@@ -12,7 +12,7 @@ use object::read::pe::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -101,6 +101,15 @@ pub enum PackageError {
     Pe(#[from] object::Error),
     #[error(transparent)]
     Utf8(#[from] std::str::Utf8Error),
+    #[error("{target}: bundle source is busy or open for modification: {path}: {source}")]
+    BundleSourceBusy {
+        target: String,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{target}: bundle source changed while snapshotting: {path}")]
+    UnstableBundleSource { target: String, path: PathBuf },
     #[error("{0}")]
     Message(String),
 }
@@ -267,6 +276,24 @@ pub fn resolve_bundle_files_with_policy(
     external_imports: &[String],
     strict_paths: bool,
 ) -> PackageResult<ResolvedBundle> {
+    resolve_bundle_files_with_policy_impl(
+        manifest_directory,
+        target,
+        configured,
+        external_imports,
+        strict_paths,
+        &NoopSnapshotObserver,
+    )
+}
+
+fn resolve_bundle_files_with_policy_impl(
+    manifest_directory: &Path,
+    target: &str,
+    configured: &[String],
+    external_imports: &[String],
+    strict_paths: bool,
+    observer: &dyn SnapshotObserver,
+) -> PackageResult<ResolvedBundle> {
     Architecture::parse(target)?;
     let canonical_root = fs::canonicalize(manifest_directory).map_err(|error| {
         PackageError::Message(format!(
@@ -283,12 +310,9 @@ pub fn resolve_bundle_files_with_policy(
             reject_reparse_points(&canonical_root, configured_path)?;
         }
         let unresolved_source = canonical_root.join(configured_path);
-        let mut opened_source = std::fs::File::open(&unresolved_source).map_err(|error| {
-            PackageError::Message(format!(
-                "{target}: failed to open {}: {error}",
-                unresolved_source.display()
-            ))
-        })?;
+        let mut opened_source = open_bundle_source_for_snapshot(&unresolved_source)
+            .map_err(|error| map_snapshot_open_error(target, &unresolved_source, error))?;
+        observer.after_open(&unresolved_source);
         let source = fs::canonicalize(&unresolved_source).map_err(|error| {
             PackageError::Message(format!(
                 "{target}: failed to resolve {}: {error}",
@@ -307,18 +331,10 @@ pub fn resolve_bundle_files_with_policy(
         if !opened_metadata.is_file() {
             return Err(format!("{target}: missing {}", source.display()).into());
         }
-        let canonical_source = std::fs::File::open(&source).map_err(|error| {
-            PackageError::Message(format!(
-                "{target}: failed to reopen resolved bundle file {}: {error}",
-                source.display()
-            ))
-        })?;
+        let canonical_source = open_bundle_source_for_snapshot(&source)
+            .map_err(|error| map_snapshot_open_error(target, &source, error))?;
         if !same_file_identity(&opened_source, &canonical_source)? {
-            return Err(format!(
-                "{target}: bundle file changed while it was being resolved: {}",
-                unresolved_source.display()
-            )
-            .into());
+            return Err(unstable_bundle_source(target, &unresolved_source));
         }
         let name = source
             .file_name()
@@ -332,13 +348,14 @@ pub fn resolve_bundle_files_with_policy(
         if !names.insert(name_key) {
             return Err(format!("duplicate bundle basename {name:?}").into());
         }
-        let mut snapshot = Vec::new();
-        opened_source.read_to_end(&mut snapshot)?;
+        let snapshot = read_stable_snapshot(target, &source, &mut opened_source, observer)?;
+        #[cfg(not(target_os = "windows"))]
+        verify_snapshot_against_second_read(target, &source, &mut opened_source, &snapshot)?;
         files.push(BundleFile {
             source,
             name,
             configured_path: configured_path.clone(),
-            snapshot: Some(Arc::from(snapshot)),
+            snapshot: Some(snapshot),
             permissions: opened_metadata.permissions(),
         });
     }
@@ -1022,23 +1039,203 @@ fn path_is_within(root: &Path, candidate: &Path) -> bool {
     })
 }
 
-#[cfg(unix)]
-fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
+trait SnapshotObserver {
+    fn after_open(&self, _path: &Path) {}
 
-    let left = left.metadata()?;
-    let right = right.metadata()?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    fn after_first_chunk(&self, _path: &Path) {}
+}
+
+struct NoopSnapshotObserver;
+
+impl SnapshotObserver for NoopSnapshotObserver {}
+
+fn open_bundle_source_for_snapshot(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        // Other readers remain allowed, but writers and delete/rename operations
+        // are rejected while this handle is alive.
+        options.share_mode(FILE_SHARE_READ);
+    }
+
+    options.open(path)
+}
+
+fn map_snapshot_open_error(target: &str, path: &Path, error: io::Error) -> PackageError {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+            return PackageError::BundleSourceBusy {
+                target: target.to_owned(),
+                path: path.to_owned(),
+                source: error,
+            };
+        }
+    }
+
+    PackageError::Message(format!(
+        "{target}: failed to open {}: {error}",
+        path.display()
+    ))
+}
+
+fn unstable_bundle_source(target: &str, path: &Path) -> PackageError {
+    PackageError::UnstableBundleSource {
+        target: target.to_owned(),
+        path: path.to_owned(),
+    }
+}
+
+fn read_stable_snapshot(
+    target: &str,
+    path: &Path,
+    file: &mut std::fs::File,
+    observer: &dyn SnapshotObserver,
+) -> PackageResult<Arc<[u8]>> {
+    let before = file_snapshot_state(file)?;
+    let expected_len = usize::try_from(before.len).map_err(|_| {
+        PackageError::Message(format!(
+            "{target}: bundle file is too large to snapshot: {}",
+            path.display()
+        ))
+    })?;
+
+    let mut snapshot = Vec::new();
+    snapshot.try_reserve_exact(expected_len).map_err(|_| {
+        PackageError::Message(format!(
+            "{target}: cannot reserve {expected_len} bytes for bundle snapshot: {}",
+            path.display()
+        ))
+    })?;
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut limited = file.take(before.len.saturating_add(1));
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut observed_first_chunk = false;
+
+    loop {
+        let count = limited.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+
+        if !observed_first_chunk {
+            observed_first_chunk = true;
+            observer.after_first_chunk(path);
+        }
+
+        let Some(new_len) = snapshot.len().checked_add(count) else {
+            return Err(unstable_bundle_source(target, path));
+        };
+        if new_len > expected_len {
+            return Err(unstable_bundle_source(target, path));
+        }
+        snapshot.extend_from_slice(&buffer[..count]);
+    }
+
+    if snapshot.len() as u64 != before.len {
+        return Err(unstable_bundle_source(target, path));
+    }
+
+    let after = file_snapshot_state(file)?;
+    if before != after {
+        return Err(unstable_bundle_source(target, path));
+    }
+
+    Ok(Arc::from(snapshot))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_snapshot_against_second_read(
+    target: &str,
+    path: &Path,
+    file: &mut std::fs::File,
+    expected: &[u8],
+) -> PackageResult {
+    let before = file_snapshot_state(file)?;
+    file.seek(SeekFrom::Start(0))?;
+
+    let expected_digest = Sha256::digest(expected);
+    let mut hasher = Sha256::new();
+    let mut limited = file.take(before.len.saturating_add(1));
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let count = limited.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+
+    let observed_digest = hasher.finalize();
+    let after = file_snapshot_state(file)?;
+    if before != after || expected_digest != observed_digest {
+        return Err(unstable_bundle_source(target, path));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
 }
 
 #[cfg(target_os = "windows")]
-fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
-    Ok(windows_file_identity(left)? == windows_file_identity(right)?)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSnapshotState {
+    #[cfg(any(unix, target_os = "windows"))]
+    identity: FileIdentity,
+    len: u64,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(target_os = "windows")]
+    last_write_time: u64,
+}
+
+#[cfg(unix)]
+fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapshotState> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(FileSnapshotState {
+        identity: FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        len: metadata.len(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
 }
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
-fn windows_file_identity(file: &std::fs::File) -> io::Result<(u32, u64)> {
+fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapshotState> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1059,7 +1256,35 @@ fn windows_file_identity(file: &std::fs::File) -> io::Result<(u32, u64)> {
 
     let file_index =
         (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    Ok((information.dwVolumeSerialNumber, file_index))
+    let len = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    let last_write_time = (u64::from(information.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(information.ftLastWriteTime.dwLowDateTime);
+
+    Ok(FileSnapshotState {
+        identity: FileIdentity {
+            volume_serial_number: information.dwVolumeSerialNumber,
+            file_index,
+        },
+        len,
+        last_write_time,
+    })
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapshotState> {
+    Ok(FileSnapshotState {
+        len: file.metadata()?.len(),
+    })
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
+    Ok(file_snapshot_state(left)?.identity == file_snapshot_state(right)?.identity)
+}
+
+#[cfg(target_os = "windows")]
+fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
+    Ok(file_snapshot_state(left)?.identity == file_snapshot_state(right)?.identity)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
@@ -2403,6 +2628,142 @@ mod tests {
         let different = std::fs::File::open(&second).unwrap();
         assert!(same_file_identity(&opened, &same).unwrap());
         assert!(!same_file_identity(&opened, &different).unwrap());
+    }
+
+    #[cfg(target_os = "windows")]
+    struct BlockingAfterOpenObserver {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    #[cfg(target_os = "windows")]
+    impl SnapshotObserver for BlockingAfterOpenObserver {
+        fn after_open(&self, _path: &Path) {
+            self.entered.wait();
+            self.release.wait();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn snapshot_denies_in_place_writers() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Engine.dll");
+        fs::write(&source, vec![0x41; 1024 * 1024]).unwrap();
+
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let observer = BlockingAfterOpenObserver {
+            entered: std::sync::Arc::clone(&entered),
+            release: std::sync::Arc::clone(&release),
+        };
+
+        let manifest_directory = directory.path().to_owned();
+        let resolver = std::thread::spawn(move || {
+            resolve_bundle_files_with_policy_impl(
+                &manifest_directory,
+                "x86_64-pc-windows-msvc",
+                &["Engine.dll".to_owned()],
+                &[],
+                false,
+                &observer,
+            )
+        });
+
+        entered.wait();
+
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+
+        release.wait();
+        resolver.join().unwrap().unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn snapshot_rejects_source_already_open_for_writing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Engine.dll");
+        fs::write(&source, b"original").unwrap();
+
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&source)
+            .unwrap();
+
+        let error = resolve_bundle_files(
+            directory.path(),
+            "x86_64-pc-windows-msvc",
+            &["Engine.dll".to_owned()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PackageError::BundleSourceBusy { .. }));
+    }
+
+    #[cfg(unix)]
+    struct BlockingAfterFirstChunkObserver {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    #[cfg(unix)]
+    impl SnapshotObserver for BlockingAfterFirstChunkObserver {
+        fn after_first_chunk(&self, _path: &Path) {
+            self.entered.wait();
+            self.release.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_length_in_place_mutation_during_snapshot_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Engine.dll");
+        let initial = vec![0x11; 4 * 1024 * 1024];
+        let replacement = vec![0x22; initial.len()];
+        fs::write(&source, &initial).unwrap();
+
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let observer = BlockingAfterFirstChunkObserver {
+            entered: std::sync::Arc::clone(&entered),
+            release: std::sync::Arc::clone(&release),
+        };
+
+        let manifest_directory = directory.path().to_owned();
+        let resolver = std::thread::spawn(move || {
+            resolve_bundle_files_with_policy_impl(
+                &manifest_directory,
+                "x86_64-pc-windows-msvc",
+                &["Engine.dll".to_owned()],
+                &[],
+                false,
+                &observer,
+            )
+        });
+
+        entered.wait();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        writer.write_all(&replacement).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        release.wait();
+
+        let error = resolver.join().unwrap().unwrap_err();
+        assert!(matches!(error, PackageError::UnstableBundleSource { .. }));
     }
 
     #[test]
