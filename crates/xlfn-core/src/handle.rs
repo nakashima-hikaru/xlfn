@@ -210,6 +210,74 @@ pub(crate) struct HandleRegistry {
     cleanup_failure: Mutex<Option<XllError>>,
 }
 
+struct PendingHandleValue<'a, T>
+where
+    T: Any + Send + Sync + 'static,
+{
+    registry: &'a HandleRegistry,
+    value: Option<Arc<T>>,
+    operation: &'static str,
+}
+
+impl<'a, T> PendingHandleValue<'a, T>
+where
+    T: Any + Send + Sync + 'static,
+{
+    fn new(registry: &'a HandleRegistry, value: Arc<T>, operation: &'static str) -> Self {
+        Self {
+            registry,
+            value: Some(value),
+            operation,
+        }
+    }
+
+    fn slot(&mut self) -> &mut Option<Arc<T>> {
+        &mut self.value
+    }
+}
+
+impl<T> Drop for PendingHandleValue<'_, T>
+where
+    T: Any + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            let value: Arc<dyn Any + Send + Sync> = value;
+            self.registry
+                .drop_values(std::iter::once(value), self.operation);
+        }
+    }
+}
+
+struct DisplacedHandleValue<'a> {
+    registry: &'a HandleRegistry,
+    value: Option<Arc<dyn Any + Send + Sync>>,
+    operation: &'static str,
+}
+
+impl<'a> DisplacedHandleValue<'a> {
+    fn new(
+        registry: &'a HandleRegistry,
+        value: Arc<dyn Any + Send + Sync>,
+        operation: &'static str,
+    ) -> Self {
+        Self {
+            registry,
+            value: Some(value),
+            operation,
+        }
+    }
+}
+
+impl Drop for DisplacedHandleValue<'_> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            self.registry
+                .drop_values(std::iter::once(value), self.operation);
+        }
+    }
+}
+
 const HANDLE_ENTROPY_DIAGNOSTIC_ID: u64 = 0x4841_4e44_524e_4746;
 
 impl HandleRegistry {
@@ -280,6 +348,7 @@ impl HandleRegistry {
         self.state.read().live
     }
 
+    #[cfg(test)]
     pub fn insert<T>(&self, value: Arc<T>) -> XllResult<String>
     where
         T: Any + Send + Sync + 'static,
@@ -314,6 +383,51 @@ impl HandleRegistry {
             }
         };
         let generation = state.slots[index].generation.max(1);
+        state.slots[index].entry = Some(HandleEntry {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            value,
+        });
+        state.live += 1;
+        drop(state);
+        Ok(self.format_token(slot, generation))
+    }
+
+    fn insert_pending<T>(&self, value: &mut Option<Arc<T>>) -> XllResult<String>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let mut state = self.state.write();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        if state.live >= self.maximum_handles {
+            return Err(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            });
+        }
+
+        let (index, slot) = match state.free.pop() {
+            Some(index) => {
+                let slot = u32::try_from(index).map_err(|_| XllError::Internal {
+                    diagnostic_id: 0x4841_4e44_534c_4f54,
+                })?;
+                (index, slot)
+            }
+            None => {
+                let index = state.slots.len();
+                let slot = u32::try_from(index).map_err(|_| XllError::Domain {
+                    code: DomainErrorCode::Overflow,
+                })?;
+                state.slots.push(Slot {
+                    generation: 1,
+                    entry: None,
+                });
+                (index, slot)
+            }
+        };
+        let generation = state.slots[index].generation.max(1);
+        let value = value.take().expect("pending handle value is armed");
         state.slots[index].entry = Some(HandleEntry {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
@@ -402,7 +516,11 @@ impl HandleRegistry {
         })
     }
 
-    fn replace<T>(&self, token: &str, value: Arc<T>) -> XllResult<Arc<dyn Any + Send + Sync>>
+    fn replace_pending<T>(
+        &self,
+        token: &str,
+        value: &mut Option<Arc<T>>,
+    ) -> XllResult<Arc<dyn Any + Send + Sync>>
     where
         T: Any + Send + Sync + 'static,
     {
@@ -431,7 +549,8 @@ impl HandleRegistry {
             }));
             return Err(XllError::InvalidHandle);
         }
-        let replacement: Arc<dyn Any + Send + Sync> = value;
+        let replacement: Arc<dyn Any + Send + Sync> =
+            value.take().expect("pending handle value is armed");
         Ok(std::mem::replace(&mut entry.value, replacement))
     }
 
@@ -788,6 +907,8 @@ pub(crate) struct HandleRuntime {
     registry: HandleRegistry,
     topics: Mutex<TopicState>,
     leases: Arc<HandleLeaseState>,
+    #[cfg(test)]
+    after_replace_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleRuntime {
@@ -796,6 +917,8 @@ impl HandleRuntime {
             registry: HandleRegistry::try_new(maximum_handles)?,
             topics: Mutex::new(TopicState::default()),
             leases: Arc::new(HandleLeaseState::new()),
+            #[cfg(test)]
+            after_replace_hook: Mutex::new(None),
         })
     }
 
@@ -877,6 +1000,8 @@ impl HandleRuntime {
                 return Err(error);
             }
         };
+        let mut value =
+            PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
 
         {
             let topics = self.topics.lock();
@@ -909,7 +1034,16 @@ impl HandleRuntime {
                     return Err(XllError::StaleHandle);
                 }
             }
-            let previous = self.registry.replace(&token, value)?;
+            let previous = self.registry.replace_pending(&token, value.slot())?;
+            let previous = DisplacedHandleValue::new(
+                &self.registry,
+                previous,
+                "handle formula value replacement",
+            );
+            #[cfg(test)]
+            if let Some(hook) = self.after_replace_hook.lock().clone() {
+                hook();
+            }
             {
                 let topics = self.topics.lock();
                 if topics.closed || topics.generation != generation {
@@ -923,15 +1057,12 @@ impl HandleRuntime {
                     return Err(XllError::StaleHandle);
                 }
             }
-            self.registry.drop_values(
-                std::iter::once(previous),
-                "handle formula value replacement",
-            );
+            drop(previous);
             drop(initializing);
             return Ok((token, false));
         }
 
-        let token = self.registry.insert(value)?;
+        let token = self.registry.insert_pending(value.slot())?;
         let unpublished = scopeguard::guard(
             (&self.registry, &self.topics, key.as_str(), token.as_str()),
             |(registry, topics, key, token)| {
@@ -1246,6 +1377,11 @@ impl HandleRuntime {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.registry.len()
+    }
+
+    #[cfg(test)]
+    fn set_after_replace_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.after_replace_hook.lock() = hook;
     }
 }
 
@@ -2049,6 +2185,120 @@ mod tests {
         assert!(matches!(replacement, Err(XllError::ExcelApi { .. })));
         assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 1);
         assert_eq!(runtime.len(), 1);
+    }
+
+    struct PanicFlagRecord {
+        panic_on_drop: bool,
+    }
+
+    impl ExcelHandleObject for PanicFlagRecord {}
+
+    impl Drop for PanicFlagRecord {
+        fn drop(&mut self) {
+            if self.panic_on_drop {
+                panic!("injected unpublished handle destructor panic");
+            }
+        }
+    }
+
+    #[test]
+    fn observation_failure_accounts_for_new_value_destructor_panic() {
+        let runtime = HandleRuntime::new(8);
+        runtime
+            .prepare_observed(
+                "observed-panic".to_owned(),
+                || {
+                    Ok(Arc::new(PanicFlagRecord {
+                        panic_on_drop: false,
+                    }))
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+
+        let result = runtime.prepare_observed(
+            "observed-panic".to_owned(),
+            || {
+                Ok(Arc::new(PanicFlagRecord {
+                    panic_on_drop: true,
+                }))
+            },
+            |_, _| Err(XllError::Closing),
+        );
+        assert!(matches!(result, Err(XllError::Closing)));
+        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    }
+
+    #[test]
+    fn replacement_failure_accounts_for_new_value_destructor_panic() {
+        let runtime = HandleRuntime::new(8);
+        runtime
+            .prepare_observed(
+                "replace-panic".to_owned(),
+                || {
+                    Ok(Arc::new(PanicFlagRecord {
+                        panic_on_drop: false,
+                    }))
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+
+        let result = runtime.prepare_observed(
+            "replace-panic".to_owned(),
+            || {
+                Ok(Arc::new(PanicFlagRecord {
+                    panic_on_drop: true,
+                }))
+            },
+            |_, token| {
+                let previous = runtime.registry.remove_any(token)?;
+                runtime
+                    .registry
+                    .drop_values(std::iter::once(previous), "test replacement removal");
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(XllError::StaleHandle)));
+        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    }
+
+    #[test]
+    fn post_replace_disconnect_accounts_for_displaced_value_panic() {
+        let runtime = Arc::new(HandleRuntime::new(8));
+        runtime
+            .prepare_observed(
+                "disconnect-replace-panic".to_owned(),
+                || {
+                    Ok(Arc::new(PanicFlagRecord {
+                        panic_on_drop: true,
+                    }))
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        runtime.connect(7, 11, "disconnect-replace-panic").unwrap();
+
+        let disconnecting = Arc::clone(&runtime);
+        runtime.set_after_replace_hook(Some(Arc::new(move || {
+            disconnecting.disconnect(7, 11);
+        })));
+        let result = runtime.prepare_observed(
+            "disconnect-replace-panic".to_owned(),
+            || {
+                Ok(Arc::new(PanicFlagRecord {
+                    panic_on_drop: false,
+                }))
+            },
+            |_, _| Ok(()),
+        );
+        runtime.set_after_replace_hook(None);
+
+        assert!(matches!(
+            result,
+            Err(XllError::Closing | XllError::StaleHandle)
+        ));
+        assert!(matches!(runtime.close(), Err(XllError::Panic)));
     }
 
     #[test]

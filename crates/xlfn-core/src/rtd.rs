@@ -3,9 +3,30 @@ use crate::XllError;
 use crate::XllResult;
 use crate::handle::HandleRuntime;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+static MODULE_UNLOAD_CERTIFIED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn begin_module_open() {
+    MODULE_UNLOAD_CERTIFIED.store(false, Ordering::Release);
+}
+
+pub(crate) fn begin_module_close() {
+    MODULE_UNLOAD_CERTIFIED.store(false, Ordering::Release);
+}
+
+pub(crate) fn certify_module_unload() {
+    MODULE_UNLOAD_CERTIFIED.store(true, Ordering::Release);
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn module_unload_certified() -> bool {
+    MODULE_UNLOAD_CERTIFIED.load(Ordering::Acquire)
+        && crate::ingress::global_ingress().phase() == crate::ingress::PHASE_CLOSED
+}
 
 #[derive(Debug)]
 pub(crate) struct RtdQuiescent(());

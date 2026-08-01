@@ -109,6 +109,7 @@ impl<S> Runtime<S> {
         }
 
         let attempt_id = self.next_lifecycle_attempt_id();
+        crate::rtd::begin_module_open();
         crate::ingress::global_ingress().reset();
         self.open_attempt_id.store(attempt_id, Ordering::Release);
         self.return_admission_closed.store(false, Ordering::Release);
@@ -555,6 +556,7 @@ impl<S> Runtime<S> {
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
         self.no_active_calls.notify_all();
+        crate::rtd::certify_module_unload();
         Ok(())
     }
 

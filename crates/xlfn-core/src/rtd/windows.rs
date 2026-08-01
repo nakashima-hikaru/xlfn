@@ -3566,11 +3566,7 @@ fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter();
-    if !accepted {
-        return S_OK;
-    }
-    if COM_MODULE_LIFETIME.can_unload_now() {
+    if crate::rtd::module_unload_certified() && COM_MODULE_LIFETIME.can_unload_now() {
         S_OK
     } else {
         1 // S_FALSE
@@ -4884,6 +4880,10 @@ mod tests {
     #[test]
     fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
         let _guard = TEST_LOCK.lock().unwrap();
+        let ingress = crate::ingress::global_ingress();
+        ingress.begin_close();
+        let _ = ingress.seal_and_drain();
+        crate::rtd::certify_module_unload();
         let baseline = COM_MODULE_LIFETIME.snapshot();
         assert!(baseline.is_quiescent());
         assert_eq!(dll_can_unload_now(), S_OK);
@@ -4895,6 +4895,12 @@ mod tests {
             assert_eq!(dll_can_unload_now(), S_FALSE);
         }
         assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+
+        ingress.reset();
+        crate::rtd::begin_module_open();
+        ingress.begin_close();
+        crate::rtd::begin_module_close();
+        assert_eq!(dll_can_unload_now(), S_FALSE);
 
         let factory = Box::into_raw(Box::new(ClassFactory {
             vtable: &CLASS_FACTORY_VTABLE,
@@ -4926,6 +4932,13 @@ mod tests {
         }
 
         assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+        let _ = ingress.seal_and_drain();
+        crate::rtd::certify_module_unload();
+        assert_eq!(dll_can_unload_now(), S_OK);
+
+        let server = ComObjectLease::new(ComObjectKind::Server);
+        assert_eq!(dll_can_unload_now(), S_FALSE);
+        drop(server);
         assert_eq!(dll_can_unload_now(), S_OK);
     }
 

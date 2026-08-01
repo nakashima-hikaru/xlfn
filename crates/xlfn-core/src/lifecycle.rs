@@ -99,7 +99,6 @@ fn open_addin_inner<A>(
 where
     A: Addin,
 {
-    crate::ingress::global_ingress().reset();
     crate::diagnostics::reset_diagnostic_router();
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
     let registrar = HostRegistrar::connect()?;
@@ -221,6 +220,7 @@ where
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
         return runtime.phase() == crate::LifecyclePhase::Closed;
     };
+    crate::ingress::global_ingress().begin_close();
 
     // A failed open closes return admission before rollback ownership is
     // acquired. Drain every producer and Excel-owned DLL-free return before
@@ -369,6 +369,7 @@ where
         }
     }
     if succeeded {
+        let _exports_drained = crate::ingress::global_ingress().seal_and_drain();
         // Publish Closed only after every rollback action has completed. A
         // concurrent xlAutoClose waiter may return as soon as it observes this
         // terminal transition.
@@ -404,6 +405,8 @@ fn emergency_close<S>(runtime: &Runtime<S>) {
     let Some(_close_attempt) = runtime.begin_final_close() else {
         return;
     };
+    crate::rtd::begin_module_close();
+    crate::ingress::global_ingress().begin_close();
     runtime.wait_for_calls();
     runtime.wait_for_returns();
     #[cfg(feature = "async")]
@@ -419,7 +422,7 @@ fn emergency_close<S>(runtime: &Runtime<S>) {
         let _ = std::sync::Arc::into_raw(state);
     }
     let _ = crate::diagnostics::clear_diagnostic_sink();
-    let _ = crate::ingress::global_ingress().close_and_drain();
+    let _ = crate::ingress::global_ingress().seal_and_drain();
     let _ = crate::rtd::wait_for_module_quiescence();
 }
 
@@ -433,10 +436,11 @@ where
     let Some(_close_attempt) = runtime.begin_final_close() else {
         return;
     };
+    crate::rtd::begin_module_close();
+    crate::ingress::global_ingress().begin_close();
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let exports_drained = crate::ingress::global_ingress().close_and_drain();
 
     let registrations = runtime.registrations();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
@@ -605,8 +609,6 @@ where
 
     let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
     let addin_quiesced = crate::shutdown::AddinQuiesced::new();
-    let rtd_quiescent = crate::rtd::wait_for_module_quiescence();
-
     if let Some(mut state) = addin_state {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             let mut reporter = crate::CleanupReporter::new(&mut report);
@@ -648,6 +650,9 @@ where
             &XllError::Closing,
         ),
     };
+
+    let exports_drained = crate::ingress::global_ingress().seal_and_drain();
+    let rtd_quiescent = crate::rtd::wait_for_module_quiescence();
 
     let certificate = runtime
         .certify_close(crate::runtime::ClosePrerequisites {

@@ -17,7 +17,7 @@ use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 #[cfg(test)]
 use std::time::Duration;
@@ -192,7 +192,11 @@ impl AsyncManager {
         // Excel owns the XLL module lifetime. Returning while a worker can
         // still execute this module is unsound, so shutdown deliberately has
         // no timeout: a non-cooperative poll keeps xlAutoClose blocked.
-        executor.wait_for_idle();
+        if !executor.wait_for_idle() && !executor.drain_after_worker_failure() {
+            // No worker remains that can release the outstanding task guards.
+            // Returning an AsyncStopped certificate would permit unsafe unload.
+            std::process::abort();
+        }
         let issues = executor.finish_close();
         self.finish_close();
         crate::shutdown::StopOutcome {
@@ -283,12 +287,15 @@ impl AsyncManager {
 struct Executor {
     inner: Arc<ExecutorInner>,
     sender: Sender<Runnable>,
+    receiver: Receiver<Runnable>,
     workers: Vec<JoinHandle<()>>,
 }
 
 struct ExecutorInner {
     next_id: AtomicU64,
     active: AtomicUsize,
+    live_workers: AtomicUsize,
+    fatal_worker_failure: AtomicBool,
     registry: Mutex<TaskRegistry>,
     wait_lock: Mutex<()>,
     idle: Condvar,
@@ -324,6 +331,8 @@ impl Executor {
         let inner = Arc::new(ExecutorInner {
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
+            live_workers: AtomicUsize::new(0),
+            fatal_worker_failure: AtomicBool::new(false),
             registry: Mutex::new(TaskRegistry {
                 closing: false,
                 generations: HashMap::from([(
@@ -352,18 +361,32 @@ impl Executor {
         );
         for index in 0..worker_count {
             let receiver = receiver.clone();
+            let worker_inner = Arc::clone(&inner);
+            inner.live_workers.fetch_add(1, Ordering::Release);
             let worker = thread::Builder::new()
                 .name(format!("xlfn-async-{index}"))
-                .spawn(move || run_executor(receiver))
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x4153_594e_4353_504e,
-                })?;
+                .spawn(move || {
+                    let _exit = WorkerExitGuard {
+                        inner: worker_inner,
+                    };
+                    run_executor(receiver);
+                });
+            let worker = match worker {
+                Ok(worker) => worker,
+                Err(_) => {
+                    inner.live_workers.fetch_sub(1, Ordering::AcqRel);
+                    return Err(XllError::Internal {
+                        diagnostic_id: 0x4153_594e_4353_504e,
+                    });
+                }
+            };
             workers.push(worker);
         }
         let workers = scopeguard::ScopeGuard::into_inner(workers);
         Ok(Self {
             inner,
             sender,
+            receiver,
             workers,
         })
     }
@@ -489,11 +512,17 @@ impl Executor {
             .collect()
     }
 
-    fn wait_for_idle(&self) {
+    fn wait_for_idle(&self) -> bool {
         let mut guard = self.inner.wait_lock.lock();
         while self.inner.active.load(Ordering::Acquire) != 0 {
+            if self.inner.fatal_worker_failure.load(Ordering::Acquire)
+                && self.inner.live_workers.load(Ordering::Acquire) == 0
+            {
+                return false;
+            }
             self.inner.idle.wait(&mut guard);
         }
+        true
     }
 
     #[cfg(test)]
@@ -501,6 +530,11 @@ impl Executor {
         let deadline = Instant::now() + timeout;
         let mut guard = self.inner.wait_lock.lock();
         while self.inner.active.load(Ordering::Acquire) != 0 {
+            if self.inner.fatal_worker_failure.load(Ordering::Acquire)
+                && self.inner.live_workers.load(Ordering::Acquire) == 0
+            {
+                return false;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return false;
@@ -508,6 +542,14 @@ impl Executor {
             self.inner.idle.wait_for(&mut guard, deadline - now);
         }
         true
+    }
+
+    fn drain_after_worker_failure(&self) -> bool {
+        self.sender.close();
+        while let Ok(runnable) = self.receiver.try_recv() {
+            drop(runnable);
+        }
+        self.inner.active.load(Ordering::Acquire) == 0
     }
 
     fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
@@ -523,6 +565,23 @@ impl Executor {
             }
         }
         issues
+    }
+}
+
+struct WorkerExitGuard {
+    inner: Arc<ExecutorInner>,
+}
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.inner
+                .fatal_worker_failure
+                .store(true, Ordering::Release);
+        }
+        self.inner.live_workers.fetch_sub(1, Ordering::AcqRel);
+        let _guard = self.inner.wait_lock.lock();
+        self.inner.idle.notify_all();
     }
 }
 
@@ -581,7 +640,8 @@ fn run_executor(receiver: Receiver<Runnable>) {
         };
         // Panics from user futures are contained by the UDF wrapper. Anything
         // that reaches this executor boundary is an infrastructure failure and
-        // must make the worker join fail so close can refuse unload.
+        // must terminate the worker so close can report it and explicitly
+        // dispose any work stranded after the last worker exits.
         runnable.run();
     }
 }
@@ -1478,6 +1538,45 @@ mod tests {
             crate::CleanupIssueKind::WorkerPanickedAfterJoin
         );
         let _stopped = outcome.certificate;
+        assert!(manager.is_stopped());
+    }
+
+    #[test]
+    fn lone_worker_panic_drops_tasks_left_on_the_queue() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        manager
+            .spawn(
+                TEST_GENERATION,
+                async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    panic!("injected worker-fatal panic");
+                },
+                test_cancellation_source(),
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        manager
+            .spawn(
+                TEST_GENERATION,
+                std::future::pending(),
+                test_cancellation_source(),
+            )
+            .unwrap();
+
+        let closing = Arc::clone(&manager);
+        let closer = std::thread::spawn(move || closing.close());
+        release_tx.send(()).unwrap();
+        let outcome = closer.join().unwrap();
+
+        assert_eq!(outcome.issues.len(), 1);
+        assert_eq!(
+            outcome.issues[0].kind,
+            crate::CleanupIssueKind::WorkerPanickedAfterJoin
+        );
         assert!(manager.is_stopped());
     }
 

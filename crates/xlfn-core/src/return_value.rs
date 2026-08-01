@@ -893,6 +893,10 @@ mod tests {
 
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::ingress::global_ingress().phase() != crate::ingress::PHASE_CLOSED {
+            crate::ingress::global_ingress().begin_close();
+            let _ = crate::ingress::global_ingress().seal_and_drain();
+        }
         crate::ingress::global_ingress().reset();
         guard
     }
