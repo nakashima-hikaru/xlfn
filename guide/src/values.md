@@ -31,6 +31,32 @@ Use `ExcelErrorValue(ExcelError::NotAvailable)` when an Excel error is the inten
 
 ## Matrices
 
+For synchronous functions that only inspect or transform an Excel array during the call, use `XlArrayRef<'_>`. It borrows the `xltypeMulti` cell buffer and converts each `XlValueRef` lazily, so input traversal itself allocates nothing:
+
+```rust
+#[excel_function(name = "ARRAY.SUM.BORROWED", thread_safe)]
+fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
+    values
+        .cells()
+        .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+}
+```
+
+For large numeric outputs, write directly into an `XlArrayBuilder` and return its `XlArrayOutput`. The finished cell allocation is adopted by `ReturnBlock` without copying:
+
+```rust
+fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
+    let (rows, columns) = values.shape();
+    let mut output = XlArrayBuilder::numbers(rows, columns)?;
+    for cell in values.cells() {
+        output.push_f64(cell.as_f64()? * 2.0)?;
+    }
+    output.finish()
+}
+```
+
+Use the owned `Matrix<T>` path when values must outlive the exported call or cross into async work.
+
 `Matrix<T>` stores a rectangular grid in row-major order:
 
 ```rust

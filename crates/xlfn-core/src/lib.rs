@@ -99,14 +99,16 @@ inventory::collect!(RegistrationDescriptor);
 pub use runtime::{CallGuard, LifecyclePhase, Runtime};
 pub use subscription::{IntoRtdValue, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
 pub use value::{
-    AsyncReturn, BoundedVarArgs, CallContext, CellPresence, Column, ExcelDateSystem,
-    ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, ExcelValueRef, FromExcel,
-    IntoExcelValue, MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue,
-    OwnedExcelValue, Row, ThreadSafeReturn, VolatileReturn,
+    AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column, ExcelDateSystem,
+    ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, FromExcel, IntoExcelValue,
+    MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue, Row,
+    ThreadSafeReturn, VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef,
+    XlValueRef,
 };
 #[doc(hidden)]
 pub use value::{
-    argument_from_raw, argument_from_raw_with_context, assert_async_return, assert_excel_parameter,
-    assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
-    assert_volatile_return, cell_presence_from_raw,
+    argument_from_raw, argument_from_raw_with_context, assert_async_parameter, assert_async_return,
+    assert_excel_parameter, assert_macro_sheet_return, assert_main_thread_return,
+    assert_thread_safe_return, assert_volatile_return, cell_presence_from_raw,
+    with_excel_call_scope,
 };

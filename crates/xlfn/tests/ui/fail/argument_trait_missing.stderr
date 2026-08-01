@@ -1,15 +1,15 @@
-error[E0277]: the trait bound `NotAnArgument: ExcelParameter` is not satisfied
+error[E0277]: the trait bound `NotAnArgument: ExcelParameter<'_>` is not satisfied
  --> tests/ui/fail/argument_trait_missing.rs:8:15
   |
 8 | fn bad(value: NotAnArgument) -> f64 {
   |               ^^^^^^^^^^^^^ unsatisfied trait bound
   |
-help: the trait `FromExcel` is not implemented for `NotAnArgument`
+help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
  --> tests/ui/fail/argument_trait_missing.rs:3:1
   |
 3 | struct NotAnArgument;
   | ^^^^^^^^^^^^^^^^^^^^
-  = help: the following other types implement trait `FromExcel`:
+  = help: the following other types implement trait `FromExcel<'call>`:
             BoundedVarArgs<T, MAX>
             Column<T>
             ExcelErrorValue
@@ -19,25 +19,25 @@ help: the trait `FromExcel` is not implemented for `NotAnArgument`
             OptionalExcelValue<T>
             OwnedExcelValue
           and $N others
-  = note: required for `NotAnArgument` to implement `ExcelParameter`
+  = note: required for `NotAnArgument` to implement `ExcelParameter<'_>`
 note: required by a bound in `xlfn::__private::assert_excel_parameter`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |
-  | pub fn assert_excel_parameter<T: ExcelParameter>() {}
-  |                                  ^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
+  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: CallScope<'call>) {}
+  |                                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
 
-error[E0277]: the trait bound `NotAnArgument: FromExcel` is not satisfied
+error[E0277]: the trait bound `NotAnArgument: FromExcel<'_>` is not satisfied
  --> tests/ui/fail/argument_trait_missing.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.ARGUMENT")]
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
   |
-help: the trait `FromExcel` is not implemented for `NotAnArgument`
+help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
  --> tests/ui/fail/argument_trait_missing.rs:3:1
   |
 3 | struct NotAnArgument;
   | ^^^^^^^^^^^^^^^^^^^^
-  = help: the following other types implement trait `FromExcel`:
+  = help: the following other types implement trait `FromExcel<'call>`:
             BoundedVarArgs<T, MAX>
             Column<T>
             ExcelErrorValue
@@ -50,9 +50,9 @@ help: the trait `FromExcel` is not implemented for `NotAnArgument`
 note: required by a bound in `xlfn::__private::argument_from_raw_with_context`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |
-  | pub unsafe fn argument_from_raw_with_context<S, T>(
+  | pub unsafe fn argument_from_raw_with_context<'call, S, T>(
   |               ------------------------------ required by a bound in this function
 ...
-  |     T: FromExcel,
-  |        ^^^^^^^^^ required by this bound in `argument_from_raw_with_context`
+  |     T: FromExcel<'call>,
+  |        ^^^^^^^^^^^^^^^^ required by this bound in `argument_from_raw_with_context`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

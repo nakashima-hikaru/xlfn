@@ -4,20 +4,20 @@ The framework's conversion traits let domain types appear directly in worksheet 
 
 ## Custom input with `FromExcel`
 
-A custom input receives a call-scoped `ExcelValueRef`, the static argument name, and a `CallContext`:
+A custom input receives a call-scoped `XlValueRef`, the static argument name, and a `CallContext`:
 
 ```rust
 use xlfn::{
-    convert::{CallContext, ExcelValueRef, FromExcel},
+    convert::{CallContext, XlValueRef, FromExcel},
     error::{InputError, XllError, XllResult},
 };
 
 #[derive(Clone, Copy)]
 struct PositiveRate(f64);
 
-impl FromExcel for PositiveRate {
+impl<'call> FromExcel<'call> for PositiveRate {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -30,7 +30,7 @@ impl FromExcel for PositiveRate {
 }
 ```
 
-The anonymous input lifetime is deliberate. An implementation cannot choose it and therefore cannot safely store a reference to Excel-owned memory in the returned type. Copy strings, arrays, or other nested values into owned Rust data during conversion.
+The call lifetime is explicit. Owned conversions work for every `'call`; borrowed framework types such as `XlArrayRef<'call>` preserve that exact lifetime. Generated wrappers create a fresh lifetime per call, so Excel-owned memory cannot escape the exported function.
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 

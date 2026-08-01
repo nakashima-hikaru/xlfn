@@ -373,6 +373,29 @@ impl ReturnBlock {
                     Some(cells),
                 )
             }
+            OwnedExcelValue::ArrayOutput(encoded) => {
+                let rows = i32::try_from(encoded.rows).map_err(|_| XllError::Domain {
+                    code: crate::DomainErrorCode::Overflow,
+                })?;
+                let columns = i32::try_from(encoded.columns).map_err(|_| XllError::Domain {
+                    code: crate::DomainErrorCode::Overflow,
+                })?;
+                let mut cells = encoded.cells;
+                let pointer = cells.as_mut_ptr();
+                (
+                    XLOPER12 {
+                        value: XLOPER12Value {
+                            array: XLOPER12Array {
+                                values: pointer,
+                                rows,
+                                columns,
+                            },
+                        },
+                        xltype: XLTYPE_MULTI,
+                    },
+                    Some(cells),
+                )
+            }
             scalar => (
                 encode_scalar(scalar, &mut strings, &mut allocation_bytes)?,
                 None,
@@ -416,6 +439,7 @@ fn allocation_shape(value: &OwnedExcelValue) -> (usize, usize) {
                 .count(),
         ),
         OwnedExcelValue::String(_) => (0, 1),
+        OwnedExcelValue::ArrayOutput(array) => (array.cells.len(), 0),
         _ => (0, 0),
     }
 }
@@ -495,6 +519,10 @@ fn encode_scalar(
             })
         }
         OwnedExcelValue::Matrix(_) => Err(XllError::input(
+            "<return>",
+            crate::InputError::Malformed("nested return arrays are not supported"),
+        )),
+        OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
             "<return>",
             crate::InputError::Malformed("nested return arrays are not supported"),
         )),
@@ -914,6 +942,22 @@ mod tests {
         assert_eq!(array.columns, 2);
         // SAFETY: the array contains two live cells.
         assert_eq!(unsafe { (*array.values.add(1)).base_type() }, XLTYPE_NUM);
+        // SAFETY: pointer has not yet been freed.
+        unsafe { free_return(pointer) };
+    }
+
+    #[test]
+    fn encoded_array_buffer_is_adopted_without_copying_cells() {
+        let _test = test_lock();
+        let mut builder = crate::XlArrayBuilder::numbers(1, 2).unwrap();
+        builder.push_f64(10.0).unwrap();
+        builder.push_f64(20.0).unwrap();
+        let encoded = builder.finish().unwrap();
+        let original_cells = encoded.cells.as_ptr();
+        let pointer = ffi_boundary(|| Ok(encoded));
+        // SAFETY: pointer is a live encoded array return.
+        let returned_cells = unsafe { (*pointer).value.array.values };
+        assert_eq!(returned_cells.cast_const(), original_cells);
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
     }

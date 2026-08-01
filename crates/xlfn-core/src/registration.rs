@@ -1,5 +1,5 @@
 use crate::{
-    ExcelCallbackValue, ExcelValueRef, FromExcel, InputError, XllError, XllResult,
+    ExcelCallbackValue, FromExcel, InputError, XlValueRef, XllError, XllResult,
     return_value::ExcelCallbackStatus,
 };
 use std::collections::HashSet;
@@ -362,9 +362,9 @@ struct ModuleName {
     units: Vec<u16>,
 }
 
-impl FromExcel for ModuleName {
+impl<'call> FromExcel<'call> for ModuleName {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _: &crate::CallContext,
     ) -> XllResult<Self> {

@@ -1581,6 +1581,21 @@ mod tests {
         (encoded, raw)
     }
 
+    unsafe fn convert_with_context<S, T>(
+        runtime: &crate::Runtime<S>,
+        argument: &'static str,
+        raw: *mut xlfn_sys::XLOPER12,
+    ) -> XllResult<T>
+    where
+        T: for<'call> crate::FromExcel<'call>,
+    {
+        crate::with_excel_call_scope(|scope| {
+            // SAFETY: the test caller keeps the raw value and nested payload live.
+            // SAFETY: forwarded from this helper's caller.
+            unsafe { crate::argument_from_raw_with_context(scope, runtime, argument, raw) }
+        })
+    }
+
     #[test]
     fn formula_topics_keep_identity_but_replace_the_value_on_each_evaluation() {
         let runtime = HandleRuntime::new(8);
@@ -1623,8 +1638,7 @@ mod tests {
         type DataRecordHandle = Handle<DataRecord>;
         // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
         let resolved: DataRecordHandle =
-            unsafe { crate::argument_from_raw_with_context(&runtime, "dataset", &mut raw) }
-                .unwrap();
+            unsafe { convert_with_context(&runtime, "dataset", &mut raw) }.unwrap();
         assert_eq!(resolved.0, 19);
     }
 
@@ -1642,11 +1656,7 @@ mod tests {
         let (_wrong_encoded, mut wrong_raw) = token_value(&token);
         // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
         let wrong = unsafe {
-            crate::argument_from_raw_with_context::<_, Handle<SimpleResource>>(
-                &runtime,
-                "curve",
-                &mut wrong_raw,
-            )
+            convert_with_context::<_, Handle<SimpleResource>>(&runtime, "curve", &mut wrong_raw)
         };
         assert!(matches!(wrong, Err(XllError::InvalidHandle)));
 
@@ -1654,7 +1664,7 @@ mod tests {
         let (_foreign_encoded, mut foreign_raw) = token_value(&token);
         // SAFETY: `foreign_raw` and its counted UTF-16 storage remain live for conversion.
         let foreign = unsafe {
-            crate::argument_from_raw_with_context::<_, Handle<DataRecord>>(
+            convert_with_context::<_, Handle<DataRecord>>(
                 &foreign_runtime,
                 "dataset",
                 &mut foreign_raw,
@@ -1668,11 +1678,7 @@ mod tests {
         let (_tampered_encoded, mut tampered_raw) = token_value(&tampered);
         // SAFETY: `tampered_raw` and its counted UTF-16 storage remain live for conversion.
         let tampered = unsafe {
-            crate::argument_from_raw_with_context::<_, Handle<DataRecord>>(
-                &runtime,
-                "dataset",
-                &mut tampered_raw,
-            )
+            convert_with_context::<_, Handle<DataRecord>>(&runtime, "dataset", &mut tampered_raw)
         };
         assert!(matches!(tampered, Err(XllError::InvalidHandle)));
 
@@ -1680,11 +1686,7 @@ mod tests {
         let (_stale_encoded, mut stale_raw) = token_value(&token);
         // SAFETY: `stale_raw` and its counted UTF-16 storage remain live for conversion.
         let stale = unsafe {
-            crate::argument_from_raw_with_context::<_, Handle<DataRecord>>(
-                &runtime,
-                "dataset",
-                &mut stale_raw,
-            )
+            convert_with_context::<_, Handle<DataRecord>>(&runtime, "dataset", &mut stale_raw)
         };
         assert!(matches!(stale, Err(XllError::StaleHandle)));
     }
@@ -1696,18 +1698,12 @@ mod tests {
         let mut missing = xlfn_sys::XLOPER12::missing();
         // SAFETY: `blank` remains live for the duration of conversion.
         let blank_value = unsafe {
-            crate::argument_from_raw_with_context::<_, Option<Handle<DataRecord>>>(
-                &runtime, "dataset", &mut blank,
-            )
+            convert_with_context::<_, Option<Handle<DataRecord>>>(&runtime, "dataset", &mut blank)
         }
         .unwrap();
         // SAFETY: `missing` remains live for the duration of conversion.
         let missing_value = unsafe {
-            crate::argument_from_raw_with_context::<_, Option<Handle<DataRecord>>>(
-                &runtime,
-                "dataset",
-                &mut missing,
-            )
+            convert_with_context::<_, Option<Handle<DataRecord>>>(&runtime, "dataset", &mut missing)
         }
         .unwrap();
         assert!(blank_value.is_none());
@@ -1715,9 +1711,7 @@ mod tests {
 
         // SAFETY: `blank` remains live for the duration of conversion.
         let direct_blank = unsafe {
-            crate::argument_from_raw_with_context::<_, Handle<DataRecord>>(
-                &runtime, "dataset", &mut blank,
-            )
+            convert_with_context::<_, Handle<DataRecord>>(&runtime, "dataset", &mut blank)
         };
         assert!(direct_blank.is_err());
     }

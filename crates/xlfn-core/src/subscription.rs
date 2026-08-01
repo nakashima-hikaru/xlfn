@@ -114,7 +114,7 @@ impl TryFrom<crate::OwnedExcelValue> for RtdValue {
             crate::OwnedExcelValue::String(value) => Self::String(value),
             crate::OwnedExcelValue::Error(value) => Self::Error(value),
             crate::OwnedExcelValue::Missing | crate::OwnedExcelValue::Blank => Self::Empty,
-            crate::OwnedExcelValue::Matrix(_) => {
+            crate::OwnedExcelValue::Matrix(_) | crate::OwnedExcelValue::ArrayOutput(_) => {
                 return Err(XllError::input(
                     "RTD value",
                     crate::InputError::Malformed("RTD values must be scalar"),

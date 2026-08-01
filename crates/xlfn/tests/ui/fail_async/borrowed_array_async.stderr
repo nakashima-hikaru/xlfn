@@ -1,0 +1,5 @@
+error: borrowed Excel array arguments cannot be used by an asynchronous UDF; use Matrix<T> or Vec<T> when the input must outlive the exported call
+  --> tests/ui/fail_async/borrowed_array_async.rs:18:22
+   |
+18 | async fn bad(values: XlArrayRef<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^

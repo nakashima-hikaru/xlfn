@@ -1,4 +1,4 @@
-use crate::{ExcelValueRef, InputError, XllError, XllResult};
+use crate::{InputError, XlValueRef, XllError, XllResult};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -128,15 +128,11 @@ impl Iterator for ReferenceAreas<'_> {
 }
 
 pub trait FromExcelReference<'call>: Sized {
-    fn from_excel_reference(value: ExcelValueRef<'call>, argument: &'static str)
-    -> XllResult<Self>;
+    fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 }
 
 impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
-    fn from_excel_reference(
-        value: ExcelValueRef<'call>,
-        argument: &'static str,
-    ) -> XllResult<Self> {
+    fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let kind = match value.base_type() {
             XLTYPE_SREF => {
                 // SAFETY: xltypeSRef selects the sref union member.
@@ -204,7 +200,7 @@ where
     T: FromExcelReference<'call>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { ExcelValueRef::from_raw(raw) }?;
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }?;
     T::from_excel_reference(borrowed, argument)
 }
 

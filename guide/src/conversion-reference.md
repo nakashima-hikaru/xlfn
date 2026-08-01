@@ -16,6 +16,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `Handle<T>` | string handle token | authenticates, checks generation, and checks object type |
 | `Option<T>` | value, blank, or missing | blank and missing become `None` |
 | `OptionalExcelValue<T>` | value, blank, or missing | preserves all three states |
+| `XlArrayRef<'call>` | rectangular multi-value | zero-allocation borrowed cells; synchronous UDFs only |
 | `Matrix<T>` | scalar or rectangular multi-value | scalar becomes `1 x 1`; validates shape and limits |
 | `Row<T>` | scalar or `1 x N` | rejects a true 2-D shape |
 | `Column<T>` | scalar or `N x 1` | rejects a true 2-D shape |
@@ -23,7 +24,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `BoundedVarArgs<T, MAX>` | scalar, row, or column | input only; requires `MAX > 0` and enforces the bound |
 | `OwnedExcelValue` | supported scalar, error, blank, missing, or array | intentionally dynamic, owned representation |
 | a type deriving `ExcelEnum` | string | exact or optional ASCII case-insensitive match |
-| a custom `T: FromExcel` | defined by the implementation | must not retain borrowed call data |
+| a custom `T: FromExcel<'call>` | defined by the implementation | may borrow only for the generated call lifetime |
 
 An Excel error supplied where another type is expected is propagated as that Excel error. Ordinary conversions do not ask Excel to coerce strings, booleans, references, or arrays into unrelated types.
 
@@ -52,7 +53,7 @@ The following are direct scalar returns:
 - a type deriving `ExcelEnum`;
 - `RtdValue`.
 
-`Matrix<T>`, `Row<T>`, and `Column<T>` are array returns when every element implements `IntoExcelValue`.
+`Matrix<T>`, `Row<T>`, and `Column<T>` are owned array returns when every element implements `IntoExcelValue`. `XlArrayBuilder::numbers` produces `XlArrayOutput` directly in the final `XLOPER12` cell buffer, avoiding an intermediate `Vec<OwnedExcelValue>` and a cell-buffer copy.
 
 `Result<T, E>` is supported whenever `T` is supported for the selected execution mode and `E: IntoXllError`. The wrapper converts the error exactly once at the Excel boundary.
 
@@ -62,7 +63,7 @@ The following are direct scalar returns:
 |---|:---:|:---:|:---:|:---:|:---:|
 | built-in scalar | yes | yes | yes | yes | yes |
 | `ExcelEnum` | yes | yes | yes | yes | yes |
-| `Matrix<T>`, `Row<T>`, `Column<T>` | yes | yes | yes | yes | yes |
+| `Matrix<T>`, `Row<T>`, `Column<T>`, `XlArrayOutput` | yes | yes | yes | yes | yes |
 | `RtdValue` | yes | yes | yes | yes | yes |
 | `Handle<T>` | yes | no | no | no | yes |
 | object deriving `ExcelHandleObject` | yes | no | no | no | yes |
@@ -89,7 +90,9 @@ See [Optional arguments and enums](optional-arguments.md).
 
 ## Arrays and allocation limits
 
-`Matrix::new` requires non-zero dimensions, checked multiplication, matching element count, and values within both Excel and framework limits.
+`XlArrayRef` is the allocation-free mixed-value input path. It exposes shape, indexed access, and lazy cell iteration through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Use `Matrix<T>` or `Vec<T>` when the input must be owned, especially for async work.
+
+`Matrix::new` and `XlArrayBuilder::numbers` require non-zero dimensions, checked multiplication, matching element count, and values within both Excel and framework limits.
 
 | Limit | x86 | x64 |
 |---|---:|---:|
@@ -113,9 +116,9 @@ Number | Boolean | Integer | String | Error | Blank | Missing | Matrix
 
 ## Custom conversion checklist
 
-For `FromExcel`:
+For `FromExcel<'call>`:
 
-1. inspect only the active `ExcelValueRef<'_>`;
+1. inspect only the active `XlValueRef<'_>`;
 2. copy owned data before returning;
 3. use the supplied static argument name in `XllError::Input`;
 4. reject unsupported coercions and non-finite values explicitly;

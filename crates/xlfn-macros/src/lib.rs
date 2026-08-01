@@ -9,8 +9,20 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{
     Data, DeriveInput, Expr, ExprLit, Fields, FnArg, ItemFn, ItemStruct, Lit, Meta, Pat,
-    ReturnType, Token, parse_macro_input,
+    ReturnType, Token, Type, parse_macro_input,
 };
+
+fn is_borrowed_array_type(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    path.qself.is_none()
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "XlArrayRef")
+}
 
 #[derive(Default)]
 struct FunctionOptions {
@@ -193,7 +205,12 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         variants.push((variant.ident.clone(), excel_name));
     }
     let ident = &input.ident;
-    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let (_, type_generics, _) = input.generics.split_for_impl();
+    let mut conversion_generics = input.generics.clone();
+    conversion_generics
+        .params
+        .insert(0, syn::parse_quote!('__xlfn_call));
+    let (impl_generics, _, where_clause) = conversion_generics.split_for_impl();
     let comparisons = variants.iter().map(|(variant, name)| {
         if ascii_case_insensitive {
             quote! {
@@ -214,16 +231,16 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .map(|(variant, name)| quote!(Self::#variant => #name))
         .collect::<Vec<_>>();
     Ok(quote! {
-        impl #impl_generics ::xlfn::convert::FromExcel
+        impl #impl_generics ::xlfn::convert::FromExcel<'__xlfn_call>
             for #ident #type_generics #where_clause
         {
             fn from_excel(
-                __value: ::xlfn::convert::ExcelValueRef<'_>,
+                __value: ::xlfn::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
                 __context: &::xlfn::convert::CallContext,
             ) -> ::xlfn::error::XllResult<Self> {
                 let __text =
-                    <::std::string::String as ::xlfn::convert::FromExcel>::from_excel(
+                    <::std::string::String as ::xlfn::convert::FromExcel<'__xlfn_call>>::from_excel(
                         __value,
                         __argument,
                         __context,
@@ -623,6 +640,13 @@ fn expand_excel_function(
         argument_names.push(pattern.ident.clone());
         argument_types.push(argument.ty.as_ref().clone());
     }
+    if is_async && let Some(borrowed) = argument_types.iter().find(|ty| is_borrowed_array_type(ty))
+    {
+        return Err(syn::Error::new_spanned(
+            borrowed,
+            "borrowed Excel array arguments cannot be used by an asynchronous UDF; use Matrix<T> or Vec<T> when the input must outlive the exported call",
+        ));
+    }
 
     let raw_names = (0..argument_names.len())
         .map(|index| format_ident!("__raw_{index}"))
@@ -761,11 +785,16 @@ fn expand_excel_function(
                     }
                 }
             } else {
+                let async_assertion = is_async.then(|| {
+                    quote!(::xlfn::__private::assert_async_parameter::<#ty>();)
+                });
                 quote! {
                     {
-                        ::xlfn::__private::assert_excel_parameter::<#ty>();
+                        #async_assertion
+                        ::xlfn::__private::assert_excel_parameter::<#ty>(__call_scope);
                         unsafe {
                             ::xlfn::__private::argument_from_raw_with_context(
+                                __call_scope,
                                 &crate::__XLFN_RUNTIME,
                                 #argument,
                                 #raw,
@@ -825,11 +854,13 @@ fn expand_excel_function(
                         #excel_name,
                         __async_handle,
                         |__state, __cancellation| {
-                            #context_setup
-                            #(#conversions)*
-                            ::core::result::Result::Ok(async move {
-                                #return_assertion
-                                #async_result_expression
+                            ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                                #context_setup
+                                #(#conversions)*
+                                ::core::result::Result::Ok(async move {
+                                    #return_assertion
+                                    #async_result_expression
+                                })
                             })
                         },
                     )
@@ -857,11 +888,11 @@ fn expand_excel_function(
                     };
                     ::xlfn::convert::ExcelReturn::invoke(
                         &mut __return_context,
-                        || {
+                        || ::xlfn::__private::with_excel_call_scope(|__call_scope| {
                             #context_setup
                             #(#conversions)*
                             ::core::result::Result::Ok(#invocation)
-                        },
+                        }),
                     )
                 },
             )
@@ -1071,19 +1102,25 @@ fn expand_excel_addin(
             ::xlfn::__private::ffi_boundary_tracked(
                 &crate::__XLFN_RUNTIME,
                 || {
-                    let __action: f64 = unsafe {
-                        ::xlfn::__private::argument_from_raw("action", __action)?
-                    };
-                    if __action == 1.0 {
-                        ::core::result::Result::Ok(
-                            <#ident as ::xlfn::addin::AddinMetadata>::DISPLAY_NAME.to_owned(),
-                        )
-                    } else {
-                        ::core::result::Result::Err(::xlfn::error::XllError::input(
-                            "action",
-                            ::xlfn::error::InputError::OutOfRange,
-                        ))
-                    }
+                    ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                        let __action: f64 = unsafe {
+                            ::xlfn::__private::argument_from_raw(
+                                __call_scope,
+                                "action",
+                                __action,
+                            )?
+                        };
+                        if __action == 1.0 {
+                            ::core::result::Result::Ok(
+                                <#ident as ::xlfn::addin::AddinMetadata>::DISPLAY_NAME.to_owned(),
+                            )
+                        } else {
+                            ::core::result::Result::Err(::xlfn::error::XllError::input(
+                                "action",
+                                ::xlfn::error::InputError::OutOfRange,
+                            ))
+                        }
+                    })
                 },
             )
         }

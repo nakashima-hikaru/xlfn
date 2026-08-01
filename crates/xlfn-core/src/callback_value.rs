@@ -1,4 +1,4 @@
-use crate::{CallbackCleanupDebt, ExcelCallbackStatus, ExcelValueRef, XllError, XllResult};
+use crate::{CallbackCleanupDebt, ExcelCallbackStatus, XlValueRef, XllError, XllResult};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -127,10 +127,10 @@ impl ExcelCallbackValue {
         }
     }
 
-    pub fn borrow(&mut self) -> XllResult<ExcelValueRef<'_>> {
+    pub fn borrow(&mut self) -> XllResult<XlValueRef<'_>> {
         self.ensure_live()?;
         // SAFETY: `Live` means this guard still owns a readable callback result.
-        unsafe { ExcelValueRef::from_raw(&mut self.raw) }
+        unsafe { XlValueRef::from_raw(&mut self.raw) }
     }
 
     pub(crate) fn raw_pointer(&mut self) -> XllResult<NonNull<XLOPER12>> {

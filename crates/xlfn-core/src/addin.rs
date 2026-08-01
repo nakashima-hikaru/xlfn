@@ -281,7 +281,7 @@ impl<'call, S> MacroSheetContext<'call, S> {
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
-        T: FromExcel,
+        T: for<'value> FromExcel<'value>,
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.

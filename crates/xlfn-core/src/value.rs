@@ -24,13 +24,13 @@ const MAX_ARRAY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ARRAY_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-pub struct ExcelValueRef<'call> {
+pub struct XlValueRef<'call> {
     raw: &'call XLOPER12,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 enum GridView<'call> {
-    Scalar(ExcelValueRef<'call>),
+    Scalar(XlValueRef<'call>),
     Multi {
         rows: usize,
         columns: usize,
@@ -40,7 +40,7 @@ enum GridView<'call> {
 }
 
 impl<'call> GridView<'call> {
-    fn from_value(value: ExcelValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+    fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() == XLTYPE_MULTI {
             let array = value.array(argument)?;
             Ok(Self::Multi {
@@ -61,7 +61,7 @@ impl<'call> GridView<'call> {
         }
     }
 
-    fn element(&self, index: usize) -> XllResult<ExcelValueRef<'call>> {
+    fn element(&self, index: usize) -> XllResult<XlValueRef<'call>> {
         match self {
             Self::Scalar(value) if index == 0 => Ok(*value),
             Self::Scalar(_) => Err(XllError::Internal {
@@ -70,13 +70,13 @@ impl<'call> GridView<'call> {
             Self::Multi { values, .. } => {
                 // SAFETY: `array` validation established the contiguous range,
                 // and callers only request indices within the validated shape.
-                unsafe { ExcelValueRef::from_raw(values.add(index)) }
+                unsafe { XlValueRef::from_raw(values.add(index)) }
             }
         }
     }
 }
 
-impl<'call> ExcelValueRef<'call> {
+impl<'call> XlValueRef<'call> {
     /// Creates a call-scoped view over an argument supplied by Excel.
     ///
     /// # Safety
@@ -108,6 +108,28 @@ impl<'call> ExcelValueRef<'call> {
     #[must_use]
     pub const fn raw(&self) -> &'call XLOPER12 {
         self.raw
+    }
+
+    /// Returns this value as a finite Excel number without allocating.
+    pub fn as_f64(self) -> XllResult<f64> {
+        f64::from_excel(self, "<array cell>", &CallContext::without_runtime())
+    }
+
+    /// Returns this value as an Excel boolean without allocating.
+    pub fn as_bool(self) -> XllResult<bool> {
+        bool::from_excel(self, "<array cell>", &CallContext::without_runtime())
+    }
+
+    /// Borrows the UTF-16 payload of an Excel string without decoding it.
+    pub fn as_str(self) -> XllResult<XlStrRef<'call>> {
+        Ok(XlStrRef {
+            utf16: self.utf16("<array cell>")?,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_blank(self) -> bool {
+        self.base_type() == XLTYPE_NIL
     }
 
     fn wrong_type(&self, argument: &'static str, expected: &'static str) -> XllError {
@@ -213,7 +235,126 @@ impl<'call> ExcelValueRef<'call> {
         if elements != 0 && array.values.is_null() {
             return Err(XllError::input(argument, InputError::NullPointer));
         }
+        if elements != 0
+            && !(array.values as usize).is_multiple_of(std::mem::align_of::<XLOPER12>())
+        {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("misaligned array pointer"),
+            ));
+        }
         Ok(array)
+    }
+}
+
+/// A call-scoped, allocation-free view of an Excel UTF-16 string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XlStrRef<'call> {
+    utf16: &'call [u16],
+}
+
+impl<'call> XlStrRef<'call> {
+    #[must_use]
+    pub const fn as_utf16(self) -> &'call [u16] {
+        self.utf16
+    }
+
+    pub fn chars(self) -> impl Iterator<Item = Result<char, std::char::DecodeUtf16Error>> + 'call {
+        char::decode_utf16(self.utf16.iter().copied())
+    }
+
+    pub fn to_string(self) -> XllResult<String> {
+        String::from_utf16(self.utf16)
+            .map_err(|_| XllError::input("<array cell>", InputError::InvalidUtf16))
+    }
+}
+
+/// A call-scoped view over an Excel `xltypeMulti` value.
+///
+/// Constructed by `#[excel_function]` wrappers for `XlArrayRef<'_>`
+/// parameters. Cells are converted only when the caller asks for a typed
+/// value, so iterating or inspecting the shape performs no allocation.
+#[derive(Clone, Copy)]
+pub struct XlArrayRef<'call> {
+    cells: &'call [XLOPER12],
+    rows: usize,
+    columns: usize,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<'call> XlArrayRef<'call> {
+    fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let array = value.array(argument)?;
+        let rows = array.rows as usize;
+        let columns = array.columns as usize;
+        let len = rows * columns;
+        let cells = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: XlValueRef::array validated the non-null pointer,
+            // dimensions, byte size, and lifetime of this contiguous range.
+            unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
+        };
+        Ok(Self {
+            cells,
+            rows,
+            columns,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    #[must_use]
+    pub const fn rows(self) -> usize {
+        self.rows
+    }
+
+    #[must_use]
+    pub const fn columns(self) -> usize {
+        self.columns
+    }
+
+    #[must_use]
+    pub const fn shape(self) -> (usize, usize) {
+        (self.rows, self.columns)
+    }
+
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.cells.len()
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.cells.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(self, row: usize, column: usize) -> Option<XlValueRef<'call>> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        let index = row * self.columns + column;
+        Some(XlValueRef {
+            raw: &self.cells[index],
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    pub fn cells(self) -> impl ExactSizeIterator<Item = XlValueRef<'call>> + 'call {
+        self.cells.iter().map(|raw| XlValueRef {
+            raw,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+}
+
+impl<'call> FromExcel<'call> for XlArrayRef<'call> {
+    fn from_excel(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        _context: &CallContext,
+    ) -> XllResult<Self> {
+        Self::from_value(value, argument)
     }
 }
 
@@ -223,14 +364,14 @@ impl<'call> ExcelValueRef<'call> {
 /// choose it or store a reference to Excel-owned memory in `Self`.
 ///
 /// ```compile_fail
-/// use xlfn_core::{ExcelValueRef, FromExcel, XllResult};
+/// use xlfn_core::{XlValueRef, FromExcel, XllResult};
 /// use xlfn_sys::XLOPER12;
 ///
 /// struct Escaped(&'static XLOPER12);
 ///
-/// impl FromExcel for Escaped {
+/// impl<'call> FromExcel<'call> for Escaped {
 ///     fn from_excel(
-///         value: ExcelValueRef<'_>,
+///         value: XlValueRef<'call>,
 ///         _: &'static str,
 ///         _: &xlfn_core::CallContext,
 ///     ) -> XllResult<Self> {
@@ -238,9 +379,9 @@ impl<'call> ExcelValueRef<'call> {
 ///     }
 /// }
 /// ```
-pub trait FromExcel: Sized {
+pub trait FromExcel<'call>: Sized {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self>;
@@ -250,9 +391,9 @@ pub trait IntoExcelValue {
     fn into_excel_value(self) -> XllResult<OwnedExcelValue>;
 }
 
-pub trait ExcelParameter: FromExcel {}
+pub trait ExcelParameter<'call>: FromExcel<'call> {}
 
-impl<T> ExcelParameter for T where T: FromExcel {}
+impl<'call, T> ExcelParameter<'call> for T where T: FromExcel<'call> {}
 
 pub(crate) trait HandleRuntimeProvider {
     fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>>;
@@ -383,7 +524,25 @@ where
 }
 
 #[doc(hidden)]
-pub fn assert_excel_parameter<T: ExcelParameter>() {}
+pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: CallScope<'call>) {}
+
+#[doc(hidden)]
+pub fn assert_async_parameter<T>()
+where
+    T: for<'call> ExcelParameter<'call>,
+{
+}
+
+/// A generative lifetime token for one generated Excel call boundary.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct CallScope<'call>(PhantomData<&'call mut &'call ()>);
+
+/// Runs an operation under a fresh lifetime that cannot escape in its result.
+#[doc(hidden)]
+pub fn with_excel_call_scope<R>(operation: impl for<'call> FnOnce(CallScope<'call>) -> R) -> R {
+    operation(CallScope(PhantomData))
+}
 
 #[doc(hidden)]
 pub fn assert_main_thread_return<T: MainThreadReturn>() {}
@@ -404,14 +563,18 @@ pub fn assert_volatile_return<T: VolatileReturn>() {}
 ///
 /// # Safety
 ///
-/// The pointer must satisfy `ExcelValueRef::from_raw` for the duration of
+/// The pointer must satisfy `XlValueRef::from_raw` for the duration of
 /// the conversion.
-pub unsafe fn argument_from_raw<T>(argument: &'static str, raw: *mut XLOPER12) -> XllResult<T>
+pub unsafe fn argument_from_raw<'call, T>(
+    _scope: CallScope<'call>,
+    argument: &'static str,
+    raw: *mut XLOPER12,
+) -> XllResult<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { ExcelValueRef::from_raw(raw) }.map_err(|error| match error {
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
@@ -419,16 +582,17 @@ where
 }
 
 #[doc(hidden)]
-pub unsafe fn argument_from_raw_with_context<S, T>(
+pub unsafe fn argument_from_raw_with_context<'call, S, T>(
+    _scope: CallScope<'call>,
     runtime: &crate::Runtime<S>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { ExcelValueRef::from_raw(raw) }.map_err(|error| match error {
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
@@ -446,14 +610,14 @@ pub enum CellPresence {
 ///
 /// # Safety
 ///
-/// `raw` must satisfy `ExcelValueRef::from_raw` for this call.
+/// `raw` must satisfy `XlValueRef::from_raw` for this call.
 #[doc(hidden)]
 pub unsafe fn cell_presence_from_raw(
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<CellPresence> {
     // SAFETY: this function forwards its caller's raw-value contract.
-    let value = unsafe { ExcelValueRef::from_raw(raw) }.map_err(|error| match error {
+    let value = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
@@ -476,57 +640,64 @@ pub struct Matrix<T> {
 
 impl<T> Matrix<T> {
     pub fn new(rows: usize, columns: usize, data: Vec<T>) -> XllResult<Self> {
-        if rows == 0 || columns == 0 {
-            return Err(XllError::input(
-                "<matrix>",
-                InputError::Malformed("matrix dimensions must be non-zero"),
-            ));
-        }
-        if rows > EXCEL_MAX_ROWS {
-            return Err(XllError::input(
-                "<matrix>",
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_ROWS,
-                    actual: rows,
-                },
-            ));
-        }
-        if columns > EXCEL_MAX_COLUMNS {
-            return Err(XllError::input(
-                "<matrix>",
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_COLUMNS,
-                    actual: columns,
-                },
-            ));
-        }
-        let expected = rows.checked_mul(columns).ok_or(XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })?;
-        if expected != data.len() {
-            return Err(XllError::ElementCountMismatch {
-                rows,
-                columns,
-                expected,
-                actual: data.len(),
-            });
-        }
-        if expected > MAX_ARRAY_ELEMENTS {
-            return Err(XllError::input(
-                "<matrix>",
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_ELEMENTS,
-                    actual: expected,
-                },
-            ));
-        }
+        validate_matrix_dimensions(rows, columns, data.len())?;
         Ok(Self {
             rows,
             columns,
             data,
         })
     }
+}
 
+fn validate_matrix_dimensions(rows: usize, columns: usize, actual: usize) -> XllResult<()> {
+    if rows == 0 || columns == 0 {
+        return Err(XllError::input(
+            "<matrix>",
+            InputError::Malformed("matrix dimensions must be non-zero"),
+        ));
+    }
+    if rows > EXCEL_MAX_ROWS {
+        return Err(XllError::input(
+            "<matrix>",
+            InputError::TooLarge {
+                limit: EXCEL_MAX_ROWS,
+                actual: rows,
+            },
+        ));
+    }
+    if columns > EXCEL_MAX_COLUMNS {
+        return Err(XllError::input(
+            "<matrix>",
+            InputError::TooLarge {
+                limit: EXCEL_MAX_COLUMNS,
+                actual: columns,
+            },
+        ));
+    }
+    let expected = rows.checked_mul(columns).ok_or(XllError::Domain {
+        code: DomainErrorCode::Overflow,
+    })?;
+    if expected != actual {
+        return Err(XllError::ElementCountMismatch {
+            rows,
+            columns,
+            expected,
+            actual,
+        });
+    }
+    if expected > MAX_ARRAY_ELEMENTS {
+        return Err(XllError::input(
+            "<matrix>",
+            InputError::TooLarge {
+                limit: MAX_ARRAY_ELEMENTS,
+                actual: expected,
+            },
+        ));
+    }
+    Ok(())
+}
+
+impl<T> Matrix<T> {
     #[must_use]
     pub const fn rows(&self) -> usize {
         self.rows
@@ -717,11 +888,155 @@ pub enum OwnedExcelValue {
     Missing,
     Blank,
     Matrix(Matrix<OwnedExcelValue>),
+    #[doc(hidden)]
+    ArrayOutput(XlArrayOutput),
 }
 
-impl FromExcel for f64 {
+/// An Excel array whose cells are already encoded in their final ABI form.
+///
+/// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
+/// adopts the cell allocation instead of materializing an intermediate
+/// `Vec<OwnedExcelValue>` and encoding it into another array.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct XlArrayOutput {
+    pub(crate) rows: usize,
+    pub(crate) columns: usize,
+    pub(crate) cells: Box<[XLOPER12]>,
+}
+
+impl std::fmt::Debug for XlArrayOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("XlArrayOutput")
+            .field("rows", &self.rows)
+            .field("columns", &self.columns)
+            .field("cells", &self.cells.len())
+            .finish()
+    }
+}
+
+impl PartialEq for XlArrayOutput {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.columns == other.columns
+            && self.cells.len() == other.cells.len()
+            && self
+                .cells
+                .iter()
+                .zip(other.cells.iter())
+                .all(|(left, right)| {
+                    left.base_type() == right.base_type()
+                        && match left.base_type() {
+                            XLTYPE_NUM => {
+                                // SAFETY: XLTYPE_NUM selects the number member.
+                                unsafe { left.value.number == right.value.number }
+                            }
+                            XLTYPE_INT => {
+                                // SAFETY: XLTYPE_INT selects the integer member.
+                                unsafe { left.value.integer == right.value.integer }
+                            }
+                            XLTYPE_BOOL => {
+                                // SAFETY: XLTYPE_BOOL selects the boolean member.
+                                unsafe { left.value.boolean == right.value.boolean }
+                            }
+                            XLTYPE_ERR => {
+                                // SAFETY: XLTYPE_ERR selects the error member.
+                                unsafe { left.value.error == right.value.error }
+                            }
+                            _ => false,
+                        }
+                })
+    }
+}
+
+/// Builds a numeric Excel array directly in its final `XLOPER12` cell buffer.
+///
+/// This is the low-allocation output path for large calculated arrays. The
+/// builder owns exactly one cell buffer; returning the finished value transfers
+/// that buffer to the DLL-owned return block without copying its cells.
+pub struct XlArrayBuilder {
+    rows: usize,
+    columns: usize,
+    cells: Box<[XLOPER12]>,
+    initialized: usize,
+}
+
+impl XlArrayBuilder {
+    pub fn numbers(rows: usize, columns: usize) -> XllResult<Self> {
+        validate_matrix_dimensions(
+            rows,
+            columns,
+            rows.checked_mul(columns).ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?,
+        )?;
+        let len = rows * columns;
+        let bytes = len
+            .checked_mul(std::mem::size_of::<XLOPER12>())
+            .ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?;
+        if bytes > MAX_ARRAY_BYTES {
+            return Err(XllError::input(
+                "<array output>",
+                InputError::TooLarge {
+                    limit: MAX_ARRAY_BYTES,
+                    actual: bytes,
+                },
+            ));
+        }
+        Ok(Self {
+            rows,
+            columns,
+            cells: vec![XLOPER12::error(crate::ExcelError::NotAvailable.code()); len]
+                .into_boxed_slice(),
+            initialized: 0,
+        })
+    }
+
+    pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
+        if !value.is_finite() {
+            return Err(XllError::input("<array output>", InputError::NonFinite));
+        }
+        if self.initialized == self.cells.len() {
+            return Err(XllError::input(
+                "<array output>",
+                InputError::Malformed("too many array cells"),
+            ));
+        }
+        self.cells[self.initialized] = XLOPER12::number(value);
+        self.initialized += 1;
+        Ok(())
+    }
+
+    pub fn finish(self) -> XllResult<XlArrayOutput> {
+        let expected = self.rows * self.columns;
+        if self.initialized != expected {
+            return Err(XllError::ElementCountMismatch {
+                rows: self.rows,
+                columns: self.columns,
+                expected,
+                actual: self.initialized,
+            });
+        }
+        Ok(XlArrayOutput {
+            rows: self.rows,
+            columns: self.columns,
+            cells: self.cells,
+        })
+    }
+}
+
+impl IntoExcelValue for XlArrayOutput {
+    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+        Ok(OwnedExcelValue::ArrayOutput(self))
+    }
+}
+
+impl<'call> FromExcel<'call> for f64 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -739,9 +1054,9 @@ impl FromExcel for f64 {
     }
 }
 
-impl FromExcel for bool {
+impl<'call> FromExcel<'call> for bool {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -772,9 +1087,9 @@ fn number_to_integer<T>(
     Ok(convert(number))
 }
 
-impl FromExcel for i32 {
+impl<'call> FromExcel<'call> for i32 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -794,9 +1109,9 @@ impl FromExcel for i32 {
     }
 }
 
-impl FromExcel for i64 {
+impl<'call> FromExcel<'call> for i64 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -817,9 +1132,9 @@ impl FromExcel for i64 {
     }
 }
 
-impl FromExcel for String {
+impl<'call> FromExcel<'call> for String {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -828,12 +1143,12 @@ impl FromExcel for String {
     }
 }
 
-impl<T> FromExcel for crate::Handle<T>
+impl<'call, T> FromExcel<'call> for crate::Handle<T>
 where
     T: crate::handle::ExcelHandleObject,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'_>,
     ) -> XllResult<Self> {
@@ -842,9 +1157,9 @@ where
     }
 }
 
-impl FromExcel for ExcelErrorValue {
+impl<'call> FromExcel<'call> for ExcelErrorValue {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext,
     ) -> XllResult<Self> {
@@ -859,12 +1174,12 @@ impl FromExcel for ExcelErrorValue {
     }
 }
 
-impl<T> FromExcel for OptionalExcelValue<T>
+impl<'call, T> FromExcel<'call> for OptionalExcelValue<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -876,12 +1191,12 @@ where
     }
 }
 
-impl<T> FromExcel for Option<T>
+impl<'call, T> FromExcel<'call> for Option<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -892,9 +1207,9 @@ where
     }
 }
 
-impl FromExcel for ExcelSerialDate {
+impl<'call> FromExcel<'call> for ExcelSerialDate {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -909,12 +1224,12 @@ impl FromExcel for ExcelSerialDate {
     }
 }
 
-impl<T> FromExcel for Matrix<T>
+impl<'call, T> FromExcel<'call> for Matrix<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -982,12 +1297,12 @@ where
     }
 }
 
-impl<T> FromExcel for Vec<T>
+impl<'call, T> FromExcel<'call> for Vec<T>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -1008,12 +1323,12 @@ where
     }
 }
 
-impl<T, const MAX: usize> FromExcel for BoundedVarArgs<T, MAX>
+impl<'call, T, const MAX: usize> FromExcel<'call> for BoundedVarArgs<T, MAX>
 where
-    T: FromExcel,
+    T: FromExcel<'call>,
 {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -1044,9 +1359,9 @@ where
     }
 }
 
-impl<T: FromExcel> FromExcel for Row<T> {
+impl<'call, T: FromExcel<'call>> FromExcel<'call> for Row<T> {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -1067,9 +1382,9 @@ impl<T: FromExcel> FromExcel for Row<T> {
     }
 }
 
-impl<T: FromExcel> FromExcel for Column<T> {
+impl<'call, T: FromExcel<'call>> FromExcel<'call> for Column<T> {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -1090,9 +1405,9 @@ impl<T: FromExcel> FromExcel for Column<T> {
     }
 }
 
-impl FromExcel for OwnedExcelValue {
+impl<'call> FromExcel<'call> for OwnedExcelValue {
     fn from_excel(
-        value: ExcelValueRef<'_>,
+        value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext,
     ) -> XllResult<Self> {
@@ -1212,6 +1527,7 @@ direct_excel_returns!(
     String,
     ExcelErrorValue,
     OwnedExcelValue,
+    XlArrayOutput,
     ExcelSerialDate,
 );
 
@@ -1316,9 +1632,12 @@ mod tests {
     use super::*;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value};
 
-    fn convert<T: FromExcel>(raw: &mut XLOPER12) -> XllResult<T> {
+    fn convert<T>(raw: &mut XLOPER12) -> XllResult<T>
+    where
+        T: for<'call> FromExcel<'call>,
+    {
         // SAFETY: raw is live for this conversion.
-        unsafe { argument_from_raw("arg", raw) }
+        with_excel_call_scope(|scope| unsafe { argument_from_raw(scope, "arg", raw) })
     }
 
     #[test]
@@ -1511,9 +1830,9 @@ mod tests {
     #[test]
     fn bounded_varargs_rejects_oversized_input_before_converting_elements() {
         struct PanicOnConvert;
-        impl FromExcel for PanicOnConvert {
+        impl<'call> FromExcel<'call> for PanicOnConvert {
             fn from_excel(
-                _value: ExcelValueRef<'_>,
+                _value: XlValueRef<'call>,
                 _argument: &'static str,
                 _context: &CallContext,
             ) -> XllResult<Self> {
@@ -1599,9 +1918,9 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct FiniteNumber(f64);
 
-        impl FromExcel for FiniteNumber {
+        impl<'call> FromExcel<'call> for FiniteNumber {
             fn from_excel(
-                value: ExcelValueRef<'_>,
+                value: XlValueRef<'call>,
                 argument: &'static str,
                 context: &CallContext,
             ) -> XllResult<Self> {
@@ -1614,6 +1933,80 @@ mod tests {
             convert::<FiniteNumber>(&mut raw).unwrap(),
             FiniteNumber(42.0)
         );
+    }
+
+    #[test]
+    fn borrowed_array_reads_cells_without_materializing_them() {
+        let mut elements = [
+            XLOPER12::number(1.5),
+            XLOPER12::integer(2),
+            XLOPER12::boolean(true),
+            XLOPER12::nil(),
+        ];
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: elements.as_mut_ptr(),
+                    rows: 2,
+                    columns: 2,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+
+        with_excel_call_scope(|scope| {
+            // SAFETY: raw and its four cells remain live inside this scope.
+            let view: XlArrayRef<'_> =
+                unsafe { argument_from_raw(scope, "values", &mut raw) }.unwrap();
+            assert_eq!(view.shape(), (2, 2));
+            assert_eq!(view.get(0, 0).unwrap().as_f64().unwrap(), 1.5);
+            assert_eq!(view.get(0, 1).unwrap().as_f64().unwrap(), 2.0);
+            assert!(view.get(1, 0).unwrap().as_bool().unwrap());
+            assert!(view.get(1, 1).unwrap().is_blank());
+        });
+    }
+
+    #[test]
+    fn borrowed_array_rejects_a_misaligned_cell_buffer() {
+        let mut storage = [XLOPER12::nil(), XLOPER12::nil()];
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    // Deliberately misaligned; validation must reject it before reading.
+                    values: storage.as_mut_ptr().cast::<u8>().wrapping_add(1).cast(),
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        with_excel_call_scope(|scope| {
+            // SAFETY: the root is live; the malformed nested pointer is tested for rejection.
+            let result = unsafe { argument_from_raw::<XlArrayRef<'_>>(scope, "values", &mut raw) };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    reason: InputError::Malformed("misaligned array pointer"),
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn array_builder_encodes_directly_into_its_finished_cell_buffer() {
+        let mut builder = XlArrayBuilder::numbers(2, 2).unwrap();
+        for value in [1.0, 2.0, 3.0, 4.0] {
+            builder.push_f64(value).unwrap();
+        }
+        let encoded = builder.finish().unwrap();
+        assert_eq!((encoded.rows, encoded.columns), (2, 2));
+        assert_eq!(encoded.cells.len(), 4);
+        for (cell, expected) in encoded.cells.iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert_eq!(cell.base_type(), XLTYPE_NUM);
+            // SAFETY: XLTYPE_NUM selects the number member.
+            assert_eq!(unsafe { cell.value.number }, expected);
+        }
     }
 
     #[test]

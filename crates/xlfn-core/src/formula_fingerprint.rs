@@ -1,4 +1,4 @@
-use crate::{ExcelValueRef, InputError, XllError, XllResult};
+use crate::{InputError, XlValueRef, XllError, XllResult};
 use xlfn_sys::{
     XLOPER12, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL,
     XLTYPE_NUM, XLTYPE_STR,
@@ -23,7 +23,7 @@ pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<[u8; 
     for argument in arguments {
         // SAFETY: ReturnContext::for_call requires each raw argument to remain
         // live for the context lifetime.
-        let value = unsafe { ExcelValueRef::from_raw(*argument) }?;
+        let value = unsafe { XlValueRef::from_raw(*argument) }?;
         encoder.write_value(value, false)?;
     }
     Ok(*encoder.hasher.finalize().as_bytes())
@@ -79,7 +79,7 @@ impl FingerprintEncoder {
         self.write(&value.to_le_bytes())
     }
 
-    fn write_value(&mut self, value: ExcelValueRef<'_>, nested: bool) -> XllResult<()> {
+    fn write_value(&mut self, value: XlValueRef<'_>, nested: bool) -> XllResult<()> {
         match value.base_type() {
             XLTYPE_NUM => {
                 self.write_tag(TAG_NUMBER)?;
@@ -132,9 +132,9 @@ impl FingerprintEncoder {
                 self.write_u64(array.columns as u64)?;
                 let elements = (array.rows as usize) * (array.columns as usize);
                 for index in 0..elements {
-                    // SAFETY: ExcelValueRef::array validated the contiguous
+                    // SAFETY: XlValueRef::array validated the contiguous
                     // element range and the index is within its dimensions.
-                    let element = unsafe { ExcelValueRef::from_raw(array.values.add(index)) }?;
+                    let element = unsafe { XlValueRef::from_raw(array.values.add(index)) }?;
                     self.write_value(element, true)?;
                 }
                 Ok(())
