@@ -175,6 +175,9 @@ structure Resources where
   stateOwnedByRuntime : Bool := true
   diagnosticsPending : Nat := 0
   diagnosticsRunning : Bool := false
+  /-- Best-effort disposal debt. This is deliberately excluded from
+  `Quiescent`: it cannot make unloaded XLL code executable. -/
+  cleanupIssues : Nat := 0
   deriving DecidableEq, Repr
 
 namespace Resources
@@ -233,6 +236,10 @@ def Quiescent (r : Resources) : Prop :=
   r.HandlesDrained ∧
   r.StateClosed ∧
   r.DiagnosticsDrained
+
+/-- Operational cleanliness is tracked separately from unload safety. -/
+def CleanupComplete (r : Resources) : Prop :=
+  r.cleanupIssues = 0
 
 /-- There is framework or user code that may still create subordinate
 resources.  This is used to prevent resources from appearing spontaneously. -/
@@ -305,6 +312,14 @@ def Successful (s : State) : Prop :=
 /-- A successful state is safe to unload only when this proposition holds. -/
 def Quiescent (s : State) : Prop :=
   s.resources.Quiescent
+
+/-- Safe unload with no recorded best-effort cleanup debt. -/
+def ClosedClean (s : State) : Prop :=
+  s.Successful ∧ s.Quiescent ∧ s.resources.CleanupComplete
+
+/-- Safe unload where disposal or metadata cleanup reported debt. -/
+def ClosedDegraded (s : State) : Prop :=
+  s.Successful ∧ s.Quiescent ∧ ¬s.resources.CleanupComplete
 
 end State
 

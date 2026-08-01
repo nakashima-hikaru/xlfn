@@ -48,13 +48,6 @@ impl Addin for DeskTools {
         tracing::info!(path = %path.display(), "diagnostic log installed");
         Ok(State::new())
     }
-
-    fn close(_: &mut State) -> XllResult<()> {
-        xlfn::diagnostics::clear_diagnostic_sink()
-            .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x4449_4147_434c_4f53,
-            })
-    }
 }
 ```
 
@@ -66,7 +59,7 @@ The default path is:
 
 When `LOCALAPPDATA` is unavailable, the implementation uses a temporary-directory fallback. The file rotates at 4 MiB and retains three generations.
 
-The sink is process-wide. Installing a new sink flushes and joins the previous sink worker before replacement. Make installation and shutdown ownership explicit when multiple add-ins or test harnesses share a process; one add-in must not silently take telemetry ownership from another.
+The sink is process-wide. Installing a new sink flushes and joins the previous sink worker before replacement, and the framework stops the active sink during XLL shutdown. Make ownership explicit when multiple add-ins or test harnesses share a process; one add-in must not silently take telemetry ownership from another.
 
 ## Custom sinks
 

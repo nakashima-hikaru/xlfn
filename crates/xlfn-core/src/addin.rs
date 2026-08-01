@@ -1,6 +1,6 @@
 use crate::{
-    ExcelCallbackValue, ExcelReference, FromExcel, IntoXllError, Matrix, OwnedExcelValue, UdfLayer,
-    XllError, XllResult,
+    CleanupReporter, ExcelCallbackValue, ExcelReference, FromExcel, IntoXllError, Matrix,
+    OwnedExcelValue, UdfLayer, XllError, XllResult,
 };
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -54,12 +54,12 @@ impl OpenContext {
 
 /// Defines Add-in state and its Excel lifecycle hooks.
 ///
-/// The framework invokes [`Self::open`] and [`Self::close`] from Excel's main
+/// The framework invokes [`Self::open`] and [`Self::cleanup`] from Excel's main
 /// lifecycle thread, and both hooks for one open generation run on that same
 /// thread. Implementations may therefore keep non-`Send` lifecycle owners in
 /// thread-local storage while placing only their `Send + Sync` handles in
-/// [`Self::State`]. `close` must synchronously recover and release every such
-/// owner before returning.
+/// [`Self::State`]. [`Self::quiesce`] must synchronously stop every execution
+/// source before best-effort cleanup begins.
 pub trait Addin: Send + Sync + 'static {
     type State: Send + Sync + 'static;
     type Error: IntoXllError;
@@ -67,11 +67,18 @@ pub trait Addin: Send + Sync + 'static {
     /// Creates Add-in state on Excel's main lifecycle thread.
     fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
 
-    /// Optional hook called prior to framework handle registry shutdown.
+    /// Stops every Add-in-owned callback, worker, native module owner, and
+    /// other source that could execute XLL code after unload.
     ///
-    /// Implementations should release any `Handle<T>` instances or framework
-    /// resources stored inside `State` here so that the handle registry can wait
-    /// for lease zero without deadlocking.
+    /// Returning `Ok(())` certifies that every such execution resource is
+    /// quiescent. A panic or `Err` leaves unload safety unknown, so the
+    /// framework fail-stops rather than returning from `xlAutoClose` while code
+    /// from this XLL may still run. The hook is terminal and is never retried.
+    ///
+    /// Implementations must also release any `Handle<T>` instances stored in
+    /// `State` so that the framework registry can reach lease zero. Vendor
+    /// operations must be canceled cooperatively; unload waits rather than
+    /// abandoning in-process code.
     fn quiesce(_state: &mut Self::State) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -89,22 +96,11 @@ pub trait Addin: Send + Sync + 'static {
             .min(4)
     }
 
-    /// Releases Add-in state on the same Excel main lifecycle thread used by
-    /// [`Self::open`], after active framework calls and async tasks have
-    /// drained.
+    /// Performs best-effort disposal after quiescence has been established.
     ///
-    /// Returning `Ok(())` certifies that every Add-in-owned callback, worker,
-    /// native module owner, and other execution resource is quiescent. A panic
-    /// or `Err` leaves unload safety unknown, so the framework fail-stops rather
-    /// than returning from `xlAutoClose` while code from this XLL may still run.
-    /// The hook is therefore terminal and is never retried after failure.
-    ///
-    /// Vendor operations that can block indefinitely must be canceled
-    /// cooperatively. Otherwise Excel unload waits for the operation rather
-    /// than returning while code from this XLL can still execute.
-    fn close(_state: &mut Self::State) -> Result<(), Self::Error> {
-        Ok(())
-    }
+    /// This hook must not start work or register callbacks. Disposal failures
+    /// should be recorded with `reporter`; they do not make unload unsafe.
+    fn cleanup(_state: &mut Self::State, _reporter: &mut CleanupReporter<'_>) {}
 }
 
 /// Static metadata and lifecycle configuration supplied by `#[excel_addin]`.

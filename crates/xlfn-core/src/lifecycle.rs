@@ -144,13 +144,18 @@ fn rollback_active_open<A>(
     if attempt.fail() {
         match catch_unwind(AssertUnwindSafe(|| rollback_open::<A>(runtime))) {
             Ok(true) => {}
-            Ok(false) => fatal_unload_failure(
+            Ok(false) => fatal_unload_hazard(
+                crate::shutdown::UnloadHazard::OpenRollbackFailed,
                 "xlAutoOpen rollback",
                 &XllError::Internal {
                     diagnostic_id: 0x4f50_5242_4641_494c,
                 },
             ),
-            Err(_) => fatal_unload_failure("xlAutoOpen rollback", &XllError::Panic),
+            Err(_) => fatal_unload_hazard(
+                crate::shutdown::UnloadHazard::OpenRollbackFailed,
+                "xlAutoOpen rollback",
+                &XllError::Panic,
+            ),
         }
     }
 }
@@ -161,7 +166,7 @@ where
 {
     let state = A::open(context).map_err(IntoXllError::into_xll_error)?;
     // Publish ownership before invoking add-in hooks. If either hook panics,
-    // the outer boundary can now roll the state back through Addin::close.
+    // the outer boundary can now roll the state back through quiesce and cleanup.
     runtime.publish_state(state);
     let state = runtime.opening_state().ok_or(XllError::Internal {
         diagnostic_id: 0x4f50_454e_5354_4154,
@@ -226,9 +231,9 @@ where
     #[cfg(feature = "async")]
     {
         runtime.cancel_async();
-        if let Err(error) = runtime.close_async() {
-            report_boundary_error("xlAutoOpen async rollback", &error);
-            succeeded = false;
+        let outcome = runtime.close_async();
+        for issue in outcome.issues {
+            report_cleanup_issue(&issue);
         }
     }
     if let Err(error) = runtime.close_subscriptions() {
@@ -286,6 +291,13 @@ where
             report_boundary_error("xlAutoOpen metadata debt rollback", error);
         }
     }
+    for error in &outcome.cleanup_issues {
+        report_cleanup_issue(&crate::shutdown::CleanupIssue {
+            component: "Excel callback result",
+            kind: crate::CleanupIssueKind::HostMemoryLeak,
+            error: error.clone(),
+        });
+    }
     runtime.retain_failed_registrations(outcome.failed);
     runtime.retain_metadata_debt(outcome.metadata_debt);
 
@@ -295,6 +307,13 @@ where
         report_boundary_error("xlAutoOpen event rollback", error);
         succeeded = false;
     }
+    for error in &event_outcome.cleanup_issues {
+        report_cleanup_issue(&crate::shutdown::CleanupIssue {
+            component: "Excel event callback result",
+            kind: crate::CleanupIssueKind::HostMemoryLeak,
+            error: error.clone(),
+        });
+    }
     runtime.retain_failed_event_registrations(event_outcome.failed);
 
     if succeeded {
@@ -302,18 +321,27 @@ where
     }
 
     if succeeded && let Some(mut state) = addin_state.take() {
-        match catch_unwind(AssertUnwindSafe(|| A::close(&mut state)))
-            .map_err(|_| XllError::Panic)
-            .and_then(|result| result.map_err(IntoXllError::into_xll_error))
-        {
-            Ok(()) => {}
-            Err(error) => {
-                report_boundary_error("xlAutoOpen rollback", &error);
-                // A failed close hook cannot certify that all resources owned
-                // by State have stopped. Keep the value alive until fail-stop.
-                std::mem::forget(state);
-                succeeded = false;
-            }
+        let mut report = crate::shutdown::CloseReport::default();
+        let cleanup = catch_unwind(AssertUnwindSafe(|| {
+            let mut reporter = crate::CleanupReporter::new(&mut report);
+            A::cleanup(&mut state, &mut reporter);
+        }));
+        if cleanup.is_err() {
+            report.push(
+                "Addin::cleanup",
+                crate::CleanupIssueKind::DisposalPanicked,
+                XllError::Panic,
+            );
+            std::mem::forget(state);
+        } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
+            report.push(
+                "Addin::State::drop",
+                crate::CleanupIssueKind::DisposalPanicked,
+                XllError::Panic,
+            );
+        }
+        for issue in report.issues() {
+            report_cleanup_issue(issue);
         }
     }
     if let Some(state) = addin_state {
@@ -326,11 +354,18 @@ where
         report_boundary_error("xlAutoOpen registration state unknown", &error);
         succeeded = false;
     }
-    if succeeded && let Err(error) = crate::diagnostics::clear_diagnostic_sink() {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            tracing::error!(%error, "diagnostic logger failed during xlAutoOpen rollback");
-        }));
-        succeeded = false;
+    if succeeded {
+        match crate::diagnostics::clear_diagnostic_sink() {
+            Ok(_) => {}
+            Err(crate::DiagnosticShutdownError::WorkerPanicked) => {
+                report_cleanup_issue(&crate::shutdown::CleanupIssue {
+                    component: "diagnostics",
+                    kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
+                    error: XllError::Panic,
+                });
+            }
+            Err(crate::DiagnosticShutdownError::ReentrantShutdown) => succeeded = false,
+        }
     }
     if succeeded {
         // Publish Closed only after every rollback action has completed. A
@@ -355,7 +390,11 @@ where
         // A panic in the normal close path means State-owned resources may not
         // have been quiesced. Returning would let Excel unload this module while
         // detached threads or native callbacks can still execute its code.
-        std::process::abort();
+        fatal_unload_hazard(
+            crate::shutdown::UnloadHazard::UnhandledClosePanic,
+            "xlAutoClose boundary",
+            &error,
+        );
     }
     1
 }
@@ -374,16 +413,13 @@ fn emergency_close<S>(runtime: &Runtime<S>) {
     let _ = catch_unwind(AssertUnwindSafe(|| runtime.close_subscriptions()));
     let _ = catch_unwind(AssertUnwindSafe(|| runtime.close_handles()));
     if let Some(state) = runtime.take_state() {
-        // The normal Addin::close path panicked. Keeping a permanent strong
+        // The normal close path panicked before quiescence was certified. Keeping a permanent strong
         // reference avoids running unknown destructor code after module unload.
         let _ = std::sync::Arc::into_raw(state);
     }
     let _ = crate::diagnostics::clear_diagnostic_sink();
-    let exports = crate::ingress::global_ingress().close_and_drain();
-    let rtd = crate::rtd::wait_for_module_quiescence();
-    if let Ok(certificate) = runtime.certify_close(exports, rtd) {
-        let _ = runtime.finish_close(certificate);
-    }
+    let _ = crate::ingress::global_ingress().close_and_drain();
+    let _ = crate::rtd::wait_for_module_quiescence();
 }
 
 fn close_addin_inner<A>(runtime: &Runtime<A::State>)
@@ -397,7 +433,9 @@ where
         return;
     };
 
-    let mut unload_failure: Option<(&'static str, XllError)> = None;
+    let mut report = crate::shutdown::CloseReport::default();
+    let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
+    let exports_drained = crate::ingress::global_ingress().close_and_drain();
 
     let registrations = runtime.registrations();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
@@ -407,14 +445,29 @@ where
             if registration.cleanup_severity().is_unload_unsafe() {
                 report_boundary_error("xlAutoClose unregister", error);
                 if unload_failure.is_none() {
-                    unload_failure = Some(("xlAutoClose unregister", error.clone()));
+                    unload_failure = Some((
+                        crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                        "xlAutoClose unregister",
+                        error.clone(),
+                    ));
                 }
             }
         }
         for (registration, error) in &outcome.metadata_debt {
             if registration.cleanup_severity().is_metadata_debt() {
-                report_boundary_error("xlAutoClose metadata debt", error);
+                report.push(
+                    "Excel registered name",
+                    crate::CleanupIssueKind::HostMetadata,
+                    error.clone(),
+                );
             }
+        }
+        for error in outcome.cleanup_issues {
+            report.push(
+                "Excel callback result",
+                crate::CleanupIssueKind::HostMemoryLeak,
+                error,
+            );
         }
         runtime.retain_failed_registrations(outcome.failed);
         runtime.retain_metadata_debt(outcome.metadata_debt);
@@ -430,14 +483,22 @@ where
     } else {
         let error = XllError::Panic;
         report_boundary_error("xlAutoClose unregister", &error);
-        unload_failure = Some(("xlAutoClose unregister", error));
+        unload_failure = Some((
+            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+            "xlAutoClose unregister",
+            error,
+        ));
     }
     if runtime.registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {
             diagnostic_id: 0x5245_4753_554e_4b4e,
         };
         report_boundary_error("xlAutoClose registration state unknown", &error);
-        unload_failure = Some(("xlAutoClose registration state unknown", error));
+        unload_failure = Some((
+            crate::shutdown::UnloadHazard::RegistrationStateUnknown,
+            "xlAutoClose registration state unknown",
+            error,
+        ));
     }
 
     let event_registrations = runtime.event_registrations();
@@ -447,17 +508,30 @@ where
         for (_, error) in &event_outcome.failed {
             report_boundary_error("xlAutoClose event unregister", error);
             if unload_failure.is_none() {
-                unload_failure = Some(("xlAutoClose event unregister", error.clone()));
+                unload_failure = Some((
+                    crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                    "xlAutoClose event unregister",
+                    error.clone(),
+                ));
             }
+        }
+        for error in event_outcome.cleanup_issues {
+            report.push(
+                "Excel event callback result",
+                crate::CleanupIssueKind::HostMemoryLeak,
+                error,
+            );
         }
         runtime.retain_failed_event_registrations(event_outcome.failed);
     } else {
         let error = XllError::Panic;
         report_boundary_error("xlAutoClose event unregister", &error);
-        unload_failure = Some(("xlAutoClose event unregister", error));
+        unload_failure = Some((
+            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+            "xlAutoClose event unregister",
+            error,
+        ));
     }
-
-    let exports_drained = crate::ingress::global_ingress().close_and_drain();
 
     // Excel may unload the module as soon as xlAutoClose returns. There is no
     // safe timeout for in-process Rust code: wait until every entered call has
@@ -466,22 +540,22 @@ where
     runtime.wait_for_returns();
 
     #[cfg(feature = "async")]
-    {
+    let async_stopped = {
         runtime.cancel_async();
-        if let Err(error) = runtime.close_async() {
-            report_boundary_error("xlAutoClose async shutdown", &error);
-            if unload_failure.is_none() {
-                unload_failure = Some(("xlAutoClose async shutdown", error));
-            }
-        }
-    }
+        let outcome = runtime.close_async();
+        report.extend(outcome.issues);
+        outcome.certificate
+    };
+    #[cfg(not(feature = "async"))]
+    let async_stopped = crate::shutdown::AsyncStopped::new();
 
-    if let Err(error) = runtime.close_subscriptions() {
-        report_boundary_error("xlAutoClose subscription shutdown", &error);
-        if unload_failure.is_none() {
-            unload_failure = Some(("xlAutoClose subscription shutdown", error));
-        }
-    }
+    let subscriptions_stopped = runtime.close_subscriptions().unwrap_or_else(|error| {
+        fatal_unload_hazard(
+            crate::shutdown::UnloadHazard::SubscriptionProducerStillRunning,
+            "xlAutoClose subscription shutdown",
+            &error,
+        )
+    });
 
     let mut addin_state = None;
     if let Some(state) = runtime.take_state() {
@@ -492,9 +566,12 @@ where
                     .and_then(|result| result.map_err(IntoXllError::into_xll_error))
                 {
                     report_boundary_error("xlAutoClose quiesce", &error);
-                    if unload_failure.is_none() {
-                        unload_failure = Some(("xlAutoClose quiesce", error));
-                    }
+                    std::mem::forget(state);
+                    fatal_unload_hazard(
+                        crate::shutdown::UnloadHazard::AddinQuiesceFailed,
+                        "xlAutoClose quiesce",
+                        &error,
+                    );
                 }
                 addin_state = Some(state);
             }
@@ -504,49 +581,122 @@ where
                 };
                 report_boundary_error("xlAutoClose state escaped", &error);
                 let _ = std::sync::Arc::into_raw(state);
-                std::process::abort();
+                fatal_unload_hazard(
+                    crate::shutdown::UnloadHazard::AddinStateEscaped,
+                    "xlAutoClose state escaped",
+                    &error,
+                );
             }
         }
     }
 
-    if let Err(error) = crate::diagnostics::clear_diagnostic_sink() {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            tracing::error!(%error, "diagnostic logger failed during xlAutoClose");
-        }));
+    let handles_quiescent = runtime.close_handles().unwrap_or_else(|error| {
+        fatal_unload_hazard(
+            crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
+            "xlAutoClose handle shutdown",
+            &error,
+        )
+    });
+
+    if let Some((hazard, boundary, error)) = unload_failure {
+        fatal_unload_hazard(hazard, boundary, &error);
     }
 
-    if let Err(error) = runtime.close_handles() {
-        report_boundary_error("xlAutoClose handle shutdown", &error);
-        if unload_failure.is_none() {
-            unload_failure = Some(("xlAutoClose handle shutdown", error));
-        }
-    }
-
-    if let Some((boundary, error)) = unload_failure {
-        fatal_unload_failure(boundary, &error);
-    }
-
+    let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
+    let addin_quiesced = crate::shutdown::AddinQuiesced::new();
     let rtd_quiescent = crate::rtd::wait_for_module_quiescence();
 
     if let Some(mut state) = addin_state {
-        match catch_unwind(AssertUnwindSafe(|| A::close(&mut state)))
-            .map_err(|_| XllError::Panic)
-            .and_then(|result| result.map_err(IntoXllError::into_xll_error))
-        {
-            Ok(()) => {}
-            Err(error) => {
-                std::mem::forget(state);
-                fatal_unload_failure("xlAutoClose", &error);
-            }
+        let cleanup = catch_unwind(AssertUnwindSafe(|| {
+            let mut reporter = crate::CleanupReporter::new(&mut report);
+            A::cleanup(&mut state, &mut reporter);
+        }));
+        if cleanup.is_err() {
+            report.push(
+                "Addin::cleanup",
+                crate::CleanupIssueKind::DisposalPanicked,
+                XllError::Panic,
+            );
+            std::mem::forget(state);
+        } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
+            report.push(
+                "Addin::State::drop",
+                crate::CleanupIssueKind::DisposalPanicked,
+                XllError::Panic,
+            );
         }
     }
 
+    for issue in report.issues() {
+        report_cleanup_issue(issue);
+    }
+
+    let diagnostics_stopped = match crate::diagnostics::clear_diagnostic_sink() {
+        Ok(_) => crate::shutdown::DiagnosticsStopped::new(),
+        Err(crate::DiagnosticShutdownError::WorkerPanicked) => {
+            report_cleanup_issue(&crate::shutdown::CleanupIssue {
+                component: "diagnostics",
+                kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
+                error: XllError::Panic,
+            });
+            crate::shutdown::DiagnosticsStopped::new()
+        }
+        Err(crate::DiagnosticShutdownError::ReentrantShutdown) => fatal_unload_hazard(
+            crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
+            "xlAutoClose diagnostic shutdown",
+            &XllError::Closing,
+        ),
+    };
+
     let certificate = runtime
-        .certify_close(exports_drained, rtd_quiescent)
-        .unwrap_or_else(|error| fatal_unload_failure("xlAutoClose certification", &error));
-    runtime
-        .finish_close(certificate)
-        .unwrap_or_else(|error| fatal_unload_failure("xlAutoClose finalization", &error));
+        .certify_close(crate::runtime::ClosePrerequisites {
+            exports: exports_drained,
+            rtd: rtd_quiescent,
+            host_callbacks,
+            async_stopped,
+            subscriptions_stopped,
+            handles_quiescent,
+            diagnostics_stopped,
+            addin_quiesced,
+        })
+        .unwrap_or_else(|error| {
+            fatal_unload_hazard(
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                "xlAutoClose certification",
+                &error,
+            )
+        });
+    runtime.finish_close(certificate).unwrap_or_else(|error| {
+        fatal_unload_hazard(
+            crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            "xlAutoClose finalization",
+            &error,
+        )
+    });
+}
+
+fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        tracing::warn!(
+            component = issue.component,
+            kind = ?issue.kind,
+            error = %issue.error,
+            "xlAutoClose completed with a cleanup issue"
+        );
+    }));
+    report_boundary_error(issue.component, &issue.error);
+}
+
+#[cold]
+fn fatal_unload_hazard(
+    hazard: crate::shutdown::UnloadHazard,
+    boundary: &'static str,
+    error: &XllError,
+) -> ! {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        tracing::error!(?hazard, %error, "unload safety could not be established");
+    }));
+    fatal_unload_failure(boundary, error)
 }
 
 fn report_boundary_error(boundary: &'static str, error: &XllError) {
@@ -573,9 +723,9 @@ fn report_boundary_error(boundary: &'static str, error: &XllError) {
 fn fatal_unload_failure(boundary: &'static str, error: &XllError) -> ! {
     report_boundary_error(boundary, error);
 
-    // Excel has no xlAutoClose return code that can veto module unload. Once a
-    // terminal cleanup hook fails, continuing the host process would permit
-    // live threads or callbacks to execute code from an unloaded XLL.
+    // Excel has no xlAutoClose return code that can veto module unload. This
+    // function is reachable only through an UnloadHazard, meaning executable
+    // code could remain live or the quiescence proof could not be completed.
     #[cfg(not(test))]
     std::process::abort();
 
@@ -629,10 +779,9 @@ mod tests {
             Ok(())
         }
 
-        fn close(_: &mut Self::State) -> Result<(), Self::Error> {
+        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
             assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
             LAYERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
-            Ok(())
         }
     }
 
@@ -694,9 +843,8 @@ mod tests {
             panic!("injected async_worker_count panic")
         }
 
-        fn close(_: &mut Self::State) -> Result<(), Self::Error> {
+        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
             WORKERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
-            Ok(())
         }
     }
 
@@ -724,23 +872,22 @@ mod tests {
             unreachable!("the close retry test publishes state directly")
         }
 
-        fn close(state: &mut Self::State) -> Result<(), Self::Error> {
-            let attempt = state
+        fn cleanup(state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
+            state
                 .attempts
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                + 1;
-            if attempt == 1 {
-                Err(XllError::Internal {
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            reporter.warn(
+                "test cleanup",
+                crate::CleanupIssueKind::RegistryCleanup,
+                XllError::Internal {
                     diagnostic_id: 0x5445_5354_5254_5259,
-                })
-            } else {
-                Ok(())
-            }
+                },
+            );
         }
     }
 
     #[test]
-    fn failed_addin_close_enters_fatal_path_without_finalizing_runtime() {
+    fn addin_cleanup_issue_does_not_prevent_finalizing_runtime() {
         let runtime = Runtime::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
@@ -752,17 +899,85 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        let fatal = catch_unwind(AssertUnwindSafe(|| {
-            close_addin_inner::<RetryClose>(&runtime);
-        }));
-        assert!(fatal.is_err());
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
+        close_addin_inner::<RetryClose>(&runtime);
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_state().is_none());
     }
 
+    struct CleanupPanic;
+
+    struct DropObserved(std::sync::Arc<AtomicUsize>);
+
+    impl Drop for DropObserved {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl Addin for CleanupPanic {
+        type State = DropObserved;
+        type Error = XllError;
+
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+
+        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+            panic!("injected cleanup panic");
+        }
+    }
+
     #[test]
-    fn failed_open_rollback_enters_fatal_path_without_reinstalling_state() {
+    fn cleanup_panic_leaks_state_and_still_finalizes_safe_unload() {
+        let runtime = Runtime::new();
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        close_addin_inner::<CleanupPanic>(&runtime);
+
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+    }
+
+    struct QuiesceFailure;
+
+    impl Addin for QuiesceFailure {
+        type State = DropObserved;
+        type Error = XllError;
+
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+
+        fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
+            Err(XllError::Internal {
+                diagnostic_id: 0x5155_4945_5343_4546,
+            })
+        }
+    }
+
+    #[test]
+    fn quiesce_failure_enters_fatal_path_without_dropping_state() {
+        let runtime = Runtime::new();
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let fatal = catch_unwind(AssertUnwindSafe(|| {
+            close_addin_inner::<QuiesceFailure>(&runtime);
+        }));
+
+        assert!(fatal.is_err());
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn open_rollback_cleanup_issue_still_finalizes_without_reinstalling_state() {
         let runtime = Runtime::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
@@ -774,8 +989,8 @@ mod tests {
         );
 
         assert!(open_attempt.fail());
-        assert!(!rollback_open::<RetryClose>(&runtime));
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::OpenRollbackPending);
+        assert!(rollback_open::<RetryClose>(&runtime));
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_state().is_none());
     }
@@ -788,10 +1003,6 @@ mod tests {
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
-        }
-
-        fn close(_state: &mut Self::State) -> Result<(), Self::Error> {
-            Ok(())
         }
     }
 
@@ -817,10 +1028,6 @@ mod tests {
         fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
             drop(state.handle.take());
             state.quiesced.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-
-        fn close(_state: &mut Self::State) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -861,10 +1068,14 @@ mod tests {
             unreachable!()
         }
 
-        fn close(_state: &mut Self::State) -> Result<(), Self::Error> {
-            Err(XllError::Internal {
-                diagnostic_id: 0x4641_494c,
-            })
+        fn cleanup(_state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
+            reporter.warn(
+                "always fail cleanup",
+                crate::CleanupIssueKind::RegistryCleanup,
+                XllError::Internal {
+                    diagnostic_id: 0x4641_494c,
+                },
+            );
         }
     }
 
@@ -875,8 +1086,8 @@ mod tests {
         runtime.publish((), Vec::new());
 
         assert!(open_attempt.fail());
-        assert!(!rollback_open::<AlwaysFailClose>(&runtime));
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::OpenRollbackPending);
+        assert!(rollback_open::<AlwaysFailClose>(&runtime));
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
 
         assert_eq!(close_addin::<AlwaysFailClose>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
@@ -971,9 +1182,8 @@ mod tests {
             unreachable!()
         }
 
-        fn close(state: &mut Self::State) -> Result<(), Self::Error> {
+        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
             state.events.lock().unwrap().push("state");
-            Ok(())
         }
     }
 

@@ -83,7 +83,7 @@ event. The principal mapping is:
 | `asyncDrained` | cancel tasks, await completion, join executor |
 | `rtdDrained` | close subscriptions and wait for callbacks, factories, servers, locks, and COM operations |
 | `handlesDrained` | close handle runtime and drop stored values |
-| `stateClosed` | no escaped `Arc<State>`; `Addin::close` joins workers |
+| `stateClosed` | no escaped `Arc<State>`; `Addin::quiesce` joins workers before best-effort cleanup |
 | `diagnosticsDrained` | flush and join diagnostic dispatcher |
 | `finishClose` | call `Runtime::finish_close` only after `Quiescent` is checked |
 | `failStop` | do not return to Excel when quiescence cannot be established |

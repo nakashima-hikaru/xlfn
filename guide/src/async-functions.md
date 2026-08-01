@@ -113,4 +113,4 @@ Containment is not recovery. A panic can leave an external transaction partially
 
 On add-in close, the async manager stops accepting work, cancels tracked tasks, and waits for task guards to become idle before executor state is released. User futures and their captured values can run `Drop` during cancellation, so destructors must not block indefinitely or re-enter a resource while holding incompatible locks.
 
-`Addin::close` runs only after framework-managed async tasks have drained. Application-owned background tasks remain the application's responsibility.
+`Addin::quiesce` runs only after framework-managed async tasks have drained. Application-owned background tasks must be stopped and joined by `quiesce`; best-effort resource disposal belongs in `Addin::cleanup`.

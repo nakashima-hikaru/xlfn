@@ -1,0 +1,112 @@
+use crate::{IntoXllError, XllError};
+
+/// Classification for a best-effort failure observed after unload safety was
+/// established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CleanupIssueKind {
+    HostMetadata,
+    HostMemoryLeak,
+    DiagnosticLoss,
+    WorkerPanickedAfterJoin,
+    DisposalPanicked,
+    RegistryCleanup,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CleanupIssue {
+    pub(crate) component: &'static str,
+    pub(crate) kind: CleanupIssueKind,
+    pub(crate) error: XllError,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CloseReport {
+    issues: Vec<CleanupIssue>,
+}
+
+impl CloseReport {
+    pub(crate) fn push(
+        &mut self,
+        component: &'static str,
+        kind: CleanupIssueKind,
+        error: XllError,
+    ) {
+        self.issues.push(CleanupIssue {
+            component,
+            kind,
+            error,
+        });
+    }
+
+    pub(crate) fn extend(&mut self, issues: impl IntoIterator<Item = CleanupIssue>) {
+        self.issues.extend(issues);
+    }
+
+    pub(crate) fn issues(&self) -> &[CleanupIssue] {
+        &self.issues
+    }
+}
+
+/// Records non-fatal disposal problems after [`crate::Addin::quiesce`] has
+/// established that unloading the XLL is safe.
+pub struct CleanupReporter<'a> {
+    report: &'a mut CloseReport,
+}
+
+impl<'a> CleanupReporter<'a> {
+    pub(crate) fn new(report: &'a mut CloseReport) -> Self {
+        Self { report }
+    }
+
+    pub fn warn(
+        &mut self,
+        component: &'static str,
+        kind: CleanupIssueKind,
+        error: impl IntoXllError,
+    ) {
+        self.report.push(component, kind, error.into_xll_error());
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum UnloadHazard {
+    HostCallbackStillRegistered,
+    AsyncExecutorStillRunning,
+    SubscriptionProducerStillRunning,
+    HandleRuntimeNotQuiescent,
+    AddinStateEscaped,
+    AddinQuiesceFailed,
+    DiagnosticWorkerStillRunning,
+    RegistrationStateUnknown,
+    OpenRollbackFailed,
+    UnhandledClosePanic,
+    CloseInvariantViolation,
+}
+
+pub(crate) struct StopOutcome<T> {
+    pub(crate) certificate: T,
+    pub(crate) issues: Vec<CleanupIssue>,
+}
+
+macro_rules! shutdown_token {
+    ($name:ident) => {
+        #[derive(Debug)]
+        pub(crate) struct $name {
+            _private: (),
+        }
+
+        impl $name {
+            pub(crate) const fn new() -> Self {
+                Self { _private: () }
+            }
+        }
+    };
+}
+
+shutdown_token!(HostCallbacksDetached);
+shutdown_token!(AsyncStopped);
+shutdown_token!(SubscriptionsStopped);
+shutdown_token!(HandlesQuiescent);
+shutdown_token!(DiagnosticsStopped);
+shutdown_token!(AddinQuiesced);

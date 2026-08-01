@@ -36,11 +36,6 @@ fn record_callback_value_debt(debt: CallbackCleanupDebt) {
     audit.debts.push_back(debt);
 }
 
-pub(crate) fn callback_cleanup_debt_is_empty() -> bool {
-    let audit = CALLBACK_CLEANUP_AUDIT.lock();
-    audit.debts.is_empty() && audit.dropped_records == 0
-}
-
 type ReleaseCallback = unsafe fn(&mut XLOPER12) -> i32;
 
 fn state_after_call(

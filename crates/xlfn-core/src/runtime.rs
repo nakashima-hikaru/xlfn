@@ -48,7 +48,6 @@ pub struct Runtime<S> {
     no_active_calls: Condvar,
     close_attempt_active: AtomicBool,
     registration_state_unknown: AtomicBool,
-    cleanup_failure: Mutex<Option<XllError>>,
     handles: Mutex<Option<XllResult<Arc<crate::handle::HandleRuntime>>>>,
     subscriptions: Mutex<Option<Arc<crate::subscription::SubscriptionRuntime>>>,
     #[cfg(feature = "async")]
@@ -80,7 +79,6 @@ impl<S> Runtime<S> {
             no_active_calls: Condvar::new(),
             close_attempt_active: AtomicBool::new(false),
             registration_state_unknown: AtomicBool::new(false),
-            cleanup_failure: Mutex::new(None),
             handles: Mutex::new(None),
             subscriptions: Mutex::new(None),
             #[cfg(feature = "async")]
@@ -476,14 +474,36 @@ pub struct CloseCertificate {
     pub(crate) exports: crate::ingress::ExportsDrained,
     #[allow(dead_code)]
     pub(crate) rtd: crate::rtd::RtdQuiescent,
+    #[allow(dead_code)]
+    pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
+    #[allow(dead_code)]
+    pub(crate) async_stopped: crate::shutdown::AsyncStopped,
+    #[allow(dead_code)]
+    pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
+    #[allow(dead_code)]
+    pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
+    #[allow(dead_code)]
+    pub(crate) diagnostics_stopped: crate::shutdown::DiagnosticsStopped,
+    #[allow(dead_code)]
+    pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     runtime_address: usize,
+}
+
+pub(crate) struct ClosePrerequisites {
+    pub(crate) exports: crate::ingress::ExportsDrained,
+    pub(crate) rtd: crate::rtd::RtdQuiescent,
+    pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
+    pub(crate) async_stopped: crate::shutdown::AsyncStopped,
+    pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
+    pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
+    pub(crate) diagnostics_stopped: crate::shutdown::DiagnosticsStopped,
+    pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
 }
 
 impl<S> Runtime<S> {
     pub(crate) fn certify_close(
         &self,
-        exports: crate::ingress::ExportsDrained,
-        rtd: crate::rtd::RtdQuiescent,
+        prerequisites: ClosePrerequisites,
     ) -> XllResult<CloseCertificate> {
         let _wait_guard = self.wait_lock.lock();
         let services_stopped = self.handles.lock().is_none() && self.subscriptions.lock().is_none();
@@ -503,9 +523,7 @@ impl<S> Runtime<S> {
             && self.state.read().is_none()
             && self.registrations.lock().is_empty()
             && self.event_registrations.lock().is_empty()
-            && !self.registration_state_unknown()
-            && self.cleanup_failure.lock().is_none()
-            && crate::callback_value::callback_cleanup_debt_is_empty();
+            && !self.registration_state_unknown();
 
         if !certified {
             return Err(XllError::Internal {
@@ -514,8 +532,14 @@ impl<S> Runtime<S> {
         }
 
         Ok(CloseCertificate {
-            exports,
-            rtd,
+            exports: prerequisites.exports,
+            rtd: prerequisites.rtd,
+            host_callbacks: prerequisites.host_callbacks,
+            async_stopped: prerequisites.async_stopped,
+            subscriptions_stopped: prerequisites.subscriptions_stopped,
+            handles_quiescent: prerequisites.handles_quiescent,
+            diagnostics_stopped: prerequisites.diagnostics_stopped,
+            addin_quiesced: prerequisites.addin_quiesced,
             runtime_address: std::ptr::from_ref(self).addr(),
         })
     }
@@ -584,7 +608,7 @@ impl<S> Runtime<S> {
         result
     }
 
-    pub(crate) fn close_handles(&self) -> XllResult<()> {
+    pub(crate) fn close_handles(&self) -> XllResult<crate::shutdown::HandlesQuiescent> {
         let handles = self.handles.lock().take();
         let result = if let Some(Ok(handles)) = handles {
             let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
@@ -593,8 +617,7 @@ impl<S> Runtime<S> {
         } else {
             Ok(())
         };
-        self.record_cleanup_result(&result);
-        result
+        result.map(|()| crate::shutdown::HandlesQuiescent::new())
     }
 
     pub(crate) fn subscriptions(&self) -> Arc<crate::subscription::SubscriptionRuntime> {
@@ -604,15 +627,14 @@ impl<S> Runtime<S> {
         )
     }
 
-    pub(crate) fn close_subscriptions(&self) -> XllResult<()> {
+    pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         let subscriptions = self.subscriptions.lock().take();
         let result = if let Some(subscriptions) = subscriptions {
             crate::rtd::shutdown_subscriptions(subscriptions)
         } else {
             Ok(())
         };
-        self.record_cleanup_result(&result);
-        result
+        result.map(|()| crate::shutdown::SubscriptionsStopped::new())
     }
 
     #[cfg(feature = "async")]
@@ -626,24 +648,15 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn close_async(&self) -> XllResult<()> {
-        let result = self.async_manager.close();
-        self.record_cleanup_result(&result);
-        result
+    pub(crate) fn close_async(
+        &self,
+    ) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
+        self.async_manager.close()
     }
 
     #[cfg(feature = "async")]
     pub(crate) fn async_manager(&self) -> &crate::async_udf::AsyncManager {
         &self.async_manager
-    }
-
-    fn record_cleanup_result(&self, result: &XllResult<()>) {
-        if let Err(error) = result {
-            let mut failure = self.cleanup_failure.lock();
-            if failure.is_none() {
-                *failure = Some(error.clone());
-            }
-        }
     }
 
     #[cfg(test)]
@@ -758,7 +771,18 @@ mod tests {
     fn finish_test_close<S>(runtime: &Runtime<S>) {
         let exports = crate::ingress::ExportsDrained::for_test();
         let rtd = crate::rtd::wait_for_module_quiescence();
-        let certificate = runtime.certify_close(exports, rtd).unwrap();
+        let certificate = runtime
+            .certify_close(ClosePrerequisites {
+                exports,
+                rtd,
+                host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
+                async_stopped: crate::shutdown::AsyncStopped::new(),
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
+                diagnostics_stopped: crate::shutdown::DiagnosticsStopped::new(),
+                addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+            })
+            .unwrap();
         runtime.finish_close(certificate).unwrap();
     }
 
@@ -920,7 +944,20 @@ mod tests {
         runtime.close_subscriptions().unwrap();
         let exports = crate::ingress::ExportsDrained::for_test();
         let rtd = crate::rtd::wait_for_module_quiescence();
-        assert!(runtime.certify_close(exports, rtd).is_err());
+        assert!(
+            runtime
+                .certify_close(ClosePrerequisites {
+                    exports,
+                    rtd,
+                    host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
+                    async_stopped: crate::shutdown::AsyncStopped::new(),
+                    subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
+                    handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
+                    diagnostics_stopped: crate::shutdown::DiagnosticsStopped::new(),
+                    addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+                })
+                .is_err()
+        );
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
         assert!(runtime.take_state().is_some());
@@ -1046,7 +1083,7 @@ mod tests {
         assert!(second_token.is_cancelled());
         assert!(!first_token.is_cancelled());
 
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
         assert!(first_token.is_cancelled());
     }
 
@@ -1107,6 +1144,6 @@ mod tests {
         runtime
             .async_manager()
             .set_after_generation_publish_hook(None);
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
     }
 }

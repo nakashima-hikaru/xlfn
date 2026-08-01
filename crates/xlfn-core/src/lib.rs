@@ -38,6 +38,7 @@ mod return_value;
 #[allow(unsafe_code)]
 mod rtd;
 mod runtime;
+mod shutdown;
 #[allow(unsafe_code)]
 mod subscription;
 mod utf16;
@@ -68,6 +69,7 @@ pub use execution::{
     CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
 };
 pub use handle::{ExcelHandleObject, Handle};
+pub use shutdown::{CleanupIssueKind, CleanupReporter};
 pub mod ingress;
 pub use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
 #[doc(hidden)]

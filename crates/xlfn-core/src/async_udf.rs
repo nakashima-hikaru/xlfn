@@ -177,9 +177,12 @@ impl AsyncManager {
         *self.after_generation_publish_hook.lock() = hook;
     }
 
-    pub(crate) fn close(&self) -> XllResult<()> {
+    pub(crate) fn close(&self) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
         let Some(executor) = self.take_executor_for_close() else {
-            return Ok(());
+            return crate::shutdown::StopOutcome {
+                certificate: crate::shutdown::AsyncStopped::new(),
+                issues: Vec::new(),
+            };
         };
         let tasks = executor.request_close();
         // Manager state released — cancel/abort and run arbitrary task cleanup
@@ -190,9 +193,12 @@ impl AsyncManager {
         // still execute this module is unsound, so shutdown deliberately has
         // no timeout: a non-cooperative poll keeps xlAutoClose blocked.
         executor.wait_for_idle();
-        let close_result = executor.finish_close();
+        let issues = executor.finish_close();
         self.finish_close();
-        close_result
+        crate::shutdown::StopOutcome {
+            certificate: crate::shutdown::AsyncStopped::new(),
+            issues,
+        }
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
@@ -214,9 +220,13 @@ impl AsyncManager {
                 diagnostic_id: 0x4153_594e_5449_4d45,
             });
         }
-        let close_result = executor.finish_close();
+        let issues = executor.finish_close();
         self.finish_close();
-        close_result
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(XllError::Panic)
+        }
     }
 
     fn take_executor_for_close(&self) -> Option<Executor> {
@@ -500,17 +510,19 @@ impl Executor {
         true
     }
 
-    fn finish_close(mut self) -> XllResult<()> {
+    fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
         self.sender.close();
-        let mut worker_panicked = false;
+        let mut issues = Vec::new();
         for worker in self.workers.drain(..) {
-            worker_panicked |= worker.join().is_err();
+            if worker.join().is_err() {
+                issues.push(crate::shutdown::CleanupIssue {
+                    component: "async worker",
+                    kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
+                    error: XllError::Panic,
+                });
+            }
         }
-        if worker_panicked {
-            Err(XllError::Panic)
-        } else {
-            Ok(())
-        }
+        issues
     }
 }
 
@@ -1013,7 +1025,7 @@ mod tests {
             )
             .unwrap();
         done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
         assert!(completed.load(Ordering::Acquire));
     }
 
@@ -1041,7 +1053,7 @@ mod tests {
             )
             .unwrap();
         manager.cancel_generation(TEST_GENERATION);
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
         assert!(dropped.load(Ordering::Acquire));
     }
 
@@ -1092,7 +1104,7 @@ mod tests {
         ));
         dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         spawning.join().unwrap();
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 
     #[test]
@@ -1141,14 +1153,14 @@ mod tests {
             )
             .unwrap();
 
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
         assert!(token.is_cancelled());
         assert!(dropped.load(Ordering::Acquire));
 
         // A completed close must leave no orphaned Closing(None) owner.
         assert!(manager.advance_generation());
         manager.start(1).unwrap();
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 
     #[test]
@@ -1337,7 +1349,7 @@ mod tests {
             .unwrap();
         manager.cancel_generation(TEST_GENERATION);
         assert!(observed.is_cancelled());
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 
     #[test]
@@ -1368,7 +1380,7 @@ mod tests {
         manager
             .spawn(next, async {}, test_cancellation_source())
             .unwrap();
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 
     #[test]
@@ -1393,7 +1405,7 @@ mod tests {
         assert!(new_token.is_cancelled());
         assert!(!old_token.is_cancelled());
 
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
         assert!(old_token.is_cancelled());
     }
 
@@ -1437,11 +1449,11 @@ mod tests {
             ),
             Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
         ));
-        manager.close().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 
     #[test]
-    fn worker_panic_is_reported_by_close_after_completion_cleanup() {
+    fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
         let manager = AsyncManager::new();
         manager.start(1).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
@@ -1459,10 +1471,14 @@ mod tests {
             .unwrap();
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         release_tx.send(()).unwrap();
-        assert!(matches!(
-            manager.close_with_timeout(Duration::from_secs(1)),
-            Err(XllError::Panic)
-        ));
+        let outcome = manager.close();
+        assert_eq!(outcome.issues.len(), 1);
+        assert_eq!(
+            outcome.issues[0].kind,
+            crate::CleanupIssueKind::WorkerPanickedAfterJoin
+        );
+        let _stopped = outcome.certificate;
+        assert!(manager.is_stopped());
     }
 
     #[test]
@@ -1537,7 +1553,7 @@ mod tests {
         let closer_manager = Arc::clone(&manager);
         let (closed_tx, closed_rx) = std::sync::mpsc::channel();
         let closer = std::thread::spawn(move || {
-            closer_manager.close().unwrap();
+            assert!(closer_manager.close().issues.is_empty());
             closed_tx.send(()).unwrap();
         });
         assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
@@ -1611,7 +1627,7 @@ mod tests {
             );
         }
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
         *ASYNC_RETURN_HOOK.lock() = None;
         *CALLBACK_SENDER.lock() = None;
     }
@@ -1688,7 +1704,7 @@ mod tests {
         assert_eq!(event.1, Some(73));
         assert_eq!(event.2, 1);
 
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
         *ASYNC_RETURN_HOOK.lock() = None;
         *CALLBACK_SENDER.lock() = None;
     }
@@ -1746,7 +1762,7 @@ mod tests {
             event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
             UdfResultKind::InternalError
         );
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
         *ASYNC_RETURN_HOOK.lock() = None;
     }
 
@@ -1796,7 +1812,7 @@ mod tests {
         drop(release_tx);
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), -1);
 
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
         *ASYNC_RETURN_HOOK.lock() = None;
         *CALLBACK_SENDER.lock() = None;
     }
@@ -1849,7 +1865,7 @@ mod tests {
             callback_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             -1
         );
-        runtime.close_async().unwrap();
+        assert!(runtime.close_async().issues.is_empty());
 
         assert_eq!(crate::return_value::live_return_blocks(), before);
         *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;

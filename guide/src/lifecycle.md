@@ -9,7 +9,8 @@ pub trait Addin: Send + Sync + 'static {
 
     fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
     fn udf_layers(state: &Self::State) -> Vec<Arc<dyn UdfLayer>>;
-    fn close(state: &mut Self::State) -> Result<(), Self::Error>;
+    fn quiesce(state: &mut Self::State) -> Result<(), Self::Error>;
+    fn cleanup(state: &mut Self::State, reporter: &mut CleanupReporter<'_>);
 }
 ```
 
@@ -57,30 +58,42 @@ fn async_worker_count(_: &State) -> usize {
 
 The framework clamps the value to `1..=32`. The default is the available parallelism capped at four. This pool executes Rust futures; it is separate from any native `ThreadBoundOwner` or coordinator-backed `ThreadBoundPool` you create for native objects.
 
-## Close and unload safety
+## Quiescence, cleanup, and unload safety
 
-`Addin::close` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. Use it to synchronously recover and release lifecycle-owned resources.
+`Addin::quiesce` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. It must synchronously stop every application-owned thread, callback, task, and external producer that could execute XLL code after unload.
 
 ```rust
-fn close(state: &mut State) -> Result<(), Error> {
+fn quiesce(state: &mut State) -> Result<(), Error> {
     state.request_application_shutdown();
     shutdown_native_owners()?;
     Ok(())
 }
 ```
 
-`xlAutoClose` is terminal. Excel does not provide a useful retry protocol for a half-closed XLL. The framework therefore diagnoses a close error and still releases state. A close hook must not return while code from the XLL can still execute.
+`xlAutoClose` cannot reject DLL unload. If `quiesce` fails or panics, the framework fail-stops because unload safety is unknown. It also fail-stops when an Excel callback remains registered, a framework producer cannot be stopped, an RTD/COM object remains live, a handle runtime is not quiescent, or an `Arc<State>` escaped.
+
+After quiescence, `Addin::cleanup` performs best-effort disposal. It cannot return an arbitrary business error. Report recoverable failures explicitly; they are logged without preventing safe unload:
+
+```rust
+fn cleanup(state: &mut State, reporter: &mut CleanupReporter<'_>) {
+    if let Err(error) = state.remove_cached_metadata() {
+        reporter.warn("metadata cache", CleanupIssueKind::HostMetadata, error);
+    }
+}
+```
+
+A cleanup panic is contained after quiescence. The framework leaks the state rather than invoking more unknown destructor code, records the issue, and completes unload. `cleanup` must not start work or register callbacks.
 
 Consequences:
 
 - cancellation must be cooperative;
-- background callbacks must be quiescent before close returns;
+- background callbacks must be quiescent before `quiesce` returns;
 - native worker owners must be joined;
 - a native operation that cannot be interrupted should be isolated out of process;
 - do not implement a timeout that abandons in-process code and then permits unload.
 
 ## Thread-affine lifecycle owners
 
-`Addin::open` and `Addin::close` for a generation run on the same lifecycle thread. This permits a thread-local or otherwise external registry for non-`Send` owners. Put only their cloneable, `Send + Sync` submission handles in `State`.
+`Addin::open`, `Addin::quiesce`, and `Addin::cleanup` for a generation run on the same lifecycle thread. This permits a thread-local or otherwise external registry for non-`Send` owners. Put only their cloneable, `Send + Sync` submission handles in `State`.
 
 This owner/handle split is intentional: a worker operation cannot capture and destroy the object responsible for joining that same worker.

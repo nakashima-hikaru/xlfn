@@ -174,6 +174,7 @@ pub(crate) struct UnregisterResult<T> {
     pub(crate) succeeded: Vec<T>,
     pub(crate) failed: Vec<(T, XllError)>,
     pub(crate) metadata_debt: Vec<(T, XllError)>,
+    pub(crate) cleanup_issues: Vec<XllError>,
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +225,7 @@ impl<T> UnregisterResult<T> {
             succeeded: Vec::with_capacity(capacity),
             failed: Vec::new(),
             metadata_debt: Vec::new(),
+            cleanup_issues: Vec::new(),
         }
     }
 }
@@ -790,8 +792,7 @@ impl HostRegistrar {
                     continue;
                 }
                 if let Err(error) = release {
-                    outcome.failed.push((registration, error));
-                    continue;
+                    outcome.cleanup_issues.push(error);
                 }
             }
 
@@ -831,10 +832,9 @@ impl HostRegistrar {
                 continue;
             }
             if let Err(error) = release {
-                outcome.metadata_debt.push((registration, error));
-            } else {
-                outcome.succeeded.push(registration);
+                outcome.cleanup_issues.push(error);
             }
+            outcome.succeeded.push(registration);
         }
         outcome
     }
@@ -991,10 +991,9 @@ fn unregister_events_with(
         // fails. Never execute the unregister side effect again on a retry.
         registration.unregistered = true;
         if let Err(error) = release {
-            outcome.failed.push((registration, error));
-        } else {
-            outcome.succeeded.push(registration);
+            outcome.cleanup_issues.push(error);
         }
+        outcome.succeeded.push(registration);
     }
     outcome
 }
@@ -1824,11 +1823,12 @@ mod tests {
                 }),
             )
         });
-        assert_eq!(first.failed.len(), 1);
-        assert!(first.failed[0].0.unregistered);
+        assert!(first.failed.is_empty());
+        assert_eq!(first.cleanup_issues.len(), 1);
+        assert!(first.succeeded[0].unregistered);
 
         let retry = unregister_events_with(
-            &[first.failed[0].0.clone()],
+            &[first.succeeded[0].clone()],
             |_| -> (i32, XllResult<()>, XllResult<()>) {
                 calls.set(calls.get() + 1);
                 (XLRET_SUCCESS, Ok(()), Ok(()))

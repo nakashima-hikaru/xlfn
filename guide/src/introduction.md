@@ -17,7 +17,7 @@ The attribute generates the Excel ABI wrapper and registration descriptor. Argum
 
 ## What the framework provides
 
-- one typed add-in lifecycle with `Addin::open` and `Addin::close`;
+- one typed add-in lifecycle with `Addin::open`, `Addin::quiesce`, and `Addin::cleanup`;
 - function registration generated from Rust attributes;
 - strict scalar, string, error, array, date-serial, and reference conversion;
 - main-thread, thread-safe, macro-sheet, and asynchronous capability contexts;
