@@ -26,10 +26,10 @@ Each target directory contains:
 - configured native DLLs and their packaged dependencies;
 - `build-manifest.json`.
 
-The manifest records schema version 4, package and artifact identity, target, profile, selected
-feature text, configured/resolved bundle sources, import-policy version, file sizes, and SHA-256
-values. Its integrity section explicitly states that hashes are audit metadata and are not verified
-before DLL execution.
+The manifest records schema version 5, package and artifact identity, target, profile, selected
+features, requested and observed CRT policy, configured/resolved bundle sources, import-policy
+version, file sizes, and SHA-256 values. Its integrity section explicitly states that hashes are
+audit metadata and are not verified before DLL execution.
 
 Keep all files together. Renaming a native DLL or moving it to another directory can break both explicit loading and transitive imports.
 

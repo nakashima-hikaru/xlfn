@@ -9,9 +9,22 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use xlfn_package::{BundleMetadata, validate_windows_basename};
 
+mod crt;
+
+use crt::{CrtObservation, CrtPolicy, ResolvedCrtPolicy};
+
 type Result<T = ()> = anyhow::Result<T>;
 
 fn main() {
+    if crt::wrapper_mode_requested() {
+        match crt::run_wrapper() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("cargo xlfn rustc wrapper: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Err(error) = run() {
         eprintln!("cargo xlfn: {error}");
         std::process::exit(1);
@@ -52,6 +65,12 @@ struct CheckArgs {
 
 #[derive(Args, Clone, Debug, Default)]
 struct BuildSelectionArgs {
+    /// MSVC CRT policy for target Rust crates.
+    #[arg(long, value_enum)]
+    crt: Option<CrtPolicy>,
+    /// Base Cargo target directory; the CRT policy is appended to this path.
+    #[arg(long)]
+    target_dir: Option<PathBuf>,
     #[arg(long)]
     profile: Option<String>,
     #[arg(long, value_delimiter = ',')]
@@ -188,6 +207,7 @@ fn run() -> Result {
 
 fn check(args: &CheckArgs) -> Result {
     let metadata = project_metadata(&args.project, &args.build)?;
+    metadata.crt.print();
     let only_target = args.target.map(WindowsTarget::triple);
     let rust_targets = only_target.map_or_else(
         || vec![WindowsTarget::X86.triple(), WindowsTarget::X64.triple()],
@@ -200,6 +220,7 @@ fn check(args: &CheckArgs) -> Result {
             .arg(&metadata.manifest_path)
             .args(["--package", &metadata.package_name])
             .args(["--target", target]);
+        configure_build(&mut command, &metadata, target)?;
         args.build.apply_to_command(&mut command, None);
         if !command.status()?.success() {
             bail!("XLL001 Rust build/link failed for {target}");
@@ -231,6 +252,8 @@ fn check(args: &CheckArgs) -> Result {
             );
         }
         fs::copy(&source, &xll)?;
+        let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
+        observation.warn_if_mixed();
         xlfn_package::verify_staged_package(&xll, target, &[], staged_bundle)?;
     }
     println!("Cargo manifest / cdylib  OK");
@@ -253,7 +276,8 @@ fn built_library_path(
         .unwrap_or("dev");
     let profile_directory = if profile == "dev" { "debug" } else { profile };
     metadata
-        .target_directory
+        .crt
+        .target_directory(&metadata.target_directory)
         .join(target)
         .join(profile_directory)
         .join(format!("{}.dll", metadata.lib_name.replace('-', "_")))
@@ -382,6 +406,7 @@ struct ProjectMetadata {
     manifest_path: PathBuf,
     manifest_directory: PathBuf,
     target_directory: PathBuf,
+    crt: ResolvedCrtPolicy,
     resolved_features: Vec<String>,
     lockfile_sha256: Option<String>,
     bundle: Option<BundleMetadata>,
@@ -428,6 +453,11 @@ fn project_metadata(args: &ProjectArgs, build: &BuildSelectionArgs) -> Result<Pr
         );
     }
     let metadata = package.metadata.get("xlfn");
+    let metadata_crt = metadata
+        .and_then(|value| value.get("crt"))
+        .map(CrtPolicy::parse_metadata)
+        .transpose()?;
+    let crt = ResolvedCrtPolicy::resolve(build.crt, metadata_crt);
     let artifact_name = metadata
         .and_then(|value| value.get("artifact-name"))
         .and_then(serde_json::Value::as_str)
@@ -472,7 +502,11 @@ fn project_metadata(args: &ProjectArgs, build: &BuildSelectionArgs) -> Result<Pr
         artifact_name,
         manifest_path: package.manifest_path.as_std_path().to_path_buf(),
         manifest_directory,
-        target_directory: cargo.target_directory.as_std_path().to_path_buf(),
+        target_directory: build
+            .target_dir
+            .clone()
+            .unwrap_or_else(|| cargo.target_directory.as_std_path().to_path_buf()),
+        crt,
         resolved_features,
         lockfile_sha256,
         bundle,
@@ -557,6 +591,7 @@ fn distribute(args: &DistArgs) -> Result {
         ]
     };
     let metadata = project_metadata(&args.project, &args.build)?;
+    metadata.crt.print();
     if args.all {
         validate_atomic_output_root(&args.out)?;
         let output_parent = args
@@ -635,6 +670,7 @@ fn stage_distribution_target(
             "--target",
             target.triple(),
         ]);
+    configure_build(&mut command, metadata, target.triple())?;
     args.build.apply_to_command(&mut command, Some("release"));
     if !command.status()?.success() {
         bail!("cargo build failed for {}", target.triple());
@@ -673,6 +709,9 @@ fn stage_distribution_target(
     }
     fs::copy(&source, &xll)?;
 
+    let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
+    observation.warn_if_mixed();
+
     // Inspect only the isolated files. These same staged bytes are hashed
     // below and become the committed distribution directory.
     let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
@@ -689,7 +728,7 @@ fn stage_distribution_target(
         })
         .collect::<Result<Vec<_>>>()?;
     let manifest = json!({
-        "schema": 4,
+        "schema": 5,
         "package": metadata.package_name,
         "package_version": metadata.package_version,
         "artifact": metadata.artifact_name,
@@ -707,6 +746,7 @@ fn stage_distribution_target(
             "offline": args.build.offline,
             "lockfile_sha256": &metadata.lockfile_sha256,
         },
+        "crt": observation.manifest(metadata.crt),
         "bundle_sources": bundle_sources,
         "system_import_policy": {
             "version": xlfn_package::SYSTEM_IMPORT_POLICY_VERSION,
@@ -820,31 +860,15 @@ fn commit_staged_directory_with(
 }
 
 fn cargo_command() -> Command {
-    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    force_static_msvc_crt(&mut command);
-    command
+    Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
-fn force_static_msvc_crt(command: &mut Command) {
-    const CRT_FLAG: &str = "-Ctarget-feature=+crt-static";
-    const CRT_CONFIG: &str =
-        "target.'cfg(target_env = \"msvc\")'.rustflags=[\"-C\",\"target-feature=+crt-static\"]";
-
-    if let Some(mut flags) = std::env::var_os("CARGO_ENCODED_RUSTFLAGS") {
-        if !flags.is_empty() {
-            flags.push("\u{1f}");
-        }
-        flags.push(CRT_FLAG);
-        command.env("CARGO_ENCODED_RUSTFLAGS", flags);
-    } else if let Some(mut flags) = std::env::var_os("RUSTFLAGS") {
-        if !flags.is_empty() {
-            flags.push(" ");
-        }
-        flags.push(CRT_FLAG);
-        command.env("RUSTFLAGS", flags);
-    } else {
-        command.args(["--config", CRT_CONFIG]);
-    }
+fn configure_build(command: &mut Command, metadata: &ProjectMetadata, target: &str) -> Result {
+    crt::validate_explicit_policy_target(metadata.crt.policy, target)?;
+    command
+        .arg("--target-dir")
+        .arg(metadata.crt.target_directory(&metadata.target_directory));
+    crt::configure_wrapper(command, metadata.crt, target)
 }
 
 #[cfg(test)]
@@ -1137,6 +1161,8 @@ mod tests {
             "release",
             "--features",
             "feat1,feat2",
+            "--crt",
+            "dynamic",
             "--locked",
         ])
         .unwrap();
@@ -1145,7 +1171,19 @@ mod tests {
         };
         assert_eq!(args.build.profile.as_deref(), Some("release"));
         assert_eq!(args.build.features, vec!["feat1", "feat2"]);
+        assert_eq!(args.build.crt, Some(CrtPolicy::Dynamic));
         assert!(args.build.locked);
+    }
+
+    #[test]
+    fn cli_accepts_every_crt_policy() {
+        for policy in ["inherit", "static", "dynamic"] {
+            assert!(
+                Cli::try_parse_from(["cargo-xlfn", "check", "--crt", policy]).is_ok(),
+                "policy {policy} should parse"
+            );
+        }
+        assert!(Cli::try_parse_from(["cargo-xlfn", "check", "--crt", "auto"]).is_err());
     }
 
     #[test]
@@ -1181,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn packaging_build_forces_a_static_msvc_crt() {
+    fn base_cargo_command_does_not_rewrite_rustflags() {
         let command = cargo_command();
         let arguments = command
             .get_args()
@@ -1192,12 +1230,11 @@ mod tests {
             .filter_map(|(_, value)| value)
             .map(std::ffi::OsString::from)
             .collect::<Vec<_>>();
-        assert!(
-            arguments
-                .iter()
-                .chain(&environment)
-                .any(|value| value.to_string_lossy().contains("+crt-static"))
-        );
+        assert!(arguments.is_empty());
+        assert!(!environment.iter().any(|value| {
+            let value = value.to_string_lossy();
+            value.contains("crt-static") || value.contains("RUSTFLAGS")
+        }));
     }
 
     #[test]

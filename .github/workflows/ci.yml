@@ -80,21 +80,29 @@ jobs:
             --target ${{ matrix.target }} `
             --locked
 
-      - name: Build and validate the basic example XLL
+      - name: Build and validate the basic example XLL across CRT policies
         shell: pwsh
         run: |
-          cargo run --locked --package cargo-xlfn -- check `
-            --manifest-path examples/basic-xll/Cargo.toml `
-            --target ${{ matrix.target }} `
-            --locked
+          foreach ($crt in @("static", "dynamic", "inherit")) {
+            cargo run --locked --package cargo-xlfn -- check `
+              --manifest-path examples/basic-xll/Cargo.toml `
+              --target ${{ matrix.target }} `
+              --crt $crt `
+              --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
-      - name: Build and validate the async/RTD fixture XLL
+      - name: Build and validate the async/RTD fixture XLL across CRT policies
         shell: pwsh
         run: |
-          cargo run --locked --package cargo-xlfn -- check `
-            --manifest-path tests/xlfn-e2e-fixture/Cargo.toml `
-            --target ${{ matrix.target }} `
-            --locked
+          foreach ($crt in @("static", "dynamic", "inherit")) {
+            cargo run --locked --package cargo-xlfn -- check `
+              --manifest-path tests/xlfn-e2e-fixture/Cargo.toml `
+              --target ${{ matrix.target }} `
+              --crt $crt `
+              --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
   lean:
     name: Lean shutdown model

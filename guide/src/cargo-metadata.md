@@ -7,6 +7,7 @@
 ```toml
 [package.metadata.xlfn]
 artifact-name = "DataTools"
+crt = "dynamic"
 ```
 
 `artifact-name` controls the distributed XLL basename:
@@ -25,6 +26,10 @@ The value must be a valid Windows basename. It must:
 - not use a reserved device stem such as `CON`, `PRN`, `AUX`, `NUL`, `COM1` through `COM9`, or `LPT1` through `LPT9`.
 
 Do not add the `.xll` extension to `artifact-name`; the tool supplies it.
+
+`crt` accepts `inherit`, `static`, or `dynamic`. The resolution order is an
+explicit CLI `--crt`, then this metadata value, then the `static` default.
+`inherit` is a deliberate no-op and does not mean `dynamic`.
 
 ## Bundle metadata
 
@@ -99,6 +104,7 @@ xlfn = { version = "0.1", features = ["async"] }
 
 [package.metadata.xlfn]
 artifact-name = "DataTools"
+crt = "dynamic"
 
 [package.metadata.xlfn.bundle]
 x86 = [
@@ -122,7 +128,7 @@ The selected package must contain exactly one `cdylib` target.
 
 ## `build-manifest.json`
 
-Every distribution directory contains schema version 3 audit metadata. Its top-level fields are:
+Every distribution directory contains schema version 5 audit metadata. Its top-level fields are:
 
 | Field | Meaning |
 |---|---|
@@ -132,8 +138,10 @@ Every distribution directory contains schema version 3 audit metadata. Its top-l
 | `artifact` | configured artifact basename |
 | `target` | Rust target triple |
 | `profile` | Cargo profile |
-| `features` | selected package feature set |
-| `native_sources` | configured paths and resolved source paths used during staging |
+| `feature_selection` | requested and resolved package feature set |
+| `cargo_constraints` | lock/network constraints and lockfile hash |
+| `crt` | requested/source/effective CRT policy, enforcement, imports, and consistency |
+| `bundle_sources` | configured paths and resolved source paths used during staging |
 | `system_import_policy` | versioned system-DLL policy and approved external imports |
 | `integrity` | explicit trust-boundary statement |
 | `files` | relative path, byte size, and SHA-256 for every distributed file |

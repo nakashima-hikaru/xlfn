@@ -30,6 +30,41 @@ pub const REQUIRED_XLL_EXPORTS: &[&str] = &[
     "DllCanUnloadNow",
 ];
 
+const CRT_MARKER_MAGIC: &[u8; 8] = b"XLFNCRT\0";
+const CRT_MARKER_SCHEMA: u8 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveCrtPolicy {
+    Dynamic,
+    Static,
+}
+
+impl EffectiveCrtPolicy {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Dynamic => "dynamic",
+            Self::Static => "static",
+        }
+    }
+}
+
+fn parse_crt_marker(data: &[u8]) -> PackageResult<EffectiveCrtPolicy> {
+    let marker = data
+        .windows(CRT_MARKER_MAGIC.len())
+        .position(|candidate| candidate == CRT_MARKER_MAGIC)
+        .and_then(|offset| data.get(offset..offset + 16))
+        .ok_or_else(|| PackageError::Message("malformed .xlfncrt marker".into()))?;
+    if marker[8] != CRT_MARKER_SCHEMA {
+        return Err(format!("unsupported .xlfncrt marker schema {}", marker[8]).into());
+    }
+    match marker[9] {
+        0 => Ok(EffectiveCrtPolicy::Dynamic),
+        1 => Ok(EffectiveCrtPolicy::Static),
+        value => Err(format!("invalid .xlfncrt policy value {value}").into()),
+    }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ImportTarget {
     Name(String),
@@ -405,6 +440,13 @@ fn verify_xll_exports(info: &PeInfo, path: &Path, required_exports: &[String]) -
     if !info.has_export_manifest {
         return Err(format!(
             "{} is missing the .xllexp export manifest; ensure the crate has exactly one #[excel_addin]",
+            path.display()
+        )
+        .into());
+    }
+    if info.crt_policy.is_none() {
+        return Err(format!(
+            "{} is missing the .xlfncrt effective CRT policy marker",
             path.display()
         )
         .into());
@@ -1142,6 +1184,7 @@ pub struct PeInfo {
     pub executable_exports: BTreeSet<String>,
     pub has_export_manifest: bool,
     pub expected_exports: BTreeSet<String>,
+    pub crt_policy: Option<EffectiveCrtPolicy>,
     pub imports: BTreeSet<String>,
     pub import_targets: BTreeMap<String, BTreeSet<ImportTarget>>,
     pub delay_imports: BTreeSet<String>,
@@ -1159,6 +1202,7 @@ impl Default for PeInfo {
             executable_exports: BTreeSet::new(),
             has_export_manifest: true,
             expected_exports: BTreeSet::new(),
+            crt_policy: None,
             imports: BTreeSet::new(),
             import_targets: BTreeMap::new(),
             delay_imports: BTreeSet::new(),
@@ -1303,6 +1347,7 @@ where
 
     let mut has_export_manifest = false;
     let mut expected_exports = BTreeSet::new();
+    let mut crt_policy = None;
     for section in pe.section_table().iter() {
         let name_str = std::str::from_utf8(&section.name)
             .unwrap_or("")
@@ -1321,6 +1366,15 @@ where
                         expected_exports.insert(trimmed.to_owned());
                     }
                 }
+            }
+        }
+        if name_str == ".xlfncrt" || name_str.ends_with(".xlfncrt") {
+            let data = section.pe_data(pe.data()).map_err(|error| {
+                PackageError::Message(format!("failed to read .xlfncrt section: {error}"))
+            })?;
+            let observed = parse_crt_marker(data)?;
+            if crt_policy.replace(observed).is_some() {
+                return Err("PE image contains multiple .xlfncrt markers".into());
             }
         }
     }
@@ -1405,6 +1459,7 @@ where
         executable_exports,
         has_export_manifest,
         expected_exports,
+        crt_policy,
         imports,
         import_targets,
         delay_imports,
@@ -1432,12 +1487,32 @@ mod tests {
             executable_exports: framework.clone(),
             has_export_manifest: true,
             expected_exports: framework,
+            crt_policy: Some(EffectiveCrtPolicy::Dynamic),
             imports: BTreeSet::new(),
             import_targets: BTreeMap::new(),
             delay_imports: BTreeSet::new(),
             delay_import_targets: BTreeMap::new(),
             ordinals: Vec::new(),
         }
+    }
+
+    #[test]
+    fn crt_marker_records_the_effective_compiler_policy() {
+        let mut dynamic = [0_u8; 16];
+        dynamic[..8].copy_from_slice(CRT_MARKER_MAGIC);
+        dynamic[8] = CRT_MARKER_SCHEMA;
+        assert_eq!(
+            parse_crt_marker(&dynamic).unwrap(),
+            EffectiveCrtPolicy::Dynamic
+        );
+
+        dynamic[9] = 1;
+        assert_eq!(
+            parse_crt_marker(&dynamic).unwrap(),
+            EffectiveCrtPolicy::Static
+        );
+        dynamic[8] = 2;
+        assert!(parse_crt_marker(&dynamic).is_err());
     }
 
     #[test]
@@ -1450,6 +1525,15 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains(".xllexp")
+        );
+
+        let mut missing_crt_marker = xll_info();
+        missing_crt_marker.crt_policy = None;
+        assert!(
+            verify_xll_exports(&missing_crt_marker, path, &[])
+                .unwrap_err()
+                .to_string()
+                .contains(".xlfncrt")
         );
 
         let mut missing_lifecycle = xll_info();
@@ -1643,6 +1727,7 @@ mod tests {
             executable_exports: BTreeSet::new(),
             has_export_manifest: false,
             expected_exports: BTreeSet::new(),
+            crt_policy: None,
             imports: imports.iter().map(|name| (*name).to_owned()).collect(),
             import_targets: BTreeMap::new(),
             delay_imports: delay_imports

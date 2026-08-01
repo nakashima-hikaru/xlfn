@@ -16,6 +16,7 @@ pub fn open_addin<A>(
 where
     A: Addin,
 {
+    std::hint::black_box(crate::crt::effective_crt_policy());
     let close_epoch = runtime.close_epoch();
     let mut open_attempt = None;
     let result = catch_unwind(AssertUnwindSafe(|| {

@@ -74,8 +74,9 @@ For each target, `check`:
 3. stages configured bundle files in a temporary package;
 4. copies the linked DLL as `<artifact-name>.xll`;
 5. verifies required XLL exports and the generated `.xllexp` manifest;
-6. verifies PE architecture;
-7. validates the complete packaged DLL import closure.
+6. verifies the embedded effective Rust CRT policy and direct dynamic CRT imports;
+7. verifies PE architecture;
+8. validates the complete packaged DLL import closure.
 
 The default Cargo profile is `dev` unless `--profile` is supplied. `check` does not create a persistent distribution directory.
 
@@ -84,6 +85,7 @@ Examples:
 ```console
 cargo xlfn check
 cargo xlfn check --target x86_64-pc-windows-msvc
+cargo xlfn check --target x86_64-pc-windows-msvc --crt dynamic
 cargo xlfn check --package data-xlfn --profile release --locked
 cargo xlfn check --manifest-path xlfn/examples/basic-xll/Cargo.toml --all-features
 ```
@@ -144,6 +146,8 @@ When no package is supplied, the workspace root package is selected. A virtual w
 
 | Option                  | Forwarded behavior                      |
 | ----------------------- | --------------------------------------- |
+| `--crt <POLICY>`        | `inherit`, `static`, or `dynamic`; see below |
+| `--target-dir <PATH>`   | base target directory, separated by CRT policy |
 | `--profile <NAME>`      | Cargo profile                           |
 | `--features <A,B>`      | comma-separated feature selection       |
 | `--no-default-features` | disable default features                |
@@ -153,6 +157,19 @@ When no package is supplied, the workspace root package is selected. A virtual w
 | `--offline`             | disable network access                  |
 
 Feature flags affect both the binary and its expected export manifest. Always qualify the same feature set that will be distributed.
+
+The CRT policy defaults to `static`, can be set persistently with
+`package.metadata.xlfn.crt`, and is overridden by an explicit `--crt`:
+
+- `inherit` leaves `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, Cargo configuration,
+  and wrappers untouched;
+- `static` enforces `+crt-static` for Rust invocations targeting the selected
+  MSVC triple;
+- `dynamic` enforces `-crt-static` for those target invocations.
+
+Build output is isolated under `xlfn-crt-inherit`, `xlfn-crt-static`, or
+`xlfn-crt-dynamic` beneath the selected Cargo target directory. Existing
+`RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` chains are preserved.
 
 ## Exit behavior and CI use
 

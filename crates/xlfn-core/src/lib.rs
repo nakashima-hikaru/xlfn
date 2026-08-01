@@ -20,6 +20,8 @@ mod cache;
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
+#[allow(unsafe_code)]
+mod crt;
 mod diagnostics;
 mod error;
 mod execution;
