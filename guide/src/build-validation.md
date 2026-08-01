@@ -38,7 +38,9 @@ cargo xlfn check `
 
 The default is `--crt static`, which reduces deployment dependence on a separately installed VC runtime. The command reports that default rather than changing the profile silently. Use `--crt dynamic` for `/MD` native dependencies, or `--crt inherit` to preserve Cargo, environment, and toolchain CRT settings exactly.
 
-`static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `dist` verify. Under `static`, a direct import of `ucrtbase`, `vcruntime`, `msvcp`, or a Universal CRT API-set is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
+`static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `dist` verify. The CRT observer recognizes an exact, case-insensitive allowlist of release/debug MSVC runtime DLLs and Universal CRT API-set DLLs; lookalike names are not classified. Under `static`, an observed dynamic CRT import is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
+
+CRT observation does not approve an external dependency. Any runtime DLL not included in the package must be listed explicitly in `external-imports`, where it remains a deliberate deployment exception and is not validated as part of the package closure.
 
 The policy cannot recompile an existing `.lib`. Build native code with a matching MSVC runtime: `/MT` (or `/MTd`) for `static`, and `/MD` (or `/MDd`) for `dynamic`. Matching CRT settings also do not make cross-module allocator ownership safe: allocate and free an object in the same module, or expose an explicit paired deallocator/caller-owned buffer contract.
 

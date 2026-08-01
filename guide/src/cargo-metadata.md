@@ -140,7 +140,7 @@ Every distribution directory contains schema version 5 audit metadata. Its top-l
 | `profile` | Cargo profile |
 | `feature_selection` | requested and resolved package feature set |
 | `cargo_constraints` | lock/network constraints and lockfile hash |
-| `crt` | requested/source/effective CRT policy, enforcement, imports, and consistency |
+| `crt` | requested/source/effective CRT policy, enforcement, observed dynamic CRT imports, and consistency |
 | `bundle_sources` | configured paths and resolved source paths used during staging |
 | `system_import_policy` | versioned system-DLL policy and approved external imports |
 | `integrity` | explicit trust-boundary statement |

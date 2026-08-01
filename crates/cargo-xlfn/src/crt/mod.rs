@@ -214,7 +214,7 @@ fn rustc_invocation_targets(args: &[OsString], selected_target: &OsStr) -> bool 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CrtObservation {
     pub(crate) effective_rust: EffectiveCrtPolicy,
-    pub(crate) dynamic_crt_imports: Vec<String>,
+    pub(crate) observed_dynamic_crt_imports: Vec<String>,
     pub(crate) consistency: &'static str,
 }
 
@@ -223,15 +223,15 @@ impl CrtObservation {
         let effective_rust = info
             .crt_policy
             .context("generated XLL is missing its .xlfncrt effective CRT marker")?;
-        let mut dynamic_crt_imports = info
+        let mut observed_dynamic_crt_imports = info
             .imports
             .iter()
             .chain(&info.delay_imports)
             .filter(|name| is_dynamic_crt_import(name))
             .cloned()
             .collect::<Vec<_>>();
-        dynamic_crt_imports.sort_by_key(|name| name.to_ascii_lowercase());
-        dynamic_crt_imports.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        observed_dynamic_crt_imports.sort_by_key(|name| name.to_ascii_lowercase());
+        observed_dynamic_crt_imports.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
         match requested.policy {
             CrtPolicy::Static if effective_rust != EffectiveCrtPolicy::Static => bail!(
@@ -242,15 +242,15 @@ impl CrtObservation {
             ),
             _ => {}
         }
-        if requested.policy == CrtPolicy::Static && !dynamic_crt_imports.is_empty() {
+        if requested.policy == CrtPolicy::Static && !observed_dynamic_crt_imports.is_empty() {
             bail!(
                 "--crt static was requested, but the generated XLL imports dynamic MSVC runtime libraries: {}. A linked native static library may have been compiled with /MD; rebuild it with /MT or use --crt dynamic",
-                dynamic_crt_imports.join(", ")
+                observed_dynamic_crt_imports.join(", ")
             );
         }
         let consistency = if requested.policy == CrtPolicy::Inherit
             && effective_rust == EffectiveCrtPolicy::Static
-            && !dynamic_crt_imports.is_empty()
+            && !observed_dynamic_crt_imports.is_empty()
         {
             "potentially-mixed"
         } else {
@@ -258,7 +258,7 @@ impl CrtObservation {
         };
         Ok(Self {
             effective_rust,
-            dynamic_crt_imports,
+            observed_dynamic_crt_imports,
             consistency,
         })
     }
@@ -267,7 +267,7 @@ impl CrtObservation {
         if self.consistency == "potentially-mixed" {
             eprintln!(
                 "cargo xlfn: warning: Rust CRT policy is static but the XLL imports dynamic CRT libraries: {}",
-                self.dynamic_crt_imports.join(", ")
+                self.observed_dynamic_crt_imports.join(", ")
             );
         }
     }
@@ -278,19 +278,40 @@ impl CrtObservation {
             "source": requested.source.name(),
             "effective_rust": self.effective_rust.name(),
             "enforcement": requested.enforcement(),
-            "dynamic_crt_imports": self.dynamic_crt_imports,
+            "observed_dynamic_crt_imports": self.observed_dynamic_crt_imports,
             "consistency": self.consistency,
         })
     }
 }
 
 fn is_dynamic_crt_import(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name == "ucrtbase.dll"
-        || name == "ucrtbased.dll"
-        || name.starts_with("vcruntime")
-        || name.starts_with("msvcp")
-        || name.starts_with("api-ms-win-crt-")
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "ucrtbase.dll"
+            | "ucrtbased.dll"
+            | "vcruntime140.dll"
+            | "vcruntime140_1.dll"
+            | "msvcp140.dll"
+            | "msvcp140_1.dll"
+            | "msvcp140_2.dll"
+            | "msvcp140_atomic_wait.dll"
+            | "msvcp140_codecvt_ids.dll"
+            | "api-ms-win-crt-conio-l1-1-0.dll"
+            | "api-ms-win-crt-convert-l1-1-0.dll"
+            | "api-ms-win-crt-environment-l1-1-0.dll"
+            | "api-ms-win-crt-filesystem-l1-1-0.dll"
+            | "api-ms-win-crt-heap-l1-1-0.dll"
+            | "api-ms-win-crt-locale-l1-1-0.dll"
+            | "api-ms-win-crt-math-l1-1-0.dll"
+            | "api-ms-win-crt-multibyte-l1-1-0.dll"
+            | "api-ms-win-crt-private-l1-1-0.dll"
+            | "api-ms-win-crt-process-l1-1-0.dll"
+            | "api-ms-win-crt-runtime-l1-1-0.dll"
+            | "api-ms-win-crt-stdio-l1-1-0.dll"
+            | "api-ms-win-crt-string-l1-1-0.dll"
+            | "api-ms-win-crt-time-l1-1-0.dll"
+            | "api-ms-win-crt-utility-l1-1-0.dll"
+    )
 }
 
 #[cfg(test)]
@@ -370,7 +391,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observation.consistency, "potentially-mixed");
-        assert_eq!(observation.dynamic_crt_imports, ["UCRTBASE.dll"]);
+        assert_eq!(observation.observed_dynamic_crt_imports, ["UCRTBASE.dll"]);
     }
 
     #[test]
@@ -405,5 +426,9 @@ mod tests {
         assert!(is_dynamic_crt_import("vcruntime140_1.dll"));
         assert!(is_dynamic_crt_import("api-ms-win-crt-heap-l1-1-0.dll"));
         assert!(!is_dynamic_crt_import("kernel32.dll"));
+        assert!(!is_dynamic_crt_import("msvcp_private.dll"));
+        assert!(!is_dynamic_crt_import("vcruntime_payload.dll"));
+        assert!(!is_dynamic_crt_import("api-ms-win-crt-untrusted.dll"));
+        assert!(is_dynamic_crt_import("ucrtbased.dll"));
     }
 }

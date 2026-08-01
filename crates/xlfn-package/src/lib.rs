@@ -50,13 +50,26 @@ impl EffectiveCrtPolicy {
 }
 
 fn parse_crt_marker(data: &[u8]) -> PackageResult<EffectiveCrtPolicy> {
-    let marker = data
+    if data.len() < 16 || &data[..CRT_MARKER_MAGIC.len()] != CRT_MARKER_MAGIC {
+        return Err("malformed .xlfncrt marker: marker must start at section offset 0".into());
+    }
+    if data
         .windows(CRT_MARKER_MAGIC.len())
-        .position(|candidate| candidate == CRT_MARKER_MAGIC)
-        .and_then(|offset| data.get(offset..offset + 16))
-        .ok_or_else(|| PackageError::Message("malformed .xlfncrt marker".into()))?;
+        .filter(|candidate| *candidate == CRT_MARKER_MAGIC)
+        .count()
+        != 1
+    {
+        return Err("malformed .xlfncrt marker: multiple magic values".into());
+    }
+    if data[16..].iter().any(|byte| *byte != 0) {
+        return Err("malformed .xlfncrt marker: non-zero section padding".into());
+    }
+    let marker = &data[..16];
     if marker[8] != CRT_MARKER_SCHEMA {
         return Err(format!("unsupported .xlfncrt marker schema {}", marker[8]).into());
+    }
+    if marker[10..].iter().any(|byte| *byte != 0) {
+        return Err("malformed .xlfncrt marker: reserved bytes are not zero".into());
     }
     match marker[9] {
         0 => Ok(EffectiveCrtPolicy::Dynamic),
@@ -197,12 +210,16 @@ pub struct StagedBundle {
 }
 
 impl StagedBundle {
-    pub fn add_external_imports(&mut self, imports: impl IntoIterator<Item = impl AsRef<str>>) {
-        for import in imports {
-            if let Ok(key) = windows_dll_name_key("external import", import.as_ref()) {
-                self.external_imports.insert(key);
-            }
-        }
+    pub fn try_add_external_imports(
+        &mut self,
+        imports: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> PackageResult {
+        let normalized = imports
+            .into_iter()
+            .map(|name| windows_dll_name_key("external import", name.as_ref()))
+            .collect::<PackageResult<Vec<_>>>()?;
+        self.external_imports.extend(normalized);
+        Ok(())
     }
 }
 
@@ -546,7 +563,11 @@ fn verify_xll_exports(info: &PeInfo, path: &Path, required_exports: &[String]) -
         .into());
     }
 
-    if info.ordinals.len() > info.exports.len() {
+    let ordinal_only = info
+        .nonzero_export_slots
+        .difference(&info.named_export_slots)
+        .collect::<Vec<_>>();
+    if !ordinal_only.is_empty() {
         return Err(format!("{} has unmanifested ordinal-only export(s)", path.display()).into());
     }
 
@@ -706,6 +727,7 @@ fn inspect_checked_bundle_file(
         None => inspect_pe(&file.source)?,
     };
     verify_machine(&info, architecture, &file.source)?;
+    verify_image_characteristics(&info, &file.source)?;
     Ok(info)
 }
 
@@ -771,7 +793,9 @@ fn validate_dependency_node(
             for target in targets {
                 let exists = match target {
                     ImportTarget::Name(name) => imported_image.exports.contains(name),
-                    ImportTarget::Ordinal(ordinal) => imported_image.ordinals.contains(ordinal),
+                    ImportTarget::Ordinal(ordinal) => {
+                        imported_image.exported_ordinals.contains(ordinal)
+                    }
                 };
                 if !exists {
                     let mut chain = path
@@ -1199,7 +1223,12 @@ pub struct PeInfo {
     pub import_targets: BTreeMap<String, BTreeSet<ImportTarget>>,
     pub delay_imports: BTreeSet<String>,
     pub delay_import_targets: BTreeMap<String, BTreeSet<ImportTarget>>,
-    pub ordinals: Vec<u16>,
+    /// Ordinals represented by non-zero export address table entries.
+    pub exported_ordinals: BTreeSet<u16>,
+    /// Non-zero export address table indices, used for closed-world validation.
+    pub nonzero_export_slots: BTreeSet<u32>,
+    /// Export address table indices referenced by at least one export name.
+    pub named_export_slots: BTreeSet<u32>,
 }
 
 impl Default for PeInfo {
@@ -1217,7 +1246,9 @@ impl Default for PeInfo {
             import_targets: BTreeMap::new(),
             delay_imports: BTreeSet::new(),
             delay_import_targets: BTreeMap::new(),
-            ordinals: Vec::new(),
+            exported_ordinals: BTreeSet::new(),
+            nonzero_export_slots: BTreeSet::new(),
+            named_export_slots: BTreeSet::new(),
         }
     }
 }
@@ -1226,7 +1257,7 @@ impl PeInfo {
     fn has_export_symbol(&self, symbol: &ExportSymbol) -> bool {
         match symbol {
             ExportSymbol::Name(name) => self.exports.contains(name),
-            ExportSymbol::Ordinal(ordinal) => self.ordinals.contains(ordinal),
+            ExportSymbol::Ordinal(ordinal) => self.exported_ordinals.contains(ordinal),
         }
     }
 }
@@ -1267,8 +1298,17 @@ where
     let mut exports = BTreeSet::new();
     let mut executable_exports = BTreeSet::new();
     let mut forwarded_exports = BTreeMap::new();
-    let mut ordinals = Vec::new();
+    let mut exported_ordinals = BTreeSet::new();
+    let mut nonzero_export_slots = BTreeSet::new();
+    let mut named_export_slots = BTreeSet::new();
     if let Some(table) = pe.export_table()? {
+        if table.ordinal_base() > u32::from(u16::MAX) {
+            return Err(format!(
+                "PE export ordinal base {} exceeds u16",
+                table.ordinal_base()
+            )
+            .into());
+        }
         let mut export_targets = Vec::with_capacity(table.addresses().len());
         for (index, address) in table.addresses().iter().enumerate() {
             let address = address.get(LE);
@@ -1283,6 +1323,10 @@ where
                 .ordinal_base()
                 .checked_add(ordinal_index)
                 .ok_or_else(|| PackageError::Message("PE export ordinal overflows".into()))?;
+            let exported_ordinal = u16::try_from(ordinal)
+                .map_err(|_| format!("PE export ordinal {ordinal} exceeds u16"))?;
+            nonzero_export_slots.insert(ordinal_index);
+            exported_ordinals.insert(exported_ordinal);
             let executable = match table.target_from_address(address)? {
                 ExportTarget::Address(address) => {
                     let section = pe
@@ -1304,40 +1348,30 @@ where
                     section.characteristics.get(LE) & IMAGE_SCN_MEM_EXECUTE != 0
                 }
                 ExportTarget::ForwardByOrdinal(library, target_ordinal) => {
-                    if let Ok(ord) = u16::try_from(ordinal) {
-                        let forwarded = ForwardedExport {
-                            library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
-                            symbol: ExportSymbol::Ordinal(u16::try_from(target_ordinal).map_err(
-                                |_| {
-                                    format!("forwarded export ordinal {target_ordinal} exceeds u16")
-                                },
-                            )?),
-                        };
-                        forwarded_exports.insert(ExportSymbol::Ordinal(ord), forwarded);
-                    }
+                    let forwarded = ForwardedExport {
+                        library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
+                        symbol: ExportSymbol::Ordinal(u16::try_from(target_ordinal).map_err(
+                            |_| format!("forwarded export ordinal {target_ordinal} exceeds u16"),
+                        )?),
+                    };
+                    forwarded_exports.insert(ExportSymbol::Ordinal(exported_ordinal), forwarded);
                     false
                 }
                 ExportTarget::ForwardByName(library, target_name) => {
-                    if let Ok(ord) = u16::try_from(ordinal) {
-                        let forwarded = ForwardedExport {
-                            library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
-                            symbol: ExportSymbol::Name(
-                                std::str::from_utf8(target_name)?.to_owned(),
-                            ),
-                        };
-                        forwarded_exports.insert(ExportSymbol::Ordinal(ord), forwarded);
-                    }
+                    let forwarded = ForwardedExport {
+                        library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
+                        symbol: ExportSymbol::Name(std::str::from_utf8(target_name)?.to_owned()),
+                    };
+                    forwarded_exports.insert(ExportSymbol::Ordinal(exported_ordinal), forwarded);
                     false
                 }
             };
 
-            if let Ok(ordinal) = u16::try_from(ordinal) {
-                ordinals.push(ordinal);
-            }
             export_targets.push(Some(executable));
         }
 
         for (name_pointer, ordinal_index) in table.name_iter() {
+            named_export_slots.insert(u32::from(ordinal_index));
             let target = export_targets
                 .get(usize::from(ordinal_index))
                 .copied()
@@ -1474,7 +1508,9 @@ where
         import_targets,
         delay_imports,
         delay_import_targets,
-        ordinals,
+        exported_ordinals,
+        nonzero_export_slots,
+        named_export_slots,
     })
 }
 
@@ -1502,7 +1538,9 @@ mod tests {
             import_targets: BTreeMap::new(),
             delay_imports: BTreeSet::new(),
             delay_import_targets: BTreeMap::new(),
-            ordinals: Vec::new(),
+            exported_ordinals: BTreeSet::new(),
+            nonzero_export_slots: BTreeSet::new(),
+            named_export_slots: BTreeSet::new(),
         }
     }
 
@@ -1523,6 +1561,32 @@ mod tests {
         );
         dynamic[8] = 2;
         assert!(parse_crt_marker(&dynamic).is_err());
+    }
+
+    #[test]
+    fn crt_marker_requires_a_canonical_section_layout() {
+        let mut marker = [0_u8; 16];
+        marker[..8].copy_from_slice(CRT_MARKER_MAGIC);
+        marker[8] = CRT_MARKER_SCHEMA;
+
+        let mut junk_prefix = vec![0x5a];
+        junk_prefix.extend_from_slice(&marker);
+        assert!(parse_crt_marker(&junk_prefix).is_err());
+
+        let mut duplicate = marker.to_vec();
+        duplicate.extend_from_slice(&marker);
+        assert!(parse_crt_marker(&duplicate).is_err());
+
+        let mut reserved = marker;
+        reserved[10] = 1;
+        assert!(parse_crt_marker(&reserved).is_err());
+
+        let mut padding = marker.to_vec();
+        padding.extend_from_slice(&[0; 8]);
+        assert_eq!(
+            parse_crt_marker(&padding).unwrap(),
+            EffectiveCrtPolicy::Dynamic
+        );
     }
 
     #[test]
@@ -1728,6 +1792,235 @@ mod tests {
         }
     }
 
+    fn minimal_pe(machine: u16, characteristics: u16) -> Vec<u8> {
+        let peoff = 0x80usize;
+        let raw = 0x200usize;
+        let mut buf = vec![0_u8; 0x400];
+        buf[0..2].copy_from_slice(b"MZ");
+        buf[0x3c..0x40].copy_from_slice(&(peoff as u32).to_le_bytes());
+        let mut offset = peoff;
+        buf[offset..offset + 4].copy_from_slice(b"PE\0\0");
+        offset += 4;
+        buf[offset..offset + 2].copy_from_slice(&machine.to_le_bytes());
+        buf[offset + 2..offset + 4].copy_from_slice(&1_u16.to_le_bytes());
+        buf[offset + 16..offset + 18].copy_from_slice(&0x00f0_u16.to_le_bytes());
+        buf[offset + 18..offset + 20].copy_from_slice(&characteristics.to_le_bytes());
+        offset += 20;
+        let optional = offset;
+        buf[optional..optional + 2].copy_from_slice(&0x20b_u16.to_le_bytes());
+        buf[optional + 2] = 14;
+        buf[optional + 8..optional + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[optional + 20..optional + 24].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[optional + 24..optional + 32].copy_from_slice(&0x140000000_u64.to_le_bytes());
+        buf[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[optional + 40..optional + 42].copy_from_slice(&6_u16.to_le_bytes());
+        buf[optional + 48..optional + 50].copy_from_slice(&6_u16.to_le_bytes());
+        buf[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
+        buf[optional + 60..optional + 64].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[optional + 68..optional + 70].copy_from_slice(&2_u16.to_le_bytes());
+        buf[optional + 70..optional + 72].copy_from_slice(&0x8160_u16.to_le_bytes());
+        buf[optional + 72..optional + 80].copy_from_slice(&0x100000_u64.to_le_bytes());
+        buf[optional + 80..optional + 88].copy_from_slice(&0x1000_u64.to_le_bytes());
+        buf[optional + 88..optional + 96].copy_from_slice(&0x100000_u64.to_le_bytes());
+        buf[optional + 96..optional + 104].copy_from_slice(&0x1000_u64.to_le_bytes());
+        buf[optional + 108..optional + 112].copy_from_slice(&16_u32.to_le_bytes());
+
+        offset = optional + 0xf0;
+        buf[offset..offset + 8].copy_from_slice(b".text\0\0\0");
+        buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 12..offset + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 20..offset + 24].copy_from_slice(&(raw as u32).to_le_bytes());
+        buf[offset + 32..offset + 36].copy_from_slice(&0x60000020_u32.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn verify_bundle_files_checks_dll_characteristics() {
+        let cases = [
+            (IMAGE_FILE_DLL, "not an executable PE image"),
+            (IMAGE_FILE_EXECUTABLE_IMAGE, "not marked as a PE DLL"),
+            (
+                IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL | IMAGE_FILE_SYSTEM,
+                "marked as a system image",
+            ),
+        ];
+        for (index, (characteristics, expected)) in cases.into_iter().enumerate() {
+            let directory = tempfile::tempdir().unwrap();
+            let name = format!("Engine{index}.dll");
+            fs::write(
+                directory.path().join(&name),
+                minimal_pe(Architecture::X64.machine(), characteristics),
+            )
+            .unwrap();
+            let bundle = resolve_bundle_files(
+                directory.path(),
+                "x86_64-pc-windows-msvc",
+                std::slice::from_ref(&name),
+            )
+            .unwrap();
+            let error = verify_bundle_files(&bundle, "x86_64-pc-windows-msvc").unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    enum SyntheticExportTarget<'a> {
+        Zero,
+        Direct,
+        ForwardedOrdinal(&'a str, u32),
+    }
+
+    fn synthetic_export_pe(
+        ordinal_base: u32,
+        targets: &[SyntheticExportTarget<'_>],
+        names: &[(usize, &str)],
+    ) -> Vec<u8> {
+        let peoff = 0x80usize;
+        let edata_raw = 0x200usize;
+        let text_raw = 0x400usize;
+        let mut buf = vec![0_u8; 0x600];
+        buf[0..2].copy_from_slice(b"MZ");
+        buf[0x3c..0x40].copy_from_slice(&(peoff as u32).to_le_bytes());
+        let mut offset = peoff;
+        buf[offset..offset + 4].copy_from_slice(b"PE\0\0");
+        offset += 4;
+        buf[offset..offset + 2].copy_from_slice(&Architecture::X64.machine().to_le_bytes());
+        buf[offset + 2..offset + 4].copy_from_slice(&2_u16.to_le_bytes());
+        buf[offset + 16..offset + 18].copy_from_slice(&0x00f0_u16.to_le_bytes());
+        buf[offset + 18..offset + 20]
+            .copy_from_slice(&(IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL).to_le_bytes());
+        offset += 20;
+        let optional = offset;
+        buf[optional..optional + 2].copy_from_slice(&0x20b_u16.to_le_bytes());
+        buf[optional + 2] = 14;
+        buf[optional + 8..optional + 12].copy_from_slice(&0x400_u32.to_le_bytes());
+        buf[optional + 20..optional + 24].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[optional + 24..optional + 32].copy_from_slice(&0x140000000_u64.to_le_bytes());
+        buf[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[optional + 40..optional + 42].copy_from_slice(&6_u16.to_le_bytes());
+        buf[optional + 48..optional + 50].copy_from_slice(&6_u16.to_le_bytes());
+        buf[optional + 56..optional + 60].copy_from_slice(&0x3000_u32.to_le_bytes());
+        buf[optional + 60..optional + 64].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[optional + 68..optional + 70].copy_from_slice(&2_u16.to_le_bytes());
+        buf[optional + 70..optional + 72].copy_from_slice(&0x8160_u16.to_le_bytes());
+        buf[optional + 72..optional + 80].copy_from_slice(&0x100000_u64.to_le_bytes());
+        buf[optional + 80..optional + 88].copy_from_slice(&0x1000_u64.to_le_bytes());
+        buf[optional + 88..optional + 96].copy_from_slice(&0x100000_u64.to_le_bytes());
+        buf[optional + 96..optional + 104].copy_from_slice(&0x1000_u64.to_le_bytes());
+        buf[optional + 108..optional + 112].copy_from_slice(&16_u32.to_le_bytes());
+        buf[optional + 0x70..optional + 0x74].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[optional + 0x74..optional + 0x78].copy_from_slice(&0x180_u32.to_le_bytes());
+
+        offset = optional + 0xf0;
+        buf[offset..offset + 8].copy_from_slice(b".edata\0\0");
+        buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 12..offset + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+        buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 20..offset + 24].copy_from_slice(&(edata_raw as u32).to_le_bytes());
+        buf[offset + 32..offset + 36].copy_from_slice(&0x40000040_u32.to_le_bytes());
+        offset += 40;
+        buf[offset..offset + 8].copy_from_slice(b".text\0\0\0");
+        buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 12..offset + 16].copy_from_slice(&0x2000_u32.to_le_bytes());
+        buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        buf[offset + 20..offset + 24].copy_from_slice(&(text_raw as u32).to_le_bytes());
+        buf[offset + 32..offset + 36].copy_from_slice(&0x60000020_u32.to_le_bytes());
+
+        let export = edata_raw;
+        buf[export + 12..export + 16].copy_from_slice(&0x1080_u32.to_le_bytes());
+        buf[export + 16..export + 20].copy_from_slice(&ordinal_base.to_le_bytes());
+        buf[export + 20..export + 24].copy_from_slice(&(targets.len() as u32).to_le_bytes());
+        buf[export + 24..export + 28].copy_from_slice(&(names.len() as u32).to_le_bytes());
+        buf[export + 28..export + 32].copy_from_slice(&0x1030_u32.to_le_bytes());
+        buf[export + 32..export + 36].copy_from_slice(&0x1040_u32.to_le_bytes());
+        buf[export + 36..export + 40].copy_from_slice(&0x1050_u32.to_le_bytes());
+
+        let mut string_offset = 0x80usize;
+        buf[export + string_offset..export + string_offset + 8].copy_from_slice(b"engine\0\0");
+        string_offset += 0x10;
+        for (index, target) in targets.iter().enumerate() {
+            let target_rva = match target {
+                SyntheticExportTarget::Zero => 0,
+                SyntheticExportTarget::Direct => 0x2000,
+                SyntheticExportTarget::ForwardedOrdinal(library, ordinal) => {
+                    let forward = format!("{library}.#{ordinal}");
+                    let bytes = forward.as_bytes();
+                    buf[export + string_offset..export + string_offset + bytes.len()]
+                        .copy_from_slice(bytes);
+                    buf[export + string_offset + bytes.len()] = 0;
+                    let rva = 0x1000 + string_offset as u32;
+                    string_offset += bytes.len() + 1;
+                    rva
+                }
+            };
+            let eat = export + 0x30 + index * 4;
+            buf[eat..eat + 4].copy_from_slice(&target_rva.to_le_bytes());
+        }
+        let mut name_string_offset = string_offset.max(0x100);
+        for (name_position, (index, name)) in names.iter().enumerate() {
+            let bytes = name.as_bytes();
+            buf[export + name_string_offset..export + name_string_offset + bytes.len()]
+                .copy_from_slice(bytes);
+            buf[export + name_string_offset + bytes.len()] = 0;
+            let name_rva = 0x1000 + name_string_offset as u32;
+            let pointer = export + 0x40 + name_position * 4;
+            buf[pointer..pointer + 4].copy_from_slice(&name_rva.to_le_bytes());
+            let ordinal_pointer = export + 0x50 + name_position * 2;
+            buf[ordinal_pointer..ordinal_pointer + 2]
+                .copy_from_slice(&(*index as u16).to_le_bytes());
+            name_string_offset += bytes.len() + 1;
+        }
+        buf
+    }
+
+    #[test]
+    fn export_validation_tracks_eat_slots_for_aliases_and_forwarders() {
+        let alias = synthetic_export_pe(
+            1,
+            &[
+                SyntheticExportTarget::Direct,
+                SyntheticExportTarget::Direct,
+                SyntheticExportTarget::Zero,
+            ],
+            &[(0, "AliasA"), (0, "AliasB")],
+        );
+        let info = parse_pe_bytes(&alias).unwrap();
+        assert_eq!(info.exported_ordinals, BTreeSet::from([1, 2]));
+        assert_eq!(info.nonzero_export_slots, BTreeSet::from([0, 1]));
+        assert_eq!(info.named_export_slots, BTreeSet::from([0]));
+        assert_eq!(
+            info.nonzero_export_slots
+                .difference(&info.named_export_slots)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        let forwarded = synthetic_export_pe(
+            1,
+            &[SyntheticExportTarget::ForwardedOrdinal("engine", 7)],
+            &[(0, "Forwarded")],
+        );
+        let info = parse_pe_bytes(&forwarded).unwrap();
+        assert_eq!(info.exported_ordinals, BTreeSet::from([1]));
+        assert_eq!(
+            info.forwarded_exports.get(&ExportSymbol::Ordinal(1)),
+            Some(&ForwardedExport {
+                library: "engine.dll".to_owned(),
+                symbol: ExportSymbol::Ordinal(7),
+            })
+        );
+    }
+
+    #[test]
+    fn export_ordinal_overflow_is_rejected_instead_of_dropped() {
+        let bytes = synthetic_export_pe(0x1_0000, &[SyntheticExportTarget::Direct], &[]);
+        let error = parse_pe_bytes(&bytes).unwrap_err();
+        assert!(error.to_string().contains("exceeds u16"));
+    }
+
     fn graph_image(imports: &[&str], delay_imports: &[&str]) -> PeInfo {
         PeInfo {
             machine: Architecture::X64.machine(),
@@ -1745,13 +2038,15 @@ mod tests {
                 .map(|name| (*name).to_owned())
                 .collect(),
             delay_import_targets: BTreeMap::new(),
-            ordinals: Vec::new(),
+            exported_ordinals: BTreeSet::new(),
+            nonzero_export_slots: BTreeSet::new(),
+            named_export_slots: BTreeSet::new(),
         }
     }
 
     fn add_direct_export(image: &mut PeInfo, name: &str, ordinal: u16) {
         image.exports.insert(name.to_owned());
-        image.ordinals.push(ordinal);
+        image.exported_ordinals.insert(ordinal);
     }
 
     fn add_forwarded_export(
@@ -1820,7 +2115,7 @@ mod tests {
             BTreeSet::from([ImportTarget::Ordinal(17)]),
         );
         let mut engine = graph_image(&[], &[]);
-        engine.ordinals.push(16);
+        engine.exported_ordinals.insert(16);
         let images = BTreeMap::from([
             ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
             ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
@@ -1842,7 +2137,7 @@ mod tests {
         );
         let mut engine = graph_image(&[], &[]);
         engine.exports.insert("Process".to_owned());
-        engine.ordinals.push(17);
+        engine.exported_ordinals.insert(17);
         let images = BTreeMap::from([
             ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
             ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
@@ -1865,12 +2160,14 @@ mod tests {
     }
 
     #[test]
-    fn staged_bundle_add_external_imports_permits_dynamic_msvc_runtime() {
+    fn explicit_external_import_permits_dynamic_msvc_runtime() {
         let mut bundle = StagedBundle {
             files: vec![],
             external_imports: BTreeSet::new(),
         };
-        bundle.add_external_imports(["vcruntime140.dll"]);
+        bundle
+            .try_add_external_imports(["vcruntime140.dll"])
+            .unwrap();
         let images = BTreeMap::from([(
             "addin.xll".to_owned(),
             (
@@ -1879,6 +2176,19 @@ mod tests {
             ),
         )]);
         assert!(validate_dependency_graph(&images, &bundle.external_imports).is_ok());
+    }
+
+    #[test]
+    fn staged_bundle_external_imports_validate_all_inputs_before_mutating() {
+        let mut bundle = StagedBundle {
+            files: vec![],
+            external_imports: BTreeSet::new(),
+        };
+        let error = bundle
+            .try_add_external_imports(["trusted.dll", "vendor/not-a-basename.dll"])
+            .unwrap_err();
+        assert!(error.to_string().contains("external import"));
+        assert!(bundle.external_imports.is_empty());
     }
 
     #[test]
@@ -1955,7 +2265,7 @@ mod tests {
             ExportSymbol::Ordinal(7),
         );
         let mut model = graph_image(&[], &[]);
-        model.ordinals.push(7);
+        model.exported_ordinals.insert(7);
         let images = BTreeMap::from([
             ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
             ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
@@ -2224,8 +2534,7 @@ mod tests {
 
         info.exports.remove("CustomEntry");
         info.executable_exports.remove("CustomEntry");
-        info.ordinals.push(1);
-        info.ordinals.push(2);
+        info.nonzero_export_slots.extend([1, 2]);
         assert!(verify_xll_exports(&info, &xll_path, &[]).is_err());
     }
 }
