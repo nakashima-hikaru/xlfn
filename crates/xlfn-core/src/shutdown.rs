@@ -108,5 +108,4 @@ shutdown_token!(HostCallbacksDetached);
 shutdown_token!(AsyncStopped);
 shutdown_token!(SubscriptionsStopped);
 shutdown_token!(HandlesQuiescent);
-shutdown_token!(DiagnosticsStopped);
 shutdown_token!(AddinQuiesced);

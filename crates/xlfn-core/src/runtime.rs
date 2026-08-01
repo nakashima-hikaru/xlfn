@@ -484,7 +484,7 @@ pub struct CloseCertificate {
     #[allow(dead_code)]
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
     #[allow(dead_code)]
-    pub(crate) diagnostics_stopped: crate::shutdown::DiagnosticsStopped,
+    pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
     #[allow(dead_code)]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     runtime_address: usize,
@@ -497,7 +497,7 @@ pub(crate) struct ClosePrerequisites {
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
     pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
-    pub(crate) diagnostics_stopped: crate::shutdown::DiagnosticsStopped,
+    pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
 }
 
@@ -781,7 +781,7 @@ mod tests {
                 async_stopped: crate::shutdown::AsyncStopped::new(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
                 handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
-                diagnostics_stopped: crate::shutdown::DiagnosticsStopped::new(),
+                diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::new(),
             })
             .unwrap();
@@ -955,7 +955,7 @@ mod tests {
                     async_stopped: crate::shutdown::AsyncStopped::new(),
                     subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
                     handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
-                    diagnostics_stopped: crate::shutdown::DiagnosticsStopped::new(),
+                    diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                     addin_quiesced: crate::shutdown::AddinQuiesced::new(),
                 })
                 .is_err()

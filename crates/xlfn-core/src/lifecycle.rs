@@ -99,7 +99,9 @@ fn open_addin_inner<A>(
 where
     A: Addin,
 {
-    crate::diagnostics::reset_diagnostic_router();
+    #[cfg(test)]
+    let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
+    crate::diagnostics::reset_diagnostic_router()?;
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
     let registrar = HostRegistrar::connect()?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info);
@@ -217,6 +219,8 @@ fn rollback_open<A>(runtime: &Runtime<A::State>) -> bool
 where
     A: Addin,
 {
+    #[cfg(test)]
+    let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
         return runtime.phase() == crate::LifecyclePhase::Closed;
     };
@@ -356,16 +360,17 @@ where
         succeeded = false;
     }
     if succeeded {
-        match crate::diagnostics::clear_diagnostic_sink() {
-            Ok(_) => {}
-            Err(crate::DiagnosticShutdownError::WorkerPanicked) => {
-                report_cleanup_issue(&crate::shutdown::CleanupIssue {
-                    component: "diagnostics",
-                    kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
-                    error: XllError::Panic,
-                });
+        match crate::diagnostics::close_diagnostic_router() {
+            Ok(outcome) => {
+                for issue in outcome.issues {
+                    report_cleanup_issue(&issue);
+                }
             }
-            Err(crate::DiagnosticShutdownError::ReentrantShutdown) => succeeded = false,
+            Err(error) => {
+                let error = error.into_xll_error();
+                report_boundary_error("xlAutoOpen diagnostic rollback", &error);
+                succeeded = false;
+            }
         }
     }
     if succeeded {
@@ -402,6 +407,8 @@ where
 }
 
 fn emergency_close<S>(runtime: &Runtime<S>) {
+    #[cfg(test)]
+    let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_close_attempt) = runtime.begin_final_close() else {
         return;
     };
@@ -421,7 +428,7 @@ fn emergency_close<S>(runtime: &Runtime<S>) {
         // reference avoids running unknown destructor code after module unload.
         let _ = std::sync::Arc::into_raw(state);
     }
-    let _ = crate::diagnostics::clear_diagnostic_sink();
+    let _ = crate::diagnostics::close_diagnostic_router();
     let _ = crate::ingress::global_ingress().seal_and_drain();
     let _ = crate::rtd::wait_for_module_quiescence();
 }
@@ -430,6 +437,8 @@ fn close_addin_inner<A>(runtime: &Runtime<A::State>)
 where
     A: Addin,
 {
+    #[cfg(test)]
+    let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     // Even an apparently closed runtime must pass through begin_final_close:
     // a concurrent xlAutoOpen may already have sampled the previous close
     // epoch without having acquired its open-attempt token yet.
@@ -634,22 +643,18 @@ where
         report_cleanup_issue(issue);
     }
 
-    let diagnostics_stopped = match crate::diagnostics::clear_diagnostic_sink() {
-        Ok(_) => crate::shutdown::DiagnosticsStopped::new(),
-        Err(crate::DiagnosticShutdownError::WorkerPanicked) => {
-            report_cleanup_issue(&crate::shutdown::CleanupIssue {
-                component: "diagnostics",
-                kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
-                error: XllError::Panic,
-            });
-            crate::shutdown::DiagnosticsStopped::new()
-        }
-        Err(crate::DiagnosticShutdownError::ReentrantShutdown) => fatal_unload_hazard(
+    let diagnostics = crate::diagnostics::close_diagnostic_router().unwrap_or_else(|error| {
+        let error = error.into_xll_error();
+        fatal_unload_hazard(
             crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
             "xlAutoClose diagnostic shutdown",
-            &XllError::Closing,
-        ),
-    };
+            &error,
+        )
+    });
+    for issue in diagnostics.issues {
+        report_cleanup_issue(&issue);
+    }
+    let diagnostics_stopped = diagnostics.certificate;
 
     let exports_drained = crate::ingress::global_ingress().seal_and_drain();
     let rtd_quiescent = crate::rtd::wait_for_module_quiescence();
