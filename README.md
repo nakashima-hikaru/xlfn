@@ -140,7 +140,7 @@ CI builds the Lean project, runs `leanchecker`, and rejects committed `sorry` or
 
 ## Documentation
 
-- [User guide](guide/README.md)
+- [User guide](https://nakashima-hikaru.github.io/xlfn/)
 - [Quick start](guide/src/quick-start.md)
 - [Compatibility](guide/src/compatibility.md)
 - [CLI reference](guide/src/cli-reference.md)
