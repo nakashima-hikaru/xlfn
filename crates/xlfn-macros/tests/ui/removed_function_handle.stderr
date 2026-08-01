@@ -1,0 +1,5 @@
+error: expected `name`, `id`, `category`, `description`, `help_topic`, `thread_safe`, `macro_sheet`, `volatile`, or `hidden`
+ --> tests/ui/removed_function_handle.rs:3:18
+  |
+3 | #[excel_function(handle)]
+  |                  ^^^^^^

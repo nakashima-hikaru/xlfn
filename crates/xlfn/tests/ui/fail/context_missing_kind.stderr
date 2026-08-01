@@ -1,0 +1,5 @@
+error: expected attribute arguments in parentheses: #[excel_context(...)]
+ --> tests/ui/fail/context_missing_kind.rs:4:10
+  |
+4 | fn bad(#[excel_context] context: f64) -> f64 {
+  |          ^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `default = ...` requires `blank = "default"` or `missing = "default"`
+ --> tests/ui/default_without_policy.rs:4:55
+  |
+4 | fn default_without_policy(#[excel_arg(default = 1.0)] x: f64) -> f64 {
+  |                                                       ^^^^^^

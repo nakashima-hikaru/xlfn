@@ -1,0 +1,24 @@
+[package]
+name = "cargo-xlfn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Single-crate project, diagnostics, and packaging CLI for xlfn"
+
+[[bin]]
+name = "cargo-xlfn"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cargo_metadata.workspace = true
+xlfn-package.workspace = true
+fs-err.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

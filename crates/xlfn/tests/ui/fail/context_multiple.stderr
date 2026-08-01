@@ -1,0 +1,5 @@
+error: only one #[excel_context(...)] parameter is allowed
+ --> tests/ui/fail/context_multiple.rs:6:35
+  |
+6 |     #[excel_context(thread_safe)] second: f64,
+  |                                   ^^^^^^^^^^^

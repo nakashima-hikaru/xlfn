@@ -1,0 +1,5 @@
+error: expected `name`, `description`, `default`, `blank`, `missing`, or `reference`
+ --> tests/ui/removed_argument_handle.rs:4:24
+  |
+4 | fn consume(#[excel_arg(handle)] value: String) -> f64 {
+  |                        ^^^^^^

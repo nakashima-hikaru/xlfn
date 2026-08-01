@@ -1,0 +1,19 @@
+:root {
+  --content-max-width: 920px;
+}
+
+.content main {
+  max-width: var(--content-max-width);
+}
+
+.content table {
+  width: 100%;
+}
+
+.content code {
+  overflow-wrap: anywhere;
+}
+
+.content blockquote {
+  border-left-width: 0.25rem;
+}

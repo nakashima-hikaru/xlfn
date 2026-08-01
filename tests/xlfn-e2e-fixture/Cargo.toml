@@ -1,0 +1,19 @@
+[package]
+name = "xlfn-e2e-fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xlfn = { workspace = true, features = ["async"] }
+
+[package.metadata.xlfn]
+artifact-name = "FrameworkFixture"
+
+[lints]
+workspace = true

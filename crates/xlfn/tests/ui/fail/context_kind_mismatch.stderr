@@ -1,0 +1,12 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/context_kind_mismatch.rs:7:1
+  |
+7 | #[excel_function(name = "FAIL.CONTEXT")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ThreadSafeContext<'_, State>`, found `MainThreadContext<'_, State>`
+8 | fn bad(
+9 |     #[excel_context(main_thread)] context: ThreadSafeContext<'_, State>,
+  |                                            ---------------------------- expected due to this
+  |
+  = note: expected struct `xlfn::context::ThreadSafeContext<'_, State>`
+             found struct `MainThreadContext<'_, State>`
+  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

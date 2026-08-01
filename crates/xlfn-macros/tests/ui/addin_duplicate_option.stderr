@@ -1,0 +1,5 @@
+error: duplicate `name`
+ --> tests/ui/addin_duplicate_option.rs:3:31
+  |
+3 | #[excel_addin(name = "First", name = "Second")]
+  |                               ^^^^^^^^^^^^^^^

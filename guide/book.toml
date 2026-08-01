@@ -1,0 +1,28 @@
+[book]
+authors = ["xlfn contributors"]
+language = "en"
+src = "src"
+title = "xlfn User Guide"
+description = "Build safe Rust Excel XLL add-ins with xlfn"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/nakashima-hikaru/xlfn"
+additional-css = ["theme/custom.css"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3

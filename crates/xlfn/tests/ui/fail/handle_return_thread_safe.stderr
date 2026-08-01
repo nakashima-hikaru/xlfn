@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `Dataset: ThreadSafeReturn` is not satisfied
+  --> tests/ui/fail/handle_return_thread_safe.rs:10:13
+   |
+10 | fn bad() -> Dataset {
+   |             ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `ThreadSafeReturn` is not implemented for `Dataset`
+  --> tests/ui/fail/handle_return_thread_safe.rs:4:1
+   |
+ 4 | struct Dataset;
+   | ^^^^^^^^^^^^^^
+   = help: the following other types implement trait `ThreadSafeReturn`:
+             &str
+             Column<T>
+             ExcelErrorValue
+             ExcelSerialDate
+             OwnedExcelValue
+             Result<T, E>
+             Row<T>
+             RtdValue
+           and $N others
+note: required by a bound in `xlfn::__private::assert_thread_safe_return`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_thread_safe_return<T: ThreadSafeReturn>() {}
+   |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_thread_safe_return`

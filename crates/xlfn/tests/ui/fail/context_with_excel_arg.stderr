@@ -1,0 +1,6 @@
+error: #[excel_context(...)] cannot be combined with #[excel_arg(...)]
+ --> tests/ui/fail/context_with_excel_arg.rs:6:5
+  |
+6 | /     #[excel_arg(name = "bad")]
+7 | |     context: f64,
+  | |________________^

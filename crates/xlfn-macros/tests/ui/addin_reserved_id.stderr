@@ -1,0 +1,5 @@
+error: add-in `id` must be a non-reserved ASCII slug beginning with a letter and containing only letters, digits, `-`, or `_`
+ --> tests/ui/addin_reserved_id.rs:4:1
+  |
+4 | struct Addin;
+  | ^^^^^^^^^^^^^

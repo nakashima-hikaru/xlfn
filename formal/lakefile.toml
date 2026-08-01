@@ -1,0 +1,6 @@
+name = "ExcelXllFormal"
+version = "0.1.0"
+defaultTargets = ["ExcelXllFormal"]
+
+[[lean_lib]]
+name = "ExcelXllFormal"

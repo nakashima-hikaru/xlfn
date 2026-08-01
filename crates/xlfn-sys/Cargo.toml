@@ -1,0 +1,20 @@
+[package]
+name = "xlfn-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raw Excel 12 XLL ABI definitions and callback trampoline"
+
+[features]
+abi-probe = []
+
+[dependencies]
+static_assertions.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_LibraryLoader"] }
+
+[lints]
+workspace = true

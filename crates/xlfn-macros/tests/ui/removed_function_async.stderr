@@ -1,0 +1,5 @@
+error: expected identifier, found keyword `async`
+ --> tests/ui/removed_function_async.rs:3:18
+  |
+3 | #[excel_function(async)]
+  |                  ^^^^^

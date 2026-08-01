@@ -1,0 +1,5 @@
+error: a macro-sheet context function cannot be marked `thread_safe`
+ --> tests/ui/macro_sheet_thread_safe.rs:7:38
+  |
+7 | fn bad(#[excel_context(macro_sheet)] context: &MacroSheetContext<'_, State>) -> f64 {
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

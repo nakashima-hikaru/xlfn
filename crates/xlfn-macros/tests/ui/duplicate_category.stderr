@@ -1,0 +1,5 @@
+error: duplicate `category`
+ --> tests/ui/duplicate_category.rs:3:57
+  |
+3 | #[excel_function(name = "BAD.CATEGORY", category = "A", category = "B")]
+  |                                                         ^^^^^^^^^^^^^^

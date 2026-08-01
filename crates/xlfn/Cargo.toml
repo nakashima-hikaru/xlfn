@@ -1,0 +1,24 @@
+[package]
+name = "xlfn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Facade crate for building safe Rust Excel XLL add-ins"
+
+[features]
+default = []
+async = ["xlfn-core/async"]
+
+[dependencies]
+xlfn-macros.workspace = true
+xlfn-core.workspace = true
+xlfn-sys.workspace = true
+inventory.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

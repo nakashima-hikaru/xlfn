@@ -1,0 +1,7 @@
+error: asynchronous Excel functions require the xlfn `async` feature
+ --> tests/ui/fail_no_async/async_feature_required.rs:6:1
+  |
+6 | #[excel_function(name = "FAIL.ASYNC.FEATURE")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `::xlfn::__xlfn_async_only` which comes from the expansion of the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,77 @@
+[workspace]
+members = [
+    "crates/xlfn-sys",
+    "crates/xlfn-core",
+    "crates/xlfn-macros",
+    "crates/xlfn-package",
+    "crates/cargo-xlfn",
+    "crates/xlfn",
+    "examples/basic-xll",
+    "tests/xlfn-e2e-fixture",
+    "probes/excel-abi-probe",
+]
+exclude = [
+    "formal/_nanoda_lib",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nakashima-hikaru/xlfn"
+publish = false
+
+[workspace.dependencies]
+# Member crates
+cargo-xlfn = { version = "0.1.0", path = "crates/cargo-xlfn" }
+xlfn = { version = "0.1.0", path = "crates/xlfn" }
+xlfn-core = { version = "0.1.0", path = "crates/xlfn-core" }
+xlfn-macros = { version = "0.1.0", path = "crates/xlfn-macros" }
+xlfn-package = { version = "0.1.0", path = "crates/xlfn-package" }
+xlfn-sys = { version = "0.1.0", path = "crates/xlfn-sys" }
+
+# Third-party dependencies
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+async-task = "4.7.1"
+bindgen = "0.72.1"
+blake3 = { version = "1.8.5", features = ["pure"] }
+cargo_metadata = "0.23.1"
+cc = "1.2.57"
+clap = { version = "4.6.4", features = ["derive"] }
+constant_time_eq = "0.5.0"
+fs-err = "3.3.1"
+futures-executor = { version = "0.3.33", features = ["thread-pool"] }
+futures-util = "0.3.33"
+getrandom = "0.4.3"
+inventory = "0.3.24"
+libloading = "0.9.0"
+loom = "0.7.2"
+moka = { version = "0.12", default-features = false, features = ["sync"] }
+object = { version = "0.39.1", default-features = false, features = ["pe", "read", "std"] }
+parking_lot = "0.12.5"
+proc-macro2 = "1.0.107"
+proptest = "1.11.0"
+quote = "1.0.47"
+scopeguard = "1.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+shuttle = "0.9.1"
+static_assertions = "1.1.0"
+syn = { version = "3.0.3", features = ["full"] }
+tempfile = "3.27.0"
+thiserror = "2.0.19"
+tracing = "0.1.44"
+trybuild = "1.0.118"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"

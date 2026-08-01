@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `xlfn_macros::ExcelHandle`
+ --> tests/ui/removed_excel_handle_derive.rs:1:5
+  |
+1 | use xlfn_macros::ExcelHandle;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `ExcelHandle` in the root

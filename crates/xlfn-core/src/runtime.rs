@@ -1,0 +1,1074 @@
+use crate::execution::SharedUdfLayers;
+use crate::{RegistrationId, XllError, XllResult};
+#[cfg(test)]
+use parking_lot::MutexGuard;
+use parking_lot::{Condvar, Mutex, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum LifecyclePhase {
+    Closed = 0,
+    Opening = 1,
+    Open = 2,
+    Closing = 3,
+    OpenRollbackPending = 4,
+}
+
+impl LifecyclePhase {
+    fn from_raw(value: u8) -> Self {
+        match value {
+            1 => Self::Opening,
+            2 => Self::Open,
+            3 => Self::Closing,
+            4 => Self::OpenRollbackPending,
+            _ => Self::Closed,
+        }
+    }
+}
+
+pub struct Runtime<S> {
+    phase: AtomicU8,
+    next_lifecycle_attempt: AtomicU64,
+    open_attempt_id: AtomicU64,
+    close_epoch: AtomicU64,
+    state: RwLock<Option<Arc<S>>>,
+    layers: RwLock<SharedUdfLayers>,
+    registrations: Mutex<Vec<crate::registration::PendingRegistration>>,
+    event_registrations: Mutex<Vec<crate::registration::EventRegistration>>,
+    active_calls: AtomicUsize,
+    return_admission_closed: AtomicBool,
+    returns: Mutex<Option<Arc<crate::return_value::ReturnTracker>>>,
+    next_call_id: AtomicU64,
+    #[cfg(not(feature = "async"))]
+    calculation_id: AtomicU64,
+    wait_lock: Mutex<()>,
+    no_active_calls: Condvar,
+    close_attempt_active: AtomicBool,
+    registration_state_unknown: AtomicBool,
+    cleanup_failure: Mutex<Option<XllError>>,
+    handles: Mutex<Option<XllResult<Arc<crate::handle::HandleRuntime>>>>,
+    subscriptions: Mutex<Option<Arc<crate::subscription::SubscriptionRuntime>>>,
+    #[cfg(feature = "async")]
+    async_manager: crate::async_udf::AsyncManager,
+    #[cfg(test)]
+    zero_active_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl<S> Runtime<S> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(LifecyclePhase::Closed as u8),
+            next_lifecycle_attempt: AtomicU64::new(1),
+            open_attempt_id: AtomicU64::new(0),
+            close_epoch: AtomicU64::new(0),
+            state: RwLock::new(None),
+            layers: RwLock::new(Vec::new()),
+            registrations: Mutex::new(Vec::new()),
+            event_registrations: Mutex::new(Vec::new()),
+            active_calls: AtomicUsize::new(0),
+            return_admission_closed: AtomicBool::new(false),
+            returns: Mutex::new(None),
+            next_call_id: AtomicU64::new(1),
+            #[cfg(not(feature = "async"))]
+            calculation_id: AtomicU64::new(1),
+            wait_lock: Mutex::new(()),
+            no_active_calls: Condvar::new(),
+            close_attempt_active: AtomicBool::new(false),
+            registration_state_unknown: AtomicBool::new(false),
+            cleanup_failure: Mutex::new(None),
+            handles: Mutex::new(None),
+            subscriptions: Mutex::new(None),
+            #[cfg(feature = "async")]
+            async_manager: crate::async_udf::AsyncManager::new(),
+            #[cfg(test)]
+            zero_active_hook: Mutex::new(None),
+        }
+    }
+
+    #[must_use]
+    pub fn phase(&self) -> LifecyclePhase {
+        LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn begin_open_if_epoch(
+        &self,
+        expected_close_epoch: u64,
+    ) -> XllResult<OpenAttemptGuard<'_, S>> {
+        let _wait_guard = self.wait_lock.lock();
+        if self.close_epoch.load(Ordering::Acquire) != expected_close_epoch
+            || self.phase() != LifecyclePhase::Closed
+            || self.open_attempt_id.load(Ordering::Acquire) != 0
+            || self.close_attempt_active.load(Ordering::Acquire)
+        {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x4f50_454e_5048_4153,
+            });
+        }
+
+        let attempt_id = self.next_lifecycle_attempt_id();
+        crate::ingress::global_ingress().reset();
+        self.open_attempt_id.store(attempt_id, Ordering::Release);
+        self.return_admission_closed.store(false, Ordering::Release);
+        self.phase
+            .store(LifecyclePhase::Opening as u8, Ordering::Release);
+        Ok(OpenAttemptGuard {
+            runtime: self,
+            attempt_id,
+            active: true,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_open(&self) -> XllResult<OpenAttemptGuard<'_, S>> {
+        self.begin_open_if_epoch(self.close_epoch())
+    }
+
+    fn next_lifecycle_attempt_id(&self) -> u64 {
+        loop {
+            let attempt_id = self.next_lifecycle_attempt.fetch_add(1, Ordering::Relaxed);
+            if attempt_id != 0 {
+                return attempt_id;
+            }
+        }
+    }
+
+    pub(crate) fn close_epoch(&self) -> u64 {
+        self.close_epoch.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish(&self, state: S, layers: Vec<Arc<dyn crate::UdfLayer>>) {
+        self.publish_state(state);
+        self.publish_layers(layers);
+    }
+
+    pub(crate) fn publish_state(&self, state: S) {
+        *self.state.write() = Some(Arc::new(state));
+    }
+
+    pub(crate) fn opening_state(&self) -> Option<Arc<S>> {
+        self.state.read().clone()
+    }
+
+    pub(crate) fn publish_layers(&self, layers: Vec<Arc<dyn crate::UdfLayer>>) {
+        *self.layers.write() = layers;
+    }
+
+    pub(crate) fn finish_open(
+        &self,
+        attempt: &mut OpenAttemptGuard<'_, S>,
+        registrations: Vec<RegistrationId>,
+    ) -> XllResult<()> {
+        let new_items: Vec<_> = registrations
+            .into_iter()
+            .map(crate::registration::PendingRegistration::from)
+            .collect();
+        let _wait_guard = self.wait_lock.lock();
+        if !attempt.active || self.open_attempt_id.load(Ordering::Acquire) != attempt.attempt_id {
+            attempt.active = false;
+            return Err(XllError::Closing);
+        }
+
+        // Once this attempt owns the lifecycle slot, retain every host
+        // registration even when a concurrent close has already won the phase
+        // transition. The close owner needs those IDs to unregister the host
+        // mutations before publishing Closed.
+        self.registrations.lock().extend(new_items);
+        let can_commit = self.phase() == LifecyclePhase::Opening;
+        if can_commit {
+            self.phase
+                .store(LifecyclePhase::Open as u8, Ordering::Release);
+        }
+        self.open_attempt_id.store(0, Ordering::Release);
+        attempt.active = false;
+        self.no_active_calls.notify_all();
+
+        if can_commit {
+            Ok(())
+        } else {
+            Err(XllError::Closing)
+        }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn set_event_registrations(
+        &self,
+        registrations: Vec<crate::registration::EventRegistration>,
+    ) {
+        self.event_registrations.lock().extend(registrations);
+    }
+
+    pub(crate) fn retain_registration_debt(
+        &self,
+        registrations: Vec<crate::registration::PendingRegistration>,
+    ) {
+        self.registrations.lock().extend(registrations);
+    }
+
+    pub(crate) fn retain_event_registration_debt(
+        &self,
+        registrations: Vec<crate::registration::EventRegistration>,
+    ) {
+        self.event_registrations.lock().extend(registrations);
+    }
+
+    pub(crate) fn mark_registration_state_unknown(&self) {
+        self.registration_state_unknown
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn registration_state_unknown(&self) -> bool {
+        self.registration_state_unknown.load(Ordering::Acquire)
+    }
+
+    fn fail_open_attempt(&self, attempt_id: u64) -> bool {
+        let _wait_guard = self.wait_lock.lock();
+        if self.open_attempt_id.load(Ordering::Acquire) != attempt_id {
+            return false;
+        }
+
+        self.open_attempt_id.store(0, Ordering::Release);
+        let should_rollback = match self.phase() {
+            LifecyclePhase::Opening => {
+                self.return_admission_closed.store(true, Ordering::Release);
+                self.phase
+                    .store(LifecyclePhase::OpenRollbackPending as u8, Ordering::Release);
+                true
+            }
+            LifecyclePhase::OpenRollbackPending => true,
+            LifecyclePhase::Closed | LifecyclePhase::Open | LifecyclePhase::Closing => false,
+        };
+        self.no_active_calls.notify_all();
+        should_rollback
+    }
+
+    pub(crate) fn finish_open_rollback(&self) {
+        debug_assert!(self.registrations.lock().is_empty());
+        debug_assert!(self.event_registrations.lock().is_empty());
+        debug_assert!(self.state.read().is_none());
+        debug_assert!(!self.registration_state_unknown());
+        debug_assert!(self.return_admission_closed.load(Ordering::Acquire));
+        debug_assert!(self.returns_are_quiescent());
+        self.layers.write().clear();
+        let _wait_guard = self.wait_lock.lock();
+        debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
+        debug_assert!(matches!(
+            self.phase(),
+            LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
+        ));
+        self.phase
+            .store(LifecyclePhase::Closed as u8, Ordering::Release);
+        self.no_active_calls.notify_all();
+    }
+
+    pub fn enter(&self) -> XllResult<CallGuard<'_, S>> {
+        if self.phase() != LifecyclePhase::Open {
+            return Err(XllError::Closing);
+        }
+
+        let concurrent_calls = self.active_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.phase() != LifecyclePhase::Open {
+            self.leave();
+            return Err(XllError::Closing);
+        }
+
+        let state = self.state.read().clone();
+        match state {
+            Some(state) => Ok(CallGuard {
+                runtime: self,
+                state: Some(state),
+                concurrent_calls,
+            }),
+            None => {
+                self.leave();
+                Err(XllError::Internal {
+                    diagnostic_id: 0x4d49_5353_5354_4154,
+                })
+            }
+        }
+    }
+
+    fn leave(&self) {
+        if self.active_calls.fetch_sub(1, Ordering::AcqRel) == 1 {
+            #[cfg(test)]
+            if let Some(hook) = self.zero_active_hook.lock().as_ref().cloned() {
+                hook();
+            }
+            let _guard = self.wait_lock.lock();
+            self.no_active_calls.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_close(&self) -> bool {
+        let _wait_guard = self.wait_lock.lock();
+        if self.phase() == LifecyclePhase::Open {
+            self.return_admission_closed.store(true, Ordering::Release);
+            self.phase
+                .store(LifecyclePhase::Closing as u8, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn begin_final_close(&self) -> Option<CloseAttemptGuard<'_, S>> {
+        let mut wait_guard = self.wait_lock.lock();
+        // Every final-close invocation invalidates open operations that started
+        // before it, including an operation that is between rollback recovery
+        // and acquisition of its open-attempt token while the phase is Closed.
+        self.close_epoch.fetch_add(1, Ordering::AcqRel);
+        self.return_admission_closed.store(true, Ordering::Release);
+        loop {
+            match self.phase() {
+                LifecyclePhase::Closed => {
+                    // A cleanup owner publishes Closed before its guard leaves
+                    // the callback stack. A concurrent xlAutoClose must not
+                    // return until that owner has fully exited, because Excel
+                    // may unload the XLL immediately afterwards.
+                    if !self.close_attempt_active.load(Ordering::Acquire)
+                        && self.returns_are_quiescent()
+                    {
+                        return None;
+                    }
+                    if !self.close_attempt_active.load(Ordering::Acquire) {
+                        self.phase
+                            .store(LifecyclePhase::Closing as u8, Ordering::Release);
+                    }
+                }
+                LifecyclePhase::Closing => {}
+                LifecyclePhase::Opening
+                | LifecyclePhase::Open
+                | LifecyclePhase::OpenRollbackPending => {
+                    self.phase
+                        .store(LifecyclePhase::Closing as u8, Ordering::Release);
+                }
+            }
+
+            if self.phase() != LifecyclePhase::Closed
+                && self.open_attempt_id.load(Ordering::Acquire) == 0
+                && !self.close_attempt_active.load(Ordering::Acquire)
+            {
+                self.close_attempt_active.store(true, Ordering::Release);
+                return Some(CloseAttemptGuard { runtime: self });
+            }
+
+            self.no_active_calls.wait(&mut wait_guard);
+        }
+    }
+
+    pub(crate) fn acquire_open_rollback(&self) -> Option<CloseAttemptGuard<'_, S>> {
+        let mut wait_guard = self.wait_lock.lock();
+        loop {
+            match self.phase() {
+                LifecyclePhase::Closed => return None,
+                LifecyclePhase::OpenRollbackPending => {}
+                LifecyclePhase::Closing | LifecyclePhase::Opening | LifecyclePhase::Open => {
+                    return None;
+                }
+            }
+            if !self.close_attempt_active.load(Ordering::Acquire) {
+                self.close_attempt_active.store(true, Ordering::Release);
+                return Some(CloseAttemptGuard { runtime: self });
+            }
+            self.no_active_calls.wait(&mut wait_guard);
+        }
+    }
+
+    pub(crate) fn registrations(&self) -> Vec<crate::registration::PendingRegistration> {
+        self.registrations.lock().clone()
+    }
+
+    pub(crate) fn retain_failed_registrations(
+        &self,
+        failed: Vec<(crate::registration::PendingRegistration, XllError)>,
+    ) {
+        *self.registrations.lock() = failed.into_iter().map(|(entry, _)| entry).collect();
+    }
+
+    pub(crate) fn event_registrations(&self) -> Vec<crate::registration::EventRegistration> {
+        self.event_registrations.lock().clone()
+    }
+
+    pub(crate) fn retain_failed_event_registrations(
+        &self,
+        failed: Vec<(crate::registration::EventRegistration, XllError)>,
+    ) {
+        *self.event_registrations.lock() = failed.into_iter().map(|(entry, _)| entry).collect();
+    }
+
+    pub(crate) fn wait_for_calls(&self) {
+        let mut guard = self.wait_lock.lock();
+        while self.active_calls.load(Ordering::Acquire) != 0 {
+            self.no_active_calls.wait(&mut guard);
+        }
+    }
+
+    pub(crate) fn enter_return_producer(&self) -> Option<crate::return_value::ReturnProducerGuard> {
+        let _wait_guard = self.wait_lock.lock();
+        if self.return_admission_closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let tracker = {
+            let mut slot = self.returns.lock();
+            Arc::clone(
+                slot.get_or_insert_with(|| Arc::new(crate::return_value::ReturnTracker::new())),
+            )
+        };
+        Some(tracker.enter_producer())
+    }
+
+    pub(crate) fn wait_for_returns(&self) {
+        let tracker = self.returns.lock().clone();
+        if let Some(tracker) = tracker {
+            tracker.wait_for_quiescence();
+        }
+    }
+
+    fn returns_are_quiescent(&self) -> bool {
+        self.returns
+            .lock()
+            .as_ref()
+            .is_none_or(|tracker| tracker.is_quiescent())
+    }
+
+    pub(crate) fn take_state(&self) -> Option<Arc<S>> {
+        self.state.write().take()
+    }
+
+    pub(crate) fn restore_state_arc(&self, state: Arc<S>) {
+        *self.state.write() = Some(state);
+    }
+}
+
+#[derive(Debug)]
+pub struct CloseCertificate {
+    #[allow(dead_code)]
+    pub(crate) exports: crate::ingress::ExportsDrained,
+    #[allow(dead_code)]
+    pub(crate) rtd: crate::rtd::RtdQuiescent,
+    runtime_address: usize,
+}
+
+impl<S> Runtime<S> {
+    pub(crate) fn certify_close(
+        &self,
+        exports: crate::ingress::ExportsDrained,
+        rtd: crate::rtd::RtdQuiescent,
+    ) -> XllResult<CloseCertificate> {
+        let _wait_guard = self.wait_lock.lock();
+        let services_stopped = self.handles.lock().is_none() && self.subscriptions.lock().is_none();
+        #[cfg(feature = "async")]
+        let async_stopped = self.async_manager.is_stopped();
+        #[cfg(not(feature = "async"))]
+        let async_stopped = true;
+
+        let certified = self.phase() == LifecyclePhase::Closing
+            && self.open_attempt_id.load(Ordering::Acquire) == 0
+            && self.close_attempt_active.load(Ordering::Acquire)
+            && self.active_calls.load(Ordering::Acquire) == 0
+            && self.return_admission_closed.load(Ordering::Acquire)
+            && self.returns_are_quiescent()
+            && async_stopped
+            && services_stopped
+            && self.state.read().is_none()
+            && self.registrations.lock().is_empty()
+            && self.event_registrations.lock().is_empty()
+            && !self.registration_state_unknown()
+            && self.cleanup_failure.lock().is_none()
+            && crate::callback_value::callback_cleanup_debt_is_empty();
+
+        if !certified {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x434c_4f53_4543_4552,
+            });
+        }
+
+        Ok(CloseCertificate {
+            exports,
+            rtd,
+            runtime_address: std::ptr::from_ref(self).addr(),
+        })
+    }
+
+    pub(crate) fn finish_close(&self, certificate: CloseCertificate) -> XllResult<()> {
+        if certificate.runtime_address != std::ptr::from_ref(self).addr() {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x434c_4f53_4552_554e,
+            });
+        }
+        self.layers.write().clear();
+        let _wait_guard = self.wait_lock.lock();
+        self.phase
+            .store(LifecyclePhase::Closed as u8, Ordering::Release);
+        self.no_active_calls.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn next_call_id(&self) -> u64 {
+        self.next_call_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn layers(&self) -> SharedUdfLayers {
+        self.layers.read().clone()
+    }
+
+    pub(crate) fn calculation_id(&self) -> crate::CalculationId {
+        #[cfg(feature = "async")]
+        {
+            self.async_manager.current_generation().into()
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            self.calculation_id.load(Ordering::Acquire).into()
+        }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn finish_calculation(&self) {
+        let _ = self.async_manager.advance_generation();
+    }
+
+    pub(crate) fn handles(&self) -> XllResult<Arc<crate::handle::HandleRuntime>> {
+        if let Some(handles) = self.handles.lock().as_ref() {
+            return handles.as_ref().map(Arc::clone).map_err(Clone::clone);
+        }
+
+        // Entropy acquisition and failure diagnostics can invoke platform or
+        // subscriber code. Keep them outside the runtime slot lock so a
+        // diagnostic subscriber can safely re-enter runtime services.
+        let mut candidate = Some(crate::handle::HandleRuntime::try_new(16_384).map(Arc::new));
+        let result = {
+            let mut slot = self.handles.lock();
+            if slot.is_none() {
+                *slot = candidate.take();
+            }
+            slot.as_ref()
+                .expect("the handle runtime result was installed")
+                .as_ref()
+                .map(Arc::clone)
+                .map_err(Clone::clone)
+        };
+        // A concurrent initializer may have won. Drop this empty candidate only
+        // after releasing the slot lock.
+        drop(candidate);
+        result
+    }
+
+    pub(crate) fn close_handles(&self) -> XllResult<()> {
+        let handles = self.handles.lock().take();
+        let result = if let Some(Ok(handles)) = handles {
+            let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
+            let handle_result = handles.close();
+            rtd_result.and(handle_result)
+        } else {
+            Ok(())
+        };
+        self.record_cleanup_result(&result);
+        result
+    }
+
+    pub(crate) fn subscriptions(&self) -> Arc<crate::subscription::SubscriptionRuntime> {
+        let mut slot = self.subscriptions.lock();
+        Arc::clone(
+            slot.get_or_insert_with(|| Arc::new(crate::subscription::SubscriptionRuntime::new())),
+        )
+    }
+
+    pub(crate) fn close_subscriptions(&self) -> XllResult<()> {
+        let subscriptions = self.subscriptions.lock().take();
+        let result = if let Some(subscriptions) = subscriptions {
+            crate::rtd::shutdown_subscriptions(subscriptions)
+        } else {
+            Ok(())
+        };
+        self.record_cleanup_result(&result);
+        result
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn start_async(&self, worker_count: usize) -> XllResult<()> {
+        self.async_manager.start(worker_count)
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn cancel_async(&self) {
+        self.async_manager.cancel_current_generation();
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn close_async(&self) -> XllResult<()> {
+        let result = self.async_manager.close();
+        self.record_cleanup_result(&result);
+        result
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn async_manager(&self) -> &crate::async_udf::AsyncManager {
+        &self.async_manager
+    }
+
+    fn record_cleanup_result(&self, result: &XllResult<()>) {
+        if let Err(error) = result {
+            let mut failure = self.cleanup_failure.lock();
+            if failure.is_none() {
+                *failure = Some(error.clone());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn registrations_guard(&self) -> MutexGuard<'_, Vec<crate::registration::PendingRegistration>> {
+        self.registrations.lock()
+    }
+
+    #[cfg(test)]
+    fn set_zero_active_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.zero_active_hook.lock() = Some(hook);
+    }
+}
+
+impl<S> Default for Runtime<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct CloseAttemptGuard<'runtime, S> {
+    runtime: &'runtime Runtime<S>,
+}
+
+impl<S> Drop for CloseAttemptGuard<'_, S> {
+    fn drop(&mut self) {
+        let _wait_guard = self.runtime.wait_lock.lock();
+        self.runtime
+            .close_attempt_active
+            .store(false, Ordering::Release);
+        self.runtime.no_active_calls.notify_all();
+    }
+}
+
+pub(crate) struct OpenAttemptGuard<'runtime, S> {
+    runtime: &'runtime Runtime<S>,
+    attempt_id: u64,
+    active: bool,
+}
+
+impl<S> OpenAttemptGuard<'_, S> {
+    pub(crate) const fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub(crate) fn fail(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        let should_rollback = self.runtime.fail_open_attempt(self.attempt_id);
+        self.active = false;
+        should_rollback
+    }
+}
+
+impl<S> Drop for OpenAttemptGuard<'_, S> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let _ = self.runtime.fail_open_attempt(self.attempt_id);
+        self.active = false;
+    }
+}
+
+pub struct CallGuard<'runtime, S> {
+    runtime: &'runtime Runtime<S>,
+    state: Option<Arc<S>>,
+    concurrent_calls: usize,
+}
+
+impl<S> CallGuard<'_, S> {
+    #[must_use]
+    pub fn state(&self) -> &S {
+        self.state
+            .as_deref()
+            .expect("CallGuard state is available before drop")
+    }
+
+    #[must_use]
+    pub const fn concurrent_calls(&self) -> usize {
+        self.concurrent_calls
+    }
+
+    #[cfg(feature = "async")]
+    #[must_use]
+    pub(crate) fn state_arc(&self) -> Arc<S> {
+        self.state
+            .as_ref()
+            .expect("CallGuard state is available before drop")
+            .clone()
+    }
+}
+
+impl<S> Drop for CallGuard<'_, S> {
+    fn drop(&mut self) {
+        // Closing is allowed to take and unwrap the runtime's root Arc as soon
+        // as active_calls reaches zero. Release this call's ownership first so
+        // that observation cannot race the compiler-generated field drops.
+        drop(self.state.take());
+        self.runtime.leave();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn finish_test_close<S>(runtime: &Runtime<S>) {
+        let exports = crate::ingress::ExportsDrained::for_test();
+        let rtd = crate::rtd::wait_for_module_quiescence();
+        let certificate = runtime.certify_close(exports, rtd).unwrap();
+        runtime.finish_close(certificate).unwrap();
+    }
+
+    #[test]
+    fn runtime_can_open_close_and_reopen() {
+        struct TestHandle(u32);
+        impl crate::ExcelHandleObject for TestHandle {}
+
+        let runtime = Runtime::new();
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(1_u32, Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        assert_eq!(runtime.enter().unwrap().state(), &1);
+        let old_handles = runtime.handles().unwrap();
+        let (old_token, _) = old_handles
+            .prepare("old".to_owned(), || Ok(Arc::new(TestHandle(1))))
+            .unwrap();
+
+        let close_attempt = runtime.begin_final_close().unwrap();
+        runtime.wait_for_calls();
+        runtime.close_handles().unwrap();
+        assert_eq!(*runtime.take_state().unwrap(), 1);
+        finish_test_close(&runtime);
+        drop(close_attempt);
+
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(2_u32, Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        assert_eq!(runtime.enter().unwrap().state(), &2);
+        let new_handles = runtime.handles().unwrap();
+        let (new_token, _) = new_handles
+            .prepare("new".to_owned(), || Ok(Arc::new(TestHandle(2))))
+            .unwrap();
+        assert_eq!(new_handles.lookup::<TestHandle>(&new_token).unwrap().0, 2);
+        assert!(matches!(
+            new_handles.lookup::<TestHandle>(&old_token),
+            Err(XllError::StaleHandle | XllError::InvalidHandle)
+        ));
+    }
+
+    #[test]
+    fn close_on_closed_runtime_invalidates_an_older_open_epoch() {
+        let runtime = Runtime::<()>::new();
+        let stale_epoch = runtime.close_epoch();
+
+        assert!(runtime.begin_final_close().is_none());
+        assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
+
+        let mut current = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut current, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Open);
+    }
+
+    #[test]
+    fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
+        let runtime = Runtime::new();
+        let mut first = runtime.begin_open().unwrap();
+
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
+
+        runtime.publish(11_u32, Vec::new());
+        runtime.finish_open(&mut first, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Open);
+        assert_eq!(runtime.enter().unwrap().state(), &11);
+    }
+
+    #[test]
+    fn final_close_cancels_an_in_flight_open_commit() {
+        let runtime = Arc::new(Runtime::new());
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish(17_u32, Vec::new());
+
+        let close_epoch = runtime.close_epoch();
+        let closing_runtime = Arc::clone(&runtime);
+        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+        let closer = thread::spawn(move || {
+            let _close = closing_runtime
+                .begin_final_close()
+                .expect("the opening runtime requires final close");
+            assert_eq!(*closing_runtime.take_state().unwrap(), 17);
+            finish_test_close(&closing_runtime);
+            closed_tx.send(()).unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert_ne!(runtime.close_epoch(), close_epoch);
+        assert!(matches!(
+            runtime.finish_open(&mut opening, Vec::new()),
+            Err(XllError::Closing)
+        ));
+
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_waiter_is_not_lost_when_open_rollback_finishes() {
+        let runtime = Arc::new(Runtime::<()>::new());
+        let mut opening = runtime.begin_open().unwrap();
+        assert!(opening.fail());
+        let rollback = runtime.acquire_open_rollback().unwrap();
+
+        let closing_runtime = Arc::clone(&runtime);
+        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+        let closer = thread::spawn(move || {
+            assert!(closing_runtime.begin_final_close().is_none());
+            closed_tx.send(()).unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        runtime.finish_open_rollback();
+        assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(rollback);
+
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn abandoned_close_owner_notifies_and_allows_takeover() {
+        let runtime = Arc::new(Runtime::<()>::new());
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let first = runtime.begin_final_close().unwrap();
+        drop(first);
+
+        let second = runtime.begin_final_close().unwrap();
+        let _ = runtime.take_state();
+        finish_test_close(&runtime);
+        drop(second);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_certificate_refuses_to_publish_closed_before_state_is_released() {
+        let runtime = Runtime::new();
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let close_attempt = runtime.begin_final_close().unwrap();
+        runtime.wait_for_calls();
+        runtime.wait_for_returns();
+        runtime.close_handles().unwrap();
+        runtime.close_subscriptions().unwrap();
+        let exports = crate::ingress::ExportsDrained::for_test();
+        let rtd = crate::rtd::wait_for_module_quiescence();
+        assert!(runtime.certify_close(exports, rtd).is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+
+        assert!(runtime.take_state().is_some());
+        finish_test_close(&runtime);
+        drop(close_attempt);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_rejects_new_calls_and_waits_for_existing_call() {
+        let runtime = Arc::new(Runtime::new());
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(7_u32, Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        let guard = runtime.enter().unwrap();
+        assert!(runtime.begin_close());
+        assert!(matches!(runtime.enter(), Err(XllError::Closing)));
+
+        let (sender, receiver) = mpsc::channel();
+        let closer = Arc::clone(&runtime);
+        let handle = thread::spawn(move || {
+            closer.wait_for_calls();
+            sender.send(()).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(guard);
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn zero_active_calls_implies_no_guard_owns_state() {
+        let runtime = Arc::new(Runtime::new());
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(7_u32, Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        let guard = runtime.enter().unwrap();
+        assert!(runtime.begin_close());
+        let state = runtime.state.read().as_ref().map(Arc::downgrade).unwrap();
+        runtime.set_zero_active_hook(Arc::new(move || {
+            assert_eq!(
+                state.strong_count(),
+                1,
+                "active_calls reached zero while a CallGuard still owned state"
+            );
+        }));
+        let closer = Arc::clone(&runtime);
+        let handle = thread::spawn(move || {
+            closer.wait_for_calls();
+            Arc::try_unwrap(closer.take_state().unwrap())
+        });
+
+        drop(guard);
+        assert_eq!(handle.join().unwrap(), Ok(7));
+    }
+
+    #[test]
+    fn registration_storage_is_replaceable() {
+        let runtime = Runtime::<()>::new();
+        runtime
+            .registrations_guard()
+            .push(crate::registration::PendingRegistration::from(
+                RegistrationId {
+                    id: 1.0,
+                    excel_name: "TEST",
+                },
+            ));
+        assert_eq!(runtime.registrations().len(), 1);
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn calculation_end_advances_the_async_task_generation() {
+        let runtime = Runtime::<()>::new();
+        runtime.start_async(1).unwrap();
+        let first = runtime.calculation_id().get();
+        let (first_source, first_token) = crate::cancellation::CancellationSource::new(
+            crate::CancellationGuarantee::CalculationScoped,
+        );
+        runtime
+            .async_manager()
+            .spawn(first, std::future::pending(), first_source)
+            .unwrap();
+
+        runtime.finish_calculation();
+        let second = runtime.calculation_id().get();
+        assert_eq!(second, first + 1);
+        assert!(matches!(
+            runtime.async_manager().spawn(
+                first,
+                std::future::pending(),
+                crate::cancellation::CancellationSource::new(
+                    crate::CancellationGuarantee::CalculationScoped,
+                )
+                .0,
+            ),
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+
+        let (second_source, second_token) = crate::cancellation::CancellationSource::new(
+            crate::CancellationGuarantee::CalculationScoped,
+        );
+        runtime
+            .async_manager()
+            .spawn(second, std::future::pending(), second_source)
+            .unwrap();
+        runtime.cancel_async();
+        assert!(second_token.is_cancelled());
+        assert!(!first_token.is_cancelled());
+
+        runtime.close_async().unwrap();
+        assert!(first_token.is_cancelled());
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn published_async_generation_already_has_a_registry_entry() {
+        let runtime = Arc::new(Runtime::<()>::new());
+        runtime.start_async(1).unwrap();
+        let first = runtime.calculation_id().get();
+        let (published_tx, published_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        runtime
+            .async_manager()
+            .set_after_generation_publish_hook(Some(Arc::new(move || {
+                published_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap();
+            })));
+
+        let advancing_runtime = Arc::clone(&runtime);
+        let advancing = thread::spawn(move || advancing_runtime.finish_calculation());
+        published_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let published = runtime.calculation_id().get();
+        assert_eq!(published, first + 1);
+        let (spawned_tx, spawned_rx) = mpsc::sync_channel(1);
+        let spawning_runtime = Arc::clone(&runtime);
+        let spawning = thread::spawn(move || {
+            let source = crate::cancellation::CancellationSource::new(
+                crate::CancellationGuarantee::CalculationScoped,
+            )
+            .0;
+            spawned_tx
+                .send(
+                    spawning_runtime
+                        .async_manager()
+                        .spawn(published, async {}, source),
+                )
+                .unwrap();
+        });
+
+        assert!(matches!(
+            spawned_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        advancing.join().unwrap();
+        spawned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        spawning.join().unwrap();
+
+        runtime
+            .async_manager()
+            .set_after_generation_publish_hook(None);
+        runtime.close_async().unwrap();
+    }
+}

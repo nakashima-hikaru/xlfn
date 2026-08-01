@@ -1,0 +1,49 @@
+error[E0277]: the trait bound `Result: MainThreadReturn` is not satisfied
+ --> tests/ui/fail/lookalike_result.rs:8:13
+  |
+8 | fn bad() -> Result {
+  |             ^^^^^^ unsatisfied trait bound
+  |
+help: the trait `MainThreadReturn` is not implemented for `Result`
+ --> tests/ui/fail/lookalike_result.rs:3:1
+  |
+3 | struct Result;
+  | ^^^^^^^^^^^^^
+  = help: the following other types implement trait `MainThreadReturn`:
+            &str
+            Column<T>
+            ExcelErrorValue
+            ExcelSerialDate
+            Handle<T>
+            OwnedExcelValue
+            Row<T>
+            RtdValue
+          and $N others
+note: required by a bound in `xlfn::__private::assert_main_thread_return`
+ --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  |
+  | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
+  |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`
+
+error[E0277]: the trait bound `Result: ExcelReturn` is not satisfied
+ --> tests/ui/fail/lookalike_result.rs:7:1
+  |
+7 | #[excel_function(name = "FAIL.LOOKALIKE")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `ExcelReturn` is not implemented for `Result`
+ --> tests/ui/fail/lookalike_result.rs:3:1
+  |
+3 | struct Result;
+  | ^^^^^^^^^^^^^
+  = help: the following other types implement trait `ExcelReturn`:
+            &str
+            Column<T>
+            ExcelErrorValue
+            ExcelSerialDate
+            Handle<T>
+            OwnedExcelValue
+            Row<T>
+            RtdValue
+          and $N others
+  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

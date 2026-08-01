@@ -1,0 +1,5 @@
+error: unknown context role; expected main_thread, thread_safe, macro_sheet, or asynchronous
+ --> tests/ui/fail/context_unknown_kind.rs:4:24
+  |
+4 | fn bad(#[excel_context(worker)] context: f64) -> f64 {
+  |                        ^^^^^^

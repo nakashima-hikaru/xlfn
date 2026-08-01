@@ -1,0 +1,5 @@
+error: a main-thread context function cannot be marked `thread_safe`
+ --> tests/ui/main_thread_thread_safe.rs:7:38
+  |
+7 | fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, State>) -> f64 {
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

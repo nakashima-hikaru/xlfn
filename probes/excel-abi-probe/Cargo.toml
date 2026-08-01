@@ -1,0 +1,20 @@
+[package]
+name = "excel-abi-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+sdk-bindgen = ["dep:bindgen"]
+
+[dependencies]
+xlfn-sys = { workspace = true, features = ["abi-probe"] }
+
+[build-dependencies]
+bindgen = { workspace = true, optional = true }
+cc.workspace = true
+
+[lints]
+workspace = true

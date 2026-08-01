@@ -1,0 +1,118 @@
+#[cfg(not(target_os = "windows"))]
+use crate::XllError;
+use crate::XllResult;
+use crate::handle::HandleRuntime;
+use std::sync::Arc;
+
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[derive(Debug)]
+pub(crate) struct RtdQuiescent(());
+
+pub(crate) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> XllResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::observe(handles, key, token)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handles, key, token);
+        Err(XllError::ExcelApi {
+            function: "xlfRtd",
+            code: xlfn_sys::XLRET_FAILED,
+        })
+    }
+}
+
+pub(crate) fn observe_subscription(
+    subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
+    key: &str,
+) -> XllResult<crate::RtdValue> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::observe_subscription(subscriptions, key)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (subscriptions, key);
+        Err(XllError::ExcelApi {
+            function: "xlfRtd",
+            code: xlfn_sys::XLRET_FAILED,
+        })
+    }
+}
+
+pub(crate) fn shutdown(handles: Arc<HandleRuntime>) -> XllResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::shutdown(handles)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        handles.terminate_all_topics();
+        Ok(())
+    }
+}
+
+pub(crate) fn shutdown_subscriptions(
+    subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
+) -> XllResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::shutdown_subscriptions(subscriptions)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        subscriptions.close()
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Returns the temporary RTD COM class factory.
+///
+/// # Safety
+/// The three pointers must follow the COM `DllGetClassObject` contract.
+pub unsafe fn dll_get_class_object(
+    class_id: *const core::ffi::c_void,
+    interface_id: *const core::ffi::c_void,
+    output: *mut *mut core::ffi::c_void,
+) -> i32 {
+    // SAFETY: exported COM boundary forwards its pointer contract.
+    unsafe { windows::dll_get_class_object(class_id, interface_id, output) }
+}
+
+#[cfg(not(target_os = "windows"))]
+/// Reports that the RTD COM class is unavailable on non-Windows targets.
+///
+/// # Safety
+/// A non-null `output` must point to writable pointer storage.
+pub unsafe fn dll_get_class_object(
+    _class_id: *const core::ffi::c_void,
+    _interface_id: *const core::ffi::c_void,
+    output: *mut *mut core::ffi::c_void,
+) -> i32 {
+    if !output.is_null() {
+        // SAFETY: the caller supplied a writable COM output pointer.
+        unsafe { *output = core::ptr::null_mut() };
+    }
+    0x8004_0111_u32 as i32
+}
+
+#[must_use]
+pub fn dll_can_unload_now() -> i32 {
+    #[cfg(target_os = "windows")]
+    {
+        windows::dll_can_unload_now()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        1 // S_FALSE: the COM server is unavailable on non-Windows targets.
+    }
+}
+
+pub(crate) fn wait_for_module_quiescence() -> RtdQuiescent {
+    #[cfg(target_os = "windows")]
+    windows::wait_for_module_quiescence();
+    RtdQuiescent(())
+}
