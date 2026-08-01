@@ -189,6 +189,7 @@ fn retain_transaction_error<S>(
 ) -> XllError {
     runtime.retain_registration_debt(error.pending_registrations);
     runtime.retain_event_registration_debt(error.pending_events);
+    runtime.retain_metadata_debt_items(error.metadata_debt);
     if !error.unknown_registrations.is_empty() {
         runtime.mark_registration_state_unknown();
         for unknown in error.unknown_registrations {
@@ -274,11 +275,19 @@ where
 
     let registrations = runtime.registrations();
     let outcome = HostRegistrar::unregister_pending(&registrations);
-    for (_, error) in &outcome.failed {
-        report_boundary_error("xlAutoOpen registration rollback", error);
-        succeeded = false;
+    for (registration, error) in &outcome.failed {
+        if registration.cleanup_severity().is_unload_unsafe() {
+            report_boundary_error("xlAutoOpen registration rollback", error);
+            succeeded = false;
+        }
+    }
+    for (registration, error) in &outcome.metadata_debt {
+        if registration.cleanup_severity().is_metadata_debt() {
+            report_boundary_error("xlAutoOpen metadata debt rollback", error);
+        }
     }
     runtime.retain_failed_registrations(outcome.failed);
+    runtime.retain_metadata_debt(outcome.metadata_debt);
 
     let events = runtime.event_registrations();
     let event_outcome = HostRegistrar::unregister_events_detailed(&events);
@@ -394,13 +403,30 @@ where
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
         HostRegistrar::unregister_pending(&registrations)
     })) {
-        for (_, error) in &outcome.failed {
-            report_boundary_error("xlAutoClose unregister", error);
-            if unload_failure.is_none() {
-                unload_failure = Some(("xlAutoClose unregister", error.clone()));
+        for (registration, error) in &outcome.failed {
+            if registration.cleanup_severity().is_unload_unsafe() {
+                report_boundary_error("xlAutoClose unregister", error);
+                if unload_failure.is_none() {
+                    unload_failure = Some(("xlAutoClose unregister", error.clone()));
+                }
+            }
+        }
+        for (registration, error) in &outcome.metadata_debt {
+            if registration.cleanup_severity().is_metadata_debt() {
+                report_boundary_error("xlAutoClose metadata debt", error);
             }
         }
         runtime.retain_failed_registrations(outcome.failed);
+        runtime.retain_metadata_debt(outcome.metadata_debt);
+        if runtime.has_metadata_debt() {
+            let debt_count = runtime.metadata_debt().len();
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                tracing::warn!(
+                    count = debt_count,
+                    "xlAutoClose completed with host metadata debt"
+                );
+            }));
+        }
     } else {
         let error = XllError::Panic;
         report_boundary_error("xlAutoClose unregister", &error);

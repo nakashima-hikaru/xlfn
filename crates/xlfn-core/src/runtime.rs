@@ -36,6 +36,7 @@ pub struct Runtime<S> {
     state: RwLock<Option<Arc<S>>>,
     layers: RwLock<SharedUdfLayers>,
     registrations: Mutex<Vec<crate::registration::PendingRegistration>>,
+    metadata_debt: Mutex<Vec<crate::registration::PendingRegistration>>,
     event_registrations: Mutex<Vec<crate::registration::EventRegistration>>,
     active_calls: AtomicUsize,
     return_admission_closed: AtomicBool,
@@ -67,6 +68,7 @@ impl<S> Runtime<S> {
             state: RwLock::new(None),
             layers: RwLock::new(Vec::new()),
             registrations: Mutex::new(Vec::new()),
+            metadata_debt: Mutex::new(Vec::new()),
             event_registrations: Mutex::new(Vec::new()),
             active_calls: AtomicUsize::new(0),
             return_admission_closed: AtomicBool::new(false),
@@ -387,6 +389,30 @@ impl<S> Runtime<S> {
         failed: Vec<(crate::registration::PendingRegistration, XllError)>,
     ) {
         *self.registrations.lock() = failed.into_iter().map(|(entry, _)| entry).collect();
+    }
+
+    pub(crate) fn retain_metadata_debt(
+        &self,
+        metadata_debt: Vec<(crate::registration::PendingRegistration, XllError)>,
+    ) {
+        self.metadata_debt
+            .lock()
+            .extend(metadata_debt.into_iter().map(|(entry, _)| entry));
+    }
+
+    pub(crate) fn retain_metadata_debt_items(
+        &self,
+        metadata_debt: Vec<crate::registration::PendingRegistration>,
+    ) {
+        self.metadata_debt.lock().extend(metadata_debt);
+    }
+
+    pub(crate) fn metadata_debt(&self) -> Vec<crate::registration::PendingRegistration> {
+        self.metadata_debt.lock().clone()
+    }
+
+    pub(crate) fn has_metadata_debt(&self) -> bool {
+        !self.metadata_debt.lock().is_empty()
     }
 
     pub(crate) fn event_registrations(&self) -> Vec<crate::registration::EventRegistration> {
@@ -966,6 +992,18 @@ mod tests {
                 },
             ));
         assert_eq!(runtime.registrations().len(), 1);
+    }
+
+    #[test]
+    fn metadata_debt_storage_is_queryable() {
+        let runtime = Runtime::<()>::new();
+        runtime.retain_metadata_debt_items(vec![crate::registration::PendingRegistration::from(
+            RegistrationId {
+                id: 1.0,
+                excel_name: "TEST_DEBT",
+            },
+        )]);
+        assert_eq!(runtime.metadata_debt().len(), 1);
     }
 
     #[cfg(feature = "async")]

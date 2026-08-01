@@ -140,9 +140,40 @@ impl From<RegistrationId> for PendingRegistration {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum CleanupSeverity {
+    BestEffort,
+    HostMetadataDebt,
+    UnloadUnsafe,
+}
+
+impl CleanupSeverity {
+    #[must_use]
+    pub fn is_unload_unsafe(self) -> bool {
+        matches!(self, Self::UnloadUnsafe)
+    }
+
+    #[must_use]
+    pub fn is_metadata_debt(self) -> bool {
+        matches!(self, Self::HostMetadataDebt)
+    }
+}
+
+impl PendingRegistration {
+    #[must_use]
+    pub(crate) fn cleanup_severity(&self) -> CleanupSeverity {
+        match self.state {
+            RegistrationCleanupState::Registered => CleanupSeverity::UnloadUnsafe,
+            RegistrationCleanupState::Unregistered => CleanupSeverity::HostMetadataDebt,
+            RegistrationCleanupState::NameDeleted => CleanupSeverity::BestEffort,
+        }
+    }
+}
+
 pub(crate) struct UnregisterResult<T> {
     pub(crate) succeeded: Vec<T>,
     pub(crate) failed: Vec<(T, XllError)>,
+    pub(crate) metadata_debt: Vec<(T, XllError)>,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +187,7 @@ pub(crate) struct RegistrationTransactionError {
     pub(crate) source: Box<XllError>,
     pub(crate) pending_registrations: Vec<PendingRegistration>,
     pub(crate) pending_events: Vec<EventRegistration>,
+    pub(crate) metadata_debt: Vec<PendingRegistration>,
     pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
     /// When true, the Excel host has entered a terminal state (Abort/Uncalced)
     /// and no further C API calls (including rollback) should be attempted.
@@ -168,6 +200,7 @@ impl RegistrationTransactionError {
             source: Box::new(source),
             pending_registrations: Vec::new(),
             pending_events: Vec::new(),
+            metadata_debt: Vec::new(),
             unknown_registrations: Vec::new(),
             terminal: false,
         }
@@ -178,6 +211,7 @@ impl RegistrationTransactionError {
             source: Box::new(source),
             pending_registrations: Vec::new(),
             pending_events: Vec::new(),
+            metadata_debt: Vec::new(),
             unknown_registrations: Vec::new(),
             terminal: true,
         }
@@ -189,6 +223,7 @@ impl<T> UnregisterResult<T> {
         Self {
             succeeded: Vec::with_capacity(capacity),
             failed: Vec::new(),
+            metadata_debt: Vec::new(),
         }
     }
 }
@@ -686,14 +721,26 @@ impl HostRegistrar {
                 code: status,
             }));
         }
-        let exists = if result.base_type()? == XLTYPE_ERR {
+        let is_conflict = if result.base_type()? == XLTYPE_ERR {
             // SAFETY: XLTYPE_ERR selects the error union member.
             unsafe { result.raw_pointer()?.as_ref().value.error != XLERR_NAME }
+        } else if result.base_type()? == XLTYPE_NUM {
+            let id = result.borrow().and_then(|value| {
+                f64::from_excel(
+                    value,
+                    "is_registered_name",
+                    &crate::CallContext::without_runtime(),
+                )
+            });
+            match id {
+                Ok(id) => valid_registration_id(id),
+                Err(_) => false,
+            }
         } else {
-            true
+            false
         };
         result.try_release()?;
-        Ok(exists)
+        Ok(is_conflict)
     }
     pub(crate) fn unregister_pending(
         registrations: &[PendingRegistration],
@@ -751,7 +798,7 @@ impl HostRegistrar {
             let mut name = match TemporaryString::new(registration.registration.excel_name) {
                 Ok(name) => name,
                 Err(error) => {
-                    outcome.failed.push((registration, error));
+                    outcome.metadata_debt.push((registration, error));
                     continue;
                 }
             };
@@ -761,7 +808,7 @@ impl HostRegistrar {
                 unsafe { ExcelCallbackValue::call(XLF_SET_NAME, &name_arguments) };
             if ExcelCallbackStatus::from_raw(status).is_terminal() {
                 terminal = true;
-                outcome.failed.push((
+                outcome.metadata_debt.push((
                     registration,
                     XllError::ExcelApi {
                         function: "xlfSetName",
@@ -780,11 +827,11 @@ impl HostRegistrar {
             );
             let release = result.try_release();
             if let Err(error) = name_deleted {
-                outcome.failed.push((registration, error));
+                outcome.metadata_debt.push((registration, error));
                 continue;
             }
             if let Err(error) = release {
-                outcome.failed.push((registration, error));
+                outcome.metadata_debt.push((registration, error));
             } else {
                 outcome.succeeded.push(registration);
             }
@@ -974,12 +1021,13 @@ fn register_all_transaction(
                     // Record all already-registered items as debt.
                     error.pending_registrations.extend(pending);
                 } else {
-                    error.pending_registrations.extend(
-                        unregister(&pending)
-                            .failed
-                            .into_iter()
-                            .map(|(entry, _)| entry),
-                    );
+                    let outcome = unregister(&pending);
+                    error
+                        .pending_registrations
+                        .extend(outcome.failed.into_iter().map(|(entry, _)| entry));
+                    error
+                        .metadata_debt
+                        .extend(outcome.metadata_debt.into_iter().map(|(entry, _)| entry));
                 }
                 return Err(error);
             }
@@ -1016,8 +1064,10 @@ fn registration_release_failure(
 ) -> RegistrationTransactionError {
     let pending = [PendingRegistration::from(registration)];
     let mut error = RegistrationTransactionError::new(source);
-    error.pending_registrations = unregister(&pending)
-        .failed
+    let outcome = unregister(&pending);
+    error.pending_registrations = outcome.failed.into_iter().map(|(entry, _)| entry).collect();
+    error.metadata_debt = outcome
+        .metadata_debt
         .into_iter()
         .map(|(entry, _)| entry)
         .collect();
@@ -1532,6 +1582,66 @@ mod tests {
     }
 
     #[test]
+    fn failed_registration_rollback_returns_metadata_debt() {
+        const ARGUMENTS: &[ArgumentDescriptor] = &[];
+        const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
+        let descriptor = |export_name, excel_name| RegistrationDescriptor {
+            export_name,
+            excel_name,
+            signature: RegistrationSignature {
+                result: ResultAbi::Xloper,
+                arguments: ABI_ARGUMENTS,
+                flags: RegistrationFlags::default(),
+            },
+            category: "test",
+            description: "test",
+            help_topic: "",
+            visibility: FunctionVisibility::Public,
+            arguments: ARGUMENTS,
+        };
+        let descriptors = [descriptor("first", "FIRST"), descriptor("second", "SECOND")];
+        let attempts = std::cell::Cell::new(0);
+        let result = register_all_transaction(
+            &descriptors,
+            |descriptor| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 2 {
+                    Err(RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "injected register",
+                        code: 32,
+                    }))
+                } else {
+                    Ok(RegistrationId {
+                        id: f64::from(attempt),
+                        excel_name: descriptor.excel_name,
+                    })
+                }
+            },
+            |registrations| {
+                let mut outcome = UnregisterResult::new(registrations.len());
+                outcome
+                    .metadata_debt
+                    .extend(registrations.iter().cloned().map(|entry| {
+                        (
+                            entry,
+                            XllError::ExcelApi {
+                                function: "injected set_name",
+                                code: 64,
+                            },
+                        )
+                    }));
+                outcome
+            },
+        )
+        .unwrap_err();
+
+        assert!(result.pending_registrations.is_empty());
+        assert_eq!(result.metadata_debt.len(), 1);
+        assert_eq!(result.metadata_debt[0].registration.id, 1.0);
+    }
+
+    #[test]
     fn malformed_success_payload_recovers_and_unregisters_the_committed_registration() {
         const ARGUMENTS: &[ArgumentDescriptor] = &[];
         const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
@@ -1807,5 +1917,53 @@ mod tests {
 
         assert_eq!(rollback_calls.get(), 1);
         assert_eq!(error.pending_events, vec![registration]);
+    }
+
+    #[test]
+    fn cleanup_severity_ordering() {
+        assert!(CleanupSeverity::BestEffort < CleanupSeverity::HostMetadataDebt);
+        assert!(CleanupSeverity::HostMetadataDebt < CleanupSeverity::UnloadUnsafe);
+    }
+
+    #[test]
+    fn unregister_result_tracks_metadata_debt_separately_from_failed() {
+        let registration = PendingRegistration {
+            registration: RegistrationId {
+                id: 42.0,
+                excel_name: "TEST_FUNC",
+            },
+            state: RegistrationCleanupState::Unregistered,
+        };
+        let mut outcome = UnregisterResult::new(1);
+        outcome.metadata_debt.push((
+            registration.clone(),
+            XllError::ExcelApi {
+                function: "xlfSetName",
+                code: 0,
+            },
+        ));
+        assert!(outcome.failed.is_empty());
+        assert_eq!(outcome.metadata_debt.len(), 1);
+        assert_eq!(
+            outcome.metadata_debt[0].0.state,
+            RegistrationCleanupState::Unregistered
+        );
+    }
+
+    #[test]
+    fn pending_registration_cleanup_severity() {
+        let mut reg = PendingRegistration::from(RegistrationId {
+            id: 1.0,
+            excel_name: "FOO",
+        });
+        assert_eq!(reg.cleanup_severity(), CleanupSeverity::UnloadUnsafe);
+        assert!(reg.cleanup_severity().is_unload_unsafe());
+
+        reg.state = RegistrationCleanupState::Unregistered;
+        assert_eq!(reg.cleanup_severity(), CleanupSeverity::HostMetadataDebt);
+        assert!(reg.cleanup_severity().is_metadata_debt());
+
+        reg.state = RegistrationCleanupState::NameDeleted;
+        assert_eq!(reg.cleanup_severity(), CleanupSeverity::BestEffort);
     }
 }
