@@ -36,73 +36,7 @@ A topic must contain at least one non-empty part. Each part must fit Excel's 32,
 ## Implement a source
 
 ```rust
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
-
-use xlfn::{
-    error::InputError,
-    prelude::*,
-};
-
-struct MetricSource {
-    client: Arc<Client>,
-}
-
-impl RtdSource for MetricSource {
-    type Value = RtdValue;
-
-    fn subscribe(
-        &self,
-        topic: &RtdTopic,
-        sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
-        let [kind, symbol] = topic.parts() else {
-            return Err(XllError::input(
-                "RTD topic",
-                InputError::Malformed("expected [kind, symbol]"),
-            ));
-        };
-        if kind != "last" {
-            return Err(XllError::input(
-                "RTD topic",
-                InputError::Malformed("unsupported metric topic"),
-            ));
-        }
-        let symbol = symbol.clone();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let client = Arc::clone(&self.client);
-
-        let worker = std::thread::spawn(move || {
-            while !worker_cancelled.load(Ordering::Acquire) {
-                match client.try_next_metric(&symbol) {
-                    Ok(Some(value)) => {
-                        if sink.publish(RtdValue::Number(value)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                    Err(_) => {
-                        let _ = sink.publish(RtdValue::Error(ExcelErrorValue(
-                            ExcelError::NotAvailable,
-                        )));
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Box::new(MetricSubscription {
-            cancelled,
-            worker: Some(worker),
-        }))
-    }
-}
+{{#include ../../examples/rtd-source/src/metric_source.rs}}
 ```
 
 The source's subscription path must be bounded. It may create a worker or register with an existing event loop, but it should not wait indefinitely for the first external message. In this illustrative loop, `try_next_metric` is a non-blocking poll; in production, prefer a cancellation-aware channel or event loop over periodic polling.
@@ -110,27 +44,13 @@ The source's subscription path must be bounded. It may create a worker or regist
 ## Implement shutdown correctly
 
 ```rust
-struct MetricSubscription {
-    cancelled: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl RtdSubscription for MetricSubscription {
-    fn request_cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
-        self.request_cancel();
-        if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| XllError::Internal {
-                diagnostic_id: 0x5254_4457_4f52_4b52,
-            })?;
-        }
-        Ok(())
-    }
-}
+{{#include ../../examples/rtd-source/src/metric_subscription.rs}}
 ```
+
+`RtdSubscription` is an unsafe trait because this implementation controls
+whether the XLL can be unloaded. The `unsafe impl` is justified only by the
+two-part quiescence guarantee shown above: cancellation stops the sole
+producer, and `disconnect_and_wait` joins it before returning.
 
 `request_cancel` must be non-blocking, idempotent, panic-free, and must not call Excel or re-enter framework subscription APIs. `disconnect_and_wait` performs the quiescence barrier: when it returns, the source must no longer execute XLL code or publish through the sink.
 
@@ -141,17 +61,10 @@ Do not implement a timeout that abandons an in-process callback and then permits
 Keep the source in add-in state and subscribe from a main-thread function:
 
 ```rust
-#[excel_function(name = "METRIC.LAST")]
-fn last_metric(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, State>,
-    symbol: String,
-) -> XllResult<RtdValue> {
-    let topic = RtdTopic::new(["last", symbol.as_str()])?;
-    context.subscribe(context.state().metrics.clone(), topic)
-}
+{{#include ../../examples/rtd-source/src/lib.rs:42:48}}
 ```
 
-The source is typically an `Arc<S>` or another cloneable value satisfying the source API. The exact identity of source plus topic determines sharing. Multiple formulas that observe the same active subscription share it; a failed new observation rolls back only the reservation created by that attempt, not an unrelated established subscriber.
+The source is typically an `Arc<S>` or another cloneable value satisfying the source API. The exact identity of source plus topic determines sharing. Multiple formulas that observe the same active subscription share it; a failed new observation rolls back only the reservation created by that attempt, not an unrelated established subscriber. The complete compile-tested fixture, including the add-in state and `Client` placeholder, lives under `examples/rtd-source`.
 
 ## RTD value types
 

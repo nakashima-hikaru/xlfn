@@ -126,7 +126,7 @@ impl From<&str> for PackageError {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleMetadata {
     #[serde(default)]
@@ -135,8 +135,23 @@ pub struct BundleMetadata {
     pub x64: Vec<String>,
     #[serde(default, rename = "external-imports")]
     pub external_imports: Vec<String>,
-    #[serde(default, rename = "strict-paths")]
+    #[serde(default = "default_strict_paths", rename = "strict-paths")]
     pub strict_paths: bool,
+}
+
+fn default_strict_paths() -> bool {
+    true
+}
+
+impl Default for BundleMetadata {
+    fn default() -> Self {
+        Self {
+            x86: Vec::new(),
+            x64: Vec::new(),
+            external_imports: Vec::new(),
+            strict_paths: default_strict_paths(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,7 +263,7 @@ pub fn resolve_bundle_files(
     target: &str,
     configured: &[String],
 ) -> PackageResult<ResolvedBundle> {
-    resolve_bundle_files_with_policy(manifest_directory, target, configured, &[], false)
+    resolve_bundle_files_with_policy(manifest_directory, target, configured, &[], true)
 }
 
 pub fn resolve_bundle_files_with_metadata(
@@ -1925,6 +1940,23 @@ mod tests {
     }
 
     #[test]
+    fn bundle_metadata_and_simple_resolution_default_to_strict_paths() {
+        let parsed: BundleMetadata = serde_json::from_str(r#"{"x86":[],"x64":[]}"#).unwrap();
+        assert!(parsed.strict_paths);
+        assert!(BundleMetadata::default().strict_paths);
+
+        let manifest = tempfile::tempdir().unwrap();
+        fs::write(manifest.path().join("Engine.dll"), []).unwrap();
+        let bundle = resolve_bundle_files(
+            manifest.path(),
+            "x86_64-pc-windows-msvc",
+            &["Engine.dll".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(bundle.resolved_files().count(), 1);
+    }
+
+    #[test]
     fn case_insensitive_bundle_basenames_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
         fs::create_dir_all(directory.path().join("one")).unwrap();
@@ -2563,13 +2595,27 @@ mod tests {
             manifest.path().join("Escape.dll"),
         )
         .unwrap();
-        let error = resolve_bundle_files(
+        let strict_error = resolve_bundle_files(
             manifest.path(),
             "x86_64-pc-windows-msvc",
             &["Escape.dll".to_owned()],
         )
         .unwrap_err();
-        assert!(error.to_string().contains("escapes manifest directory"));
+        assert!(strict_error.to_string().contains("rejects symlink"));
+
+        let relaxed_escape_error = resolve_bundle_files_with_policy(
+            manifest.path(),
+            "x86_64-pc-windows-msvc",
+            &["Escape.dll".to_owned()],
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            relaxed_escape_error
+                .to_string()
+                .contains("escapes manifest directory")
+        );
 
         fs::write(manifest.path().join("Inside.dll"), b"inside").unwrap();
         symlink(
@@ -2577,10 +2623,12 @@ mod tests {
             manifest.path().join("Alias.dll"),
         )
         .unwrap();
-        let relaxed = resolve_bundle_files(
+        let relaxed = resolve_bundle_files_with_policy(
             manifest.path(),
             "x86_64-pc-windows-msvc",
             &["Alias.dll".to_owned()],
+            &[],
+            false,
         )
         .unwrap();
         assert_eq!(relaxed.resolved_files().count(), 1);

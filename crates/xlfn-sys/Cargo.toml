@@ -12,6 +12,7 @@ description = "Raw Excel 12 XLL ABI definitions and callback trampoline"
 abi-probe = []
 
 [dependencies]
+smallvec.workspace = true
 static_assertions.workspace = true
 
 [target.'cfg(windows)'.dependencies]

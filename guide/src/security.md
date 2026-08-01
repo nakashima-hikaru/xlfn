@@ -55,8 +55,9 @@ Do not expose a token as a durable object ID or accept it over an external servi
 ## Native DLL loading and dependencies
 
 The product adapter builds its DLL path from `OpenContext::module_directory()`. `cargo xlfn` checks
-the independently declared bundle architecture and import closure. With `strict-paths = true`,
-configured bundle paths reject symlink, junction, and reparse-point traversal.
+the independently declared bundle architecture and import closure. `strict-paths` defaults to true;
+configured bundle paths reject symlink, junction, and reparse-point traversal unless a manifest
+explicitly opts into the relaxed policy.
 
 Still apply these controls:
 

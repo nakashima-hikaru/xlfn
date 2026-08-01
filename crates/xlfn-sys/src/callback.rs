@@ -1,6 +1,7 @@
 use crate::{XL_FREE, XLOPER12};
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub const XLRET_SUCCESS: i32 = 0;
@@ -136,10 +137,8 @@ pub unsafe fn excel12_with_invocation(
     let Some(callback) = resolve_callback() else {
         return (XLRET_FAILED, result, false);
     };
-    let mut raw_arguments = arguments
-        .iter()
-        .map(|argument| argument.as_ptr())
-        .collect::<Vec<_>>();
+    let mut raw_arguments: SmallVec<[*mut XLOPER12; 16]> =
+        arguments.iter().map(|argument| argument.as_ptr()).collect();
     // SAFETY: the private pointer array supplies exactly the reported number
     // of live, read-only XLOPER12 pointers and may be mutated by the callback.
     // Result is writable for the duration of the call.

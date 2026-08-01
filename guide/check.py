@@ -12,6 +12,7 @@ SRC = GUIDE / "src"
 SUMMARY = SRC / "SUMMARY.md"
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 SUMMARY_LINK = re.compile(r"^\s*(?:[-*]\s+)?\[[^\]]+\]\(([^)]+)\)", re.MULTILINE)
+INCLUDE = re.compile(r"\{\{#include\s+([^}:]+)(?::[^}]*)?\}\}")
 
 errors: list[str] = []
 
@@ -96,6 +97,10 @@ for path in [GUIDE / "README.md", *markdown_files]:
         resolved = (path.parent / target_path).resolve()
         if not resolved.exists():
             errors.append(f"Broken local link in {path.relative_to(GUIDE)}: {target}")
+    for target in INCLUDE.findall(text):
+        resolved = (path.parent / target).resolve()
+        if not resolved.is_file():
+            errors.append(f"Broken mdBook include in {path.relative_to(GUIDE)}: {target}")
 
 if errors:
     print("Guide validation failed:", file=sys.stderr)

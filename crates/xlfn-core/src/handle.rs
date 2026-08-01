@@ -703,21 +703,28 @@ impl HandleRegistry {
     }
 
     fn parse_token(&self, token: &str) -> XllResult<ParsedToken> {
-        let fields = token.split(':').collect::<Vec<_>>();
-        if fields.len() != 6
-            || fields[0] != "xllh"
-            || fields[1] != "3"
-            || fields[2].len() != 16
-            || fields[3].len() != 8
-            || fields[4].len() != 16
-            || fields[5].len() != 32
+        let mut fields = token.splitn(7, ':');
+        let prefix = fields.next().ok_or(XllError::InvalidHandle)?;
+        let version = fields.next().ok_or(XllError::InvalidHandle)?;
+        let session = fields.next().ok_or(XllError::InvalidHandle)?;
+        let slot = fields.next().ok_or(XllError::InvalidHandle)?;
+        let generation = fields.next().ok_or(XllError::InvalidHandle)?;
+        let tag = fields.next().ok_or(XllError::InvalidHandle)?;
+        if fields.next().is_some()
+            || prefix != "xllh"
+            || version != "3"
+            || session.len() != 16
+            || slot.len() != 8
+            || generation.len() != 16
+            || tag.len() != 32
         {
             return Err(XllError::InvalidHandle);
         }
-        let session = u64::from_str_radix(fields[2], 16).map_err(|_| XllError::InvalidHandle)?;
-        let slot = u32::from_str_radix(fields[3], 16).map_err(|_| XllError::InvalidHandle)?;
-        let generation = u64::from_str_radix(fields[4], 16).map_err(|_| XllError::InvalidHandle)?;
-        let tag = decode_tag(fields[5]).ok_or(XllError::InvalidHandle)?;
+        let session = u64::from_str_radix(session, 16).map_err(|_| XllError::InvalidHandle)?;
+        let slot = u32::from_str_radix(slot, 16).map_err(|_| XllError::InvalidHandle)?;
+        let generation =
+            u64::from_str_radix(generation, 16).map_err(|_| XllError::InvalidHandle)?;
+        let tag = decode_tag(tag).ok_or(XllError::InvalidHandle)?;
         let expected = self.authentication_tag(slot, generation);
         if session != self.session || !constant_time_eq::constant_time_eq(&tag, &expected) {
             return Err(XllError::InvalidHandle);

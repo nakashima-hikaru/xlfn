@@ -53,6 +53,9 @@ jobs:
           --all-features
           --locked
 
+      - name: Compile-test the RTD guide fixture
+        run: cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
+
       - name: Validate the user guide
         run: python guide/check.py
 

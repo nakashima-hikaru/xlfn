@@ -17,6 +17,7 @@ Also build the feature combinations your consumers use, including the no-default
 ```console
 cargo check --package xlfn --locked
 cargo check --package xlfn --features async --locked
+cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
 ```
 
 Unit tests should cover pure business logic separately from generated boundaries. Property tests are useful for conversion limits, fingerprints, token parsing, array shapes, and cache keys.

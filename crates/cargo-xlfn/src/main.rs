@@ -679,24 +679,31 @@ fn stage_distribution_target(
     if !source.is_file() {
         bail!("built XLL DLL was not found at {}", source.display());
     }
-    let bundle = match &metadata.bundle {
-        Some(bundle_metadata) => xlfn_package::resolve_bundle_files_with_metadata(
-            &metadata.manifest_directory,
-            target.triple(),
-            bundle_metadata,
-        )?,
-        None => xlfn_package::ResolvedBundle::empty(),
+    let (bundle, strict_paths) = match &metadata.bundle {
+        Some(bundle_metadata) => (
+            xlfn_package::resolve_bundle_files_with_metadata(
+                &metadata.manifest_directory,
+                target.triple(),
+                bundle_metadata,
+            )?,
+            bundle_metadata.strict_paths,
+        ),
+        None => (xlfn_package::ResolvedBundle::empty(), true),
     };
     validate_bundle_output_names(&bundle, &metadata.artifact_name)?;
     let bundle_sources = bundle
         .resolved_files()
-        .map(|(configured_path, resolved_source)| {
-            json!({
+        .map(|(configured_path, staged_source)| -> Result<_> {
+            let staged_relative_path = staged_source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("bundle file basename is not valid UTF-8")?;
+            Ok(json!({
                 "configured_path": configured_path,
-                "resolved_source": resolved_source.to_string_lossy(),
-            })
+                "staged_relative_path": staged_relative_path,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let external_imports = bundle.external_imports().collect::<Vec<_>>();
 
     let staged_bundle = xlfn_package::stage_bundle(&bundle, staging)?;
@@ -728,7 +735,7 @@ fn stage_distribution_target(
         })
         .collect::<Result<Vec<_>>>()?;
     let manifest = json!({
-        "schema": 5,
+        "schema": 6,
         "package": metadata.package_name,
         "package_version": metadata.package_version,
         "artifact": metadata.artifact_name,
@@ -748,8 +755,9 @@ fn stage_distribution_target(
         },
         "crt": observation.manifest(metadata.crt),
         "bundle_sources": bundle_sources,
-        "system_import_policy": {
-            "version": xlfn_package::SYSTEM_IMPORT_POLICY_VERSION,
+        "bundle_policy": {
+            "strict_paths": strict_paths,
+            "system_import_policy": xlfn_package::SYSTEM_IMPORT_POLICY_VERSION,
             "external_imports": external_imports,
         },
         "integrity": {

@@ -26,7 +26,7 @@ Each target directory contains:
 - configured native DLLs and their packaged dependencies;
 - `build-manifest.json`.
 
-The manifest records schema version 5, package and artifact identity, target, profile, selected
+The manifest records schema version 6, package and artifact identity, target, profile, selected
 features, requested and observed CRT policy, configured/resolved bundle sources, import-policy
 version, file sizes, and SHA-256 values. Its integrity section explicitly states that hashes are
 audit metadata and are not verified before DLL execution.
@@ -108,7 +108,7 @@ Before publishing:
 - build with `--locked` from a clean checkout;
 - record source commit, toolchain, target, and feature set;
 - run both artifact and real-Excel qualification gates;
-- review `build-manifest.json` and native-source paths;
+- review `build-manifest.json`, its effective bundle policy, and staged bundle paths;
 - verify x86/x64 architecture independently;
 - sign and verify every executable binary;
 - scan the final package with organizational security tooling;

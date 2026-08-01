@@ -7,6 +7,7 @@ members = [
     "crates/cargo-xlfn",
     "crates/xlfn",
     "examples/basic-xll",
+    "examples/rtd-source",
     "tests/xlfn-e2e-fixture",
     "probes/excel-abi-probe",
 ]
@@ -59,6 +60,7 @@ scopeguard = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+smallvec = "1.15.2"
 shuttle = "0.9.1"
 static_assertions = "1.1.0"
 syn = { version = "3.0.3", features = ["full"] }

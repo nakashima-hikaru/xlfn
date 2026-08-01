@@ -54,7 +54,7 @@ strict-paths = true
 | `x86` | array of strings | files packaged for `i686-pc-windows-msvc` |
 | `x64` | array of strings | files packaged for `x86_64-pc-windows-msvc` |
 | `external-imports` | array of strings | approved non-system DLL basenames supplied outside the package |
-| `strict-paths` | Boolean | reject symbolic links/reparse points in configured source paths |
+| `strict-paths` | Boolean | reject symbolic links/reparse points in configured source paths; defaults to `true` |
 
 Unknown fields are rejected.
 
@@ -69,7 +69,7 @@ Every configured native path must:
 - have a case-insensitively unique output basename;
 - not collide with `<artifact-name>.xll` or `build-manifest.json`.
 
-With `strict-paths = true`, each configured component is also rejected when it is a symbolic link or Windows reparse point. Keep this enabled for release inputs. A relaxed setting still enforces canonical containment but permits links; use it only for a controlled development workflow whose trust boundary is documented.
+With `strict-paths = true`, each configured component is also rejected when it is a symbolic link or Windows reparse point. This is the default, including when the key is omitted. To relax the check, set `strict-paths = false` explicitly; that still enforces canonical containment but permits links, and should be limited to a controlled development workflow whose trust boundary is documented.
 
 The output package is flat. Directory structure in configured paths is not preserved, so basename uniqueness is mandatory.
 
@@ -128,7 +128,7 @@ The selected package must contain exactly one `cdylib` target.
 
 ## `build-manifest.json`
 
-Every distribution directory contains schema version 5 audit metadata. Its top-level fields are:
+Every distribution directory contains schema version 6 audit metadata. Its top-level fields are:
 
 | Field | Meaning |
 |---|---|
@@ -141,8 +141,8 @@ Every distribution directory contains schema version 5 audit metadata. Its top-l
 | `feature_selection` | requested and resolved package feature set |
 | `cargo_constraints` | lock/network constraints and lockfile hash |
 | `crt` | requested/source/effective CRT policy, enforcement, observed dynamic CRT imports, and consistency |
-| `bundle_sources` | configured paths and resolved source paths used during staging |
-| `system_import_policy` | versioned system-DLL policy and approved external imports |
+| `bundle_sources` | configured relative paths and their staged relative basenames |
+| `bundle_policy` | effective strict-paths setting, versioned system-DLL policy, and approved external imports |
 | `integrity` | explicit trust-boundary statement |
 | `files` | relative path, byte size, and SHA-256 for every distributed file |
 
@@ -155,6 +155,6 @@ Before release:
 1. compare the two architecture lists rather than assuming they are symmetric;
 2. inspect every transitive import reported by `cargo xlfn check`;
 3. keep `external-imports` empty unless deployment owns the exception;
-4. review resolved source paths in the manifest for unintended build-machine locations;
+4. review the recorded bundle policy and staged relative paths;
 5. verify output basenames and signatures after staging;
 6. archive the manifest with release evidence, but do not use it as the sole integrity control.
