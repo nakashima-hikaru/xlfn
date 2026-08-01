@@ -196,6 +196,16 @@ pub struct StagedBundle {
     external_imports: BTreeSet<String>,
 }
 
+impl StagedBundle {
+    pub fn add_external_imports(&mut self, imports: impl IntoIterator<Item = impl AsRef<str>>) {
+        for import in imports {
+            if let Ok(key) = windows_dll_name_key("external import", import.as_ref()) {
+                self.external_imports.insert(key);
+            }
+        }
+    }
+}
+
 pub struct VerifiedPackage {
     files: Vec<PathBuf>,
 }
@@ -1852,6 +1862,23 @@ mod tests {
         )]);
         let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
         assert!(error.to_string().contains("vcruntime140.dll"));
+    }
+
+    #[test]
+    fn staged_bundle_add_external_imports_permits_dynamic_msvc_runtime() {
+        let mut bundle = StagedBundle {
+            files: vec![],
+            external_imports: BTreeSet::new(),
+        };
+        bundle.add_external_imports(["vcruntime140.dll"]);
+        let images = BTreeMap::from([(
+            "addin.xll".to_owned(),
+            (
+                "Addin.xll".to_owned(),
+                graph_image(&["vcruntime140.dll"], &[]),
+            ),
+        )]);
+        assert!(validate_dependency_graph(&images, &bundle.external_imports).is_ok());
     }
 
     #[test]

@@ -254,6 +254,8 @@ fn check(args: &CheckArgs) -> Result {
         fs::copy(&source, &xll)?;
         let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
         observation.warn_if_mixed();
+        let mut staged_bundle = staged_bundle;
+        staged_bundle.add_external_imports(&observation.dynamic_crt_imports);
         xlfn_package::verify_staged_package(&xll, target, &[], staged_bundle)?;
     }
     println!("Cargo manifest / cdylib  OK");
@@ -711,6 +713,9 @@ fn stage_distribution_target(
 
     let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
     observation.warn_if_mixed();
+
+    let mut staged_bundle = staged_bundle;
+    staged_bundle.add_external_imports(&observation.dynamic_crt_imports);
 
     // Inspect only the isolated files. These same staged bytes are hashed
     // below and become the committed distribution directory.
