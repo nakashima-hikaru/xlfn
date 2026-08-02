@@ -151,16 +151,6 @@ impl ExportIngress {
         ExportsDrained { epoch: state.epoch }
     }
 
-    /// Begins closing and immediately seals after all active calls drain.
-    ///
-    /// Lifecycle shutdown should use [`Self::begin_close`] at admission cutoff
-    /// and defer [`Self::seal_and_drain`] until final certification.
-    #[deprecated(note = "use begin_close followed by seal_and_drain at final shutdown")]
-    pub fn close_and_drain(&self) -> ExportsDrained {
-        self.begin_close();
-        self.seal_and_drain()
-    }
-
     pub fn phase(&self) -> u8 {
         self.state
             .lock()
