@@ -388,6 +388,20 @@ pub fn verify_bundle_files(bundle: &ResolvedBundle, target: &str) -> PackageResu
     )
 }
 
+/// Opens a packaging source with the same stable-snapshot guarantees used for
+/// bundled DLLs and returns the bytes read from that fixed file identity.
+pub fn snapshot_file(target: &str, path: &Path) -> PackageResult<Arc<[u8]>> {
+    let mut file = open_bundle_source_for_snapshot(path)
+        .map_err(|error| map_snapshot_open_error(target, path, error))?;
+    if !file.metadata()?.is_file() {
+        return Err(format!("{target}: source is not a file: {}", path.display()).into());
+    }
+    let snapshot = read_stable_snapshot(target, path, &mut file, &NoopSnapshotObserver)?;
+    #[cfg(not(target_os = "windows"))]
+    verify_snapshot_against_second_read(target, path, &mut file, &snapshot)?;
+    Ok(snapshot)
+}
+
 pub fn stage_bundle(bundle: &ResolvedBundle, destination: &Path) -> PackageResult<StagedBundle> {
     if destination.exists() || fs::symlink_metadata(destination).is_ok() {
         return Err(format!(
@@ -681,6 +695,9 @@ pub fn verify_pe_dependency_closure(
             .and_then(|name| name.to_str())
             .ok_or_else(|| format!("bundled DLL has no UTF-8 basename: {}", path.display()))?;
         let key = windows_dll_name_key("bundled DLL", name)?;
+        if is_system(&key) {
+            return Err(format!("bundle must not shadow Windows system DLL {name:?}").into());
+        }
         if key == root_key {
             return Err(
                 format!("bundled DLL basename `{name}` collides with root `{root_name}`").into(),
@@ -767,6 +784,10 @@ fn validate_dependency_graph(
     images: &BTreeMap<String, (String, PeInfo)>,
     external_imports: &BTreeSet<String>,
 ) -> PackageResult {
+    let bundled_names = images.keys().cloned().collect::<BTreeSet<_>>();
+    if let Some(name) = external_imports.intersection(&bundled_names).next() {
+        return Err(format!("DLL `{name}` cannot be both bundled and external").into());
+    }
     for root in images.keys() {
         let mut path = vec![root.clone()];
         validate_dependency_node(
@@ -2404,6 +2425,74 @@ mod tests {
     }
 
     #[test]
+    fn dependency_graph_rejects_bundled_external_collision_for_regular_import() {
+        let images = BTreeMap::from([
+            (
+                "vendor.dll".to_owned(),
+                ("Vendor.dll".to_owned(), graph_image(&[], &[])),
+            ),
+            (
+                "addin.xll".to_owned(),
+                ("Addin.xll".to_owned(), graph_image(&["Vendor.dll"], &[])),
+            ),
+        ]);
+        let external = BTreeSet::from(["vendor.dll".to_owned()]);
+
+        let error = validate_dependency_graph(&images, &external).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DLL `vendor.dll` cannot be both bundled and external"
+        );
+    }
+
+    #[test]
+    fn dependency_graph_rejects_bundled_external_collision_for_delay_import() {
+        let images = BTreeMap::from([
+            (
+                "vendor.dll".to_owned(),
+                ("Vendor.dll".to_owned(), graph_image(&[], &[])),
+            ),
+            (
+                "addin.xll".to_owned(),
+                ("Addin.xll".to_owned(), graph_image(&[], &["Vendor.dll"])),
+            ),
+        ]);
+        let external = BTreeSet::from(["vendor.dll".to_owned()]);
+
+        let error = validate_dependency_graph(&images, &external).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DLL `vendor.dll` cannot be both bundled and external"
+        );
+    }
+
+    #[test]
+    fn dependency_graph_rejects_bundled_external_collision_for_forwarded_export() {
+        let mut addin = graph_image(&[], &[]);
+        add_forwarded_export(
+            &mut addin,
+            "Process",
+            1,
+            "Vendor.dll",
+            ExportSymbol::Name("ProcessImpl".to_owned()),
+        );
+        let images = BTreeMap::from([
+            ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+            (
+                "vendor.dll".to_owned(),
+                ("Vendor.dll".to_owned(), graph_image(&[], &[])),
+            ),
+        ]);
+        let external = BTreeSet::from(["vendor.dll".to_owned()]);
+
+        let error = validate_dependency_graph(&images, &external).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "DLL `vendor.dll` cannot be both bundled and external"
+        );
+    }
+
+    #[test]
     fn dynamically_linked_msvc_runtime_is_not_treated_as_an_inbox_dll() {
         let images = BTreeMap::from([(
             "addin.xll".to_owned(),
@@ -2486,6 +2575,41 @@ mod tests {
         assert!(normalize_external_imports(&["..\\vendor.dll".to_owned()]).is_err());
         assert!(normalize_external_imports(&["C:\\Temp\\vendor.dll".to_owned()]).is_err());
         assert!(normalize_external_imports(&["vendor.exe".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn public_dependency_verifier_rejects_a_bundled_system_dll_basename() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Addin.xll");
+        let bundled = directory.path().join("version.dll");
+        fs::write(
+            &root,
+            minimal_pe(
+                Architecture::X64.machine(),
+                IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &bundled,
+            minimal_pe(
+                Architecture::X64.machine(),
+                IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+            ),
+        )
+        .unwrap();
+
+        let error = verify_pe_dependency_closure(
+            &root,
+            "x86_64-pc-windows-msvc",
+            std::slice::from_ref(&bundled),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must not shadow Windows system DLL")
+        );
     }
 
     #[test]
@@ -2812,6 +2936,18 @@ mod tests {
 
         let error = resolver.join().unwrap().unwrap_err();
         assert!(matches!(error, PackageError::UnstableBundleSource { .. }));
+    }
+
+    #[test]
+    fn snapshot_file_keeps_the_bytes_from_its_open_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Addin.dll");
+        fs::write(&source, b"original bytes").unwrap();
+
+        let snapshot = snapshot_file("x86_64-pc-windows-msvc", &source).unwrap();
+        fs::write(&source, b"replacement bytes").unwrap();
+
+        assert_eq!(snapshot.as_ref(), b"original bytes");
     }
 
     #[test]

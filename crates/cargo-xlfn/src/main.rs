@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs_err as fs;
 use serde_json::json;
 use std::fmt;
-use std::io;
+use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use xlfn_package::{BundleMetadata, validate_windows_basename};
@@ -208,6 +208,7 @@ fn run() -> Result {
 fn check(args: &CheckArgs) -> Result {
     let metadata = project_metadata(&args.project, &args.build)?;
     metadata.crt.print();
+    let target_directory = metadata.crt.target_directory(&metadata.target_directory);
     let only_target = args.target.map(WindowsTarget::triple);
     let rust_targets = only_target.map_or_else(
         || vec![WindowsTarget::X86.triple(), WindowsTarget::X64.triple()],
@@ -220,16 +221,17 @@ fn check(args: &CheckArgs) -> Result {
             .arg(&metadata.manifest_path)
             .args(["--package", &metadata.package_name])
             .args(["--target", target]);
-        configure_build(&mut command, &metadata, target)?;
+        configure_build(&mut command, &metadata, target, &target_directory)?;
         args.build.apply_to_command(&mut command, None);
         if !command.status()?.success() {
             bail!("XLL001 Rust build/link failed for {target}");
         }
 
-        let source = built_library_path(&metadata, target, &args.build, None);
+        let source = built_library_path(&metadata, target, &args.build, None, &target_directory);
         if !source.is_file() {
             bail!("built XLL DLL was not found at {}", source.display());
         }
+        let source_snapshot = xlfn_package::snapshot_file(target, &source)?;
         let bundle = match &metadata.bundle {
             Some(bundle_metadata) => xlfn_package::resolve_bundle_files_with_metadata(
                 &metadata.manifest_directory,
@@ -251,7 +253,7 @@ fn check(args: &CheckArgs) -> Result {
                 xll.display()
             );
         }
-        fs::copy(&source, &xll)?;
+        fs::write(&xll, source_snapshot.as_ref())?;
         let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
         observation.warn_if_mixed();
         xlfn_package::verify_staged_package(&xll, target, &[], staged_bundle)?;
@@ -268,6 +270,7 @@ fn built_library_path(
     target: &str,
     build: &BuildSelectionArgs,
     default_profile: Option<&str>,
+    target_directory: &Path,
 ) -> PathBuf {
     let profile = build
         .profile
@@ -275,9 +278,8 @@ fn built_library_path(
         .or(default_profile)
         .unwrap_or("dev");
     let profile_directory = if profile == "dev" { "debug" } else { profile };
-    metadata
-        .crt
-        .target_directory(&metadata.target_directory)
+    target_directory
+        .to_path_buf()
         .join(target)
         .join(profile_directory)
         .join(format!("{}.dll", metadata.lib_name.replace('-', "_")))
@@ -592,6 +594,12 @@ fn distribute(args: &DistArgs) -> Result {
     };
     let metadata = project_metadata(&args.project, &args.build)?;
     metadata.crt.print();
+    let target_parent = metadata.crt.target_directory(&metadata.target_directory);
+    fs::create_dir_all(&target_parent)?;
+    let build_target_guard = tempfile::Builder::new()
+        .prefix(".cargo-xlfn-dist-build-")
+        .tempdir_in(&target_parent)?;
+    let build_target_directory = build_target_guard.path();
     if args.all {
         validate_atomic_output_root(&args.out)?;
         let output_parent = args
@@ -605,25 +613,32 @@ fn distribute(args: &DistArgs) -> Result {
             .tempdir_in(output_parent)?;
         let staging_root = staging_guard.path().join("distribution");
         fs::create_dir(&staging_root)?;
-        for target in targets {
+        for target in &targets {
+            validate_output_destination(&args.out.join(target.directory()))?;
             stage_distribution_target(
-                target,
+                *target,
                 args,
                 &metadata,
                 &staging_root.join(target.directory()),
+                build_target_directory,
             )?;
+        }
+        for target in &targets {
+            validate_output_destination(&args.out.join(target.directory()))?;
         }
         commit_staged_directory(&staging_root, &args.out)?;
         println!("created {}", args.out.display());
     } else {
+        validate_output_destination(&args.out)?;
         fs::create_dir_all(&args.out)?;
         let target = targets[0];
         let destination = args.out.join(target.directory());
+        validate_output_destination(&destination)?;
         let staging_guard = tempfile::Builder::new()
             .prefix(&format!(".{}.tmp-", target.directory()))
             .tempdir_in(&args.out)?;
         let staging = staging_guard.path().join("distribution");
-        stage_distribution_target(target, args, &metadata, &staging)?;
+        stage_distribution_target(target, args, &metadata, &staging, build_target_directory)?;
         commit_staged_directory(&staging, &destination)?;
         println!("created {}", destination.display());
     }
@@ -640,6 +655,7 @@ fn validate_atomic_output_root(destination: &Path) -> Result {
             destination.display()
         );
     }
+    validate_output_destination(destination)?;
     if destination.exists() {
         let current = fs::canonicalize(std::env::current_dir()?)?;
         let destination = fs::canonicalize(destination)?;
@@ -653,11 +669,46 @@ fn validate_atomic_output_root(destination: &Path) -> Result {
     Ok(())
 }
 
+fn validate_output_destination(destination: &Path) -> Result {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if output_path_is_reparse_point(&metadata) => {
+            bail!(
+                "output destination must not be a symlink or reparse point: {}",
+                destination.display()
+            );
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!(
+                "output destination must be a directory: {}",
+                destination.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn output_path_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn output_path_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 fn stage_distribution_target(
     target: WindowsTarget,
     args: &DistArgs,
     metadata: &ProjectMetadata,
     staging: &Path,
+    target_directory: &Path,
 ) -> Result {
     let profile = args.build.profile.as_deref().unwrap_or("release");
     let mut command = cargo_command();
@@ -670,15 +721,22 @@ fn stage_distribution_target(
             "--target",
             target.triple(),
         ]);
-    configure_build(&mut command, metadata, target.triple())?;
+    configure_build(&mut command, metadata, target.triple(), target_directory)?;
     args.build.apply_to_command(&mut command, Some("release"));
     if !command.status()?.success() {
         bail!("cargo build failed for {}", target.triple());
     }
-    let source = built_library_path(metadata, target.triple(), &args.build, Some("release"));
+    let source = built_library_path(
+        metadata,
+        target.triple(),
+        &args.build,
+        Some("release"),
+        target_directory,
+    );
     if !source.is_file() {
         bail!("built XLL DLL was not found at {}", source.display());
     }
+    let source_snapshot = xlfn_package::snapshot_file(target.triple(), &source)?;
     let (bundle, strict_paths) = match &metadata.bundle {
         Some(bundle_metadata) => (
             xlfn_package::resolve_bundle_files_with_metadata(
@@ -714,7 +772,7 @@ fn stage_distribution_target(
             xll.display()
         );
     }
-    fs::copy(&source, &xll)?;
+    fs::write(&xll, source_snapshot.as_ref())?;
 
     let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
     observation.warn_if_mixed();
@@ -824,6 +882,7 @@ fn commit_staged_directory_with(
     destination: &Path,
     file_ops: &impl DistributionFileOps,
 ) -> Result {
+    validate_output_destination(destination)?;
     let parent = destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -871,11 +930,14 @@ fn cargo_command() -> Command {
     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
-fn configure_build(command: &mut Command, metadata: &ProjectMetadata, target: &str) -> Result {
+fn configure_build(
+    command: &mut Command,
+    metadata: &ProjectMetadata,
+    target: &str,
+    target_directory: &Path,
+) -> Result {
     crt::validate_explicit_policy_target(metadata.crt.policy, target)?;
-    command
-        .arg("--target-dir")
-        .arg(metadata.crt.target_directory(&metadata.target_directory));
+    command.arg("--target-dir").arg(target_directory);
     crt::configure_wrapper(command, metadata.crt, target)
 }
 
@@ -1131,6 +1193,39 @@ mod tests {
         assert!(validate_atomic_output_root(Path::new("..")).is_err());
         assert!(validate_atomic_output_root(Path::new("/")).is_err());
         assert!(validate_atomic_output_root(Path::new("dist")).is_ok());
+    }
+
+    #[test]
+    fn output_destination_rejects_existing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        fs::write(&destination, b"do not replace").unwrap();
+
+        let error = validate_output_destination(&destination).unwrap_err();
+        assert!(error.to_string().contains("must be a directory"));
+
+        let staging = directory.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.xll"), b"new").unwrap();
+        let file_ops = InjectedFileOps::default();
+        assert!(commit_staged_directory_with(&staging, &destination, &file_ops).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"do not replace");
+        assert!(file_ops.operations.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_destination_rejects_existing_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real_destination = directory.path().join("real");
+        let destination = directory.path().join("win-x64");
+        fs::create_dir(&real_destination).unwrap();
+        symlink(&real_destination, &destination).unwrap();
+
+        let error = validate_output_destination(&destination).unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
     }
 
     #[test]
