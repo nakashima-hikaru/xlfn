@@ -99,6 +99,8 @@ mod tests {
 
         assert!(!session.permits_callbacks());
         assert_eq!(session.terminal_status(), Some(ExcelCallbackStatus::Abort));
+        // SAFETY: this test intentionally supplies a dummy operation and
+        // verifies that terminal suppression prevents it from being invoked.
         let suppressed = match unsafe { session.call(123, &[]) } {
             Ok(_) => panic!("terminal session unexpectedly invoked callback"),
             Err(suppressed) => suppressed,
@@ -116,6 +118,8 @@ mod tests {
             session.terminal_status(),
             Some(ExcelCallbackStatus::Uncalced)
         );
+        // SAFETY: this test intentionally supplies a dummy operation and
+        // verifies that terminal suppression prevents it from being invoked.
         let suppressed = match unsafe { session.call(123, &[]) } {
             Ok(_) => panic!("terminal session unexpectedly invoked callback"),
             Err(suppressed) => suppressed,

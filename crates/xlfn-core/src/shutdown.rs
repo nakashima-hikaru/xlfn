@@ -82,6 +82,8 @@ pub(crate) enum UnloadHazard {
     OpenRollbackFailed,
     UnhandledClosePanic,
     CloseInvariantViolation,
+    RtdGitCallbackStillRegistered,
+    RtdGitRevocationDebt,
 }
 
 pub(crate) struct StopOutcome<T> {

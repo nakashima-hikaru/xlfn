@@ -772,7 +772,7 @@ mod tests {
 
     fn finish_test_close<S>(runtime: &Runtime<S>) {
         let exports = crate::ingress::ExportsDrained::for_test();
-        let rtd = crate::rtd::wait_for_module_quiescence();
+        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = runtime
             .certify_close(ClosePrerequisites {
                 exports,
@@ -945,7 +945,7 @@ mod tests {
         runtime.close_handles().unwrap();
         runtime.close_subscriptions().unwrap();
         let exports = crate::ingress::ExportsDrained::for_test();
-        let rtd = crate::rtd::wait_for_module_quiescence();
+        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         assert!(
             runtime
                 .certify_close(ClosePrerequisites {

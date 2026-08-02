@@ -31,6 +31,12 @@ pub(crate) fn module_unload_certified() -> bool {
 #[derive(Debug)]
 pub(crate) struct RtdQuiescent(());
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RtdQuiescenceError {
+    pub(crate) outstanding_git_cookies: usize,
+    pub(crate) revocation_debt: usize,
+}
+
 pub(crate) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
@@ -132,8 +138,10 @@ pub fn dll_can_unload_now() -> i32 {
     }
 }
 
-pub(crate) fn wait_for_module_quiescence() -> RtdQuiescent {
+pub(crate) fn wait_for_module_quiescence() -> Result<RtdQuiescent, RtdQuiescenceError> {
     #[cfg(target_os = "windows")]
-    windows::wait_for_module_quiescence();
-    RtdQuiescent(())
+    {
+        windows::wait_for_module_quiescence()?;
+    }
+    Ok(RtdQuiescent(()))
 }

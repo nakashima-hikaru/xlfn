@@ -6,6 +6,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
@@ -79,7 +80,6 @@ const SERVER_STARTING: u8 = 1;
 const SERVER_STARTED: u8 = 2;
 const SERVER_START_FAILED: u8 = 3;
 static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
-static GIT_REVOCATION_DEBT: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 #[repr(C)]
 struct IGlobalInterfaceTable {
@@ -162,44 +162,96 @@ impl ComModuleState {
             && self.outstanding_git_cookies == 0
             && self.revocation_debt == 0
     }
+
+    fn has_only_git_blockers(self) -> bool {
+        self.live_factories == 0
+            && self.live_servers == 0
+            && self.server_locks == 0
+            && self.in_flight_calls == 0
+            && (self.outstanding_git_cookies != 0 || self.revocation_debt != 0)
+    }
+}
+
+struct ComModuleLifetimeInner {
+    state: ComModuleState,
+    /// Cookies whose GIT revocation failed. The corresponding
+    /// `state.revocation_debt` count also includes claims temporarily removed
+    /// from this queue while a retry is in flight.
+    git_revocation_debt: Vec<NonZeroU32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ComModuleQuiescenceError {
+    state: ComModuleState,
 }
 
 struct ComModuleLifetime {
-    state: Mutex<ComModuleState>,
+    inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
 }
 
 impl ComModuleLifetime {
     const fn new() -> Self {
         Self {
-            state: Mutex::new(ComModuleState {
-                live_factories: 0,
-                live_servers: 0,
-                server_locks: 0,
-                in_flight_calls: 0,
-                outstanding_git_cookies: 0,
-                revocation_debt: 0,
+            inner: Mutex::new(ComModuleLifetimeInner {
+                state: ComModuleState {
+                    live_factories: 0,
+                    live_servers: 0,
+                    server_locks: 0,
+                    in_flight_calls: 0,
+                    outstanding_git_cookies: 0,
+                    revocation_debt: 0,
+                },
+                git_revocation_debt: Vec::new(),
             }),
             quiescent: Condvar::new(),
         }
     }
 
-    #[allow(dead_code)]
-    fn git_cookie_created(&self) {
-        let mut state = self.state.lock();
-        Self::increment(&mut state.outstanding_git_cookies);
+    fn git_cookie_registered(&self) {
+        let mut inner = self.inner.lock();
+        Self::increment(&mut inner.state.outstanding_git_cookies);
     }
 
-    #[allow(dead_code)]
-    fn git_cookie_revoked(&self, success: bool) {
-        let mut state = self.state.lock();
-        if state.outstanding_git_cookies > 0 {
-            Self::decrement(&mut state.outstanding_git_cookies);
-        }
-        if !success {
-            Self::increment(&mut state.revocation_debt);
-        }
+    fn git_cookie_revoked(&self) {
+        let mut inner = self.inner.lock();
+        Self::decrement(&mut inner.state.outstanding_git_cookies);
         self.quiescent.notify_all();
+    }
+
+    fn git_cookie_revocation_deferred(&self, cookie: NonZeroU32) {
+        let mut inner = self.inner.lock();
+        Self::decrement(&mut inner.state.outstanding_git_cookies);
+        Self::increment(&mut inner.state.revocation_debt);
+        inner.git_revocation_debt.push(cookie);
+        self.quiescent.notify_all();
+    }
+
+    fn git_revocation_debt_resolved(&self) {
+        let mut inner = self.inner.lock();
+        Self::decrement(&mut inner.state.revocation_debt);
+        self.quiescent.notify_all();
+    }
+
+    fn claim_git_revocation_debt_batch(&self) -> Vec<GitRevocationDebtClaim> {
+        let cookies = {
+            let mut inner = self.inner.lock();
+            std::mem::take(&mut inner.git_revocation_debt)
+        };
+
+        cookies
+            .into_iter()
+            .map(|cookie| GitRevocationDebtClaim {
+                cookie: Some(cookie),
+            })
+            .collect()
+    }
+
+    fn requeue_git_revocation_debt(&self, cookie: NonZeroU32) {
+        let mut inner = self.inner.lock();
+        // The debt count already includes this claim, so only return its
+        // ownership to the queue. Do not change the count here.
+        inner.git_revocation_debt.push(cookie);
     }
 
     fn increment(counter: &mut usize) {
@@ -218,9 +270,9 @@ impl ComModuleLifetime {
 
     fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
         let (ingress_guard, accepted) = crate::ingress::global_ingress().enter();
-        let mut state = self.state.lock();
-        Self::increment(&mut state.in_flight_calls);
-        drop(state);
+        let mut inner = self.inner.lock();
+        Self::increment(&mut inner.state.in_flight_calls);
+        drop(inner);
         (
             ComModuleCallGuard {
                 lifetime: self,
@@ -231,50 +283,63 @@ impl ComModuleLifetime {
     }
 
     fn object_created(&self, kind: ComObjectKind) {
-        let mut state = self.state.lock();
+        let mut inner = self.inner.lock();
         match kind {
-            ComObjectKind::Factory => Self::increment(&mut state.live_factories),
-            ComObjectKind::Server => Self::increment(&mut state.live_servers),
+            ComObjectKind::Factory => Self::increment(&mut inner.state.live_factories),
+            ComObjectKind::Server => Self::increment(&mut inner.state.live_servers),
         }
     }
 
     fn object_destroyed(&self, kind: ComObjectKind) {
-        let mut state = self.state.lock();
+        let mut inner = self.inner.lock();
         match kind {
-            ComObjectKind::Factory => Self::decrement(&mut state.live_factories),
-            ComObjectKind::Server => Self::decrement(&mut state.live_servers),
+            ComObjectKind::Factory => Self::decrement(&mut inner.state.live_factories),
+            ComObjectKind::Server => Self::decrement(&mut inner.state.live_servers),
         }
         self.quiescent.notify_all();
     }
 
     fn set_server_lock(&self, lock: bool) -> bool {
-        let mut state = self.state.lock();
+        let mut inner = self.inner.lock();
         if lock {
-            Self::increment(&mut state.server_locks);
+            Self::increment(&mut inner.state.server_locks);
             true
-        } else if state.server_locks == 0 {
+        } else if inner.state.server_locks == 0 {
             false
         } else {
-            Self::decrement(&mut state.server_locks);
+            Self::decrement(&mut inner.state.server_locks);
             self.quiescent.notify_all();
             true
         }
     }
 
     fn can_unload_now(&self) -> bool {
-        self.state.lock().is_quiescent()
+        self.inner.lock().state.is_quiescent()
     }
 
-    fn wait_for_quiescence(&self) {
-        let mut state = self.state.lock();
-        while !state.is_quiescent() {
-            self.quiescent.wait(&mut state);
+    fn wait_for_quiescence(&self) -> Result<(), ComModuleQuiescenceError> {
+        loop {
+            retry_git_revocation_debt();
+
+            let mut inner = self.inner.lock();
+            if inner.state.is_quiescent() {
+                return Ok(());
+            }
+            if inner.state.has_only_git_blockers() {
+                return Err(ComModuleQuiescenceError { state: inner.state });
+            }
+            self.quiescent.wait(&mut inner);
         }
     }
 
     #[cfg(test)]
     fn snapshot(&self) -> ComModuleState {
-        *self.state.lock()
+        self.inner.lock().state
+    }
+
+    #[cfg(test)]
+    fn queued_git_revocation_debt(&self) -> Vec<NonZeroU32> {
+        self.inner.lock().git_revocation_debt.clone()
     }
 }
 
@@ -287,8 +352,8 @@ struct ComModuleCallGuard {
 
 impl Drop for ComModuleCallGuard {
     fn drop(&mut self) {
-        let mut state = self.lifetime.state.lock();
-        ComModuleLifetime::decrement(&mut state.in_flight_calls);
+        let mut inner = self.lifetime.inner.lock();
+        ComModuleLifetime::decrement(&mut inner.state.in_flight_calls);
         self.lifetime.quiescent.notify_all();
     }
 }
@@ -1155,8 +1220,73 @@ impl Drop for ComApartmentGuard {
     }
 }
 
+struct GitCookieLease {
+    cookie: Option<NonZeroU32>,
+}
+
+impl GitCookieLease {
+    fn from_registered(cookie: NonZeroU32) -> Self {
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        Self {
+            cookie: Some(cookie),
+        }
+    }
+
+    fn raw(&self) -> u32 {
+        self.cookie
+            .expect("live GIT cookie lease contains a cookie")
+            .get()
+    }
+}
+
+impl Drop for GitCookieLease {
+    fn drop(&mut self) {
+        let Some(cookie) = self.cookie.take() else {
+            return;
+        };
+
+        match revoke_git_cookie(cookie.get()) {
+            Ok(()) => COM_MODULE_LIFETIME.git_cookie_revoked(),
+            Err(error) => {
+                COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+                crate::diagnostics::report_no_unwind("RTD GIT callback revocation", &error);
+            }
+        }
+    }
+}
+
+struct GitRevocationDebtClaim {
+    cookie: Option<NonZeroU32>,
+}
+
+impl GitRevocationDebtClaim {
+    fn raw(&self) -> u32 {
+        self.cookie
+            .expect("unresolved GIT revocation debt contains a cookie")
+            .get()
+    }
+
+    fn resolve(mut self) {
+        let _cookie = self
+            .cookie
+            .take()
+            .expect("GIT revocation debt is resolved once");
+        COM_MODULE_LIFETIME.git_revocation_debt_resolved();
+    }
+}
+
+impl Drop for GitRevocationDebtClaim {
+    fn drop(&mut self) {
+        let Some(cookie) = self.cookie.take() else {
+            return;
+        };
+
+        COM_MODULE_LIFETIME.requeue_git_revocation_debt(cookie);
+    }
+}
+
 struct RetainedUpdateCallback {
-    cookie: u32,
+    cookie: Option<GitCookieLease>,
     #[cfg(test)]
     drop_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -1189,39 +1319,18 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
     }
 }
 
-fn retain_git_revocation_debt(cookie: u32, error: &XllError) {
-    if cookie != 0 {
-        let mut debt = GIT_REVOCATION_DEBT.lock();
-        if !debt.contains(&cookie) {
-            debt.push(cookie);
-        }
-    }
-    crate::diagnostics::report_no_unwind("RTD GIT callback revocation", error);
-}
-
 fn retry_git_revocation_debt() {
     retry_git_revocation_debt_with(revoke_git_cookie);
 }
 
 fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllResult<()>) {
-    let debt = std::mem::take(&mut *GIT_REVOCATION_DEBT.lock());
-    if debt.is_empty() {
-        return;
-    }
-
-    let mut failed = Vec::new();
-    for cookie in debt {
-        if let Err(error) = revoke(cookie) {
-            failed.push(cookie);
-            crate::diagnostics::report_no_unwind("RTD GIT callback revocation retry", &error);
-        }
-    }
-
-    if !failed.is_empty() {
-        let mut debt = GIT_REVOCATION_DEBT.lock();
-        for cookie in failed {
-            if !debt.contains(&cookie) {
-                debt.push(cookie);
+    let claims = COM_MODULE_LIFETIME.claim_git_revocation_debt_batch();
+    for claim in claims {
+        match revoke(claim.raw()) {
+            Ok(()) => claim.resolve(),
+            Err(error) => {
+                crate::diagnostics::report_no_unwind("RTD GIT callback revocation retry", &error);
+                // The unresolved claim is requeued by Drop.
             }
         }
     }
@@ -1229,44 +1338,46 @@ fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllResult<()>) 
 
 impl RetainedUpdateCallback {
     fn notify(&self) -> XllResult<()> {
-        if self.cookie != 0 {
-            let _apartment = ComApartmentGuard::enter();
+        let Some(cookie) = self.cookie.as_ref() else {
+            return Ok(());
+        };
+        let cookie = cookie.raw();
+        let _apartment = ComApartmentGuard::enter();
 
-            // SAFETY: this thread has entered a COM apartment. `get_git` returns
-            // one live IGlobalInterfaceTable reference on success.
-            // GetInterfaceFromGlobal writes one IRTDUpdateEvent reference into
-            // `proxy`; both returned COM references are released exactly once.
-            unsafe {
-                let git = get_git().map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x4749_545f_4e55_4c4c,
-                })?;
-                let git = git.as_ptr();
-                let mut proxy: *mut c_void = ptr::null_mut();
-                let status = ((*(*git).vtable).get_interface_from_global)(
-                    git,
-                    self.cookie,
-                    &IID_IRTD_UPDATE_EVENT,
-                    &mut proxy,
-                );
-                let _ = ((*(*git).vtable).release)(git);
+        // SAFETY: this thread has entered a COM apartment. `get_git` returns
+        // one live IGlobalInterfaceTable reference on success.
+        // GetInterfaceFromGlobal writes one IRTDUpdateEvent reference into
+        // `proxy`; both returned COM references are released exactly once.
+        unsafe {
+            let git = get_git().map_err(|_| XllError::Internal {
+                diagnostic_id: 0x4749_545f_4e55_4c4c,
+            })?;
+            let git = git.as_ptr();
+            let mut proxy: *mut c_void = ptr::null_mut();
+            let status = ((*(*git).vtable).get_interface_from_global)(
+                git,
+                cookie,
+                &IID_IRTD_UPDATE_EVENT,
+                &mut proxy,
+            );
+            let _ = ((*(*git).vtable).release)(git);
 
-                if status != S_OK || proxy.is_null() {
-                    return Err(XllError::ExcelApi {
-                        function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
-                        code: status,
-                    });
-                }
+            if status != S_OK || proxy.is_null() {
+                return Err(XllError::ExcelApi {
+                    function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
+                    code: status,
+                });
+            }
 
-                let event = proxy.cast::<RtdUpdateEvent>();
-                let notify_status = callback_update_notify(event);
-                let _ = callback_release(event);
+            let event = proxy.cast::<RtdUpdateEvent>();
+            let notify_status = callback_update_notify(event);
+            let _ = callback_release(event);
 
-                if notify_status != S_OK {
-                    return Err(XllError::ExcelApi {
-                        function: "IRTDUpdateEvent::UpdateNotify",
-                        code: notify_status,
-                    });
-                }
+            if notify_status != S_OK {
+                return Err(XllError::ExcelApi {
+                    function: "IRTDUpdateEvent::UpdateNotify",
+                    code: notify_status,
+                });
             }
         }
 
@@ -1276,10 +1387,9 @@ impl RetainedUpdateCallback {
 
 impl Drop for RetainedUpdateCallback {
     fn drop(&mut self) {
-        let cookie = std::mem::take(&mut self.cookie);
-        if let Err(error) = revoke_git_cookie(cookie) {
-            retain_git_revocation_debt(cookie, &error);
-        }
+        // RevokeInterfaceFromGlobal must run before the test hook, matching
+        // the historical callback-drop ordering explicitly.
+        drop(self.cookie.take());
 
         #[cfg(test)]
         if let Some(drop_hook) = self.drop_hook.as_ref() {
@@ -3005,12 +3115,20 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     // been released.
     unsafe { ((*(*git).vtable).release)(git) };
 
-    if status < 0 || cookie == 0 {
+    if status < 0 {
         return E_FAIL;
     }
 
+    let Some(cookie) = NonZeroU32::new(cookie) else {
+        return E_FAIL;
+    };
+
+    // Track the successfully registered GIT cookie before any later fallible
+    // callback publication or notification work can run.
+    let cookie = GitCookieLease::from_registered(cookie);
+
     let callback = Arc::new(RetainedUpdateCallback {
-        cookie,
+        cookie: Some(cookie),
         #[cfg(test)]
         drop_hook: None,
     });
@@ -3573,8 +3691,13 @@ pub(super) fn dll_can_unload_now() -> i32 {
     }
 }
 
-pub(super) fn wait_for_module_quiescence() {
-    COM_MODULE_LIFETIME.wait_for_quiescence();
+pub(super) fn wait_for_module_quiescence() -> Result<(), crate::rtd::RtdQuiescenceError> {
+    COM_MODULE_LIFETIME
+        .wait_for_quiescence()
+        .map_err(|error| crate::rtd::RtdQuiescenceError {
+            outstanding_git_cookies: error.state.outstanding_git_cookies,
+            revocation_debt: error.state.revocation_debt,
+        })
 }
 
 unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i32 {
@@ -4569,6 +4692,9 @@ mod tests {
     use std::marker::PhantomData;
     use std::ptr;
     use std::rc::Rc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use static_assertions::assert_not_impl_any;
     use windows_sys::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
@@ -4943,6 +5069,106 @@ mod tests {
     }
 
     #[test]
+    fn registered_git_cookie_blocks_module_unload() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let baseline = COM_MODULE_LIFETIME.snapshot();
+        assert!(baseline.is_quiescent());
+
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        let registered = COM_MODULE_LIFETIME.snapshot();
+        assert_eq!(registered.outstanding_git_cookies, 1);
+        assert_eq!(registered.revocation_debt, 0);
+        assert!(!COM_MODULE_LIFETIME.can_unload_now());
+
+        COM_MODULE_LIFETIME.git_cookie_revoked();
+        assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    }
+
+    #[test]
+    fn git_revocation_retry_in_flight_keeps_unload_blocked() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let baseline = COM_MODULE_LIFETIME.snapshot();
+        assert!(baseline.is_quiescent());
+        let cookie = NonZeroU32::new(41).unwrap();
+
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+
+        let (claimed_tx, claimed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let retry = thread::spawn(move || {
+            retry_git_revocation_debt_with(|cookie| {
+                claimed_tx.send(cookie).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            });
+        });
+
+        assert_eq!(claimed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 41);
+        let retrying = COM_MODULE_LIFETIME.snapshot();
+        assert_eq!(retrying.revocation_debt, 1);
+        assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+        assert!(!COM_MODULE_LIFETIME.can_unload_now());
+
+        release_tx.send(()).unwrap();
+        retry.join().unwrap();
+        assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    }
+
+    #[test]
+    fn panicking_git_revocation_retry_requeues_claim() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let baseline = COM_MODULE_LIFETIME.snapshot();
+        assert!(baseline.is_quiescent());
+        let cookie = NonZeroU32::new(41).unwrap();
+
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            retry_git_revocation_debt_with(|_| panic!("injected GIT revoke panic"));
+        }));
+        assert!(result.is_err());
+        assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
+        assert_eq!(
+            COM_MODULE_LIFETIME.queued_git_revocation_debt(),
+            vec![cookie]
+        );
+
+        retry_git_revocation_debt_with(|cookie| {
+            assert_eq!(cookie, 41);
+            Ok(())
+        });
+        assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    }
+
+    #[test]
+    fn module_quiescence_refuses_debt_claim_in_flight() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let baseline = COM_MODULE_LIFETIME.snapshot();
+        assert!(baseline.is_quiescent());
+        let cookie = NonZeroU32::new(41).unwrap();
+
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+        let claims = COM_MODULE_LIFETIME.claim_git_revocation_debt_batch();
+        assert_eq!(claims.len(), 1);
+        assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+
+        let error = crate::rtd::wait_for_module_quiescence().unwrap_err();
+        assert_eq!(error.outstanding_git_cookies, 0);
+        assert_eq!(error.revocation_debt, 1);
+        assert!(!COM_MODULE_LIFETIME.can_unload_now());
+
+        drop(claims);
+        retry_git_revocation_debt_with(|cookie| {
+            assert_eq!(cookie, 41);
+            Ok(())
+        });
+        assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    }
+
+    #[test]
     fn server_start_reservation_is_single_use_and_rolls_back_failure() {
         let state = AtomicU8::new(SERVER_NOT_STARTED);
 
@@ -5033,7 +5259,7 @@ mod tests {
             })
         };
         let callback = Arc::new(RetainedUpdateCallback {
-            cookie: 0,
+            cookie: None,
             drop_hook: Some(drop_hook),
         });
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
@@ -5154,13 +5380,23 @@ mod tests {
     #[test]
     fn failed_git_revocation_is_retained_and_retryable() {
         let _guard = TEST_LOCK.lock().unwrap();
-        GIT_REVOCATION_DEBT.lock().clear();
+        let baseline = COM_MODULE_LIFETIME.snapshot();
+        assert!(baseline.is_quiescent());
+        assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+
+        let cookie = NonZeroU32::new(41).unwrap();
+        COM_MODULE_LIFETIME.git_cookie_registered();
+        COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
         let error = XllError::ExcelApi {
             function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
             code: E_FAIL,
         };
-        retain_git_revocation_debt(41, &error);
-        assert_eq!(&*GIT_REVOCATION_DEBT.lock(), &[41]);
+        assert_eq!(COM_MODULE_LIFETIME.snapshot().outstanding_git_cookies, 0);
+        assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
+        assert_eq!(
+            COM_MODULE_LIFETIME.queued_git_revocation_debt(),
+            vec![cookie]
+        );
 
         let mut attempts = 0;
         retry_git_revocation_debt_with(|cookie| {
@@ -5169,7 +5405,11 @@ mod tests {
             Err(error.clone())
         });
         assert_eq!(attempts, 1);
-        assert_eq!(&*GIT_REVOCATION_DEBT.lock(), &[41]);
+        assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
+        assert_eq!(
+            COM_MODULE_LIFETIME.queued_git_revocation_debt(),
+            vec![NonZeroU32::new(41).unwrap()]
+        );
 
         retry_git_revocation_debt_with(|cookie| {
             attempts += 1;
@@ -5177,7 +5417,8 @@ mod tests {
             Ok(())
         });
         assert_eq!(attempts, 2);
-        assert!(GIT_REVOCATION_DEBT.lock().is_empty());
+        assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+        assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
     }
 
     #[test]
@@ -5225,7 +5466,7 @@ mod tests {
         };
 
         let previous = Arc::new(RetainedUpdateCallback {
-            cookie: 0,
+            cookie: None,
             drop_hook: Some(drop_hook),
         });
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
@@ -5236,7 +5477,7 @@ mod tests {
         // SAFETY: the retained server remains live.
         let operation = unsafe { (*server).operations.enter() }.unwrap();
         let replacement = Arc::new(RetainedUpdateCallback {
-            cookie: 0,
+            cookie: None,
             drop_hook: None,
         });
         // SAFETY: the retained server remains live.
@@ -5291,7 +5532,7 @@ mod tests {
             rendezvous.wait();
 
             let callback = Arc::new(RetainedUpdateCallback {
-                cookie: 0,
+                cookie: None,
                 drop_hook: None,
             });
             // SAFETY: the retained server remains live.

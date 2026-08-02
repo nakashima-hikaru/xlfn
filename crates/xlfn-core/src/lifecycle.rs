@@ -372,8 +372,12 @@ where
         runtime.retain_failed_event_registrations(Vec::new());
     }
 
-    if local_quiescent {
-        crate::rtd::wait_for_module_quiescence();
+    if local_quiescent && crate::rtd::wait_for_module_quiescence().is_err() {
+        let error = XllError::Internal {
+            diagnostic_id: 0x5254_445f_4749_5451,
+        };
+        report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
+        local_quiescent = false;
     }
 
     if local_quiescent && let Some(mut state) = addin_state.take() {
@@ -497,7 +501,20 @@ fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession
     }
     let _ = crate::diagnostics::close_diagnostic_router();
     let _ = crate::ingress::global_ingress().seal_and_drain();
-    let _ = crate::rtd::wait_for_module_quiescence();
+    if let Err(error) = crate::rtd::wait_for_module_quiescence() {
+        let hazard = if error.revocation_debt != 0 {
+            crate::shutdown::UnloadHazard::RtdGitRevocationDebt
+        } else {
+            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+        };
+        fatal_unload_hazard(
+            hazard,
+            "xlAutoClose emergency RTD GIT quiescence",
+            &XllError::Internal {
+                diagnostic_id: 0x5254_445f_4749_5451,
+            },
+        );
+    }
 }
 
 fn close_addin_inner<A>(runtime: &Runtime<A::State>, callbacks: &mut HostCallbackSession)
@@ -750,7 +767,20 @@ where
     let diagnostics_stopped = diagnostics.certificate;
 
     let exports_drained = crate::ingress::global_ingress().seal_and_drain();
-    let rtd_quiescent = crate::rtd::wait_for_module_quiescence();
+    let rtd_quiescent = crate::rtd::wait_for_module_quiescence().unwrap_or_else(|error| {
+        let hazard = if error.revocation_debt != 0 {
+            crate::shutdown::UnloadHazard::RtdGitRevocationDebt
+        } else {
+            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+        };
+        fatal_unload_hazard(
+            hazard,
+            "xlAutoClose RTD GIT quiescence",
+            &XllError::Internal {
+                diagnostic_id: 0x5254_445f_4749_5451,
+            },
+        )
+    });
 
     let certificate = runtime
         .certify_close(crate::runtime::ClosePrerequisites {
