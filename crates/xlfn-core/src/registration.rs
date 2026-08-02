@@ -1,14 +1,13 @@
 use crate::{
     ExcelCallbackValue, FromExcel, InputError, XlValueRef, XllError, XllResult,
-    return_value::ExcelCallbackStatus,
+    host_callback::HostCallbackSession, return_value::ExcelCallbackStatus,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use xlfn_sys::{
     XL_EVENT_REGISTER, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME, XLF_UNREGISTER,
-    XLOPER12, XLOPER12Value, XLRET_SUCCESS, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_NUM,
-    XLTYPE_STR,
+    XLOPER12, XLOPER12Value, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_NUM, XLTYPE_STR,
 };
 #[cfg(any(feature = "async", test))]
 use xlfn_sys::{XLEVENT_CALCULATION_CANCELED, XLEVENT_CALCULATION_ENDED};
@@ -190,9 +189,6 @@ pub(crate) struct RegistrationTransactionError {
     pub(crate) pending_events: Vec<EventRegistration>,
     pub(crate) metadata_debt: Vec<PendingRegistration>,
     pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
-    /// When true, the Excel host has entered a terminal state (Abort/Uncalced)
-    /// and no further C API calls (including rollback) should be attempted.
-    pub(crate) terminal: bool,
 }
 
 impl RegistrationTransactionError {
@@ -203,18 +199,6 @@ impl RegistrationTransactionError {
             pending_events: Vec::new(),
             metadata_debt: Vec::new(),
             unknown_registrations: Vec::new(),
-            terminal: false,
-        }
-    }
-
-    fn terminal(source: XllError) -> Self {
-        Self {
-            source: Box::new(source),
-            pending_registrations: Vec::new(),
-            pending_events: Vec::new(),
-            metadata_debt: Vec::new(),
-            unknown_registrations: Vec::new(),
-            terminal: true,
         }
     }
 }
@@ -385,29 +369,43 @@ impl<'call> FromExcel<'call> for ModuleName {
 }
 
 impl HostRegistrar {
-    pub(crate) fn connect() -> XllResult<Self> {
+    pub(crate) fn connect(
+        callbacks: &mut HostCallbackSession,
+    ) -> Result<Self, RegistrationTransactionError> {
         // SAFETY: no argument pointers are supplied and Excel owns the result.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(xlfn_sys::XL_GET_NAME, &[]) };
-        if status != XLRET_SUCCESS {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlGetName",
-                code: status,
-            }));
+        let (status, mut result) = unsafe {
+            callbacks
+                .call(xlfn_sys::XL_GET_NAME, &[])
+                .map_err(|suppressed| {
+                    RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlGetName(suppressed)",
+                        code: suppressed.status.raw_code(),
+                    })
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
+            return Err(RegistrationTransactionError::new(
+                result.try_release().err().unwrap_or(XllError::ExcelApi {
+                    function: "xlGetName",
+                    code: status.raw_code(),
+                }),
+            ));
         }
 
         // SAFETY: Excel returned a live result XLOPER12 for this stack frame.
         let module_name = ModuleName::from_excel(
-            result.borrow()?,
+            result.borrow().map_err(RegistrationTransactionError::new)?,
             "module",
             &crate::CallContext::without_runtime(),
         );
-        result.try_release()?;
-        let module_name = module_name?;
+        let release = result.try_release();
+        let module_name = module_name.map_err(RegistrationTransactionError::new)?;
+        release.map_err(RegistrationTransactionError::new)?;
         if !module_name.path.is_absolute() {
-            return Err(XllError::input(
+            return Err(RegistrationTransactionError::new(XllError::input(
                 "module",
                 InputError::Malformed("xlGetName did not return an absolute module path"),
-            ));
+            )));
         }
         Ok(Self {
             module_path: module_name.path,
@@ -422,11 +420,13 @@ impl HostRegistrar {
 
     pub(crate) fn register_all(
         &self,
+        callbacks: &mut HostCallbackSession,
         descriptors: &[RegistrationDescriptor],
     ) -> Result<Vec<RegistrationId>, RegistrationTransactionError> {
         register_all_transaction(
+            callbacks,
             descriptors,
-            |descriptor| self.register_one(descriptor),
+            |callbacks, descriptor| self.register_one(callbacks, descriptor),
             Self::unregister_pending,
         )
     }
@@ -434,9 +434,11 @@ impl HostRegistrar {
     #[cfg(feature = "async")]
     pub(crate) fn register_async_events(
         &self,
+        callbacks: &mut HostCallbackSession,
     ) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
         register_async_events_transaction(
-            |procedure, event| self.register_event(procedure, event),
+            callbacks,
+            |callbacks, procedure, event| self.register_event(callbacks, procedure, event),
             Self::unregister_events_detailed,
         )
     }
@@ -444,6 +446,7 @@ impl HostRegistrar {
     #[cfg(feature = "async")]
     fn register_event(
         &self,
+        callbacks: &mut HostCallbackSession,
         procedure: &'static str,
         event: i32,
     ) -> Result<EventRegistration, RegistrationTransactionError> {
@@ -452,19 +455,30 @@ impl HostRegistrar {
         let mut event_value = XLOPER12::integer(event);
         let arguments = [procedure_value.pointer(), NonNull::from(&mut event_value)];
         // SAFETY: both arguments are live for the callback.
-        let (status, mut result) =
-            unsafe { ExcelCallbackValue::call(XL_EVENT_REGISTER, &arguments) };
-        if status != XLRET_SUCCESS {
-            let callback_status = ExcelCallbackStatus::from_raw(status);
+        let (status, mut result) = unsafe {
+            callbacks
+                .call(XL_EVENT_REGISTER, &arguments)
+                .map_err(|suppressed| {
+                    RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlEventRegister(suppressed)",
+                        code: suppressed.status.raw_code(),
+                    })
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
                 function: "xlEventRegister",
-                code: status,
+                code: status.raw_code(),
             });
-            let error = if callback_status.is_terminal() {
-                RegistrationTransactionError::terminal(source)
-            } else {
-                RegistrationTransactionError::new(source)
-            };
+            let mut error = RegistrationTransactionError::new(source);
+            if status.is_terminal() {
+                error.pending_events.push(EventRegistration {
+                    procedure,
+                    event,
+                    registration_id: 0,
+                    unregistered: false,
+                });
+            }
             return Err(error);
         }
         let result_is_integer = result
@@ -492,6 +506,7 @@ impl HostRegistrar {
         };
         if let Err(error) = result.try_release() {
             return Err(event_release_failure(
+                callbacks,
                 registration,
                 error,
                 Self::unregister_events_detailed,
@@ -499,16 +514,18 @@ impl HostRegistrar {
         }
         if !result_is_integer {
             return Err(event_release_failure(
+                callbacks,
                 registration,
                 XllError::ExcelApi {
                     function: "xlEventRegister(result)",
-                    code: status,
+                    code: status.raw_code(),
                 },
                 Self::unregister_events_detailed,
             ));
         }
         if registration_id <= 0 {
             return Err(event_release_failure(
+                callbacks,
                 registration,
                 XllError::ExcelApi {
                     function: "xlEventRegister(result)",
@@ -522,11 +539,10 @@ impl HostRegistrar {
 
     fn register_one(
         &self,
+        callbacks: &mut HostCallbackSession,
         descriptor: &RegistrationDescriptor,
     ) -> Result<RegistrationId, RegistrationTransactionError> {
-        let exists = self
-            .is_registered_name(descriptor.excel_name)
-            .map_err(RegistrationTransactionError::new)?;
+        let exists = self.is_registered_name(callbacks, descriptor.excel_name)?;
         if exists {
             return Err(RegistrationTransactionError::new(
                 XllError::RegistrationConflict {
@@ -581,18 +597,32 @@ impl HostRegistrar {
         pointers.extend(argument_help.iter_mut().map(TemporaryString::pointer));
 
         // SAFETY: every pointer refers to a live stack value or TemporaryString.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XLF_REGISTER, &pointers) };
-        if status != XLRET_SUCCESS {
-            let callback_status = ExcelCallbackStatus::from_raw(status);
+        let (status, mut result) = unsafe {
+            callbacks
+                .call(XLF_REGISTER, &pointers)
+                .map_err(|suppressed| {
+                    RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlfRegister(suppressed)",
+                        code: suppressed.status.raw_code(),
+                    })
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
                 function: "xlfRegister",
-                code: status,
+                code: status.raw_code(),
             });
-            let error = if callback_status.is_terminal() {
-                RegistrationTransactionError::terminal(source)
-            } else {
-                RegistrationTransactionError::new(source)
-            };
+            let mut error = RegistrationTransactionError::new(source);
+            if status.is_terminal() {
+                error.unknown_registrations.push(UnknownRegistrationState {
+                    export_name: descriptor.export_name,
+                    excel_name: descriptor.excel_name,
+                    recovery_error: XllError::ExcelApi {
+                        function: "xlfRegister terminal result",
+                        code: status.raw_code(),
+                    },
+                });
+            }
             return Err(error);
         }
         if result
@@ -607,7 +637,7 @@ impl HostRegistrar {
                 function: "xlfRegister(result)",
                 code: base_type as i32,
             });
-            return Err(self.reconcile_malformed_registration_result(descriptor, source));
+            return Err(self.reconcile_malformed_registration_result(callbacks, descriptor, source));
         }
         let id = match result.borrow().and_then(|value| {
             f64::from_excel(
@@ -619,7 +649,9 @@ impl HostRegistrar {
             Ok(id) => id,
             Err(error) => {
                 let source = result.try_release().err().unwrap_or(error);
-                return Err(self.reconcile_malformed_registration_result(descriptor, source));
+                return Err(
+                    self.reconcile_malformed_registration_result(callbacks, descriptor, source)
+                );
             }
         };
         if !valid_registration_id(id) {
@@ -627,7 +659,7 @@ impl HostRegistrar {
                 function: "xlfRegister(result)",
                 code: -1,
             });
-            return Err(self.reconcile_malformed_registration_result(descriptor, source));
+            return Err(self.reconcile_malformed_registration_result(callbacks, descriptor, source));
         }
         let registration = RegistrationId {
             id,
@@ -635,6 +667,7 @@ impl HostRegistrar {
         };
         if let Err(error) = result.try_release() {
             return Err(registration_release_failure(
+                callbacks,
                 registration,
                 error,
                 Self::unregister_pending,
@@ -645,53 +678,89 @@ impl HostRegistrar {
 
     fn reconcile_malformed_registration_result(
         &self,
+        callbacks: &mut HostCallbackSession,
         descriptor: &RegistrationDescriptor,
         source: XllError,
     ) -> RegistrationTransactionError {
         reconcile_malformed_registration_result(
+            callbacks,
             descriptor,
             source,
-            |excel_name| self.recover_registration_id(excel_name),
+            |callbacks, excel_name| self.recover_registration_id(callbacks, excel_name),
             Self::unregister_pending,
         )
     }
 
     fn recover_registration_id(
         &self,
+        callbacks: &mut HostCallbackSession,
         excel_name: &'static str,
-    ) -> XllResult<Option<RegistrationId>> {
-        let mut name = TemporaryString::new(excel_name)?;
+    ) -> Result<Option<RegistrationId>, RegistrationTransactionError> {
+        let mut name =
+            TemporaryString::new(excel_name).map_err(RegistrationTransactionError::new)?;
         let arguments = [name.pointer()];
         // SAFETY: the counted name remains live for this synchronous callback.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XLF_EVALUATE, &arguments) };
-        if status != XLRET_SUCCESS {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlfEvaluate(registration recovery)",
-                code: status,
-            }));
+        let (status, mut result) = unsafe {
+            callbacks
+                .call(XLF_EVALUATE, &arguments)
+                .map_err(|suppressed| {
+                    RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlfEvaluate(registration recovery, suppressed)",
+                        code: suppressed.status.raw_code(),
+                    })
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
+            return Err(RegistrationTransactionError::new(
+                result.try_release().err().unwrap_or(XllError::ExcelApi {
+                    function: "xlfEvaluate(registration recovery)",
+                    code: status.raw_code(),
+                }),
+            ));
         }
 
-        if result.base_type()? == XLTYPE_ERR {
+        if result
+            .base_type()
+            .map_err(RegistrationTransactionError::new)?
+            == XLTYPE_ERR
+        {
             // SAFETY: XLTYPE_ERR selects the error union member.
-            let code = unsafe { result.raw_pointer()?.as_ref().value.error };
-            result.try_release()?;
+            let code = unsafe {
+                result
+                    .raw_pointer()
+                    .map_err(RegistrationTransactionError::new)?
+                    .as_ref()
+                    .value
+                    .error
+            };
+            result
+                .try_release()
+                .map_err(RegistrationTransactionError::new)?;
             return if code == XLERR_NAME {
                 Ok(None)
             } else {
-                Err(XllError::ExcelApi {
+                Err(RegistrationTransactionError::new(XllError::ExcelApi {
                     function: "xlfEvaluate(registration recovery result)",
                     code,
-                })
+                }))
             };
         }
 
-        if result.base_type()? != XLTYPE_NUM {
-            let base_type = result.base_type()?;
-            result.try_release()?;
-            return Err(XllError::ExcelApi {
+        if result
+            .base_type()
+            .map_err(RegistrationTransactionError::new)?
+            != XLTYPE_NUM
+        {
+            let base_type = result
+                .base_type()
+                .map_err(RegistrationTransactionError::new)?;
+            result
+                .try_release()
+                .map_err(RegistrationTransactionError::new)?;
+            return Err(RegistrationTransactionError::new(XllError::ExcelApi {
                 function: "xlfEvaluate(registration recovery result)",
                 code: base_type as i32,
-            });
+            }));
         }
 
         let id = result.borrow().and_then(|value| {
@@ -701,32 +770,66 @@ impl HostRegistrar {
                 &crate::CallContext::without_runtime(),
             )
         });
-        result.try_release()?;
-        let id = id?;
+        result
+            .try_release()
+            .map_err(RegistrationTransactionError::new)?;
+        let id = id.map_err(RegistrationTransactionError::new)?;
         if !valid_registration_id(id) {
-            return Err(XllError::ExcelApi {
+            return Err(RegistrationTransactionError::new(XllError::ExcelApi {
                 function: "xlfEvaluate(registration recovery result)",
                 code: -1,
-            });
+            }));
         }
         Ok(Some(RegistrationId { id, excel_name }))
     }
 
-    fn is_registered_name(&self, excel_name: &'static str) -> XllResult<bool> {
-        let mut name = TemporaryString::new(excel_name)?;
+    fn is_registered_name(
+        &self,
+        callbacks: &mut HostCallbackSession,
+        excel_name: &'static str,
+    ) -> Result<bool, RegistrationTransactionError> {
+        let mut name =
+            TemporaryString::new(excel_name).map_err(RegistrationTransactionError::new)?;
         let arguments = [name.pointer()];
         // SAFETY: the name remains live for this synchronous callback.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XLF_EVALUATE, &arguments) };
-        if status != XLRET_SUCCESS {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlfEvaluate",
-                code: status,
-            }));
+        let (status, mut result) = unsafe {
+            callbacks
+                .call(XLF_EVALUATE, &arguments)
+                .map_err(|suppressed| {
+                    RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlfEvaluate(suppressed)",
+                        code: suppressed.status.raw_code(),
+                    })
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
+            return Err(RegistrationTransactionError::new(
+                result.try_release().err().unwrap_or(XllError::ExcelApi {
+                    function: "xlfEvaluate",
+                    code: status.raw_code(),
+                }),
+            ));
         }
-        let is_conflict = if result.base_type()? == XLTYPE_ERR {
+        let is_conflict = if result
+            .base_type()
+            .map_err(RegistrationTransactionError::new)?
+            == XLTYPE_ERR
+        {
             // SAFETY: XLTYPE_ERR selects the error union member.
-            unsafe { result.raw_pointer()?.as_ref().value.error != XLERR_NAME }
-        } else if result.base_type()? == XLTYPE_NUM {
+            unsafe {
+                result
+                    .raw_pointer()
+                    .map_err(RegistrationTransactionError::new)?
+                    .as_ref()
+                    .value
+                    .error
+                    != XLERR_NAME
+            }
+        } else if result
+            .base_type()
+            .map_err(RegistrationTransactionError::new)?
+            == XLTYPE_NUM
+        {
             let id = result.borrow().and_then(|value| {
                 f64::from_excel(
                     value,
@@ -741,19 +844,19 @@ impl HostRegistrar {
         } else {
             false
         };
-        result.try_release()?;
+        result
+            .try_release()
+            .map_err(RegistrationTransactionError::new)?;
         Ok(is_conflict)
     }
     pub(crate) fn unregister_pending(
+        callbacks: &mut HostCallbackSession,
         registrations: &[PendingRegistration],
     ) -> UnregisterResult<PendingRegistration> {
         let mut outcome = UnregisterResult::new(registrations.len());
-        let mut terminal = false;
         for registration in registrations.iter().rev() {
             let mut registration = registration.clone();
-            if terminal {
-                // Terminal status detected during rollback: no further C API
-                // calls are safe. Record remaining items as failed debt.
+            if !callbacks.permits_callbacks() {
                 outcome.failed.push((registration, XllError::Closing));
                 continue;
             }
@@ -766,14 +869,25 @@ impl HostRegistrar {
                 let arguments = [NonNull::from(&mut id)];
                 // SAFETY: id is live for the callback.
                 let (status, mut result) =
-                    unsafe { ExcelCallbackValue::call(XLF_UNREGISTER, &arguments) };
-                if ExcelCallbackStatus::from_raw(status).is_terminal() {
-                    terminal = true;
+                    match unsafe { callbacks.call(XLF_UNREGISTER, &arguments) } {
+                        Ok(call) => call,
+                        Err(suppressed) => {
+                            outcome.failed.push((
+                                registration,
+                                XllError::ExcelApi {
+                                    function: "xlfUnregister(suppressed)",
+                                    code: suppressed.status.raw_code(),
+                                },
+                            ));
+                            continue;
+                        }
+                    };
+                if status.is_terminal() {
                     outcome.failed.push((
                         registration,
                         XllError::ExcelApi {
                             function: "xlfUnregister",
-                            code: status,
+                            code: status.raw_code(),
                         },
                     ));
                     continue;
@@ -796,6 +910,13 @@ impl HostRegistrar {
                 }
             }
 
+            if !callbacks.permits_callbacks() {
+                outcome
+                    .metadata_debt
+                    .push((registration, XllError::Closing));
+                continue;
+            }
+
             let mut name = match TemporaryString::new(registration.registration.excel_name) {
                 Ok(name) => name,
                 Err(error) => {
@@ -806,14 +927,25 @@ impl HostRegistrar {
             let name_arguments = [name.pointer()];
             // SAFETY: name is live for the callback.
             let (status, mut result) =
-                unsafe { ExcelCallbackValue::call(XLF_SET_NAME, &name_arguments) };
-            if ExcelCallbackStatus::from_raw(status).is_terminal() {
-                terminal = true;
+                match unsafe { callbacks.call(XLF_SET_NAME, &name_arguments) } {
+                    Ok(call) => call,
+                    Err(suppressed) => {
+                        outcome.metadata_debt.push((
+                            registration,
+                            XllError::ExcelApi {
+                                function: "xlfSetName(suppressed)",
+                                code: suppressed.status.raw_code(),
+                            },
+                        ));
+                        continue;
+                    }
+                };
+            if status.is_terminal() {
                 outcome.metadata_debt.push((
                     registration,
                     XllError::ExcelApi {
                         function: "xlfSetName",
-                        code: status,
+                        code: status.raw_code(),
                     },
                 ));
                 continue;
@@ -840,6 +972,7 @@ impl HostRegistrar {
     }
 
     pub(crate) fn unregister_events_detailed(
+        callbacks: &mut HostCallbackSession,
         registrations: &[EventRegistration],
     ) -> UnregisterResult<EventRegistration> {
         unregister_events_with(registrations, |registration| {
@@ -851,14 +984,34 @@ impl HostRegistrar {
             ];
             // SAFETY: both arguments are live for the callback.
             let (status, mut result) =
-                unsafe { ExcelCallbackValue::call(XL_EVENT_REGISTER, &arguments) };
-            let detached = if status == XLRET_SUCCESS {
+                match unsafe { callbacks.call(XL_EVENT_REGISTER, &arguments) } {
+                    Ok(call) => call,
+                    Err(suppressed) => {
+                        return EventUnregisterAttempt {
+                            status: suppressed.status,
+                            detached: Ok(()),
+                            release: None,
+                        };
+                    }
+                };
+            if status.is_terminal() {
+                return EventUnregisterAttempt {
+                    status,
+                    detached: Ok(()),
+                    release: None,
+                };
+            }
+            let detached = if status == ExcelCallbackStatus::Success {
                 validate_event_unregister_result(&result)
             } else {
                 Ok(())
             };
             let release = result.try_release();
-            (status, detached, release)
+            EventUnregisterAttempt {
+                status,
+                detached,
+                release: Some(release),
+            }
         })
     }
 }
@@ -866,15 +1019,15 @@ impl HostRegistrar {
 fn advance_cleanup_state(
     state: &mut RegistrationCleanupState,
     next: RegistrationCleanupState,
-    status: i32,
+    status: ExcelCallbackStatus,
     result: &ExcelCallbackValue,
     callback_function: &'static str,
     result_function: &'static str,
 ) -> XllResult<()> {
-    if status != XLRET_SUCCESS {
+    if status != ExcelCallbackStatus::Success {
         return Err(XllError::ExcelApi {
             function: callback_function,
-            code: status,
+            code: status.raw_code(),
         });
     }
     if !read_excel_bool(result, result_function)? {
@@ -943,46 +1096,46 @@ fn validate_event_unregister_result(result: &ExcelCallbackValue) -> XllResult<()
     Ok(())
 }
 
+struct EventUnregisterAttempt {
+    status: ExcelCallbackStatus,
+    detached: XllResult<()>,
+    release: Option<XllResult<()>>,
+}
+
 fn unregister_events_with(
     registrations: &[EventRegistration],
-    mut unregister: impl FnMut(&EventRegistration) -> (i32, XllResult<()>, XllResult<()>),
+    mut unregister: impl FnMut(&EventRegistration) -> EventUnregisterAttempt,
 ) -> UnregisterResult<EventRegistration> {
     let mut outcome = UnregisterResult::new(registrations.len());
-    let mut terminal = false;
     for registration in registrations.iter().rev() {
         let mut registration = registration.clone();
-        if terminal {
-            outcome.failed.push((registration, XllError::Closing));
-            continue;
-        }
         if registration.unregistered {
             outcome.succeeded.push(registration);
             continue;
         }
-        let (status, detached, release) = unregister(&registration);
-        if ExcelCallbackStatus::from_raw(status).is_terminal() {
-            terminal = true;
+        let attempt = unregister(&registration);
+        if attempt.status.is_terminal() {
             outcome.failed.push((
                 registration,
                 XllError::ExcelApi {
                     function: "xlEventRegister(unregister)",
-                    code: status,
+                    code: attempt.status.raw_code(),
                 },
             ));
             continue;
         }
-        if status != XLRET_SUCCESS {
+        if attempt.status != ExcelCallbackStatus::Success {
             outcome.failed.push((
                 registration,
                 XllError::ExcelApi {
                     function: "xlEventRegister(unregister)",
-                    code: status,
+                    code: attempt.status.raw_code(),
                 },
             ));
             continue;
         }
 
-        if let Err(error) = detached {
+        if let Err(error) = attempt.detached {
             outcome.failed.push((registration, error));
             continue;
         }
@@ -990,7 +1143,7 @@ fn unregister_events_with(
         // The callback side effect is certified even if releasing its result
         // fails. Never execute the unregister side effect again on a retry.
         registration.unregistered = true;
-        if let Err(error) = release {
+        if let Some(Err(error)) = attempt.release {
             outcome.cleanup_issues.push(error);
         }
         outcome.succeeded.push(registration);
@@ -999,15 +1152,20 @@ fn unregister_events_with(
 }
 
 fn register_all_transaction(
+    callbacks: &mut HostCallbackSession,
     descriptors: &[RegistrationDescriptor],
     mut register: impl FnMut(
+        &mut HostCallbackSession,
         &RegistrationDescriptor,
     ) -> Result<RegistrationId, RegistrationTransactionError>,
-    mut unregister: impl FnMut(&[PendingRegistration]) -> UnregisterResult<PendingRegistration>,
+    mut unregister: impl FnMut(
+        &mut HostCallbackSession,
+        &[PendingRegistration],
+    ) -> UnregisterResult<PendingRegistration>,
 ) -> Result<Vec<RegistrationId>, RegistrationTransactionError> {
     let mut registered = Vec::with_capacity(descriptors.len());
     for descriptor in descriptors {
-        match register(descriptor) {
+        match register(callbacks, descriptor) {
             Ok(id) => registered.push(id),
             Err(mut error) => {
                 let pending: Vec<_> = registered
@@ -1015,12 +1173,12 @@ fn register_all_transaction(
                     .copied()
                     .map(PendingRegistration::from)
                     .collect();
-                if error.terminal {
-                    // Terminal status: no further C API calls are safe.
-                    // Record all already-registered items as debt.
+                if !callbacks.permits_callbacks() {
+                    // A terminal status suppresses rollback as well. Preserve
+                    // every already-registered item as host cleanup debt.
                     error.pending_registrations.extend(pending);
                 } else {
-                    let outcome = unregister(&pending);
+                    let outcome = unregister(callbacks, &pending);
                     error
                         .pending_registrations
                         .extend(outcome.failed.into_iter().map(|(entry, _)| entry));
@@ -1036,20 +1194,39 @@ fn register_all_transaction(
 }
 
 fn reconcile_malformed_registration_result(
+    callbacks: &mut HostCallbackSession,
     descriptor: &RegistrationDescriptor,
     source: XllError,
-    recover: impl FnOnce(&'static str) -> XllResult<Option<RegistrationId>>,
-    unregister: impl FnOnce(&[PendingRegistration]) -> UnregisterResult<PendingRegistration>,
+    recover: impl FnOnce(
+        &mut HostCallbackSession,
+        &'static str,
+    ) -> Result<Option<RegistrationId>, RegistrationTransactionError>,
+    unregister: impl FnOnce(
+        &mut HostCallbackSession,
+        &[PendingRegistration],
+    ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
-    match recover(descriptor.excel_name) {
-        Ok(Some(registration)) => registration_release_failure(registration, source, unregister),
+    match recover(callbacks, descriptor.excel_name) {
+        Ok(Some(registration)) => {
+            registration_release_failure(callbacks, registration, source, unregister)
+        }
         Ok(None) => RegistrationTransactionError::new(source),
-        Err(recovery_error) => {
+        Err(mut recovery_error) => {
+            let recovery_source = *recovery_error.source;
             let mut error = RegistrationTransactionError::new(source);
+            error
+                .pending_registrations
+                .append(&mut recovery_error.pending_registrations);
+            error
+                .metadata_debt
+                .append(&mut recovery_error.metadata_debt);
+            error
+                .pending_events
+                .append(&mut recovery_error.pending_events);
             error.unknown_registrations.push(UnknownRegistrationState {
                 export_name: descriptor.export_name,
                 excel_name: descriptor.excel_name,
-                recovery_error,
+                recovery_error: recovery_source,
             });
             error
         }
@@ -1057,13 +1234,21 @@ fn reconcile_malformed_registration_result(
 }
 
 fn registration_release_failure(
+    callbacks: &mut HostCallbackSession,
     registration: RegistrationId,
     source: XllError,
-    unregister: impl FnOnce(&[PendingRegistration]) -> UnregisterResult<PendingRegistration>,
+    unregister: impl FnOnce(
+        &mut HostCallbackSession,
+        &[PendingRegistration],
+    ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
     let pending = [PendingRegistration::from(registration)];
     let mut error = RegistrationTransactionError::new(source);
-    let outcome = unregister(&pending);
+    if !callbacks.permits_callbacks() {
+        error.pending_registrations.extend_from_slice(&pending);
+        return error;
+    }
+    let outcome = unregister(callbacks, &pending);
     error.pending_registrations = outcome.failed.into_iter().map(|(entry, _)| entry).collect();
     error.metadata_debt = outcome
         .metadata_debt
@@ -1075,12 +1260,20 @@ fn registration_release_failure(
 
 #[cfg(any(feature = "async", test))]
 fn event_release_failure(
+    callbacks: &mut HostCallbackSession,
     registration: EventRegistration,
     source: XllError,
-    unregister: impl FnOnce(&[EventRegistration]) -> UnregisterResult<EventRegistration>,
+    unregister: impl FnOnce(
+        &mut HostCallbackSession,
+        &[EventRegistration],
+    ) -> UnregisterResult<EventRegistration>,
 ) -> RegistrationTransactionError {
     let mut error = RegistrationTransactionError::new(source);
-    error.pending_events = unregister(&[registration])
+    if !callbacks.permits_callbacks() {
+        error.pending_events.push(registration);
+        return error;
+    }
+    error.pending_events = unregister(callbacks, &[registration])
         .failed
         .into_iter()
         .map(|(entry, _)| entry)
@@ -1090,29 +1283,39 @@ fn event_release_failure(
 
 #[cfg(any(feature = "async", test))]
 fn register_async_events_transaction(
+    callbacks: &mut HostCallbackSession,
     mut register: impl FnMut(
+        &mut HostCallbackSession,
         &'static str,
         i32,
     ) -> Result<EventRegistration, RegistrationTransactionError>,
-    mut unregister: impl FnMut(&[EventRegistration]) -> UnregisterResult<EventRegistration>,
+    mut unregister: impl FnMut(
+        &mut HostCallbackSession,
+        &[EventRegistration],
+    ) -> UnregisterResult<EventRegistration>,
 ) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
     let mut registrations = Vec::with_capacity(2);
     registrations.push(register(
+        callbacks,
         "__xlfn_calculation_canceled",
         XLEVENT_CALCULATION_CANCELED,
     )?);
-    match register("__xlfn_calculation_ended", XLEVENT_CALCULATION_ENDED) {
+    match register(
+        callbacks,
+        "__xlfn_calculation_ended",
+        XLEVENT_CALCULATION_ENDED,
+    ) {
         Ok(registration) => {
             registrations.push(registration);
             Ok(registrations)
         }
         Err(mut error) => {
-            if error.terminal {
+            if !callbacks.permits_callbacks() {
                 // Terminal status: no further C API calls are safe.
                 error.pending_events.extend(registrations);
             } else {
                 error.pending_events.extend(
-                    unregister(&registrations)
+                    unregister(callbacks, &registrations)
                         .failed
                         .into_iter()
                         .map(|(entry, _)| entry),
@@ -1427,7 +1630,7 @@ mod tests {
         let error = advance_cleanup_state(
             &mut state,
             RegistrationCleanupState::Unregistered,
-            XLRET_SUCCESS,
+            ExcelCallbackStatus::Success,
             &result,
             "xlfUnregister",
             "xlfUnregister(result)",
@@ -1453,7 +1656,7 @@ mod tests {
                 advance_cleanup_state(
                     &mut state,
                     RegistrationCleanupState::NameDeleted,
-                    XLRET_SUCCESS,
+                    ExcelCallbackStatus::Success,
                     &result,
                     "xlfSetName",
                     "xlfSetName(result)",
@@ -1471,7 +1674,7 @@ mod tests {
         advance_cleanup_state(
             &mut state,
             RegistrationCleanupState::Unregistered,
-            XLRET_SUCCESS,
+            ExcelCallbackStatus::Success,
             &result,
             "xlfUnregister",
             "xlfUnregister(result)",
@@ -1484,8 +1687,10 @@ mod tests {
     fn second_async_event_failure_rolls_back_the_first_registration() {
         let attempts = std::cell::Cell::new(0);
         let rolled_back = std::cell::RefCell::new(Vec::new());
+        let mut callbacks = HostCallbackSession::new();
         let result = register_async_events_transaction(
-            |procedure, event| {
+            &mut callbacks,
+            |_callbacks, procedure, event| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 if attempt == 2 {
@@ -1502,7 +1707,7 @@ mod tests {
                     })
                 }
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 rolled_back.borrow_mut().extend_from_slice(registrations);
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.succeeded.extend_from_slice(registrations);
@@ -1519,6 +1724,54 @@ mod tests {
                 unregistered: false,
             }]
         );
+    }
+
+    #[test]
+    fn terminal_async_event_failure_preserves_current_and_previous_events() {
+        let attempts = std::cell::Cell::new(0);
+        let unregister_calls = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
+        let error = register_async_events_transaction(
+            &mut callbacks,
+            |callbacks, procedure, event| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 2 {
+                    callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
+                    let mut error = RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlEventRegister",
+                        code: xlfn_sys::XLRET_ABORT,
+                    });
+                    error.pending_events.push(EventRegistration {
+                        procedure,
+                        event,
+                        registration_id: 0,
+                        unregistered: false,
+                    });
+                    Err(error)
+                } else {
+                    Ok(EventRegistration {
+                        procedure,
+                        event,
+                        registration_id: attempt,
+                        unregistered: false,
+                    })
+                }
+            },
+            |_callbacks, registrations| {
+                unregister_calls.set(unregister_calls.get() + 1);
+                let mut outcome = UnregisterResult::new(registrations.len());
+                outcome.succeeded.extend_from_slice(registrations);
+                outcome
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(unregister_calls.get(), 0);
+        assert_eq!(error.pending_events.len(), 2);
+        assert_eq!(error.pending_events[0].registration_id, 0);
+        assert_eq!(error.pending_events[1].registration_id, 1);
+        assert!(!callbacks.permits_callbacks());
     }
 
     #[test]
@@ -1541,9 +1794,11 @@ mod tests {
         };
         let descriptors = [descriptor("first", "FIRST"), descriptor("second", "SECOND")];
         let attempts = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
         let result = register_all_transaction(
+            &mut callbacks,
             &descriptors,
-            |descriptor| {
+            |_callbacks, descriptor| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 if attempt == 2 {
@@ -1558,7 +1813,7 @@ mod tests {
                     })
                 }
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome
                     .failed
@@ -1600,9 +1855,11 @@ mod tests {
         };
         let descriptors = [descriptor("first", "FIRST"), descriptor("second", "SECOND")];
         let attempts = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
         let result = register_all_transaction(
+            &mut callbacks,
             &descriptors,
-            |descriptor| {
+            |_callbacks, descriptor| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 if attempt == 2 {
@@ -1617,7 +1874,7 @@ mod tests {
                     })
                 }
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome
                     .metadata_debt
@@ -1641,6 +1898,72 @@ mod tests {
     }
 
     #[test]
+    fn terminal_registration_failure_preserves_debt_without_rollback() {
+        const ARGUMENTS: &[ArgumentDescriptor] = &[];
+        const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
+        let descriptor = |export_name, excel_name| RegistrationDescriptor {
+            export_name,
+            excel_name,
+            signature: RegistrationSignature {
+                result: ResultAbi::Xloper,
+                arguments: ABI_ARGUMENTS,
+                flags: RegistrationFlags::default(),
+            },
+            category: "test",
+            description: "test",
+            help_topic: "",
+            visibility: FunctionVisibility::Public,
+            arguments: ARGUMENTS,
+        };
+        let descriptors = [descriptor("first", "FIRST"), descriptor("second", "SECOND")];
+        let attempts = std::cell::Cell::new(0);
+        let unregister_calls = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
+        let error = register_all_transaction(
+            &mut callbacks,
+            &descriptors,
+            |callbacks, descriptor| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 2 {
+                    callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
+                    let mut error = RegistrationTransactionError::new(XllError::ExcelApi {
+                        function: "xlfRegister",
+                        code: xlfn_sys::XLRET_ABORT,
+                    });
+                    error.unknown_registrations.push(UnknownRegistrationState {
+                        export_name: descriptor.export_name,
+                        excel_name: descriptor.excel_name,
+                        recovery_error: XllError::ExcelApi {
+                            function: "xlfRegister terminal result",
+                            code: xlfn_sys::XLRET_ABORT,
+                        },
+                    });
+                    Err(error)
+                } else {
+                    Ok(RegistrationId {
+                        id: f64::from(attempt),
+                        excel_name: descriptor.excel_name,
+                    })
+                }
+            },
+            |_callbacks, registrations| {
+                unregister_calls.set(unregister_calls.get() + 1);
+                let mut outcome = UnregisterResult::new(registrations.len());
+                outcome.succeeded.extend_from_slice(registrations);
+                outcome
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(unregister_calls.get(), 0);
+        assert_eq!(error.pending_registrations.len(), 1);
+        assert_eq!(error.pending_registrations[0].registration.id, 1.0);
+        assert_eq!(error.unknown_registrations.len(), 1);
+        assert!(!callbacks.permits_callbacks());
+    }
+
+    #[test]
     fn malformed_success_payload_recovers_and_unregisters_the_committed_registration() {
         const ARGUMENTS: &[ArgumentDescriptor] = &[];
         const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
@@ -1659,19 +1982,21 @@ mod tests {
             arguments: ARGUMENTS,
         };
         let unregistered = std::cell::Cell::new(None);
+        let mut callbacks = HostCallbackSession::new();
         let error = reconcile_malformed_registration_result(
+            &mut callbacks,
             &descriptor,
             XllError::ExcelApi {
                 function: "xlfRegister(result)",
                 code: XLTYPE_STR as i32,
             },
-            |excel_name| {
+            |_callbacks, excel_name| {
                 Ok(Some(RegistrationId {
                     id: 42.0,
                     excel_name,
                 }))
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 unregistered.set(Some(registrations[0].registration.id));
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.succeeded.extend_from_slice(registrations);
@@ -1702,19 +2027,21 @@ mod tests {
             visibility: FunctionVisibility::Public,
             arguments: ARGUMENTS,
         };
+        let mut callbacks = HostCallbackSession::new();
         let error = reconcile_malformed_registration_result(
+            &mut callbacks,
             &descriptor,
             XllError::ExcelApi {
                 function: "xlfRegister(result)",
                 code: XLTYPE_STR as i32,
             },
-            |_| {
-                Err(XllError::ExcelApi {
+            |_callbacks, _| {
+                Err(RegistrationTransactionError::new(XllError::ExcelApi {
                     function: "xlfEvaluate(registration recovery)",
                     code: 32,
-                })
+                }))
             },
-            |_| panic!("an unknown registration must not be treated as recoverable"),
+            |_callbacks, _| panic!("an unknown registration must not be treated as recoverable"),
         );
 
         assert_eq!(error.unknown_registrations.len(), 1);
@@ -1723,15 +2050,61 @@ mod tests {
     }
 
     #[test]
+    fn terminal_registration_recovery_preserves_unknown_state() {
+        const ARGUMENTS: &[ArgumentDescriptor] = &[];
+        const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
+        let descriptor = RegistrationDescriptor {
+            export_name: "terminal_recovery_export",
+            excel_name: "TERMINAL.RECOVERY",
+            signature: RegistrationSignature {
+                result: ResultAbi::Xloper,
+                arguments: ABI_ARGUMENTS,
+                flags: RegistrationFlags::default(),
+            },
+            category: "test",
+            description: "test",
+            help_topic: "",
+            visibility: FunctionVisibility::Public,
+            arguments: ARGUMENTS,
+        };
+        let mut callbacks = HostCallbackSession::new();
+        let error = reconcile_malformed_registration_result(
+            &mut callbacks,
+            &descriptor,
+            XllError::ExcelApi {
+                function: "xlfRegister(result)",
+                code: XLTYPE_STR as i32,
+            },
+            |callbacks, _| {
+                callbacks.suppress_for_test(ExcelCallbackStatus::Uncalced);
+                Err(RegistrationTransactionError::new(XllError::ExcelApi {
+                    function: "xlfEvaluate(registration recovery)",
+                    code: xlfn_sys::XLRET_UNCALCED,
+                }))
+            },
+            |_callbacks, _| panic!("terminal recovery must not attempt unregister"),
+        );
+
+        assert_eq!(error.unknown_registrations.len(), 1);
+        assert_eq!(
+            error.unknown_registrations[0].excel_name,
+            "TERMINAL.RECOVERY"
+        );
+        assert!(!callbacks.permits_callbacks());
+    }
+
+    #[test]
     fn callback_release_failure_returns_cleanup_debt_when_unregister_fails() {
         let registration = RegistrationId {
             id: 7.0,
             excel_name: "RELEASE_FAILURE",
         };
+        let mut callbacks = HostCallbackSession::new();
         let result = registration_release_failure(
+            &mut callbacks,
             registration,
             XllError::Internal { diagnostic_id: 1 },
-            |registrations| {
+            |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.failed.push((
                     registrations[0].clone(),
@@ -1751,8 +2124,10 @@ mod tests {
     #[test]
     fn failed_async_event_rollback_returns_cleanup_debt() {
         let attempts = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
         let result = register_async_events_transaction(
-            |procedure, event| {
+            &mut callbacks,
+            |_callbacks, procedure, event| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 if attempt == 2 {
@@ -1769,7 +2144,7 @@ mod tests {
                     })
                 }
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.failed.push((
                     registrations[0].clone(),
@@ -1814,14 +2189,14 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let first = unregister_events_with(&[registration], |_| {
             calls.set(calls.get() + 1);
-            (
-                XLRET_SUCCESS,
-                Ok(()),
-                Err(XllError::ExcelApi {
+            EventUnregisterAttempt {
+                status: ExcelCallbackStatus::Success,
+                detached: Ok(()),
+                release: Some(Err(XllError::ExcelApi {
                     function: "xlFree",
                     code: 32,
-                }),
-            )
+                })),
+            }
         });
         assert!(first.failed.is_empty());
         assert_eq!(first.cleanup_issues.len(), 1);
@@ -1829,9 +2204,13 @@ mod tests {
 
         let retry = unregister_events_with(
             &[first.succeeded[0].clone()],
-            |_| -> (i32, XllResult<()>, XllResult<()>) {
+            |_| -> EventUnregisterAttempt {
                 calls.set(calls.get() + 1);
-                (XLRET_SUCCESS, Ok(()), Ok(()))
+                EventUnregisterAttempt {
+                    status: ExcelCallbackStatus::Success,
+                    detached: Ok(()),
+                    release: Some(Ok(())),
+                }
             },
         );
 
@@ -1848,15 +2227,13 @@ mod tests {
             registration_id: 1,
             unregistered: false,
         };
-        let result = unregister_events_with(&[registration], |_| {
-            (
-                XLRET_SUCCESS,
-                Err(XllError::ExcelApi {
-                    function: "xlEventRegister(unregister result)",
-                    code: 0,
-                }),
-                Ok(()),
-            )
+        let result = unregister_events_with(&[registration], |_| EventUnregisterAttempt {
+            status: ExcelCallbackStatus::Success,
+            detached: Err(XllError::ExcelApi {
+                function: "xlEventRegister(unregister result)",
+                code: 0,
+            }),
+            release: Some(Ok(())),
         });
 
         assert_eq!(result.failed.len(), 1);
@@ -1871,15 +2248,13 @@ mod tests {
             registration_id: 1,
             unregistered: false,
         };
-        let result = unregister_events_with(&[registration], |_| {
-            (
-                XLRET_SUCCESS,
-                Err(XllError::ExcelApi {
-                    function: "xlEventRegister(unregister result)",
-                    code: xlfn_sys::XLTYPE_BOOL as i32,
-                }),
-                Ok(()),
-            )
+        let result = unregister_events_with(&[registration], |_| EventUnregisterAttempt {
+            status: ExcelCallbackStatus::Success,
+            detached: Err(XllError::ExcelApi {
+                function: "xlEventRegister(unregister result)",
+                code: xlfn_sys::XLTYPE_BOOL as i32,
+            }),
+            release: Some(Ok(())),
         });
 
         assert_eq!(result.failed.len(), 1);
@@ -1895,13 +2270,15 @@ mod tests {
             unregistered: false,
         };
         let rollback_calls = std::cell::Cell::new(0);
+        let mut callbacks = HostCallbackSession::new();
         let error = event_release_failure(
+            &mut callbacks,
             registration.clone(),
             XllError::ExcelApi {
                 function: "xlEventRegister(result)",
                 code: 0,
             },
-            |registrations| {
+            |_callbacks, registrations| {
                 rollback_calls.set(rollback_calls.get() + 1);
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.failed.push((

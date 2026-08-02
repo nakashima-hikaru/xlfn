@@ -1,3 +1,4 @@
+use crate::host_callback::{HostCallbackSession, HostCallbackState};
 use crate::registration::HostRegistrar;
 use crate::{
     Addin, BuildInfo, IntoXllError, OpenContext, RegistrationDescriptor, Runtime, XllError,
@@ -19,13 +20,19 @@ where
     std::hint::black_box(crate::crt::effective_crt_policy());
     let close_epoch = runtime.close_epoch();
     let mut open_attempt = None;
+    let mut callbacks = HostCallbackSession::new();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending
-            && !rollback_open::<A>(runtime)
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: 0x4f50_5242_5045_4e44,
-            });
+        if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending {
+            let outcome = rollback_open::<A>(runtime, &mut callbacks);
+            if !outcome.unload_safe() {
+                fatal_unload_hazard(
+                    crate::shutdown::UnloadHazard::OpenRollbackFailed,
+                    "xlAutoOpen pending rollback",
+                    &XllError::Internal {
+                        diagnostic_id: 0x4f50_5242_5045_4e44,
+                    },
+                );
+            }
         }
 
         // A final close that overlapped recovery of a previous failed open
@@ -44,6 +51,7 @@ where
                 target,
             },
             descriptors,
+            &mut callbacks,
         )?;
         runtime.finish_open(
             open_attempt
@@ -61,14 +69,14 @@ where
         Ok(Err(error)) => {
             write_startup_log(addin_id, &format!("xlAutoOpen failed: {error}"));
             report_boundary_error("xlAutoOpen", &error);
-            rollback_active_open::<A>(runtime, open_attempt.as_mut());
+            rollback_active_open::<A>(runtime, open_attempt.as_mut(), &mut callbacks);
             0
         }
         Err(_) => {
             let error = XllError::Panic;
             write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
-            rollback_active_open::<A>(runtime, open_attempt.as_mut());
+            rollback_active_open::<A>(runtime, open_attempt.as_mut(), &mut callbacks);
             0
         }
     }
@@ -95,6 +103,7 @@ fn open_addin_inner<A>(
     runtime: &Runtime<A::State>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
+    callbacks: &mut HostCallbackSession,
 ) -> XllResult<Vec<crate::RegistrationId>>
 where
     A: Addin,
@@ -103,7 +112,8 @@ where
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     crate::diagnostics::reset_diagnostic_router()?;
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
-    let registrar = HostRegistrar::connect()?;
+    let registrar = HostRegistrar::connect(callbacks)
+        .map_err(|error| retain_transaction_error(runtime, error))?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info);
     initialize_addin::<A>(runtime, &context)?;
     let has_async_functions = descriptors
@@ -114,7 +124,7 @@ where
         {
             let async_worker_count = async_worker_count::<A>(runtime)?;
             runtime.start_async(async_worker_count)?;
-            match registrar.register_async_events() {
+            match registrar.register_async_events(callbacks) {
                 Ok(events) => runtime.set_event_registrations(events),
                 Err(error) => return Err(retain_transaction_error(runtime, error)),
             }
@@ -127,13 +137,14 @@ where
         }
     }
     registrar
-        .register_all(descriptors)
+        .register_all(callbacks, descriptors)
         .map_err(|error| retain_transaction_error(runtime, error))
 }
 
 fn rollback_active_open<A>(
     runtime: &Runtime<A::State>,
     attempt: Option<&mut crate::runtime::OpenAttemptGuard<'_, A::State>>,
+    callbacks: &mut HostCallbackSession,
 ) where
     A: Addin,
 {
@@ -144,9 +155,9 @@ fn rollback_active_open<A>(
         return;
     }
     if attempt.fail() {
-        match catch_unwind(AssertUnwindSafe(|| rollback_open::<A>(runtime))) {
-            Ok(true) => {}
-            Ok(false) => fatal_unload_hazard(
+        match catch_unwind(AssertUnwindSafe(|| rollback_open::<A>(runtime, callbacks))) {
+            Ok(outcome) if outcome.unload_safe() => {}
+            Ok(_) => fatal_unload_hazard(
                 crate::shutdown::UnloadHazard::OpenRollbackFailed,
                 "xlAutoOpen rollback",
                 &XllError::Internal {
@@ -215,14 +226,37 @@ fn retain_transaction_error<S>(
     *error.source
 }
 
-fn rollback_open<A>(runtime: &Runtime<A::State>) -> bool
+struct OpenRollbackOutcome {
+    local_quiescent: bool,
+    host_callbacks_detached: bool,
+    #[allow(dead_code)]
+    host_callback_state: HostCallbackState,
+    registration_state_known: bool,
+}
+
+impl OpenRollbackOutcome {
+    fn unload_safe(&self) -> bool {
+        self.local_quiescent && self.host_callbacks_detached && self.registration_state_known
+    }
+}
+
+fn rollback_open<A>(
+    runtime: &Runtime<A::State>,
+    callbacks: &mut HostCallbackSession,
+) -> OpenRollbackOutcome
 where
     A: Addin,
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
-        return runtime.phase() == crate::LifecyclePhase::Closed;
+        return OpenRollbackOutcome {
+            local_quiescent: runtime.phase() == crate::LifecyclePhase::Closed,
+            host_callbacks_detached: runtime.registrations().is_empty()
+                && runtime.event_registrations().is_empty(),
+            host_callback_state: callbacks.state(),
+            registration_state_known: !runtime.registration_state_unknown(),
+        };
     };
     crate::ingress::global_ingress().begin_close();
 
@@ -232,7 +266,7 @@ where
     runtime.wait_for_calls();
     runtime.wait_for_returns();
 
-    let mut succeeded = true;
+    let mut local_quiescent = true;
     #[cfg(feature = "async")]
     {
         runtime.cancel_async();
@@ -243,7 +277,7 @@ where
     }
     if let Err(error) = runtime.close_subscriptions() {
         report_boundary_error("xlAutoOpen subscription rollback", &error);
-        succeeded = false;
+        local_quiescent = false;
     }
 
     // State may own framework Handle leases. Remove and quiesce it before the
@@ -263,7 +297,7 @@ where
                         // execution resources have stopped. Preserve it until
                         // the caller enters the fail-stop path.
                         std::mem::forget(state);
-                        succeeded = false;
+                        local_quiescent = false;
                     }
                 }
             }
@@ -273,22 +307,21 @@ where
                     diagnostic_id: 0x5354_4154_4553_4341,
                 };
                 report_boundary_error("xlAutoOpen rollback state escaped", &error);
-                succeeded = false;
+                local_quiescent = false;
             }
         }
     }
 
-    if succeeded && let Err(error) = runtime.close_handles() {
+    if local_quiescent && let Err(error) = runtime.close_handles() {
         report_boundary_error("xlAutoOpen handle rollback", &error);
-        succeeded = false;
+        local_quiescent = false;
     }
 
     let registrations = runtime.registrations();
-    let outcome = HostRegistrar::unregister_pending(&registrations);
+    let outcome = HostRegistrar::unregister_pending(callbacks, &registrations);
     for (registration, error) in &outcome.failed {
         if registration.cleanup_severity().is_unload_unsafe() {
             report_boundary_error("xlAutoOpen registration rollback", error);
-            succeeded = false;
         }
     }
     for (registration, error) in &outcome.metadata_debt {
@@ -307,25 +340,43 @@ where
     runtime.retain_metadata_debt(outcome.metadata_debt);
 
     let events = runtime.event_registrations();
-    let event_outcome = HostRegistrar::unregister_events_detailed(&events);
-    for (_, error) in &event_outcome.failed {
-        report_boundary_error("xlAutoOpen event rollback", error);
-        succeeded = false;
+    if callbacks.permits_callbacks() {
+        let event_outcome = HostRegistrar::unregister_events_detailed(callbacks, &events);
+        for (_, error) in &event_outcome.failed {
+            report_boundary_error("xlAutoOpen event rollback", error);
+        }
+        for error in &event_outcome.cleanup_issues {
+            report_cleanup_issue(&crate::shutdown::CleanupIssue {
+                component: "Excel event callback result",
+                kind: crate::CleanupIssueKind::HostMemoryLeak,
+                error: error.clone(),
+            });
+        }
+        runtime.retain_failed_event_registrations(event_outcome.failed);
+    } else if !events.is_empty() {
+        let error = callbacks
+            .terminal_status()
+            .map(|status| XllError::ExcelApi {
+                function: "xlEventRegister(unregister suppressed)",
+                code: status.raw_code(),
+            })
+            .unwrap_or(XllError::Closing);
+        report_boundary_error("xlAutoOpen event rollback", &error);
+        runtime.retain_failed_event_registrations(
+            events
+                .into_iter()
+                .map(|event| (event, error.clone()))
+                .collect(),
+        );
+    } else {
+        runtime.retain_failed_event_registrations(Vec::new());
     }
-    for error in &event_outcome.cleanup_issues {
-        report_cleanup_issue(&crate::shutdown::CleanupIssue {
-            component: "Excel event callback result",
-            kind: crate::CleanupIssueKind::HostMemoryLeak,
-            error: error.clone(),
-        });
-    }
-    runtime.retain_failed_event_registrations(event_outcome.failed);
 
-    if succeeded {
+    if local_quiescent {
         crate::rtd::wait_for_module_quiescence();
     }
 
-    if succeeded && let Some(mut state) = addin_state.take() {
+    if local_quiescent && let Some(mut state) = addin_state.take() {
         let mut report = crate::shutdown::CloseReport::default();
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             let mut reporter = crate::CleanupReporter::new(&mut report);
@@ -357,9 +408,8 @@ where
             diagnostic_id: 0x5245_4753_554e_4b4e,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
-        succeeded = false;
     }
-    if succeeded {
+    if local_quiescent {
         match crate::diagnostics::close_diagnostic_router() {
             Ok(outcome) => {
                 for issue in outcome.issues {
@@ -369,18 +419,26 @@ where
             Err(error) => {
                 let error = error.into_xll_error();
                 report_boundary_error("xlAutoOpen diagnostic rollback", &error);
-                succeeded = false;
+                local_quiescent = false;
             }
         }
     }
-    if succeeded {
+    let host_callbacks_detached =
+        runtime.registrations().is_empty() && runtime.event_registrations().is_empty();
+    let registration_state_known = !runtime.registration_state_unknown();
+    if local_quiescent && host_callbacks_detached && registration_state_known {
         let _exports_drained = crate::ingress::global_ingress().seal_and_drain();
         // Publish Closed only after every rollback action has completed. A
         // concurrent xlAutoClose waiter may return as soon as it observes this
         // terminal transition.
         runtime.finish_open_rollback();
     }
-    succeeded
+    OpenRollbackOutcome {
+        local_quiescent,
+        host_callbacks_detached,
+        host_callback_state: callbacks.state(),
+        registration_state_known,
+    }
 }
 
 #[must_use]
@@ -388,10 +446,19 @@ pub fn close_addin<A>(runtime: &Runtime<A::State>) -> i32
 where
     A: Addin,
 {
-    if catch_unwind(AssertUnwindSafe(|| close_addin_inner::<A>(runtime))).is_err() {
+    let mut callbacks = HostCallbackSession::new();
+    if catch_unwind(AssertUnwindSafe(|| {
+        close_addin_inner::<A>(runtime, &mut callbacks)
+    }))
+    .is_err()
+    {
         let error = XllError::Panic;
         report_boundary_error("xlAutoClose boundary", &error);
-        if catch_unwind(AssertUnwindSafe(|| emergency_close(runtime))).is_err() {
+        if catch_unwind(AssertUnwindSafe(|| {
+            emergency_close(runtime, &mut callbacks)
+        }))
+        .is_err()
+        {
             report_boundary_error("xlAutoClose emergency cleanup", &error);
         }
         // A panic in the normal close path means State-owned resources may not
@@ -406,7 +473,7 @@ where
     1
 }
 
-fn emergency_close<S>(runtime: &Runtime<S>) {
+fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession) {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_close_attempt) = runtime.begin_final_close() else {
@@ -433,7 +500,7 @@ fn emergency_close<S>(runtime: &Runtime<S>) {
     let _ = crate::rtd::wait_for_module_quiescence();
 }
 
-fn close_addin_inner<A>(runtime: &Runtime<A::State>)
+fn close_addin_inner<A>(runtime: &Runtime<A::State>, callbacks: &mut HostCallbackSession)
 where
     A: Addin,
 {
@@ -453,7 +520,7 @@ where
 
     let registrations = runtime.registrations();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_pending(&registrations)
+        HostRegistrar::unregister_pending(callbacks, &registrations)
     })) {
         for (registration, error) in &outcome.failed {
             if registration.cleanup_severity().is_unload_unsafe() {
@@ -516,8 +583,34 @@ where
     }
 
     let event_registrations = runtime.event_registrations();
-    if let Ok(event_outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_events_detailed(&event_registrations)
+    if !callbacks.permits_callbacks() {
+        if !event_registrations.is_empty() {
+            let error = callbacks
+                .terminal_status()
+                .map(|status| XllError::ExcelApi {
+                    function: "xlEventRegister(unregister suppressed)",
+                    code: status.raw_code(),
+                })
+                .unwrap_or(XllError::Closing);
+            for _ in &event_registrations {
+                report_boundary_error("xlAutoClose event unregister", &error);
+            }
+            runtime.retain_failed_event_registrations(
+                event_registrations
+                    .into_iter()
+                    .map(|registration| (registration, error.clone()))
+                    .collect(),
+            );
+            if unload_failure.is_none() {
+                unload_failure = Some((
+                    crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                    "xlAutoClose event unregister suppressed",
+                    error,
+                ));
+            }
+        }
+    } else if let Ok(event_outcome) = catch_unwind(AssertUnwindSafe(|| {
+        HostRegistrar::unregister_events_detailed(callbacks, &event_registrations)
     })) {
         for (_, error) in &event_outcome.failed {
             report_boundary_error("xlAutoClose event unregister", error);
@@ -810,8 +903,9 @@ mod tests {
     fn failed_concurrent_open_does_not_rollback_the_owner_attempt() {
         let runtime = Runtime::new();
         let mut owner = runtime.begin_open().unwrap();
+        let mut callbacks = HostCallbackSession::new();
 
-        rollback_active_open::<LayersPanic>(&runtime, None);
+        rollback_active_open::<LayersPanic>(&runtime, None, &mut callbacks);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Opening);
 
         runtime.publish((), Vec::new());
@@ -830,7 +924,8 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert!(open_attempt.fail());
-        assert!(rollback_open::<LayersPanic>(&runtime));
+        let mut callbacks = HostCallbackSession::new();
+        assert!(rollback_open::<LayersPanic>(&runtime, &mut callbacks).unload_safe());
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
@@ -871,7 +966,8 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert!(open_attempt.fail());
-        assert!(rollback_open::<WorkersPanic>(&runtime));
+        let mut callbacks = HostCallbackSession::new();
+        assert!(rollback_open::<WorkersPanic>(&runtime, &mut callbacks).unload_safe());
         assert_eq!(WORKERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
 
@@ -910,7 +1006,8 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        close_addin_inner::<RetryClose>(&runtime);
+        let mut callbacks = HostCallbackSession::new();
+        close_addin_inner::<RetryClose>(&runtime, &mut callbacks);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_state().is_none());
@@ -947,7 +1044,8 @@ mod tests {
         runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        close_addin_inner::<CleanupPanic>(&runtime);
+        let mut callbacks = HostCallbackSession::new();
+        close_addin_inner::<CleanupPanic>(&runtime, &mut callbacks);
 
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(drops.load(Ordering::Acquire), 0);
@@ -979,7 +1077,8 @@ mod tests {
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let fatal = catch_unwind(AssertUnwindSafe(|| {
-            close_addin_inner::<QuiesceFailure>(&runtime);
+            let mut callbacks = HostCallbackSession::new();
+            close_addin_inner::<QuiesceFailure>(&runtime, &mut callbacks);
         }));
 
         assert!(fatal.is_err());
@@ -1000,7 +1099,8 @@ mod tests {
         );
 
         assert!(open_attempt.fail());
-        assert!(rollback_open::<RetryClose>(&runtime));
+        let mut callbacks = HostCallbackSession::new();
+        assert!(rollback_open::<RetryClose>(&runtime, &mut callbacks).unload_safe());
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_state().is_none());
@@ -1064,7 +1164,8 @@ mod tests {
         );
 
         assert!(open_attempt.fail());
-        assert!(rollback_open::<StateHandleRollback>(&runtime));
+        let mut callbacks = HostCallbackSession::new();
+        assert!(rollback_open::<StateHandleRollback>(&runtime, &mut callbacks).unload_safe());
         assert_eq!(quiesced.load(Ordering::Acquire), 1);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
     }
@@ -1097,7 +1198,8 @@ mod tests {
         runtime.publish((), Vec::new());
 
         assert!(open_attempt.fail());
-        assert!(rollback_open::<AlwaysFailClose>(&runtime));
+        let mut callbacks = HostCallbackSession::new();
+        assert!(rollback_open::<AlwaysFailClose>(&runtime, &mut callbacks).unload_safe());
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
 
         assert_eq!(close_addin::<AlwaysFailClose>(&runtime), 1);

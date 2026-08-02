@@ -30,6 +30,8 @@ mod formula_fingerprint;
 #[allow(unsafe_code)]
 mod handle;
 #[allow(unsafe_code)]
+mod host_callback;
+#[allow(unsafe_code)]
 mod lifecycle;
 #[allow(unsafe_code)]
 mod reference;
