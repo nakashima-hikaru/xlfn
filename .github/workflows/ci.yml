@@ -56,6 +56,15 @@ jobs:
       - name: Compile-test the RTD guide fixture
         run: cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
 
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          # Keep this in sync with deploy-guide.yml; update through an explicit dependency PR.
+          mdbook-version: 0.5.4
+
+      - name: Build the user guide
+        run: mdbook build guide
+
       - name: Validate the user guide
         run: python guide/check.py
 
