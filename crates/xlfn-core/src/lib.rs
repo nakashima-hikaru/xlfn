@@ -90,8 +90,8 @@ pub use registration::{
 #[doc(hidden)]
 pub use return_value::{
     CallbackCleanupDebt, CleanupDebtSet, ExcelCallbackStatus, GitCookieDebt, RegistrationDebt,
-    RegistryKeyDebt, ReturnContext, ReturnFreeBoundaryGuard, ffi_boundary, ffi_boundary_tracked,
-    ffi_boundary_void, free_return, free_return_boundary, udf_boundary_named,
+    RegistryKeyDebt, ReturnContext, ReturnFreeBoundaryGuard, ffi_boundary, ffi_boundary_void,
+    free_return, free_return_boundary, udf_boundary_named,
 };
 #[doc(hidden)]
 pub use rtd::{dll_can_unload_now, dll_get_class_object};

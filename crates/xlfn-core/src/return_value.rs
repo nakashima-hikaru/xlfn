@@ -309,6 +309,12 @@ const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "32"))]
 const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
+enum ReturnOwnership {
+    Excel(Arc<ReturnTracker>),
+    #[cfg(any(feature = "async", test))]
+    Local,
+}
+
 #[repr(C)]
 struct ReturnBlock {
     // This must remain first: Excel receives a pointer to this field and
@@ -316,30 +322,24 @@ struct ReturnBlock {
     oper: XLOPER12,
     strings: Box<[Box<[u16]>]>,
     array: Option<Box<[XLOPER12]>>,
-    tracker: Option<Arc<ReturnTracker>>,
+    ownership: ReturnOwnership,
     magic: u64,
 }
 
 impl ReturnBlock {
-    fn build(value: OwnedExcelValue) -> XllResult<Box<Self>> {
-        Self::build_with_dll_free(value, true, None)
-    }
-
-    fn build_tracked(value: OwnedExcelValue, tracker: Arc<ReturnTracker>) -> XllResult<Box<Self>> {
-        Self::build_with_dll_free(value, true, Some(tracker))
+    fn build_excel(value: OwnedExcelValue, tracker: Arc<ReturnTracker>) -> XllResult<Box<Self>> {
+        Self::build_with_ownership(value, ReturnOwnership::Excel(tracker))
     }
 
     #[cfg(any(feature = "async", test))]
-    fn build_async(value: OwnedExcelValue) -> XllResult<Box<Self>> {
-        Self::build_with_dll_free(value, false, None)
+    fn build_local(value: OwnedExcelValue) -> XllResult<Box<Self>> {
+        Self::build_with_ownership(value, ReturnOwnership::Local)
     }
 
-    fn build_with_dll_free(
+    fn build_with_ownership(
         value: OwnedExcelValue,
-        dll_free: bool,
-        tracker: Option<Arc<ReturnTracker>>,
+        ownership: ReturnOwnership,
     ) -> XllResult<Box<Self>> {
-        debug_assert!(dll_free || tracker.is_none());
         let (array_cells, string_count) = allocation_shape(&value);
         let mut allocation_bytes = base_allocation_payload_bytes(array_cells, string_count)?;
         enforce_return_limit(allocation_bytes)?;
@@ -401,14 +401,14 @@ impl ReturnBlock {
                 None,
             ),
         };
-        if dll_free {
+        if matches!(&ownership, ReturnOwnership::Excel(_)) {
             oper.xltype |= XLBIT_DLL_FREE;
         }
 
         #[cfg(test)]
         LIVE_BLOCKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if let Some(tracker) = tracker.as_ref() {
+        if let ReturnOwnership::Excel(tracker) = &ownership {
             tracker.register_block();
         }
 
@@ -416,7 +416,7 @@ impl ReturnBlock {
             oper,
             strings: strings.into_boxed_slice(),
             array,
-            tracker,
+            ownership,
             magic: RETURN_MAGIC,
         }))
     }
@@ -464,7 +464,7 @@ fn base_allocation_payload_bytes(array_cells: usize, string_count: usize) -> Xll
 impl Drop for ReturnBlock {
     fn drop(&mut self) {
         debug_assert_eq!(self.magic, RETURN_MAGIC);
-        if let Some(tracker) = self.tracker.as_ref() {
+        if let ReturnOwnership::Excel(tracker) = &self.ownership {
             // This runs before field drop glue. The matching free-operation
             // guard remains active until the complete block, including every
             // UTF-16 buffer and array cell, has been released.
@@ -543,36 +543,23 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn allocate(value: OwnedExcelValue) -> XllResult<*mut XLOPER12> {
-    ReturnBlock::build(value).map(|block| ReturnBlock::into_non_null(block).as_ptr())
-}
-
-fn allocate_tracked(
+fn allocate_excel_owned(
     value: OwnedExcelValue,
     tracker: &Arc<ReturnTracker>,
 ) -> XllResult<*mut XLOPER12> {
-    ReturnBlock::build_tracked(value, Arc::clone(tracker))
+    ReturnBlock::build_excel(value, Arc::clone(tracker))
         .map(|block| ReturnBlock::into_non_null(block).as_ptr())
 }
 
 #[cfg(any(feature = "async", test))]
-pub(crate) fn allocate_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
-    ReturnBlock::build_async(value).map(ReturnBlock::into_non_null)
+pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
+    ReturnBlock::build_local(value).map(ReturnBlock::into_non_null)
 }
 
-#[allow(dead_code)]
-pub(crate) fn allocate_error(error: &XllError) -> *mut XLOPER12 {
+fn allocate_excel_error(error: &XllError, tracker: &Arc<ReturnTracker>) -> *mut XLOPER12 {
     // Encoding an Excel error is allocation-only and cannot fail except for
     // process-wide OOM, which Rust defines as aborting.
-    allocate(OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())))
-        .unwrap_or(ptr::null_mut())
-}
-
-fn allocate_tracked_error(error: &XllError, tracker: &Arc<ReturnTracker>) -> *mut XLOPER12 {
-    // Encoding an Excel error is allocation-only and cannot fail except for
-    // process-wide OOM, which Rust defines as aborting.
-    allocate_tracked(
+    allocate_excel_owned(
         OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())),
         tracker,
     )
@@ -597,10 +584,10 @@ pub(crate) fn allocate_detached_error(error: &XllError) -> *mut XLOPER12 {
 }
 
 #[cfg(feature = "async")]
-pub(crate) fn allocate_async_error(error: &XllError) -> NonNull<XLOPER12> {
+pub(crate) fn allocate_local_async_error(error: &XllError) -> NonNull<XLOPER12> {
     // Encoding a scalar Excel error cannot fail except for process-wide OOM,
     // which Rust defines as aborting.
-    allocate_async_return(OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())))
+    allocate_local_async_return(OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())))
         .expect("scalar Excel error return allocation is infallible")
 }
 
@@ -611,13 +598,13 @@ pub(crate) struct AsyncReturnPointer {
 
 #[cfg(feature = "async")]
 impl AsyncReturnPointer {
-    pub(crate) fn allocate(value: OwnedExcelValue) -> XllResult<Self> {
-        allocate_async_return(value).map(|pointer| Self { pointer })
+    pub(crate) fn from_value(value: OwnedExcelValue) -> XllResult<Self> {
+        allocate_local_async_return(value).map(|pointer| Self { pointer })
     }
 
     pub(crate) fn error(error: &XllError) -> Self {
         Self {
-            pointer: allocate_async_error(error),
+            pointer: allocate_local_async_error(error),
         }
     }
 
@@ -635,35 +622,11 @@ impl Drop for AsyncReturnPointer {
     }
 }
 
-/// Runs one generated UDF body behind a Rust panic and ownership boundary.
-#[doc(hidden)]
-#[allow(dead_code)]
-#[must_use]
-pub fn ffi_boundary<F, T>(operation: F) -> *mut XLOPER12
-where
-    F: FnOnce() -> XllResult<T>,
-    T: IntoExcelValue,
-{
-    let (_guard, accepted) = crate::ingress::global_ingress().enter();
-    if !accepted {
-        return allocate_detached_error(&XllError::Closing);
-    }
-    match catch_unwind(AssertUnwindSafe(|| {
-        let value = operation()?;
-        let value = value.into_excel_value()?;
-        allocate(value)
-    })) {
-        Ok(Ok(pointer)) => pointer,
-        Ok(Err(error)) => allocate_error(&error),
-        Err(_) => allocate_error(&XllError::Panic),
-    }
-}
-
-/// Runs a return-producing framework callback under this runtime's terminal
+/// Runs a return-producing framework callback behind the runtime's terminal
 /// return-admission gate.
 #[doc(hidden)]
 #[must_use]
-pub fn ffi_boundary_tracked<S, F, T>(runtime: &Runtime<S>, operation: F) -> *mut XLOPER12
+pub fn ffi_boundary<S, F, T>(runtime: &Runtime<S>, operation: F) -> *mut XLOPER12
 where
     F: FnOnce() -> XllResult<T>,
     T: IntoExcelValue,
@@ -679,11 +642,11 @@ where
     match catch_unwind(AssertUnwindSafe(|| {
         let value = operation()?;
         let value = value.into_excel_value()?;
-        allocate_tracked(value, tracker)
+        allocate_excel_owned(value, tracker)
     })) {
         Ok(Ok(pointer)) => pointer,
-        Ok(Err(error)) => allocate_tracked_error(&error, tracker),
-        Err(_) => allocate_tracked_error(&XllError::Panic, tracker),
+        Ok(Err(error)) => allocate_excel_error(&error, tracker),
+        Err(_) => allocate_excel_error(&XllError::Panic, tracker),
     }
 }
 
@@ -726,7 +689,7 @@ where
         udf_boundary_named_inner(runtime, tracker, udf_id, excel_name, operation)
     })) {
         Ok(pointer) => pointer,
-        Err(_) => allocate_tracked_error(&XllError::Panic, tracker),
+        Err(_) => allocate_excel_error(&XllError::Panic, tracker),
     }
 }
 
@@ -762,13 +725,13 @@ where
                     crate::diagnostics::report_no_unwind(udf_id, &error);
                     let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
                     crate::execution::trace(&metadata, &outcome);
-                    return allocate_tracked_error(&error, tracker);
+                    return allocate_excel_error(&error, tracker);
                 }
             };
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let value = operation(guard.state())?;
                 let value = value.into_excel_value()?;
-                allocate_tracked(value, tracker)
+                allocate_excel_owned(value, tracker)
             }))
             .unwrap_or(Err(XllError::Panic));
             let pointer = match result {
@@ -788,7 +751,7 @@ where
                     let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
                     layers.exit(&outcome);
                     crate::execution::trace(&metadata, &outcome);
-                    allocate_tracked_error(&error, tracker)
+                    allocate_excel_error(&error, tracker)
                 }
             };
             drop(guard);
@@ -806,12 +769,12 @@ where
             };
             let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
             crate::execution::trace(&metadata, &outcome);
-            allocate_tracked_error(&error, tracker)
+            allocate_excel_error(&error, tracker)
         }
     }
 }
 
-/// Frees a DLL-owned return previously produced by `ffi_boundary`.
+/// Frees a return block produced by an Excel-owned return boundary.
 ///
 /// # Safety
 ///
@@ -858,8 +821,12 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     let block_pointer = pointer.cast::<ReturnBlock>();
     // SAFETY: the caller contract guarantees a live ReturnBlock. Cloning the
     // tracker does not transfer or mutate ownership of the block itself.
-    let tracker = unsafe { (*block_pointer).tracker.as_ref().cloned() };
-    tracker.map(|tracker| tracker.enter_free())
+    let ownership = unsafe { &(*block_pointer).ownership };
+    match ownership {
+        ReturnOwnership::Excel(tracker) => Some(Arc::clone(tracker).enter_free()),
+        #[cfg(any(feature = "async", test))]
+        ReturnOwnership::Local => None,
+    }
 }
 
 unsafe fn free_return_block(pointer: *mut XLOPER12) {
@@ -901,14 +868,31 @@ mod tests {
         guard
     }
 
+    fn open_test_runtime() -> Runtime<()> {
+        let runtime = Runtime::new();
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        drop(open_attempt);
+        runtime
+    }
+
+    fn allocate_local_for_test(value: OwnedExcelValue) -> XllResult<*mut XLOPER12> {
+        ReturnBlock::build_local(value).map(|block| ReturnBlock::into_non_null(block).as_ptr())
+    }
+
     #[test]
     fn oper_is_the_first_field_and_is_freed_once() {
         let _test = test_lock();
         let before = LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
-        let pointer = ffi_boundary(|| Ok(42.0));
+        let runtime = open_test_runtime();
+        let pointer = ffi_boundary(&runtime, || Ok(42.0));
         assert!(!pointer.is_null());
         // SAFETY: pointer is the live return from ffi_boundary.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_NUM);
+        // Excel-owned returns carry the free bit and are registered with the
+        // runtime before the producer is released.
+        assert_ne!(unsafe { (*pointer).xltype } & XLBIT_DLL_FREE, 0);
         assert_eq!(
             LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed),
             before + 1
@@ -924,7 +908,8 @@ mod tests {
     #[test]
     fn strings_use_counted_utf16_owned_by_block() {
         let _test = test_lock();
-        let pointer = ffi_boundary(|| Ok("日本語".to_owned()));
+        let pointer =
+            allocate_local_for_test(OwnedExcelValue::String("日本語".to_owned())).unwrap();
         // SAFETY: pointer is live and the type selects the string member.
         let text = unsafe { (*pointer).value.string };
         // SAFETY: the return block owns a prefix and three UTF-16 units.
@@ -938,8 +923,13 @@ mod tests {
     #[test]
     fn arrays_hold_independent_cells() {
         let _test = test_lock();
-        let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
-        let pointer = ffi_boundary(|| Ok(matrix));
+        let matrix = Matrix::new(
+            1,
+            2,
+            vec![OwnedExcelValue::Number(1.0), OwnedExcelValue::Number(2.0)],
+        )
+        .unwrap();
+        let pointer = allocate_local_for_test(OwnedExcelValue::Matrix(matrix)).unwrap();
         // SAFETY: pointer is live and its root type is multi.
         let array = unsafe { (*pointer).value.array };
         assert_eq!(array.rows, 1);
@@ -958,7 +948,7 @@ mod tests {
         builder.push_f64(20.0).unwrap();
         let encoded = builder.finish().unwrap();
         let original_cells = encoded.cells.as_ptr();
-        let pointer = ffi_boundary(|| Ok(encoded));
+        let pointer = allocate_local_for_test(OwnedExcelValue::ArrayOutput(encoded)).unwrap();
         // SAFETY: pointer is a live encoded array return.
         let returned_cells = unsafe { (*pointer).value.array.values };
         assert_eq!(returned_cells.cast_const(), original_cells);
@@ -1002,7 +992,7 @@ mod tests {
     fn missing_and_blank_returns_are_explicit_not_available_errors() {
         let _test = test_lock();
         for value in [OwnedExcelValue::Missing, OwnedExcelValue::Blank] {
-            let pointer = ffi_boundary(|| Ok(value));
+            let pointer = allocate_local_for_test(value).unwrap();
             // SAFETY: pointer is a live encoded return value.
             assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
             // SAFETY: XLTYPE_ERR selects the error union member.
@@ -1016,8 +1006,10 @@ mod tests {
     #[test]
     fn errors_and_panics_do_not_cross_ffi() {
         let _test = test_lock();
-        let error_pointer =
-            ffi_boundary::<_, f64>(|| Err(XllError::input("x", crate::InputError::NonFinite)));
+        let runtime = open_test_runtime();
+        let error_pointer = ffi_boundary(&runtime, || {
+            Err::<f64, _>(XllError::input("x", crate::InputError::NonFinite))
+        });
         // SAFETY: pointer is a live encoded error.
         assert_eq!(unsafe { (*error_pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: XLTYPE_ERR selects error.
@@ -1027,7 +1019,8 @@ mod tests {
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(error_pointer) };
 
-        let panic_pointer = ffi_boundary::<_, f64>(|| panic!("boundary test"));
+        let panic_pointer =
+            ffi_boundary(&runtime, || -> XllResult<f64> { panic!("boundary test") });
         // SAFETY: pointer is a live encoded error.
         assert_eq!(unsafe { (*panic_pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1045,7 +1038,8 @@ mod tests {
         }
 
         let _test = test_lock();
-        let pointer = ffi_boundary(|| Ok(PanickingReturn));
+        let runtime = open_test_runtime();
+        let pointer = ffi_boundary(&runtime, || Ok(PanickingReturn));
         // SAFETY: pointer is a live encoded panic error.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1103,14 +1097,14 @@ mod tests {
     }
 
     #[test]
-    fn close_waits_until_excel_releases_a_tracked_return() {
+    fn close_waits_until_excel_releases_a_framework_return() {
         let _test = test_lock();
         let runtime = Arc::new(Runtime::new());
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        let pointer = udf_boundary_named(&runtime, "tracked", "TRACKED", |_| Ok(7.0));
+        let pointer = ffi_boundary(&runtime, || Ok(7.0));
         assert!(!pointer.is_null());
         assert!(runtime.begin_close());
 
@@ -1139,7 +1133,7 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert!(runtime.begin_close());
 
-        let pointer = ffi_boundary_tracked(&runtime, || Ok(7.0));
+        let pointer = ffi_boundary(&runtime, || Ok(7.0));
         assert!(!pointer.is_null());
         // SAFETY: admission rejection returns a standalone Box<XLOPER12>, not a
         // ReturnBlock, specifically so Excel will never call xlAutoFree12.
@@ -1204,7 +1198,8 @@ mod tests {
     #[test]
     fn owned_values_cannot_bypass_scalar_validation() {
         let _test = test_lock();
-        let pointer = ffi_boundary(|| Ok(OwnedExcelValue::Number(f64::NAN)));
+        let runtime = open_test_runtime();
+        let pointer = ffi_boundary(&runtime, || Ok(OwnedExcelValue::Number(f64::NAN)));
         // SAFETY: pointer is a live encoded validation error.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1239,15 +1234,16 @@ mod tests {
     #[test]
     fn async_return_allocation_does_not_set_xlbit_dll_free() {
         let _test = test_lock();
-        let udf_ptr = allocate(OwnedExcelValue::Number(42.0)).unwrap();
-        let async_ptr = allocate_async_return(OwnedExcelValue::Number(42.0)).unwrap();
+        let runtime = open_test_runtime();
+        let excel_ptr = ffi_boundary(&runtime, || Ok(42.0));
+        let async_ptr = allocate_local_async_return(OwnedExcelValue::Number(42.0)).unwrap();
 
         // SAFETY: both pointers are valid ReturnBlock pointers
         unsafe {
-            assert_ne!((*udf_ptr).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
+            assert_ne!((*excel_ptr).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
             assert_eq!((*async_ptr.as_ptr()).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
 
-            free_return(udf_ptr);
+            free_return(excel_ptr);
             free_return(async_ptr.as_ptr());
         }
     }

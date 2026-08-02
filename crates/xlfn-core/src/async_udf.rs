@@ -914,7 +914,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
                 let result = match evaluated {
                     Ok(Ok(value)) => catch_unwind(AssertUnwindSafe(|| {
                         let value = value.into_excel_value()?;
-                        AsyncReturnPointer::allocate(value)
+                        AsyncReturnPointer::from_value(value)
                     }))
                     .unwrap_or(Err(XllError::Panic)),
                     Ok(Err(error)) => Err(error),

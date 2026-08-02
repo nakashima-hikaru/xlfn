@@ -178,9 +178,8 @@ pub mod __private {
         assert_async_parameter, assert_async_return, assert_excel_parameter,
         assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
         assert_volatile_return, cell_presence_from_raw, close_addin, dll_can_unload_now,
-        dll_get_class_object, ffi_boundary, ffi_boundary_tracked, ffi_boundary_void,
-        free_return_boundary, global_ingress, open_addin, reference_from_raw, udf_boundary_named,
-        with_excel_call_scope,
+        dll_get_class_object, ffi_boundary, ffi_boundary_void, free_return_boundary,
+        global_ingress, open_addin, reference_from_raw, udf_boundary_named, with_excel_call_scope,
     };
     #[cfg(feature = "async")]
     pub use xlfn_core::{

@@ -1099,7 +1099,7 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAddInManagerInfo12(
             __action: *mut ::xlfn::sys::XLOPER12,
         ) -> *mut ::xlfn::sys::XLOPER12 {
-            ::xlfn::__private::ffi_boundary_tracked(
+            ::xlfn::__private::ffi_boundary(
                 &crate::__XLFN_RUNTIME,
                 || {
                     ::xlfn::__private::with_excel_call_scope(|__call_scope| {
@@ -1840,7 +1840,7 @@ mod tests {
         assert!(expanded.contains("let __free_operation"));
         assert!(expanded.contains("free_return_boundary"));
         assert!(expanded.contains("fn xlAddInManagerInfo12"));
-        assert!(expanded.contains("ffi_boundary_tracked"));
+        assert!(expanded.contains("ffi_boundary"));
         assert!(expanded.contains("fn DllGetClassObject"));
         assert!(expanded.contains("fn DllCanUnloadNow"));
         assert!(expanded.contains("__XLFN_FRAMEWORK_EXPORTS"));
