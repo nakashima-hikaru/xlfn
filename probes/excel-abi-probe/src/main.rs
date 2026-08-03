@@ -310,8 +310,9 @@ fn verify_callback_abi() {
         install_callback_for_abi_probe(xlfn_callback_probe as *const () as *mut c_void);
     }
     let mut argument = XLOPER12::integer(7);
-    let arguments = [&mut argument as *mut XLOPER12];
-    // SAFETY: one live argument pointer is supplied to the linked trampoline.
+    let arguments = [std::ptr::NonNull::from(&mut argument)];
+    // SAFETY: one live, non-null argument pointer is supplied to the linked
+    // trampoline for the duration of the call.
     let (status, result) = unsafe { excel12(0x1234, &arguments) };
     // SAFETY: the trampoline sets xltypeInt before writing the integer member.
     let value = unsafe { result.value.integer };

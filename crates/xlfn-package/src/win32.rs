@@ -15,10 +15,10 @@ windows_link::link!("kernel32.dll" "system" fn CreateDirectoryW(lppathname : PCW
 windows_link::link!("advapi32.dll" "system" fn EqualSid(psid1 : PSID, psid2 : PSID) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetAce(pacl : *const ACL, dwaceindex : u32, pace : *mut *mut core::ffi::c_void) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetAclInformation(pacl : *const ACL, paclinformation : *mut core::ffi::c_void, naclinformationlength : u32, dwaclinformationclass : ACL_INFORMATION_CLASS) -> BOOL);
-windows_link::link!("advapi32.dll" "system" fn GetLengthSid(psid : PSID) -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn GetFileInformationByHandle(hfile : HANDLE, lpfileinformation : *mut BY_HANDLE_FILE_INFORMATION) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetFileInformationByHandleEx(hfile : HANDLE, fileinformationclass : FILE_INFO_BY_HANDLE_CLASS, lpfileinformation : *mut core::ffi::c_void, dwbuffersize : u32) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn GetLengthSid(psid : PSID) -> u32);
 windows_link::link!("advapi32.dll" "system" fn GetNamedSecurityInfoW(pobjectname : PCWSTR, objecttype : SE_OBJECT_TYPE, securityinfo : OBJECT_SECURITY_INFORMATION, ppsidowner : *mut PSID, ppsidgroup : *mut PSID, ppdacl : *mut *mut ACL, ppsacl : *mut *mut ACL, ppsecuritydescriptor : *mut PSECURITY_DESCRIPTOR) -> WIN32_ERROR);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorControl(psecuritydescriptor : PSECURITY_DESCRIPTOR, pcontrol : *mut u16, lpdwrevision : *mut u32) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorDacl(psecuritydescriptor : PSECURITY_DESCRIPTOR, lpbdaclpresent : *mut BOOL, pdacl : *mut *mut ACL, lpbdacldefaulted : *mut BOOL) -> BOOL);

@@ -447,33 +447,61 @@ fn sync_scaffold_files(staging: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn retryable_windows_path_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33))
+}
+
+#[cfg(target_os = "windows")]
+fn move_file_ex_with_retry(
+    from: &Path,
+    to: &Path,
+    flags: crate::win32::MOVE_FILE_FLAGS,
+) -> io::Result<()> {
+    use crate::win32::MoveFileExW;
+    use std::os::windows::ffi::OsStrExt;
+
+    const ATTEMPTS: usize = 24;
+    let from_wide = from
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let to_wide = to
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut delay = std::time::Duration::from_millis(10);
+    for attempt in 0..ATTEMPTS {
+        // SAFETY: both paths are live, NUL-terminated buffers for this call.
+        if unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) } != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if attempt + 1 == ATTEMPTS || !retryable_windows_path_error(&error) {
+            return Err(error);
+        }
+        // Virus scanners and indexing services on hosted Windows runners can
+        // briefly retain a handle after the writer closes it. Keep retries
+        // bounded so persistent ACL failures remain visible.
+        std::thread::sleep(delay);
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(500));
+    }
+    unreachable!("bounded move loop always returns")
+}
+
 fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        const ATTEMPTS: usize = 8;
-        let mut delay = std::time::Duration::from_millis(10);
-        for attempt in 0..ATTEMPTS {
-            match fs::rename(from, to) {
-                Ok(()) => return Ok(()),
-                Err(error)
-                    if attempt + 1 < ATTEMPTS
-                        && (matches!(
-                            error.kind(),
-                            io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
-                        ) || matches!(error.raw_os_error(), Some(5) | Some(32))) =>
-                {
-                    // Windows hosted runners may briefly hold newly written
-                    // files for scanning. Bound the retry so real ACL failures
-                    // remain visible rather than being hidden indefinitely.
-                    std::thread::sleep(delay);
-                    delay = delay
-                        .saturating_mul(2)
-                        .min(std::time::Duration::from_millis(160));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        unreachable!("bounded rename loop always returns")
+        use crate::win32::MOVEFILE_WRITE_THROUGH;
+
+        move_file_ex_with_retry(from, to, MOVEFILE_WRITE_THROUGH)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2052,31 +2080,9 @@ fn write_transaction_state(
 fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
-        use std::os::windows::ffi::OsStrExt;
+        use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
-        let from_wide = from
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let to_wide = to
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        // SAFETY: both paths are NUL-terminated buffers valid for this call.
-        let replaced = unsafe {
-            MoveFileExW(
-                from_wide.as_ptr(),
-                to_wide.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if replaced == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        move_file_ex_with_retry(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2092,18 +2098,33 @@ fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         use crate::win32::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
             FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
         use std::os::windows::fs::OpenOptionsExt;
 
+        // Windows does not expose a portable parent-directory fsync. File
+        // contents are flushed before this call, and every publishing rename
+        // uses MoveFileExW with MOVEFILE_WRITE_THROUGH. Reopen the directory
+        // to validate that it still resolves to a directory, but do not call
+        // File::sync_all: that maps to FlushFileBuffers on a read-only handle
+        // and deterministically returns ERROR_ACCESS_DENIED.
         let mut options = std::fs::OpenOptions::new();
         options
             .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_WRITE_THROUGH)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         let directory = options.open(path)?;
-        directory.sync_all()
+        if !directory.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!(
+                    "directory synchronization target is not a directory: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(())
     }
     #[cfg(not(any(unix, target_os = "windows")))]
     {

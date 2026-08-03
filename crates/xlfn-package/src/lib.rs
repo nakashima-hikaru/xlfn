@@ -2601,9 +2601,8 @@ fn current_windows_user_sid_string() -> PackageResult<String> {
         }
         // SAFETY: GetLengthSid returned the complete size of the validated SID,
         // which remains live in `token_buffer`.
-        let sid = unsafe {
-            std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_length)
-        };
+        let sid =
+            unsafe { std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_length) };
         let subauthority_count = sid[1] as usize;
         let expected_length = 8_usize
             .checked_add(
@@ -2615,9 +2614,8 @@ fn current_windows_user_sid_string() -> PackageResult<String> {
         if sid_length != expected_length {
             return Err("current user SID has an inconsistent length".into());
         }
-        let identifier_authority = u64::from_be_bytes([
-            0, 0, sid[2], sid[3], sid[4], sid[5], sid[6], sid[7],
-        ]);
+        let identifier_authority =
+            u64::from_be_bytes([0, 0, sid[2], sid[3], sid[4], sid[5], sid[6], sid[7]]);
         let mut value = format!("S-{}-{identifier_authority}", sid[0]);
         for index in 0..subauthority_count {
             let offset = 8 + index * 4;
@@ -2655,9 +2653,7 @@ fn create_private_windows_directory(path: &Path) -> PackageResult {
     // relying on the token's default owner can select the Administrators group
     // on hosted runners and make the private-directory invariant fail.
     let user_sid = current_windows_user_sid_string()?;
-    let descriptor_string = wide_nul(&format!(
-        "O:{user_sid}D:P(A;;FA;;;SY)(A;;FA;;;{user_sid})"
-    ));
+    let descriptor_string = wide_nul(&format!("O:{user_sid}D:P(A;;FA;;;SY)(A;;FA;;;{user_sid})"));
     let mut descriptor = std::ptr::null_mut::<std::ffi::c_void>();
     // SAFETY: the SDDL literal is NUL-terminated and `descriptor` points to
     // writable storage for the API-owned security descriptor pointer.
