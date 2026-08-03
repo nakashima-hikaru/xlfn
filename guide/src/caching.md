@@ -32,7 +32,7 @@ let dataset = cache.get_or_try_insert_with(
 
 The returned value is `Arc<V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
 
-The weight budget is an abstract integer. It can represent approximate bytes, native resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
+The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 
 Metrics such as `len()` and `used_weight()` run pending Moka maintenance first, but should still be treated as operational estimates rather than transactional accounting.
 
@@ -100,7 +100,7 @@ This solves basic finite-value hashing; it does not define a tolerance. When app
 state.caches.clear();
 ```
 
-The framework does not know when application external data, configuration, or native state has changed. The add-in owns invalidation policy. Common triggers include:
+The framework does not know when application external data, configuration, or adapter state has changed. The add-in owns invalidation policy. Common triggers include:
 
 - an explicit worksheet/admin refresh function;
 - a new external-data snapshot ID;

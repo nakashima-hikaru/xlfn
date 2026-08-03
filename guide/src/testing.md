@@ -32,7 +32,7 @@ Procedural macros and marker traits enforce misuse at compile time. Maintain com
 - generic, unsafe, extern, or variadic UDFs;
 - invalid defaults and argument names;
 - handle producer restrictions;
-- malformed native declarations.
+- invalid application error conversions and adapter configuration.
 
 A good diagnostic is part of the user interface. Assert relevant error text without overfitting compiler formatting.
 
@@ -41,30 +41,32 @@ A good diagnostic is part of the user interface. Assert relevant error text with
 Deterministic tests should place barriers at lifecycle race points rather than relying only on stress loops. Cover:
 
 - close racing with call entry;
-- async cancellation versus worker claim and completion;
+- async cancellation versus application-adapter claim and completion;
 - task drop that re-enters cancellation state;
 - handle replacement and formula-topic termination;
 - RTD subscribe, publish, notify, `ServerTerminate`, and close barriers;
-- worker queue-full shutdown and graceful drain;
+- application-adapter queue-full shutdown and graceful drain;
 - cache clear versus in-flight initialization;
 - same-key cache recursion;
-- native API and wrapper reentry rejection.
+- application-adapter reentry rejection where the chosen implementation requires it.
 
 Use Loom or another model checker for small synchronization cores where practical, and retain ordinary stress tests for integration pressure.
 
 ## 4. Independent ABI probes
 
-Rust declarations should be checked against C or C++ compiled with the target native or Excel headers.
+Excel ABI declarations should be checked against code compiled with the target Excel headers. When an application adapter crosses another binary ABI, add an independent probe appropriate to that selected boundary.
 
 For the repository's Excel SDK probe on Windows:
 
 ```powershell
-$env:XLFN_SDK_INCLUDE = "C:\path\to\ExcelXllSdk\include"
-cargo test --package excel-abi-probe --target x86_64-pc-windows-msvc --locked
-cargo test --package excel-abi-probe --target i686-pc-windows-msvc --locked
+$env:XLFN_SDK_INCLUDE = "C:\path\to\XlFnSdk\include"
+cargo test --package excel-abi-probe --features sdk-bindgen --target x86_64-pc-windows-msvc --locked
+cargo test --package excel-abi-probe --features sdk-bindgen --target i686-pc-windows-msvc --locked
 ```
 
-A native adapter should have an equivalent probe for every shared structure, calling convention, and critical callback. Check `sizeof`, alignment, offsets, architecture-specific types, and a live trampoline call where possible.
+An in-process binary adapter should have an equivalent probe for every shared structure, calling convention, ownership rule, and critical callback. Check `sizeof`, alignment, offsets, architecture-specific types, and a live trampoline call where possible. The commands above run those checks from the Rust test harness; a plain `cargo test` without `sdk-bindgen` is intentionally rejected rather than treated as a successful ABI check.
+
+CI downloads the Microsoft Excel 2013 XLL SDK MSI and verifies its SHA-256 before extraction; local runs should use the same SDK release or an explicitly reviewed header bundle.
 
 Treat the downloaded SDK or header bundle as a supply-chain input: pin its digest and verify its publisher in CI.
 
@@ -140,7 +142,7 @@ result and evidence:
 - wrong-type, stale, forged, and previous-session tokens;
 - Formula Wizard, VBA/direct calls, and multi-cell caller rejection;
 - workbook close and add-in unload cleanup;
-- native object destruction on its required worker.
+- external object destruction on its required application-owned executor.
 
 ### Async
 
@@ -160,15 +162,18 @@ result and evidence:
 - repeated publish and retry after a transient notification failure;
 - unload/reload without stale callbacks.
 
-### Native DLLs
+### External adapters
 
-- exact required and optional symbols;
-- ABI mismatch and missing-symbol failure;
-- wrong-architecture DLL rejection;
-- native error strings and malformed outputs;
-- maximum intended concurrency;
-- context and object leak counters where the native exposes them;
-- C++ exception containment on the native side.
+Adapt this matrix to the selected integration mechanism:
+
+- required methods, symbols, endpoints, or protocol fields;
+- version mismatch and missing-capability failure;
+- wrong-architecture binary rejection where applicable;
+- malformed outputs and bounded error conversion;
+- authentication and authorization where applicable;
+- maximum intended concurrency and overload behavior;
+- context, object, connection, and process leak counters where available;
+- exception, panic, crash, timeout, and disconnect containment at the adapter boundary.
 
 ## Release evidence
 

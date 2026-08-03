@@ -8,7 +8,8 @@ hello-xlfn/
 ├── src/
 │   ├── lib.rs       # one add-in definition and lifecycle state
 │   └── udf.rs       # exported worksheet functions
-└── native/          # optional packaged DLLs by bitness
+├── adapter/         # optional application-owned external integration
+└── native/          # conventional optional sidecar directory by bitness
     ├── x86/
     └── x64/
 ```
@@ -51,7 +52,7 @@ fn load_configuration(_: &std::path::Path) -> XllResult<Configuration> {
 }
 ```
 
-`State` must be `Send + Sync + 'static`. Thread-affine owners therefore do not belong directly in state; keep those owners in a lifecycle scope and expose only safe, cloneable handles. The native chapters cover this pattern.
+`State` must be `Send + Sync + 'static`. Any external-engine adapter stored in it must satisfy that contract. When an external implementation is thread-affine, the application should expose a safe, cloneable client while retaining shutdown ownership in its own runtime. See [External engine integration](native-overview.md).
 
 ## UDF modules
 
@@ -67,11 +68,11 @@ Each Excel-visible function remains a non-generic, safe, free Rust function. Int
 
 ## Cargo metadata
 
-Cargo metadata controls output names and native-file placement. It is not a second source of truth for worksheet signatures or native ABIs.
+Cargo metadata controls output names and optional sidecar-file placement. It is not a second source of truth for worksheet signatures or application-adapter contracts.
 
 - `#[excel_function]` is the source of truth for worksheet metadata.
 - `#[excel_addin]` is the source of truth for add-in identity and lifecycle exports.
-- Native FFI binding declarations are the source of truth for native function signatures.
+- Application adapter code is the source of truth for any external ABI, protocol, or object-lifetime contract.
 - `[package.metadata.xlfn]` controls distribution artifact naming and bundle staging.
 
 ## Generated boundary

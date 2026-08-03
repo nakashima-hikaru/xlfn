@@ -1,3 +1,4 @@
+use crate::host_callback::HostCallbackSession;
 use crate::{
     DomainErrorCode, ExcelError, InputError, IntoXllError, ReturnContext, Shape, XllError,
     XllResult,
@@ -101,33 +102,48 @@ impl<'call> XlValueRef<'call> {
     }
 
     #[must_use]
+    #[inline]
     pub const fn base_type(&self) -> u32 {
         self.raw.base_type()
     }
 
     #[must_use]
+    #[inline]
     pub const fn raw(&self) -> &'call XLOPER12 {
         self.raw
     }
 
     /// Returns this value as a finite Excel number without allocating.
+    #[inline]
     pub fn as_f64(self) -> XllResult<f64> {
         f64::from_excel(self, "<array cell>", &CallContext::without_runtime())
     }
 
     /// Returns this value as an Excel boolean without allocating.
+    #[inline]
     pub fn as_bool(self) -> XllResult<bool> {
         bool::from_excel(self, "<array cell>", &CallContext::without_runtime())
     }
 
     /// Borrows the UTF-16 payload of an Excel string without decoding it.
+    #[inline]
     pub fn as_str(self) -> XllResult<XlStrRef<'call>> {
+        self.as_str_with_argument("<array cell>")
+    }
+
+    /// Borrows an Excel string while preserving the caller's argument name in
+    /// conversion errors. This is used by allocation-free generated enum
+    /// conversions.
+    #[inline]
+    pub fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
         Ok(XlStrRef {
-            utf16: self.utf16("<array cell>")?,
+            utf16: self.utf16(argument)?,
+            argument,
         })
     }
 
     #[must_use]
+    #[inline]
     pub const fn is_blank(self) -> bool {
         self.base_type() == XLTYPE_NIL
     }
@@ -251,10 +267,12 @@ impl<'call> XlValueRef<'call> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct XlStrRef<'call> {
     utf16: &'call [u16],
+    argument: &'static str,
 }
 
 impl<'call> XlStrRef<'call> {
     #[must_use]
+    #[inline]
     pub const fn as_utf16(self) -> &'call [u16] {
         self.utf16
     }
@@ -265,7 +283,7 @@ impl<'call> XlStrRef<'call> {
 
     pub fn to_string(self) -> XllResult<String> {
         String::from_utf16(self.utf16)
-            .map_err(|_| XllError::input("<array cell>", InputError::InvalidUtf16))
+            .map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))
     }
 }
 
@@ -440,11 +458,11 @@ impl<'call> CallContext<'call> {
 pub trait ExcelReturn: Sized {
     type Output: IntoExcelValue;
 
-    fn into_excel(self, context: &mut ReturnContext<'_>) -> XllResult<Self::Output>;
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output>;
 
     #[doc(hidden)]
     fn invoke(
-        context: &mut ReturnContext<'_>,
+        context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
     ) -> XllResult<Self::Output> {
         operation()?.into_excel(context)
@@ -473,13 +491,13 @@ where
 {
     type Output = T::Output;
 
-    fn into_excel(self, context: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         self.map_err(IntoXllError::into_xll_error)?
             .into_excel(context)
     }
 
     fn invoke(
-        context: &mut ReturnContext<'_>,
+        context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
     ) -> XllResult<Self::Output> {
         T::invoke(context, || {
@@ -524,24 +542,50 @@ where
 }
 
 #[doc(hidden)]
-pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: CallScope<'call>) {}
+pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
 
 #[doc(hidden)]
 pub fn assert_async_parameter<T>()
 where
-    T: for<'call> ExcelParameter<'call>,
+    T: for<'call> ExcelParameter<'call> + Send + 'static,
 {
 }
 
 /// A generative lifetime token for one generated Excel call boundary.
 #[doc(hidden)]
-#[derive(Clone, Copy)]
-pub struct CallScope<'call>(PhantomData<&'call mut &'call ()>);
+pub struct CallScope<'call> {
+    callbacks: HostCallbackSession,
+    lifetime: PhantomData<&'call mut &'call ()>,
+}
+
+impl<'call> CallScope<'call> {
+    pub(crate) fn callbacks(&'call self) -> &'call HostCallbackSession {
+        &self.callbacks
+    }
+}
+
+struct CallScopeGuard(HostCallbackSession);
+
+impl Drop for CallScopeGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
 
 /// Runs an operation under a fresh lifetime that cannot escape in its result.
 #[doc(hidden)]
-pub fn with_excel_call_scope<R>(operation: impl for<'call> FnOnce(CallScope<'call>) -> R) -> R {
-    operation(CallScope(PhantomData))
+pub fn with_excel_call_scope<R>(
+    operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
+) -> R {
+    let callbacks = HostCallbackSession::new();
+    let scope = CallScope {
+        callbacks,
+        lifetime: PhantomData,
+    };
+    let guard = CallScopeGuard(scope.callbacks.clone());
+    let result = operation(&scope);
+    drop(guard);
+    result
 }
 
 #[doc(hidden)]
@@ -566,7 +610,7 @@ pub fn assert_volatile_return<T: VolatileReturn>() {}
 /// The pointer must satisfy `XlValueRef::from_raw` for the duration of
 /// the conversion.
 pub unsafe fn argument_from_raw<'call, T>(
-    _scope: CallScope<'call>,
+    _scope: &CallScope<'call>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
@@ -583,7 +627,7 @@ where
 
 #[doc(hidden)]
 pub unsafe fn argument_from_raw_with_context<'call, S, T>(
-    _scope: CallScope<'call>,
+    _scope: &CallScope<'call>,
     runtime: &crate::Runtime<S>,
     argument: &'static str,
     raw: *mut XLOPER12,
@@ -894,6 +938,10 @@ pub enum OwnedExcelValue {
 
 /// An Excel array whose cells are already encoded in their final ABI form.
 ///
+/// Equality compares shape and semantic values for the supported scalar cell
+/// types. The numeric builder rejects NaN and infinities, so numeric equality
+/// is well-defined.
+///
 /// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
 /// adopts the cell allocation instead of materializing an intermediate
 /// `Vec<OwnedExcelValue>` and encoding it into another array.
@@ -916,6 +964,49 @@ impl std::fmt::Debug for XlArrayOutput {
     }
 }
 
+fn equal_xloper_cells(left: &XLOPER12, right: &XLOPER12) -> bool {
+    let left_type = left.base_type();
+    if left_type != right.base_type() {
+        return false;
+    }
+
+    match left_type {
+        XLTYPE_NUM => {
+            // SAFETY: XLTYPE_NUM selects the number member.
+            unsafe { left.value.number == right.value.number }
+        }
+        XLTYPE_INT => {
+            // SAFETY: XLTYPE_INT selects the integer member.
+            unsafe { left.value.integer == right.value.integer }
+        }
+        XLTYPE_BOOL => {
+            // SAFETY: XLTYPE_BOOL selects the boolean member.
+            unsafe { left.value.boolean == right.value.boolean }
+        }
+        XLTYPE_ERR => {
+            // SAFETY: XLTYPE_ERR selects the error member.
+            unsafe { left.value.error == right.value.error }
+        }
+        XLTYPE_STR => {
+            // SAFETY: XLTYPE_STR selects the counted UTF-16 string member.
+            unsafe {
+                let left_string = left.value.string;
+                let right_string = right.value.string;
+                if left_string.is_null() || right_string.is_null() {
+                    return left_string.is_null() && right_string.is_null();
+                }
+                let left_len = *left_string as usize;
+                let right_len = *right_string as usize;
+                std::slice::from_raw_parts(left_string.add(1), left_len)
+                    == std::slice::from_raw_parts(right_string.add(1), right_len)
+            }
+        }
+        XLTYPE_NIL | XLTYPE_MISSING => true,
+        // Nested arrays and unknown cell types are outside the output contract.
+        _ => false,
+    }
+}
+
 impl PartialEq for XlArrayOutput {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
@@ -925,28 +1016,7 @@ impl PartialEq for XlArrayOutput {
                 .cells
                 .iter()
                 .zip(other.cells.iter())
-                .all(|(left, right)| {
-                    left.base_type() == right.base_type()
-                        && match left.base_type() {
-                            XLTYPE_NUM => {
-                                // SAFETY: XLTYPE_NUM selects the number member.
-                                unsafe { left.value.number == right.value.number }
-                            }
-                            XLTYPE_INT => {
-                                // SAFETY: XLTYPE_INT selects the integer member.
-                                unsafe { left.value.integer == right.value.integer }
-                            }
-                            XLTYPE_BOOL => {
-                                // SAFETY: XLTYPE_BOOL selects the boolean member.
-                                unsafe { left.value.boolean == right.value.boolean }
-                            }
-                            XLTYPE_ERR => {
-                                // SAFETY: XLTYPE_ERR selects the error member.
-                                unsafe { left.value.error == right.value.error }
-                            }
-                            _ => false,
-                        }
-                })
+                .all(|(left, right)| equal_xloper_cells(left, right))
     }
 }
 
@@ -1505,7 +1575,7 @@ macro_rules! direct_excel_returns {
             impl ExcelReturn for $ty {
                 type Output = Self;
 
-                fn into_excel(self, _: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+                fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
                     Ok(self)
                 }
             }
@@ -1534,7 +1604,7 @@ direct_excel_returns!(
 impl ExcelReturn for &str {
     type Output = Self;
 
-    fn into_excel(self, _: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         Ok(self)
     }
 }
@@ -1548,7 +1618,7 @@ impl VolatileReturn for &str {}
 impl<T: IntoExcelValue> ExcelReturn for Matrix<T> {
     type Output = Self;
 
-    fn into_excel(self, _: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         Ok(self)
     }
 }
@@ -1562,7 +1632,7 @@ impl<T: IntoExcelValue> VolatileReturn for Matrix<T> {}
 impl<T: IntoExcelValue> ExcelReturn for Row<T> {
     type Output = Self;
 
-    fn into_excel(self, _: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         Ok(self)
     }
 }
@@ -1576,7 +1646,7 @@ impl<T: IntoExcelValue> VolatileReturn for Row<T> {}
 impl<T: IntoExcelValue> ExcelReturn for Column<T> {
     type Output = Self;
 
-    fn into_excel(self, _: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         Ok(self)
     }
 }
@@ -1630,6 +1700,7 @@ impl<T: IntoExcelValue> IntoExcelValue for Column<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value};
 
     fn convert<T>(raw: &mut XLOPER12) -> XllResult<T>
@@ -1659,6 +1730,14 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn integer_values_round_trip_through_excel_storage(value in any::<i32>()) {
+            let mut raw = XLOPER12::integer(value);
+            prop_assert_eq!(convert::<i32>(&mut raw).unwrap(), value);
+        }
     }
 
     #[test]
@@ -1752,6 +1831,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn borrowed_string_reports_the_named_argument_when_decoding_is_deferred() {
+        let mut text = vec![1_u16, 0xd800];
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR | XLBIT_XL_FREE,
+        };
+
+        with_excel_call_scope(|_| {
+            // SAFETY: raw and its UTF-16 payload remain live for this scope.
+            let value = unsafe { XlValueRef::from_raw(&mut raw) }.unwrap();
+            let string = value.as_str_with_argument("currency").unwrap();
+            assert!(matches!(
+                string.to_string(),
+                Err(XllError::Input {
+                    argument: "currency",
+                    reason: InputError::InvalidUtf16,
+                })
+            ));
+        });
     }
 
     #[test]
@@ -2007,6 +2110,47 @@ mod tests {
             // SAFETY: XLTYPE_NUM selects the number member.
             assert_eq!(unsafe { cell.value.number }, expected);
         }
+    }
+
+    #[test]
+    fn array_output_equality_uses_the_semantics_of_supported_scalar_cells() {
+        let mut left_text = vec![2_u16, b'o' as u16, b'k' as u16];
+        let mut right_text = vec![2_u16, b'o' as u16, b'k' as u16];
+        let left = XlArrayOutput {
+            rows: 1,
+            columns: 5,
+            cells: vec![
+                XLOPER12::number(1.0),
+                XLOPER12::integer(2),
+                XLOPER12::boolean(true),
+                XLOPER12::nil(),
+                XLOPER12 {
+                    value: XLOPER12Value {
+                        string: left_text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                },
+            ]
+            .into_boxed_slice(),
+        };
+        let right = XlArrayOutput {
+            rows: 1,
+            columns: 5,
+            cells: vec![
+                XLOPER12::number(1.0),
+                XLOPER12::integer(2),
+                XLOPER12::boolean(true),
+                XLOPER12::nil(),
+                XLOPER12 {
+                    value: XLOPER12Value {
+                        string: right_text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                },
+            ]
+            .into_boxed_slice(),
+        };
+        assert_eq!(left, right);
     }
 
     #[test]

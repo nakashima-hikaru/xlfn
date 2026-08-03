@@ -13,7 +13,7 @@ Important `XllError` families include:
 - `Domain` with a stable `DomainErrorCode`;
 - invalid or stale handles;
 - lifecycle states such as closing or overloaded;
-- native or callback failures represented by the relevant adapters;
+- external-adapter or Excel-callback failures represented by the relevant application mappings;
 - `Internal` with a stable diagnostic ID.
 
 Use `XllError::input(argument, reason)` for user-correctable worksheet input. Reserve internal diagnostic IDs for defects or environmental failures that are not useful to expose directly in a cell.
@@ -40,8 +40,10 @@ impl Addin for DeskTools {
     type State = State;
     type Error = XllError;
 
-    fn open(_: &OpenContext) -> XllResult<State> {
-        let path = xlfn::diagnostics::install_file_diagnostic_sink("desk-tools")
+    fn open(context: &OpenContext) -> XllResult<State> {
+        let path = xlfn::diagnostics::install_file_diagnostic_sink(
+            &context.build_info().addin_id,
+        )
             .map_err(|_| XllError::Internal {
                 diagnostic_id: 0x4449_4147_494e_4954,
             })?;
@@ -50,6 +52,10 @@ impl Addin for DeskTools {
     }
 }
 ```
+
+The sink writes one JSON object per line. Control characters are escaped and
+large text fields are bounded before writing, so an error cannot create
+additional log records or bypass rotation.
 
 The default path is:
 

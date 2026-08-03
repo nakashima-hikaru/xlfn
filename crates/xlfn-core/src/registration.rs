@@ -2,7 +2,8 @@ use crate::{
     ExcelCallbackValue, FromExcel, InputError, XlValueRef, XllError, XllResult,
     host_callback::HostCallbackSession, return_value::ExcelCallbackStatus,
 };
-use std::collections::HashSet;
+use smallvec::SmallVec;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use xlfn_sys::{
@@ -130,6 +131,70 @@ enum RegistrationCleanupState {
     NameDeleted,
 }
 
+/// The single host-name identity rule used by descriptor validation and
+/// cleanup debt retention.
+///
+/// Excel's registration names are compared case-insensitively for the ASCII
+/// characters used by the framework. Non-ASCII code points are deliberately
+/// not Unicode-folded: the same rule is used everywhere, so a name cannot
+/// collide in the debt map after it passed descriptor validation.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ExcelNameKey(String);
+
+impl ExcelNameKey {
+    pub(crate) fn new(name: &str) -> Self {
+        Self(name.to_ascii_uppercase())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MetadataDebt {
+    registration: RegistrationId,
+    attempts: u32,
+    last_error: XllError,
+}
+
+impl MetadataDebt {
+    pub(crate) fn new(registration: RegistrationId, error: XllError) -> Self {
+        Self {
+            registration,
+            attempts: 1,
+            last_error: error,
+        }
+    }
+
+    fn retry_failed(&self, error: XllError) -> Self {
+        Self {
+            registration: self.registration,
+            attempts: self.attempts.saturating_add(1),
+            last_error: error,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn excel_name(&self) -> &'static str {
+        self.registration.excel_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expected_registration_id(&self) -> f64 {
+        self.registration.id
+    }
+
+    pub(crate) fn last_error(&self) -> &XllError {
+        &self.last_error
+    }
+
+    pub(crate) fn key(&self) -> ExcelNameKey {
+        ExcelNameKey::new(self.registration.excel_name)
+    }
+}
+
 impl From<RegistrationId> for PendingRegistration {
     fn from(registration: RegistrationId) -> Self {
         Self {
@@ -142,7 +207,6 @@ impl From<RegistrationId> for PendingRegistration {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum CleanupSeverity {
     BestEffort,
-    HostMetadataDebt,
     UnloadUnsafe,
 }
 
@@ -151,11 +215,6 @@ impl CleanupSeverity {
     pub fn is_unload_unsafe(self) -> bool {
         matches!(self, Self::UnloadUnsafe)
     }
-
-    #[must_use]
-    pub fn is_metadata_debt(self) -> bool {
-        matches!(self, Self::HostMetadataDebt)
-    }
 }
 
 impl PendingRegistration {
@@ -163,7 +222,7 @@ impl PendingRegistration {
     pub(crate) fn cleanup_severity(&self) -> CleanupSeverity {
         match self.state {
             RegistrationCleanupState::Registered => CleanupSeverity::UnloadUnsafe,
-            RegistrationCleanupState::Unregistered => CleanupSeverity::HostMetadataDebt,
+            RegistrationCleanupState::Unregistered => CleanupSeverity::BestEffort,
             RegistrationCleanupState::NameDeleted => CleanupSeverity::BestEffort,
         }
     }
@@ -172,7 +231,7 @@ impl PendingRegistration {
 pub(crate) struct UnregisterResult<T> {
     pub(crate) succeeded: Vec<T>,
     pub(crate) failed: Vec<(T, XllError)>,
-    pub(crate) metadata_debt: Vec<(T, XllError)>,
+    pub(crate) metadata_debt: Vec<MetadataDebt>,
     pub(crate) cleanup_issues: Vec<XllError>,
 }
 
@@ -187,7 +246,7 @@ pub(crate) struct RegistrationTransactionError {
     pub(crate) source: Box<XllError>,
     pub(crate) pending_registrations: Vec<PendingRegistration>,
     pub(crate) pending_events: Vec<EventRegistration>,
-    pub(crate) metadata_debt: Vec<PendingRegistration>,
+    pub(crate) metadata_debt: Vec<MetadataDebt>,
     pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
 }
 
@@ -214,6 +273,12 @@ impl<T> UnregisterResult<T> {
     }
 }
 
+pub(crate) struct MetadataDebtRetryResult {
+    pub(crate) remaining: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    pub(crate) cleanup_issues: Vec<XllError>,
+    pub(crate) terminal: Option<XllError>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EventRegistration {
     procedure: &'static str,
@@ -236,7 +301,7 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
             || descriptor.arguments.len() > max_arguments
             || !valid_argument_names(descriptor.arguments)
             || !exports.insert(descriptor.export_name.to_ascii_lowercase())
-            || !excel_names.insert(descriptor.excel_name.to_ascii_uppercase())
+            || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
             || descriptor.signature.arguments.len() != descriptor.arguments.len()
             || descriptor.signature.encode().is_err()
         {
@@ -911,16 +976,19 @@ impl HostRegistrar {
             }
 
             if !callbacks.permits_callbacks() {
-                outcome
-                    .metadata_debt
-                    .push((registration, XllError::Closing));
+                outcome.metadata_debt.push(MetadataDebt::new(
+                    registration.registration,
+                    XllError::Closing,
+                ));
                 continue;
             }
 
             let mut name = match TemporaryString::new(registration.registration.excel_name) {
                 Ok(name) => name,
                 Err(error) => {
-                    outcome.metadata_debt.push((registration, error));
+                    outcome
+                        .metadata_debt
+                        .push(MetadataDebt::new(registration.registration, error));
                     continue;
                 }
             };
@@ -930,8 +998,8 @@ impl HostRegistrar {
                 match unsafe { callbacks.call(XLF_SET_NAME, &name_arguments) } {
                     Ok(call) => call,
                     Err(suppressed) => {
-                        outcome.metadata_debt.push((
-                            registration,
+                        outcome.metadata_debt.push(MetadataDebt::new(
+                            registration.registration,
                             XllError::ExcelApi {
                                 function: "xlfSetName(suppressed)",
                                 code: suppressed.status.raw_code(),
@@ -941,8 +1009,8 @@ impl HostRegistrar {
                     }
                 };
             if status.is_terminal() {
-                outcome.metadata_debt.push((
-                    registration,
+                outcome.metadata_debt.push(MetadataDebt::new(
+                    registration.registration,
                     XllError::ExcelApi {
                         function: "xlfSetName",
                         code: status.raw_code(),
@@ -960,7 +1028,9 @@ impl HostRegistrar {
             );
             let release = result.try_release();
             if let Err(error) = name_deleted {
-                outcome.metadata_debt.push((registration, error));
+                outcome
+                    .metadata_debt
+                    .push(MetadataDebt::new(registration.registration, error));
                 continue;
             }
             if let Err(error) = release {
@@ -969,6 +1039,166 @@ impl HostRegistrar {
             outcome.succeeded.push(registration);
         }
         outcome
+    }
+
+    pub(crate) fn retry_metadata_debt(
+        callbacks: &mut HostCallbackSession,
+        debts: &BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    ) -> MetadataDebtRetryResult {
+        let mut remaining = BTreeMap::new();
+        let mut cleanup_issues = Vec::new();
+        let mut terminal = None;
+
+        for (key, debt_bucket) in debts {
+            if debt_bucket.is_empty() {
+                continue;
+            }
+            if !callbacks.permits_callbacks() {
+                if let Some(status) = callbacks.terminal_status() {
+                    terminal = Some(XllError::ExcelApi {
+                        function: "xlfEvaluate(metadata debt suppressed)",
+                        code: status.raw_code(),
+                    });
+                }
+                remaining.insert(key.clone(), debt_bucket.clone());
+                remaining.extend(
+                    debts
+                        .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                        .map(|(later_key, later_debt)| (later_key.clone(), later_debt.clone())),
+                );
+                break;
+            }
+
+            let probe = &debt_bucket[0];
+            let current_registration =
+                match metadata_debt_binding(callbacks, probe.registration.excel_name) {
+                    Ok(registration) => registration,
+                    Err(error) => {
+                        remaining.insert(
+                            key.clone(),
+                            debt_bucket
+                                .iter()
+                                .map(|debt| debt.retry_failed(error.clone()))
+                                .collect(),
+                        );
+                        if !callbacks.permits_callbacks() {
+                            terminal = Some(error);
+                            remaining.extend(
+                                debts
+                                    .range((
+                                        std::ops::Bound::Excluded(key),
+                                        std::ops::Bound::Unbounded,
+                                    ))
+                                    .map(|(later_key, later_debt)| {
+                                        (later_key.clone(), later_debt.clone())
+                                    }),
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+            let Some(current_registration) = current_registration else {
+                // The name is already absent. The cleanup obligation is
+                // satisfied without issuing a destructive call.
+                continue;
+            };
+
+            let Some(matched_debt) = debt_bucket
+                .iter()
+                .find(|debt| debt.registration.id == current_registration)
+            else {
+                let error = XllError::MetadataDebtBindingChanged {
+                    name: probe.registration.excel_name,
+                };
+                remaining.insert(
+                    key.clone(),
+                    debt_bucket
+                        .iter()
+                        .map(|debt| debt.retry_failed(error.clone()))
+                        .collect(),
+                );
+                continue;
+            };
+
+            let mut name = match TemporaryString::new(matched_debt.registration.excel_name) {
+                Ok(name) => name,
+                Err(error) => {
+                    remaining.insert(
+                        key.clone(),
+                        debt_bucket
+                            .iter()
+                            .map(|debt| debt.retry_failed(error.clone()))
+                            .collect(),
+                    );
+                    continue;
+                }
+            };
+            let arguments = [name.pointer()];
+            // SAFETY: the temporary name remains live for the callback.
+            let (status, mut result) = match unsafe { callbacks.call(XLF_SET_NAME, &arguments) } {
+                Ok(call) => call,
+                Err(suppressed) => {
+                    remaining.insert(
+                        key.clone(),
+                        debt_bucket
+                            .iter()
+                            .map(|debt| {
+                                debt.retry_failed(XllError::ExcelApi {
+                                    function: "xlfSetName(metadata debt suppressed)",
+                                    code: suppressed.status.raw_code(),
+                                })
+                            })
+                            .collect(),
+                    );
+                    continue;
+                }
+            };
+            if status.is_terminal() {
+                let error = XllError::ExcelApi {
+                    function: "xlfSetName(metadata debt)",
+                    code: status.raw_code(),
+                };
+                if let Err(release_error) = result.try_release() {
+                    cleanup_issues.push(release_error);
+                }
+                remaining.insert(
+                    key.clone(),
+                    debt_bucket
+                        .iter()
+                        .map(|debt| debt.retry_failed(error.clone()))
+                        .collect(),
+                );
+                remaining.extend(
+                    debts
+                        .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                        .map(|(later_key, later_debt)| (later_key.clone(), later_debt.clone())),
+                );
+                terminal = Some(error);
+                break;
+            }
+
+            let deleted = metadata_debt_name_result(status, &result);
+            if let Err(error) = deleted {
+                remaining.insert(
+                    key.clone(),
+                    debt_bucket
+                        .iter()
+                        .map(|debt| debt.retry_failed(error.clone()))
+                        .collect(),
+                );
+            }
+            if let Err(error) = result.try_release() {
+                cleanup_issues.push(error);
+            }
+        }
+
+        MetadataDebtRetryResult {
+            remaining,
+            cleanup_issues,
+            terminal,
+        }
     }
 
     pub(crate) fn unregister_events_detailed(
@@ -1016,6 +1246,78 @@ impl HostRegistrar {
     }
 }
 
+fn metadata_debt_binding(
+    callbacks: &mut HostCallbackSession,
+    excel_name: &'static str,
+) -> XllResult<Option<f64>> {
+    let mut name = TemporaryString::new(excel_name)?;
+    let arguments = [name.pointer()];
+    // SAFETY: the temporary name remains live for this synchronous callback.
+    let (status, mut result) = unsafe {
+        callbacks
+            .call(XLF_EVALUATE, &arguments)
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlfEvaluate(metadata debt suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
+    if status != ExcelCallbackStatus::Success {
+        return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
+            function: "xlfEvaluate(metadata debt)",
+            code: status.raw_code(),
+        }));
+    }
+
+    let base_type = match result.base_type() {
+        Ok(base_type) => base_type,
+        Err(error) => {
+            let _ = result.try_release();
+            return Err(error);
+        }
+    };
+    if base_type == XLTYPE_ERR {
+        // SAFETY: XLTYPE_ERR selects the error union member.
+        let code = result
+            .raw_pointer()
+            .map(|pointer| unsafe { pointer.as_ref().value.error });
+        let release = result.try_release();
+        let code = code?;
+        release?;
+        if code == XLERR_NAME {
+            return Ok(None);
+        }
+        return Err(XllError::ExcelApi {
+            function: "xlfEvaluate(metadata debt result)",
+            code,
+        });
+    }
+    if base_type != XLTYPE_NUM {
+        result.try_release()?;
+        return Err(XllError::ExcelApi {
+            function: "xlfEvaluate(metadata debt result)",
+            code: base_type as i32,
+        });
+    }
+
+    let id = result.borrow().and_then(|value| {
+        f64::from_excel(
+            value,
+            "metadata debt binding",
+            &crate::CallContext::without_runtime(),
+        )
+    });
+    let release = result.try_release();
+    let id = id?;
+    release?;
+    if !valid_registration_id(id) {
+        return Err(XllError::ExcelApi {
+            function: "xlfEvaluate(metadata debt result)",
+            code: -1,
+        });
+    }
+    Ok(Some(id))
+}
+
 fn advance_cleanup_state(
     state: &mut RegistrationCleanupState,
     next: RegistrationCleanupState,
@@ -1040,6 +1342,21 @@ fn advance_cleanup_state(
     // failure must not cause the host mutation to be repeated on retry.
     *state = next;
     Ok(())
+}
+
+fn metadata_debt_name_result(
+    status: ExcelCallbackStatus,
+    result: &ExcelCallbackValue,
+) -> XllResult<()> {
+    let mut state = RegistrationCleanupState::Unregistered;
+    advance_cleanup_state(
+        &mut state,
+        RegistrationCleanupState::NameDeleted,
+        status,
+        result,
+        "xlfSetName(metadata debt)",
+        "xlfSetName(metadata debt result)",
+    )
 }
 
 fn read_excel_bool(result: &ExcelCallbackValue, function: &'static str) -> XllResult<bool> {
@@ -1182,9 +1499,7 @@ fn register_all_transaction(
                     error
                         .pending_registrations
                         .extend(outcome.failed.into_iter().map(|(entry, _)| entry));
-                    error
-                        .metadata_debt
-                        .extend(outcome.metadata_debt.into_iter().map(|(entry, _)| entry));
+                    error.metadata_debt.extend(outcome.metadata_debt);
                 }
                 return Err(error);
             }
@@ -1250,11 +1565,7 @@ fn registration_release_failure(
     }
     let outcome = unregister(callbacks, &pending);
     error.pending_registrations = outcome.failed.into_iter().map(|(entry, _)| entry).collect();
-    error.metadata_debt = outcome
-        .metadata_debt
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect();
+    error.metadata_debt = outcome.metadata_debt;
     error
 }
 
@@ -1327,21 +1638,18 @@ fn register_async_events_transaction(
 }
 
 struct TemporaryString {
-    storage: Vec<u16>,
+    storage: SmallVec<[u16; 64]>,
     oper: XLOPER12,
 }
 
 impl TemporaryString {
     fn new(text: &str) -> XllResult<Self> {
-        let mut storage =
+        let storage =
             crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)?;
-        let oper = XLOPER12 {
-            value: XLOPER12Value {
-                string: storage.as_mut_ptr(),
-            },
-            xltype: XLTYPE_STR,
-        };
-        Ok(Self { storage, oper })
+        Ok(Self {
+            storage,
+            oper: XLOPER12::nil(),
+        })
     }
 
     fn from_units(units: &[u16]) -> XllResult<Self> {
@@ -1354,20 +1662,23 @@ impl TemporaryString {
                 },
             ));
         }
-        let mut storage = Vec::with_capacity(units.len() + 1);
+        let mut storage = SmallVec::with_capacity(units.len() + 1);
         storage.push(units.len() as u16);
         storage.extend_from_slice(units);
-        let oper = XLOPER12 {
-            value: XLOPER12Value {
-                string: storage.as_mut_ptr(),
-            },
-            xltype: XLTYPE_STR,
-        };
-        Ok(Self { storage, oper })
+        Ok(Self {
+            storage,
+            oper: XLOPER12::nil(),
+        })
     }
 
     fn pointer(&mut self) -> NonNull<XLOPER12> {
         debug_assert_eq!(self.storage.len(), self.storage[0] as usize + 1);
+        self.oper = XLOPER12 {
+            value: XLOPER12Value {
+                string: self.storage.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
         NonNull::from(&mut self.oper)
     }
 }
@@ -1378,8 +1689,8 @@ mod tests {
 
     #[test]
     fn temporary_strings_are_counted_utf16() {
-        let mut text = TemporaryString::new("価格").unwrap();
-        let pointer = text.pointer();
+        let mut texts = [TemporaryString::new("価格").unwrap()];
+        let pointer = texts[0].pointer();
         // SAFETY: pointer and its active string member belong to text.
         let units = unsafe { (*pointer.as_ptr()).value.string };
         // SAFETY: the counted allocation contains the prefix and two units.
@@ -1512,6 +1823,45 @@ mod tests {
             validate_descriptors(&[descriptor("first", "SAME"), descriptor("second", "same"),])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn descriptor_and_debt_name_keys_do_not_apply_inconsistent_unicode_folding() {
+        const ARGUMENTS: &[ArgumentDescriptor] = &[];
+        const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
+        let descriptor = |export_name, excel_name| RegistrationDescriptor {
+            export_name,
+            excel_name,
+            signature: RegistrationSignature {
+                result: ResultAbi::Xloper,
+                arguments: ABI_ARGUMENTS,
+                flags: RegistrationFlags::default(),
+            },
+            category: "test",
+            description: "test",
+            help_topic: "",
+            visibility: FunctionVisibility::Public,
+            arguments: ARGUMENTS,
+        };
+
+        assert!(
+            validate_descriptors(&[descriptor("upper", "Ä"), descriptor("lower", "ä")]).is_ok()
+        );
+        let upper = MetadataDebt::new(
+            RegistrationId {
+                id: 1.0,
+                excel_name: "Ä",
+            },
+            XllError::Closing,
+        );
+        let lower = MetadataDebt::new(
+            RegistrationId {
+                id: 2.0,
+                excel_name: "ä",
+            },
+            XllError::Closing,
+        );
+        assert_ne!(upper.key(), lower.key());
     }
 
     #[test]
@@ -1665,6 +2015,41 @@ mod tests {
             );
             assert_eq!(state, RegistrationCleanupState::Unregistered);
         }
+    }
+
+    #[test]
+    fn metadata_debt_retry_only_deletes_the_name_and_clears_after_success() {
+        let debt = MetadataDebt::new(
+            RegistrationId {
+                id: 7.0,
+                excel_name: "RETRY.NAME",
+            },
+            XllError::ExcelApi {
+                function: "xlfSetName",
+                code: 1,
+            },
+        );
+        let failed = debt.retry_failed(XllError::ExcelApi {
+            function: "xlfSetName",
+            code: 2,
+        });
+        assert_eq!(failed.excel_name(), "RETRY.NAME");
+        assert_eq!(failed.attempts(), 2);
+        assert_eq!(failed.expected_registration_id(), 7.0);
+        assert!(
+            metadata_debt_name_result(
+                ExcelCallbackStatus::Success,
+                &ExcelCallbackValue::from_raw_for_test(XLOPER12::boolean(true)),
+            )
+            .is_ok()
+        );
+        assert!(
+            metadata_debt_name_result(
+                ExcelCallbackStatus::Success,
+                &ExcelCallbackValue::from_raw_for_test(XLOPER12::boolean(false)),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1878,9 +2263,9 @@ mod tests {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome
                     .metadata_debt
-                    .extend(registrations.iter().cloned().map(|entry| {
-                        (
-                            entry,
+                    .extend(registrations.iter().map(|entry| {
+                        MetadataDebt::new(
+                            entry.registration,
                             XllError::ExcelApi {
                                 function: "injected set_name",
                                 code: 64,
@@ -1894,7 +2279,7 @@ mod tests {
 
         assert!(result.pending_registrations.is_empty());
         assert_eq!(result.metadata_debt.len(), 1);
-        assert_eq!(result.metadata_debt[0].registration.id, 1.0);
+        assert_eq!(result.metadata_debt[0].excel_name(), "FIRST");
     }
 
     #[test]
@@ -2298,8 +2683,7 @@ mod tests {
 
     #[test]
     fn cleanup_severity_ordering() {
-        assert!(CleanupSeverity::BestEffort < CleanupSeverity::HostMetadataDebt);
-        assert!(CleanupSeverity::HostMetadataDebt < CleanupSeverity::UnloadUnsafe);
+        assert!(CleanupSeverity::BestEffort < CleanupSeverity::UnloadUnsafe);
     }
 
     #[test]
@@ -2311,9 +2695,9 @@ mod tests {
             },
             state: RegistrationCleanupState::Unregistered,
         };
-        let mut outcome = UnregisterResult::new(1);
-        outcome.metadata_debt.push((
-            registration.clone(),
+        let mut outcome = UnregisterResult::<PendingRegistration>::new(1);
+        outcome.metadata_debt.push(MetadataDebt::new(
+            registration.registration,
             XllError::ExcelApi {
                 function: "xlfSetName",
                 code: 0,
@@ -2321,10 +2705,7 @@ mod tests {
         ));
         assert!(outcome.failed.is_empty());
         assert_eq!(outcome.metadata_debt.len(), 1);
-        assert_eq!(
-            outcome.metadata_debt[0].0.state,
-            RegistrationCleanupState::Unregistered
-        );
+        assert_eq!(outcome.metadata_debt[0].excel_name(), "TEST_FUNC");
     }
 
     #[test]
@@ -2337,8 +2718,7 @@ mod tests {
         assert!(reg.cleanup_severity().is_unload_unsafe());
 
         reg.state = RegistrationCleanupState::Unregistered;
-        assert_eq!(reg.cleanup_severity(), CleanupSeverity::HostMetadataDebt);
-        assert!(reg.cleanup_severity().is_metadata_debt());
+        assert_eq!(reg.cleanup_severity(), CleanupSeverity::BestEffort);
 
         reg.state = RegistrationCleanupState::NameDeleted;
         assert_eq!(reg.cleanup_severity(), CleanupSeverity::BestEffort);

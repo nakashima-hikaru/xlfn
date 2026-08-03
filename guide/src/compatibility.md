@@ -69,7 +69,7 @@ xlfn = { version = "0.1", features = ["async"] }
 ```
 
 Qualify every feature combination that you distribute. Async changes the expected export set;
-bundle contents and external C API crates have separate packaging and trust requirements.
+bundle contents and application-adapter dependencies have separate packaging and trust requirements.
 
 ## Build-profile requirements
 
@@ -109,25 +109,25 @@ Workbook compatibility is a separate concern. The following are workbook-visible
 
 Use additive changes where possible. Rename or remove a published worksheet function only through an explicit workbook migration plan. xlfn does not require retaining Rust compatibility shims inside a developing add-in, but deployed workbook contracts still need operational governance.
 
-## Native compatibility
+## External component compatibility
 
-A native package must match all of:
+When the application uses an external binary component, its adapter must account for:
 
 - Excel process bitness;
 - PE machine type for the XLL and every bundled DLL;
 - exact calling convention and symbol spelling;
-- `#[repr(C)]` layout, packing, and scalar widths;
-- the declared ABI version probe;
+- any selected ABI's layout, packing, scalar widths, ownership, and error protocol;
+- any application-defined protocol or ABI version negotiation;
 - the transitive import policy;
 - thread-affinity and concurrency guarantees.
 
-The runtime ABI probe occurs after Windows loads the DLL. It detects API mismatch but is not a pre-execution security boundary.
+xlfn does not perform runtime adapter loading or ABI negotiation. Any application-defined probe occurs according to the chosen adapter and is not a pre-execution security boundary for in-process code that has already been loaded.
 
 ## Support matrix template
 
 Publish a matrix for each release candidate:
 
-| Environment | Artifact check | Load/open | sync UDF | MTR | handles | async | RTD | native | unload/reload |
+| Environment | Artifact check | Load/open | sync UDF | MTR | handles | async | RTD | external adapter | unload/reload |
 |---|---|---|---|---|---|---|---|---|---|
 | Windows 10, Excel 32-bit, exact build/channel |  |  |  |  |  |  |  |  |  |
 | Windows 10, Excel 64-bit, exact build/channel |  |  |  |  |  |  |  |  |  |

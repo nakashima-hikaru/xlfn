@@ -20,7 +20,7 @@ async fn fetch(
     symbol: String,
 ) -> XllResult<f64> {
     context.check_cancelled()?;
-    let value = context.state().client.fetch(&key).await?;
+    let value = context.state().client.fetch(&symbol).await?;
     context.check_cancelled()?;
     Ok(value)
 }
@@ -77,7 +77,7 @@ Excel async calls currently receive `CancellationGuarantee::BestEffort`. The tok
 
 Cancellation is cooperative. Dropping a future or setting a token cannot forcibly interrupt:
 
-- a blocking native call;
+- a blocking external call;
 - synchronous filesystem or network I/O;
 - a lock held by another thread;
 - foreign code that does not expose cancellation.
@@ -96,12 +96,12 @@ async fn fetch_data(
     #[excel_context(asynchronous)] context: AsyncContext<State>,
     query: String,
 ) -> XllResult<f64> {
-    // Blocks an executor worker for the whole native call.
-    context.state().native.fetch_blocking(&query)
+    // Blocks an executor worker for the whole external call.
+    context.state().adapter.fetch_blocking(&query)
 }
 ```
 
-Submit blocking or thread-affine native work to a `ThreadBoundHandle` or `ThreadBoundPoolHandle`, then await its cancellation-aware reply. See [Thread-affine native state](native-threading.md).
+Submit blocking or thread-affine work through an application-owned bounded adapter, then await its reply without blocking the xlfn executor. xlfn does not provide that adapter or define its cancellation semantics. See [Thread-affine application adapters](native-threading.md).
 
 ## Error and panic behavior
 

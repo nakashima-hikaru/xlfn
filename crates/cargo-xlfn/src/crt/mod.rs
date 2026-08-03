@@ -285,33 +285,35 @@ impl CrtObservation {
 }
 
 fn is_dynamic_crt_import(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "ucrtbase.dll"
-            | "ucrtbased.dll"
-            | "vcruntime140.dll"
-            | "vcruntime140_1.dll"
-            | "msvcp140.dll"
-            | "msvcp140_1.dll"
-            | "msvcp140_2.dll"
-            | "msvcp140_atomic_wait.dll"
-            | "msvcp140_codecvt_ids.dll"
-            | "api-ms-win-crt-conio-l1-1-0.dll"
-            | "api-ms-win-crt-convert-l1-1-0.dll"
-            | "api-ms-win-crt-environment-l1-1-0.dll"
-            | "api-ms-win-crt-filesystem-l1-1-0.dll"
-            | "api-ms-win-crt-heap-l1-1-0.dll"
-            | "api-ms-win-crt-locale-l1-1-0.dll"
-            | "api-ms-win-crt-math-l1-1-0.dll"
-            | "api-ms-win-crt-multibyte-l1-1-0.dll"
-            | "api-ms-win-crt-private-l1-1-0.dll"
-            | "api-ms-win-crt-process-l1-1-0.dll"
-            | "api-ms-win-crt-runtime-l1-1-0.dll"
-            | "api-ms-win-crt-stdio-l1-1-0.dll"
-            | "api-ms-win-crt-string-l1-1-0.dll"
-            | "api-ms-win-crt-time-l1-1-0.dll"
-            | "api-ms-win-crt-utility-l1-1-0.dll"
-    )
+    const DYNAMIC_CRT_IMPORTS: &[&str] = &[
+        "ucrtbase.dll",
+        "ucrtbased.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll",
+        "msvcp140_codecvt_ids.dll",
+        "api-ms-win-crt-conio-l1-1-0.dll",
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-multibyte-l1-1-0.dll",
+        "api-ms-win-crt-private-l1-1-0.dll",
+        "api-ms-win-crt-process-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+    ];
+    DYNAMIC_CRT_IMPORTS
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 #[cfg(test)]

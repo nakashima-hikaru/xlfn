@@ -1,6 +1,10 @@
 //! Public facade for the xlfn framework.
+//!
+//! Add-ins normally depend on this crate alone and use [`prelude`] together
+//! with `#[excel_addin]` and `#[excel_function]`. Enable the `async` feature to
+//! expose asynchronous UDF contexts and the calculation lifecycle exports.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 #[cfg(feature = "async")]
 #[doc(hidden)]
@@ -22,10 +26,9 @@ macro_rules! __xlfn_async_only {
 
 #[cfg(feature = "async")]
 #[doc(hidden)]
-#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! __xlfn_async_exports {
-    () => {
+    ($runtime:expr) => {
         #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
         #[used]
         #[unsafe(link_section = ".drectve")]
@@ -41,16 +44,16 @@ macro_rules! __xlfn_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::__private::ffi_boundary_void(|| {
-                $crate::__private::cancel_async_calculation(&crate::__XLFN_RUNTIME);
+            $crate::__private::ffi_boundary_void($runtime, || {
+                $crate::__private::cancel_async_calculation($runtime);
             });
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::ffi_boundary_void(|| {
-                $crate::__private::end_async_calculation(&crate::__XLFN_RUNTIME);
+            $crate::__private::ffi_boundary_void($runtime, || {
+                $crate::__private::end_async_calculation($runtime);
             });
         }
     };
@@ -60,7 +63,7 @@ macro_rules! __xlfn_async_exports {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __xlfn_async_exports {
-    () => {};
+    ($runtime:expr) => {};
 }
 
 /// Add-in lifecycle types.
@@ -97,7 +100,9 @@ pub mod handle {
 
 /// Real-time data subscriptions.
 pub mod rtd {
-    pub use xlfn_core::{IntoRtdValue, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
+    pub use xlfn_core::{
+        IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue,
+    };
 }
 
 /// Errors surfaced by add-in lifecycle, conversion, and exported functions.
@@ -110,8 +115,8 @@ pub mod error {
 /// Diagnostics emitted by the XLL runtime.
 pub mod diagnostics {
     pub use xlfn_core::{
-        DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
-        clear_diagnostic_sink, dropped_diagnostic_events, failed_diagnostic_writes,
+        AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
+        InvalidAddinId, clear_diagnostic_sink, dropped_diagnostic_events, failed_diagnostic_writes,
         install_file_diagnostic_sink, set_diagnostic_sink,
     };
 }
@@ -147,7 +152,9 @@ pub mod prelude {
     };
     pub use crate::error::{ExcelError, IntoXllError, Shape, XllError, XllResult};
     pub use crate::handle::{ExcelHandleObject, Handle};
-    pub use crate::rtd::{IntoRtdValue, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
+    pub use crate::rtd::{
+        IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue,
+    };
     pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
 }
 
@@ -172,14 +179,15 @@ pub mod __private {
 
     pub use inventory;
     pub use xlfn_core::{
-        ArgumentAbi, ArgumentDescriptor, ExportCallGuard, ExportIngress, FunctionVisibility,
-        RegistrationDescriptor, RegistrationFlags, RegistrationSignature, ResultAbi, ReturnContext,
-        ReturnFreeBoundaryGuard, Runtime, argument_from_raw, argument_from_raw_with_context,
-        assert_async_parameter, assert_async_return, assert_excel_parameter,
-        assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
-        assert_volatile_return, cell_presence_from_raw, close_addin, dll_can_unload_now,
-        dll_get_class_object, ffi_boundary, ffi_boundary_void, free_return_boundary,
-        global_ingress, open_addin, reference_from_raw, udf_boundary_named, with_excel_call_scope,
+        AddinId, ArgumentAbi, ArgumentDescriptor, ExportCallGuard, ExportIngress,
+        FunctionVisibility, InvalidAddinId, RegistrationDescriptor, RegistrationFlags,
+        RegistrationSignature, ResultAbi, ReturnContext, ReturnFreeBoundaryGuard, Runtime,
+        argument_from_raw, argument_from_raw_with_context, assert_async_parameter,
+        assert_async_return, assert_excel_parameter, assert_macro_sheet_return,
+        assert_main_thread_return, assert_thread_safe_return, assert_volatile_return,
+        cell_presence_from_raw, close_addin, dll_can_unload_now, dll_get_class_object,
+        ffi_boundary, ffi_boundary_void, free_return_boundary, global_ingress, open_addin,
+        reference_from_raw, udf_boundary_named, utf16_eq_ignore_ascii_case, with_excel_call_scope,
     };
     #[cfg(feature = "async")]
     pub use xlfn_core::{

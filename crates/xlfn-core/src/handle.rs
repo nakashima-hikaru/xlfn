@@ -1,8 +1,9 @@
-use crate::{DomainErrorCode, FromExcel, ReturnContext, XllError, XllResult};
+use crate::{DomainErrorCode, ExcelCallbackStatus, ReturnContext, XllError, XllResult};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::any::{Any, TypeId, type_name};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::ops::Deref;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -89,12 +90,12 @@ impl<T: ExcelHandleObject> Drop for Handle<T> {
 impl<T: ExcelHandleObject> crate::ExcelReturn for Handle<T> {
     type Output = String;
 
-    fn into_excel(self, context: &mut ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         context.publish_existing_handle(|| Ok(self))
     }
 
     fn invoke(
-        context: &mut ReturnContext<'_>,
+        context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
     ) -> XllResult<String> {
         context.publish_existing_handle(operation)
@@ -108,6 +109,8 @@ struct HandleLeaseState {
     active: Mutex<usize>,
     idle: Condvar,
     cleanup_failure: Mutex<Option<XllError>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 impl HandleLeaseState {
@@ -116,6 +119,20 @@ impl HandleLeaseState {
             active: Mutex::new(0),
             idle: Condvar::new(),
             cleanup_failure: Mutex::new(None),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(event);
         }
     }
 
@@ -125,6 +142,8 @@ impl HandleLeaseState {
             .checked_add(1)
             .expect("handle lease count cannot overflow");
         drop(active);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
         HandleLease {
             state: Arc::clone(self),
         }
@@ -181,6 +200,10 @@ impl Drop for HandleLease {
             .checked_sub(1)
             .expect("handle lease count remains balanced");
         self.state.idle.notify_all();
+        drop(active);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.state
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
     }
 }
 
@@ -208,6 +231,8 @@ pub(crate) struct HandleRegistry {
     maximum_handles: usize,
     state: RwLock<RegistryState>,
     cleanup_failure: Mutex<Option<XllError>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 struct PendingHandleValue<'a, T>
@@ -333,7 +358,27 @@ impl HandleRegistry {
                 closed: false,
             }),
             cleanup_failure: Mutex::new(None),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
         }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(event);
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[allow(dead_code)]
+    fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
+        self.ghost.lock().clone()
     }
 
     #[cfg(test)]
@@ -346,51 +391,6 @@ impl HandleRegistry {
     #[must_use]
     pub fn len(&self) -> usize {
         self.state.read().live
-    }
-
-    #[cfg(test)]
-    pub fn insert<T>(&self, value: Arc<T>) -> XllResult<String>
-    where
-        T: Any + Send + Sync + 'static,
-    {
-        let mut state = self.state.write();
-        if state.closed {
-            return Err(XllError::Closing);
-        }
-        if state.live >= self.maximum_handles {
-            return Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            });
-        }
-
-        let (index, slot) = match state.free.pop() {
-            Some(index) => {
-                let slot = u32::try_from(index).map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x4841_4e44_534c_4f54,
-                })?;
-                (index, slot)
-            }
-            None => {
-                let index = state.slots.len();
-                let slot = u32::try_from(index).map_err(|_| XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
-                state.slots.push(Slot {
-                    generation: 1,
-                    entry: None,
-                });
-                (index, slot)
-            }
-        };
-        let generation = state.slots[index].generation.max(1);
-        state.slots[index].entry = Some(HandleEntry {
-            type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
-            value,
-        });
-        state.live += 1;
-        drop(state);
-        Ok(self.format_token(slot, generation))
     }
 
     fn insert_pending<T>(&self, value: &mut Option<Arc<T>>) -> XllResult<String>
@@ -435,6 +435,8 @@ impl HandleRegistry {
         });
         state.live += 1;
         drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok(self.format_token(slot, generation))
     }
 
@@ -590,6 +592,8 @@ impl HandleRegistry {
             state.free.push(parsed.slot as usize);
         }
         drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Arc::downcast::<T>(entry.value).map_err(|_| XllError::InvalidHandle)
     }
 
@@ -619,6 +623,8 @@ impl HandleRegistry {
             state.free.push(parsed.slot as usize);
         }
         drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(entry.value)
     }
 
@@ -656,7 +662,8 @@ impl HandleRegistry {
     fn take_values_for_close(&self) -> Vec<Arc<dyn Any + Send + Sync>> {
         let mut state = self.state.write();
         state.closed = true;
-        let mut values = Vec::with_capacity(state.live);
+        let live = state.live;
+        let mut values = Vec::with_capacity(live);
         state.free.clear();
         for index in 0..state.slots.len() {
             let slot = &mut state.slots[index];
@@ -669,6 +676,11 @@ impl HandleRegistry {
             }
         }
         state.live = 0;
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        for _ in 0..live {
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
+        }
         values
     }
 
@@ -914,18 +926,62 @@ pub(crate) struct HandleRuntime {
     registry: HandleRegistry,
     topics: Mutex<TopicState>,
     leases: Arc<HandleLeaseState>,
+    #[allow(dead_code)]
+    module_ingress: Option<&'static crate::ingress::ExportIngress>,
     #[cfg(test)]
     after_replace_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleRuntime {
+    #[allow(dead_code)]
     pub fn try_new(maximum_handles: usize) -> XllResult<Self> {
+        Self::try_new_with_ingress(maximum_handles, None)
+    }
+
+    pub(crate) fn try_new_with_ingress(
+        maximum_handles: usize,
+        module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    ) -> XllResult<Self> {
         Ok(Self {
             registry: HandleRegistry::try_new(maximum_handles)?,
             topics: Mutex::new(TopicState::default()),
             leases: Arc::new(HandleLeaseState::new()),
+            module_ingress,
             #[cfg(test)]
             after_replace_hook: Mutex::new(None),
+        })
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        self.registry.set_ghost(Arc::clone(&ghost));
+        self.leases.set_ghost(ghost);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let ghost = self.registry.ghost_handle();
+
+        let ingress_guard = if let Some(ingress) = self.module_ingress {
+            let (guard, accepted) = ingress.enter_with(|| {
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                if let Some(ghost) = ghost.as_ref() {
+                    ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+                }
+            });
+            if !accepted {
+                return Err(XllError::Closing);
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        Ok(RtdOperationGuard {
+            _ingress_guard: ingress_guard,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost,
         })
     }
 
@@ -957,6 +1013,7 @@ impl HandleRuntime {
         T: ExcelHandleObject,
     {
         let _active_initialization = HandleInitializationGuard::enter()?;
+        let _handle_operation = self.leases.acquire();
         let (initialization, generation) = loop {
             let mut topics = self.topics.lock();
             if topics.closed {
@@ -1392,18 +1449,56 @@ impl HandleRuntime {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) struct RtdOperationGuard {
+    _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Option<crate::shutdown_refinement::GhostHandle>,
+}
+
+impl Drop for RtdOperationGuard {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = self.ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        }
+    }
+}
+
+fn format_formula_topic_key(
+    sheet_id: xlfn_sys::IDSHEET,
+    row: i32,
+    column: i32,
+    udf_id: &'static str,
+    argument_digest: &[u8; 32],
+) -> String {
+    let mut digest = String::with_capacity(argument_digest.len() * 2);
+    for byte in argument_digest {
+        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{sheet_id}\u{1f}{row}\u{1f}{column}\u{1f}{udf_id}\u{1f}{digest}")
+}
+
 pub(crate) fn formula_topic_key(
+    callbacks: &crate::host_callback::HostCallbackSession,
     udf_id: &'static str,
     argument_digest: &[u8; 32],
 ) -> XllResult<String> {
-    use xlfn_sys::{XL_SHEET_NM, XLF_CALLER, XLRET_SUCCESS, XLTYPE_REF, XLTYPE_SREF};
+    use xlfn_sys::{XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLTYPE_REF, XLTYPE_SREF};
 
     // SAFETY: this runs synchronously on the generated main-thread UDF boundary.
-    let (status, mut caller) = unsafe { crate::ExcelCallbackValue::call(XLF_CALLER, &[]) };
-    if status != XLRET_SUCCESS {
+    let (status, mut caller) = unsafe {
+        callbacks
+            .call(XLF_CALLER, &[])
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlfCaller(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
+    if status != ExcelCallbackStatus::Success {
         return Err(caller.try_release().err().unwrap_or(XllError::ExcelApi {
             function: "xlfCaller",
-            code: status,
+            code: status.raw_code(),
         }));
     }
     let (row, column) = {
@@ -1463,28 +1558,65 @@ pub(crate) fn formula_topic_key(
 
     let caller_arguments = [caller.raw_pointer()?];
     // SAFETY: caller remains live for the nested xlSheetNm callback.
-    let (sheet_status, mut sheet) =
-        unsafe { crate::ExcelCallbackValue::call(XL_SHEET_NM, &caller_arguments) };
-    if sheet_status != XLRET_SUCCESS {
+    let (sheet_status, mut sheet) = unsafe {
+        callbacks
+            .call(XL_SHEET_NM, &caller_arguments)
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlSheetNm(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
+    if sheet_status != ExcelCallbackStatus::Success {
         return Err(sheet.try_release().err().unwrap_or(XllError::ExcelApi {
             function: "xlSheetNm",
-            code: sheet_status,
+            code: sheet_status.raw_code(),
         }));
     }
-    let sheet_name = String::from_excel(
-        sheet.borrow()?,
-        "caller",
-        &crate::CallContext::without_runtime(),
-    )?;
+    // `xlSheetId` accepts the counted external sheet name returned by
+    // `xlSheetNm`. The name is only a lookup input; it must never become part
+    // of formula identity because workbook and worksheet names can change.
+    let sheet_name_argument = [sheet.raw_pointer()?];
+    // SAFETY: the counted sheet-name result remains live for this nested
+    // callback and the callback session owns its release obligation.
+    let (sheet_id_status, mut sheet_id_value) = unsafe {
+        callbacks
+            .call(XL_SHEET_ID, &sheet_name_argument)
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlSheetId(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
+    if sheet_id_status != ExcelCallbackStatus::Success {
+        return Err(sheet_id_value
+            .try_release()
+            .err()
+            .unwrap_or(XllError::ExcelApi {
+                function: "xlSheetId",
+                code: sheet_id_status.raw_code(),
+            }));
+    }
+    let sheet_id = {
+        let value = sheet_id_value.borrow()?;
+        if value.base_type() != XLTYPE_REF {
+            return Err(XllError::input(
+                "caller",
+                crate::InputError::Malformed("xlSheetId did not return an external reference"),
+            ));
+        }
+        // SAFETY: XLTYPE_REF selects the MRef member, whose sheet_id is the
+        // stable Excel worksheet identifier returned by xlSheetId.
+        unsafe { value.raw().value.mref.sheet_id }
+    };
+    sheet_id_value.try_release()?;
     sheet.try_release()?;
     caller.try_release()?;
 
-    let digest = argument_digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!(
-        "{sheet_name}\u{1f}{row}\u{1f}{column}\u{1f}{udf_id}\u{1f}{digest}"
+    Ok(format_formula_topic_key(
+        sheet_id,
+        row,
+        column,
+        udf_id,
+        argument_digest,
     ))
 }
 
@@ -1497,11 +1629,30 @@ struct ParsedToken {
 mod tests {
     use super::*;
 
+    fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let mut value = Some(value);
+        registry.insert_pending(&mut value)
+    }
+
+    #[test]
+    fn formula_topic_key_uses_the_stable_sheet_identifier() {
+        let digest = [0xab_u8; 32];
+        let first = format_formula_topic_key(17, 4, 8, "TEST.CREATE", &digest);
+        let recalculated = format_formula_topic_key(17, 4, 8, "TEST.CREATE", &digest);
+        let other_sheet = format_formula_topic_key(18, 4, 8, "TEST.CREATE", &digest);
+
+        assert_eq!(first, recalculated);
+        assert_ne!(first, other_sheet);
+    }
+
     #[test]
     fn generation_prevents_aba_and_lookup_keeps_value_alive() {
         let registry = HandleRegistry::new(4);
         let first = Arc::new(String::from("first"));
-        let token = registry.insert(Arc::clone(&first)).unwrap();
+        let token = insert_production(&registry, Arc::clone(&first)).unwrap();
         let borrowed = registry.lookup::<String>(&token).unwrap();
         assert_eq!(&*borrowed, "first");
 
@@ -1512,9 +1663,8 @@ mod tests {
             Err(XllError::StaleHandle)
         ));
 
-        let replacement = registry
-            .insert(Arc::new(String::from("replacement")))
-            .unwrap();
+        let replacement =
+            insert_production(&registry, Arc::new(String::from("replacement"))).unwrap();
         assert_ne!(token, replacement);
         assert_eq!(&*borrowed, "first");
     }
@@ -1522,13 +1672,13 @@ mod tests {
     #[test]
     fn exhausted_generation_retires_the_slot_permanently() {
         let registry = HandleRegistry::new(2);
-        registry.insert(Arc::new(1_u32)).unwrap();
+        insert_production(&registry, Arc::new(1_u32)).unwrap();
         registry.state.write().slots[0].generation = u64::MAX;
         let final_token = registry.format_token(0, u64::MAX);
         assert_eq!(*registry.remove::<u32>(&final_token).unwrap(), 1);
         assert!(registry.state.read().free.is_empty());
 
-        let replacement = registry.insert(Arc::new(2_u32)).unwrap();
+        let replacement = insert_production(&registry, Arc::new(2_u32)).unwrap();
         assert_eq!(registry.parse_token(&replacement).unwrap().slot, 1);
         assert!(matches!(
             registry.lookup::<u32>(&final_token),
@@ -1540,7 +1690,7 @@ mod tests {
     fn corruption_and_cross_session_tokens_are_rejected() {
         let first = HandleRegistry::new(2);
         let second = HandleRegistry::new(2);
-        let token = first.insert(Arc::new(1_u32)).unwrap();
+        let token = insert_production(&first, Arc::new(1_u32)).unwrap();
         let fields = token.split(':').collect::<Vec<_>>();
         assert_eq!(fields[1], "3");
         assert_eq!(fields[5].len(), 32);
@@ -1575,13 +1725,13 @@ mod tests {
     #[test]
     fn close_invalidates_tokens_but_existing_arcs_survive() {
         let registry = HandleRegistry::new(2);
-        let token = registry.insert(Arc::new(42_u32)).unwrap();
+        let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
         let value = registry.lookup::<u32>(&token).unwrap();
         registry.close().unwrap();
         assert!(registry.lookup::<u32>(&token).is_err());
         assert_eq!(*value, 42);
         assert!(matches!(
-            registry.insert(Arc::new(7_u32)),
+            insert_production(&registry, Arc::new(7_u32)),
             Err(XllError::Closing)
         ));
     }
@@ -1596,7 +1746,7 @@ mod tests {
                 let inserting = shuttle::sync::Arc::clone(&registry);
                 let worker = shuttle::thread::spawn(move || {
                     shuttle::thread::yield_now();
-                    inserting.insert(Arc::new(42_u32))
+                    insert_production(&inserting, Arc::new(42_u32))
                 });
 
                 shuttle::thread::yield_now();
@@ -1619,7 +1769,7 @@ mod tests {
     #[test]
     fn wrong_remove_type_does_not_consume_handle() {
         let registry = HandleRegistry::new(2);
-        let token = registry.insert(Arc::new(42_u32)).unwrap();
+        let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
         assert!(matches!(
             registry.remove::<String>(&token),
             Err(XllError::InvalidHandle)
@@ -1635,18 +1785,20 @@ mod tests {
         impl Drop for ReenterOnDrop {
             fn drop(&mut self) {
                 assert!(matches!(
-                    self.registry.insert(Arc::new(1_u32)),
+                    insert_production(&self.registry, Arc::new(1_u32)),
                     Err(XllError::Closing)
                 ));
             }
         }
 
         let registry = Arc::new(HandleRegistry::new(2));
-        registry
-            .insert(Arc::new(ReenterOnDrop {
+        insert_production(
+            &registry,
+            Arc::new(ReenterOnDrop {
                 registry: Arc::clone(&registry),
-            }))
-            .unwrap();
+            }),
+        )
+        .unwrap();
         registry.close().unwrap();
     }
 
@@ -1668,10 +1820,8 @@ mod tests {
 
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let registry = HandleRegistry::new(2);
-        registry.insert(Arc::new(PanicOnDrop)).unwrap();
-        registry
-            .insert(Arc::new(CountOnDrop(Arc::clone(&drops))))
-            .unwrap();
+        insert_production(&registry, Arc::new(PanicOnDrop)).unwrap();
+        insert_production(&registry, Arc::new(CountOnDrop(Arc::clone(&drops)))).unwrap();
 
         assert!(matches!(registry.close(), Err(XllError::Panic)));
         assert_eq!(registry.len(), 0);

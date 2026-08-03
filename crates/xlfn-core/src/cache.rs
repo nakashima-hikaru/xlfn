@@ -1,6 +1,6 @@
 use crate::{InputError, XllError, XllResult};
 use moka::sync::Cache;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -145,7 +145,7 @@ type CacheMap = HashMap<(TypeId, &'static str), Arc<dyn ErasedCache>>;
 pub struct CacheRegistry {
     weight_budget_per_endpoint: usize,
     generation: CacheGeneration,
-    caches: Mutex<CacheMap>,
+    caches: RwLock<CacheMap>,
 }
 
 impl CacheRegistry {
@@ -154,7 +154,7 @@ impl CacheRegistry {
         Self {
             weight_budget_per_endpoint,
             generation: CacheGeneration::new(),
-            caches: Mutex::new(HashMap::new()),
+            caches: RwLock::new(HashMap::new()),
         }
     }
 
@@ -192,25 +192,27 @@ impl CacheRegistry {
         W: FnOnce(&V) -> usize,
     {
         let cache_key = endpoint.key();
-        let cache = {
-            let mut caches = self.caches.lock();
+        let cache = if self.generation.snapshot() != registry_epoch {
+            None
+        } else {
+            let caches = self.caches.read();
             if self.generation.snapshot() != registry_epoch {
                 None
+            } else if let Some(stored) = caches.get(&cache_key) {
+                Some(Self::downcast_cache::<K, V>(stored)?)
             } else {
-                let stored = caches.entry(cache_key).or_insert_with(|| {
-                    Arc::new(StoredCache(Arc::new(CalculationCache::<K, V>::new(
-                        self.weight_budget_per_endpoint,
-                    )))) as Arc<dyn ErasedCache>
-                });
-                let cache = stored
-                    .as_any()
-                    .downcast_ref::<StoredCache<K, V>>()
-                    .map(|stored| Arc::clone(&stored.0))
-                    .ok_or(XllError::Internal {
-                        diagnostic_id: 0x4341_4348_4554_5950,
-                    })?;
-                let cache_epoch = cache.generation.snapshot();
-                Some((cache, cache_epoch))
+                drop(caches);
+                let mut caches = self.caches.write();
+                if self.generation.snapshot() != registry_epoch {
+                    None
+                } else {
+                    let stored = caches.entry(cache_key).or_insert_with(|| {
+                        Arc::new(StoredCache(Arc::new(CalculationCache::<K, V>::new(
+                            self.weight_budget_per_endpoint,
+                        )))) as Arc<dyn ErasedCache>
+                    });
+                    Some(Self::downcast_cache::<K, V>(stored)?)
+                }
             }
         };
         // A clear that linearized before this endpoint was inserted could not
@@ -222,9 +224,27 @@ impl CacheRegistry {
         cache.get_or_try_insert_at_epoch(key, weight, compute, cache_epoch)
     }
 
+    fn downcast_cache<K, V>(
+        stored: &Arc<dyn ErasedCache>,
+    ) -> XllResult<(Arc<CalculationCache<K, V>>, u64)>
+    where
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let cache = stored
+            .as_any()
+            .downcast_ref::<StoredCache<K, V>>()
+            .map(|stored| Arc::clone(&stored.0))
+            .ok_or(XllError::Internal {
+                diagnostic_id: 0x4341_4348_4554_5950,
+            })?;
+        let cache_epoch = cache.generation.snapshot();
+        Ok((cache, cache_epoch))
+    }
+
     pub fn clear(&self) {
         let caches = {
-            let caches = self.caches.lock();
+            let caches = self.caches.write();
             self.generation.advance();
             caches
                 .values()
@@ -238,7 +258,7 @@ impl CacheRegistry {
 
     #[must_use]
     pub fn endpoint_count(&self) -> usize {
-        self.caches.lock().len()
+        self.caches.read().len()
     }
 }
 

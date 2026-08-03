@@ -68,6 +68,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -225,8 +234,12 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "fs-err",
+ "libc",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "windows-link",
  "xlfn-package",
 ]
 
@@ -282,9 +295,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -292,9 +305,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -620,9 +633,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
+checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
 ]
@@ -802,9 +815,9 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.39.1"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
 dependencies = [
  "memchr",
 ]
@@ -1451,9 +1464,9 @@ dependencies = [
 
 [[package]]
 name = "trybuild"
-version = "1.0.118"
+version = "1.0.120"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06649c6f63d86604ba0c8950d5a1829fc9a17afd70fc6629f481d75b6a624c78"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
 dependencies = [
  "glob",
  "serde",
@@ -1584,6 +1597,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-bindgen"
+version = "0.66.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81b7ec123a4eadd44d1f44f76804316b477b2537abed9a2ab950b3c54afa1fcf"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows-threading",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1630,6 +1654,15 @@ dependencies = [
  "windows_x86_64_gnu",
  "windows_x86_64_gnullvm",
  "windows_x86_64_msvc",
+]
+
+[[package]]
+name = "windows-threading"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
+dependencies = [
+ "windows-link",
 ]
 
 [[package]]
@@ -1713,9 +1746,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlfn-common"
+version = "0.1.0"
+
+[[package]]
 name = "xlfn-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-channel",
  "async-task",
  "blake3",
@@ -1726,13 +1764,18 @@ dependencies = [
  "loom",
  "moka",
  "parking_lot",
+ "proptest",
  "scopeguard",
+ "serde",
+ "serde_json",
  "shuttle",
+ "smallvec",
  "static_assertions",
  "tempfile",
  "thiserror",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-link",
+ "xlfn-common",
  "xlfn-sys",
 ]
 
@@ -1758,6 +1801,7 @@ name = "xlfn-package"
 version = "0.1.0"
 dependencies = [
  "fs-err",
+ "libc",
  "object",
  "proptest",
  "serde",
@@ -1765,7 +1809,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
- "windows-sys 0.61.2",
+ "windows-link",
+ "xlfn-common",
 ]
 
 [[package]]
@@ -1774,7 +1819,14 @@ version = "0.1.0"
 dependencies = [
  "smallvec",
  "static_assertions",
- "windows-sys 0.61.2",
+ "windows-link",
+]
+
+[[package]]
+name = "xlfn-windows-bindings-gen"
+version = "0.1.0"
+dependencies = [
+ "windows-bindgen",
 ]
 
 [[package]]

@@ -18,8 +18,14 @@ clap.workspace = true
 cargo_metadata.workspace = true
 xlfn-package.workspace = true
 fs-err.workspace = true
+libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-link.workspace = true
 
 [lints]
 workspace = true

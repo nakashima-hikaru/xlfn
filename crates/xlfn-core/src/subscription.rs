@@ -9,6 +9,47 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
+const DEFAULT_MAX_RTD_TOPIC_PARTS: usize = 253;
+const DEFAULT_MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_RTD_PENDING: usize = 4096;
+const DEFAULT_MAX_RTD_ACTIVE: usize = 4096;
+const DEFAULT_MAX_RTD_QUEUED_UPDATES: usize = 4096;
+const DEFAULT_MAX_RTD_SOURCE_IDS: usize = 4096;
+const DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES: usize = 64 * 1024 * 1024;
+
+/// Resource limits for one add-in's RTD subscription runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RtdLimits {
+    pub max_topic_parts: usize,
+    pub max_topic_bytes: usize,
+    pub max_pending: usize,
+    pub max_active: usize,
+    pub max_queued_updates: usize,
+    pub max_source_ids: usize,
+    pub max_total_topic_bytes: usize,
+}
+
+impl RtdLimits {
+    #[must_use]
+    pub const fn standard() -> Self {
+        Self {
+            max_topic_parts: DEFAULT_MAX_RTD_TOPIC_PARTS,
+            max_topic_bytes: DEFAULT_MAX_RTD_TOPIC_BYTES,
+            max_pending: DEFAULT_MAX_RTD_PENDING,
+            max_active: DEFAULT_MAX_RTD_ACTIVE,
+            max_queued_updates: DEFAULT_MAX_RTD_QUEUED_UPDATES,
+            max_source_ids: DEFAULT_MAX_RTD_SOURCE_IDS,
+            max_total_topic_bytes: DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES,
+        }
+    }
+}
+
+impl Default for RtdLimits {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RtdTopic {
     parts: Arc<[String]>,
@@ -16,31 +57,64 @@ pub struct RtdTopic {
 
 impl RtdTopic {
     pub fn new(parts: impl IntoIterator<Item = impl Into<String>>) -> XllResult<Self> {
-        let parts = parts.into_iter().map(Into::into).collect::<Vec<_>>();
-        if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        let limits = RtdLimits::standard();
+        let mut normalized = Vec::new();
+        let mut total_bytes = 0_usize;
+        for part in parts {
+            if normalized.len() >= limits.max_topic_parts {
+                return Err(XllError::input(
+                    "RTD topic",
+                    crate::InputError::TooLarge {
+                        limit: limits.max_topic_parts,
+                        actual: normalized.len().saturating_add(1),
+                    },
+                ));
+            }
+            let part = part.into();
+            if part.is_empty() {
+                return Err(XllError::input(
+                    "RTD topic",
+                    crate::InputError::Malformed("RTD topics require non-empty parts"),
+                ));
+            }
+            let utf16_len = part.encode_utf16().count();
+            if utf16_len > 32_767 {
+                return Err(XllError::input(
+                    "RTD topic",
+                    crate::InputError::TooLarge {
+                        limit: 32_767,
+                        actual: utf16_len,
+                    },
+                ));
+            }
+            total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
+                XllError::input(
+                    "RTD topic",
+                    crate::InputError::TooLarge {
+                        limit: limits.max_topic_bytes,
+                        actual: usize::MAX,
+                    },
+                )
+            })?;
+            if total_bytes > limits.max_topic_bytes {
+                return Err(XllError::input(
+                    "RTD topic",
+                    crate::InputError::TooLarge {
+                        limit: limits.max_topic_bytes,
+                        actual: total_bytes,
+                    },
+                ));
+            }
+            normalized.push(part);
+        }
+        if normalized.is_empty() {
             return Err(XllError::input(
                 "RTD topic",
                 crate::InputError::Malformed("RTD topics require non-empty parts"),
             ));
         }
-        if parts
-            .iter()
-            .any(|part| part.encode_utf16().count() > 32_767)
-        {
-            return Err(XllError::input(
-                "RTD topic",
-                crate::InputError::TooLarge {
-                    limit: 32_767,
-                    actual: parts
-                        .iter()
-                        .map(|part| part.encode_utf16().count())
-                        .max()
-                        .unwrap_or(0),
-                },
-            ));
-        }
         Ok(Self {
-            parts: Arc::from(parts),
+            parts: Arc::from(normalized),
         })
     }
 
@@ -52,6 +126,65 @@ impl RtdTopic {
     pub fn parts(&self) -> &[String] {
         &self.parts
     }
+
+    fn validate_with_limits(&self, limits: &RtdLimits) -> XllResult<()> {
+        validate_topic_parts(&self.parts, limits)
+    }
+
+    fn byte_len(&self) -> usize {
+        self.parts.iter().map(String::len).sum()
+    }
+}
+
+fn validate_topic_parts(parts: &[String], limits: &RtdLimits) -> XllResult<()> {
+    if parts.is_empty() || parts.iter().any(String::is_empty) {
+        return Err(XllError::input(
+            "RTD topic",
+            crate::InputError::Malformed("RTD topics require non-empty parts"),
+        ));
+    }
+    if parts.len() > limits.max_topic_parts {
+        return Err(XllError::input(
+            "RTD topic",
+            crate::InputError::TooLarge {
+                limit: limits.max_topic_parts,
+                actual: parts.len(),
+            },
+        ));
+    }
+
+    let mut total_bytes = 0_usize;
+    for part in parts {
+        let utf16_len = part.encode_utf16().count();
+        if utf16_len > 32_767 {
+            return Err(XllError::input(
+                "RTD topic",
+                crate::InputError::TooLarge {
+                    limit: 32_767,
+                    actual: utf16_len,
+                },
+            ));
+        }
+        total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
+            XllError::input(
+                "RTD topic",
+                crate::InputError::TooLarge {
+                    limit: limits.max_topic_bytes,
+                    actual: usize::MAX,
+                },
+            )
+        })?;
+    }
+    if total_bytes > limits.max_topic_bytes {
+        return Err(XllError::input(
+            "RTD topic",
+            crate::InputError::TooLarge {
+                limit: limits.max_topic_bytes,
+                actual: total_bytes,
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// Defines the contract for an active RTD subscription.
@@ -143,7 +276,7 @@ impl crate::IntoExcelValue for RtdValue {
 impl crate::ExcelReturn for RtdValue {
     type Output = Self;
 
-    fn into_excel(self, _: &mut crate::ReturnContext<'_>) -> XllResult<Self::Output> {
+    fn into_excel(self, _: &mut crate::ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         Ok(self)
     }
 }
@@ -369,6 +502,7 @@ pub(crate) struct SubscriptionConnection {
     generation: u64,
     key: String,
     value: RtdValue,
+    observed_sequence: Option<u64>,
     created: bool,
     finished: bool,
 }
@@ -384,7 +518,12 @@ impl SubscriptionConnection {
         }
         if self.created {
             let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
-            runtime.commit_connection(self.owner, self.generation, &self.key)?;
+            runtime.commit_connection(
+                self.owner,
+                self.generation,
+                &self.key,
+                self.observed_sequence,
+            )?;
         }
         self.finished = true;
         Ok(())
@@ -452,6 +591,7 @@ struct SubscriptionState {
     terminating_servers: HashSet<u64>,
     terminated_servers: HashSet<u64>,
     pending: HashMap<String, PendingSubscription>,
+    pending_topic_bytes: usize,
     active: HashMap<TopicOwner, ActiveSubscription>,
     topic_ids: HashMap<String, TopicOwner>,
     updates: BTreeMap<TopicOwner, QueuedUpdate>,
@@ -459,19 +599,40 @@ struct SubscriptionState {
     source_ids: HashMap<usize, SourceIdentity>,
 }
 
+fn restore_source_identity(
+    state: &mut SubscriptionState,
+    ptr_key: usize,
+    inserted: bool,
+    previous: Option<SourceIdentity>,
+) {
+    if !inserted {
+        return;
+    }
+    if let Some(previous) = previous {
+        state.source_ids.insert(ptr_key, previous);
+    } else {
+        state.source_ids.remove(&ptr_key);
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) struct SubscriptionRuntime {
+    limits: RtdLimits,
+    module_ingress: Option<&'static crate::ingress::ExportIngress>,
     state: Mutex<SubscriptionState>,
     idle: Condvar,
     cleanup_failure: Mutex<Option<XllError>>,
     notifications: RwLock<HashMap<u64, Arc<dyn Fn() -> XllResult<()> + Send + Sync>>>,
     next_preparation_id: AtomicU64,
     next_generation: AtomicU64,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 pub(crate) struct SubscriptionOperation<'a> {
     runtime: &'a SubscriptionRuntime,
     server_generation: Option<u64>,
+    _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
 }
 
 impl Drop for SubscriptionOperation<'_> {
@@ -497,12 +658,35 @@ impl Drop for SubscriptionOperation<'_> {
             }
         }
         self.runtime.idle.notify_all();
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.runtime
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
     }
 }
 
 impl SubscriptionRuntime {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_limits(RtdLimits::standard())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_limits(limits: RtdLimits) -> Self {
+        Self::with_limits_and_ingress(limits, None)
+    }
+
+    pub(crate) fn with_module_ingress(limits: RtdLimits) -> Self {
+        Self::with_limits_and_ingress(limits, Some(crate::ingress::global_ingress()))
+    }
+
+    fn with_limits_and_ingress(
+        limits: RtdLimits,
+        module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    ) -> Self {
         Self {
+            limits,
+            module_ingress,
             state: Mutex::new(SubscriptionState {
                 closed: false,
                 in_flight: 0,
@@ -510,6 +694,7 @@ impl SubscriptionRuntime {
                 terminating_servers: HashSet::new(),
                 terminated_servers: HashSet::new(),
                 pending: HashMap::new(),
+                pending_topic_bytes: 0,
                 active: HashMap::new(),
                 topic_ids: HashMap::new(),
                 updates: BTreeMap::new(),
@@ -521,6 +706,20 @@ impl SubscriptionRuntime {
             notifications: RwLock::new(HashMap::new()),
             next_preparation_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(event);
         }
     }
 
@@ -544,8 +743,44 @@ impl SubscriptionRuntime {
         &self,
         server_generation: Option<u64>,
     ) -> XllResult<SubscriptionOperation<'_>> {
+        if let Some(ingress) = self.module_ingress {
+            let mut admitted = false;
+            let mut admission_error = None;
+            let (ingress_guard, accepted) = ingress.enter_with(|| {
+                let mut state = self.state.lock();
+                match self.admit_operation_locked(&mut state, server_generation) {
+                    Ok(()) => {
+                        admitted = true;
+                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        self.record_ghost_event(
+                            crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
+                        );
+                    }
+                    Err(error) => admission_error = Some(error),
+                }
+            });
+            if !accepted {
+                return Err(XllError::Closing);
+            }
+            if !admitted {
+                drop(ingress_guard);
+                return Err(admission_error.expect("RTD admission error is recorded"));
+            }
+            return Ok(SubscriptionOperation {
+                runtime: self,
+                server_generation,
+                _ingress_guard: Some(ingress_guard),
+            });
+        }
+
         let mut state = self.state.lock();
-        self.enter_operation_locked(&mut state, server_generation)
+        let result = self.enter_operation_locked(&mut state, server_generation);
+        drop(state);
+        if result.is_ok() {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+        }
+        result
     }
 
     fn enter_operation_locked<'a>(
@@ -553,6 +788,19 @@ impl SubscriptionRuntime {
         state: &mut SubscriptionState,
         server_generation: Option<u64>,
     ) -> XllResult<SubscriptionOperation<'a>> {
+        self.admit_operation_locked(state, server_generation)?;
+        Ok(SubscriptionOperation {
+            runtime: self,
+            server_generation,
+            _ingress_guard: None,
+        })
+    }
+
+    fn admit_operation_locked(
+        &self,
+        state: &mut SubscriptionState,
+        server_generation: Option<u64>,
+    ) -> XllResult<()> {
         if state.closed
             || server_generation.is_some_and(|generation| {
                 state.terminating_servers.contains(&generation)
@@ -584,10 +832,7 @@ impl SubscriptionRuntime {
                 next_server_count.expect("server count was computed above"),
             );
         }
-        Ok(SubscriptionOperation {
-            runtime: self,
-            server_generation,
-        })
+        Ok(())
     }
 
     pub(crate) fn enter_server_operation(
@@ -595,6 +840,10 @@ impl SubscriptionRuntime {
         server_generation: u64,
     ) -> XllResult<SubscriptionOperation<'_>> {
         self.enter_operation(Some(server_generation))
+    }
+
+    pub(crate) fn enter_external_operation(&self) -> XllResult<SubscriptionOperation<'_>> {
+        self.enter_operation(None)
     }
 
     pub(crate) fn prepare<S>(
@@ -606,6 +855,8 @@ impl SubscriptionRuntime {
         S: RtdSource,
     {
         static NEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+        topic.validate_with_limits(&self.limits)?;
+        let topic_bytes = topic.byte_len();
         let ptr_key = Arc::as_ptr(&source) as usize;
         let erased_source: Arc<dyn Any + Send + Sync> = source.clone();
         let mut state = self.state.lock();
@@ -615,6 +866,8 @@ impl SubscriptionRuntime {
         state
             .source_ids
             .retain(|_, identity| identity.source.strong_count() != 0);
+        let mut replaced_source_identity = None;
+        let mut source_identity_inserted = false;
         let source_identity = match state.source_ids.get(&ptr_key) {
             Some(identity)
                 if identity
@@ -625,8 +878,12 @@ impl SubscriptionRuntime {
                 identity.id
             }
             _ => {
+                if state.source_ids.len() >= self.limits.max_source_ids {
+                    return Err(XllError::Overloaded);
+                }
                 let id = NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-                state.source_ids.insert(
+                source_identity_inserted = true;
+                replaced_source_identity = state.source_ids.insert(
                     ptr_key,
                     SourceIdentity {
                         id,
@@ -671,7 +928,30 @@ impl SubscriptionRuntime {
             });
         }
 
+        let Some(next_pending_topic_bytes) = state.pending_topic_bytes.checked_add(topic_bytes)
+        else {
+            restore_source_identity(
+                &mut state,
+                ptr_key,
+                source_identity_inserted,
+                replaced_source_identity,
+            );
+            return Err(XllError::Overloaded);
+        };
+        if state.pending.len() >= self.limits.max_pending
+            || next_pending_topic_bytes > self.limits.max_total_topic_bytes
+        {
+            restore_source_identity(
+                &mut state,
+                ptr_key,
+                source_identity_inserted,
+                replaced_source_identity,
+            );
+            return Err(XllError::Overloaded);
+        }
+
         let preparation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
+        state.pending_topic_bytes = next_pending_topic_bytes;
         state.pending.insert(
             key.clone(),
             PendingSubscription {
@@ -729,6 +1009,7 @@ impl SubscriptionRuntime {
                         generation: active.generation,
                         key: key.to_owned(),
                         value: active.latest.clone(),
+                        observed_sequence: None,
                         created: false,
                         finished: false,
                     })
@@ -740,6 +1021,9 @@ impl SubscriptionRuntime {
             }
             if state.topic_ids.contains_key(key) {
                 return Err(XllError::InvalidHandle);
+            }
+            if state.active.len() >= self.limits.max_active {
+                return Err(XllError::Overloaded);
             }
             let pending = state.pending.get_mut(key).ok_or(XllError::InvalidHandle)?;
             if pending
@@ -801,12 +1085,26 @@ impl SubscriptionRuntime {
             let can_install = !state.closed
                 && !state.terminating_servers.contains(&server_generation)
                 && !state.terminated_servers.contains(&server_generation);
-            let installed = match state.active.get_mut(&owner) {
-                Some(active) if can_install && active.generation == generation => {
-                    active.subscription = subscription.take();
-                    Some(active.latest.clone())
-                }
-                _ => None,
+            let installed = state
+                .active
+                .get(&owner)
+                .is_some_and(|active| can_install && active.generation == generation);
+            let installed = if installed {
+                state
+                    .active
+                    .get_mut(&owner)
+                    .expect("the active RTD connection was checked above")
+                    .subscription = subscription.take();
+                let active = state
+                    .active
+                    .get(&owner)
+                    .expect("the active RTD connection was installed above");
+                Some((
+                    active.latest.clone(),
+                    state.updates.get(&owner).map(|queued| queued.sequence),
+                ))
+            } else {
+                None
             };
             if let Some(latest) = installed {
                 (Some(latest), None)
@@ -829,12 +1127,13 @@ impl SubscriptionRuntime {
             self.record_cleanup_result(disconnect_one_no_unwind(subscription, owner, key));
         }
         match latest {
-            Some(value) => Ok(SubscriptionConnection {
+            Some((value, observed_sequence)) => Ok(SubscriptionConnection {
                 runtime: Arc::downgrade(self),
                 owner,
                 generation,
                 key: key.to_owned(),
                 value,
+                observed_sequence,
                 created: true,
                 finished: false,
             }),
@@ -842,9 +1141,15 @@ impl SubscriptionRuntime {
         }
     }
 
-    fn commit_connection(&self, owner: TopicOwner, generation: u64, key: &str) -> XllResult<()> {
+    fn commit_connection(
+        &self,
+        owner: TopicOwner,
+        generation: u64,
+        key: &str,
+        observed_sequence: Option<u64>,
+    ) -> XllResult<()> {
         let _operation = self.enter_operation(Some(owner.server_generation))?;
-        let retired_pending = {
+        let (retired_pending, should_notify) = {
             let mut state = self.state.lock();
             if state.closed
                 || state.terminating_servers.contains(&owner.server_generation)
@@ -871,12 +1176,25 @@ impl SubscriptionRuntime {
                 });
             }
             active.committed = true;
-            state.pending.remove(key)
+            let should_notify = match state.updates.get(&owner) {
+                Some(queued) if observed_sequence == Some(queued.sequence) => {
+                    state.updates.remove(&owner);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            };
+            (Self::remove_pending(&mut state, key), should_notify)
         };
         self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
             retired_pending,
             "rtd_committed_pending_source_drop",
         ));
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
+        if should_notify {
+            self.notify_with_retry_inner(owner.server_generation);
+        }
         Ok(())
     }
 
@@ -936,7 +1254,7 @@ impl SubscriptionRuntime {
                         || state.terminated_servers.contains(&generation)
                 });
             (!connecting && (unowned || invalid_generation))
-                .then(|| state.pending.remove(key))
+                .then(|| Self::remove_pending(&mut state, key))
                 .flatten()
         };
         // The source is user-owned and its Drop implementation may re-enter
@@ -1007,6 +1325,15 @@ impl SubscriptionRuntime {
         }
     }
 
+    fn remove_pending(state: &mut SubscriptionState, key: &str) -> Option<PendingSubscription> {
+        let pending = state.pending.remove(key)?;
+        state.pending_topic_bytes = state
+            .pending_topic_bytes
+            .checked_sub(pending.topic.byte_len())
+            .expect("pending RTD topic byte quota remains balanced");
+        Some(pending)
+    }
+
     fn reset_pending_connection(
         state: &mut SubscriptionState,
         key: &str,
@@ -1025,7 +1352,9 @@ impl SubscriptionRuntime {
                 state.terminating_servers.contains(&generation)
                     || state.terminated_servers.contains(&generation)
             });
-        should_remove.then(|| state.pending.remove(key)).flatten()
+        should_remove
+            .then(|| Self::remove_pending(state, key))
+            .flatten()
     }
 
     pub(crate) fn disconnect(&self, server_generation: u64, topic_id: i32) {
@@ -1058,7 +1387,13 @@ impl SubscriptionRuntime {
             updates: state
                 .updates
                 .iter()
-                .filter(|&(owner, _queued)| owner.server_generation == server_generation)
+                .filter(|&(owner, _queued)| {
+                    owner.server_generation == server_generation
+                        && state
+                            .active
+                            .get(owner)
+                            .is_some_and(|active| active.committed)
+                })
                 .map(|(owner, queued)| RtdUpdate {
                     owner: *owner,
                     sequence: queued.sequence,
@@ -1084,10 +1419,13 @@ impl SubscriptionRuntime {
 
     pub(crate) fn has_pending_updates(&self, server_generation: u64) -> bool {
         let state = self.state.lock();
-        state
-            .updates
-            .keys()
-            .any(|owner| owner.server_generation == server_generation)
+        state.updates.keys().any(|owner| {
+            owner.server_generation == server_generation
+                && state
+                    .active
+                    .get(owner)
+                    .is_some_and(|active| active.committed)
+        })
     }
 
     pub(crate) fn retry_updates(&self, server_generation: u64) {
@@ -1157,21 +1495,31 @@ impl SubscriptionRuntime {
         };
         drop(retired_notification);
 
-        let mut subscriptions = {
+        let (mut subscriptions, _removed_subscriptions) = {
             let mut state = self.state.lock();
-            state
+            let subscriptions = state
                 .active
                 .iter_mut()
                 .filter_map(|(owner, active)| {
                     if owner.server_generation != server_generation {
                         return None;
                     }
+                    let committed = active.committed;
                     active
                         .subscription
                         .take()
-                        .map(|subscription| (*owner, active.key.clone(), subscription))
+                        .map(|subscription| (*owner, active.key.clone(), committed, subscription))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let removed = subscriptions
+                .iter()
+                .filter(|(_, _, committed, _)| *committed)
+                .count();
+            let subscriptions = subscriptions
+                .into_iter()
+                .map(|(owner, key, _, subscription)| (owner, key, subscription))
+                .collect::<Vec<_>>();
+            (subscriptions, removed)
         };
         self.record_cleanup_result(request_cancel_all_no_unwind(&subscriptions));
 
@@ -1186,7 +1534,7 @@ impl SubscriptionRuntime {
             }
         }
 
-        let (late_subscriptions, removed_pending) = {
+        let (late_subscriptions, removed_pending, _late_removed_subscriptions) = {
             let mut state = self.state.lock();
             let pending_keys = state
                 .pending
@@ -1196,7 +1544,7 @@ impl SubscriptionRuntime {
                 .collect::<Vec<_>>();
             let removed_pending = pending_keys
                 .into_iter()
-                .filter_map(|key| state.pending.remove(&key))
+                .filter_map(|key| Self::remove_pending(&mut state, &key))
                 .collect::<Vec<_>>();
             let owners = state
                 .active
@@ -1212,10 +1560,18 @@ impl SubscriptionRuntime {
                     state.topic_ids.remove(&active.key);
                     active
                         .subscription
-                        .map(|subscription| (owner, active.key, subscription))
+                        .map(|subscription| (owner, active.key, active.committed, subscription))
                 })
                 .collect::<Vec<_>>();
-            (late_subscriptions, removed_pending)
+            let late_removed = late_subscriptions
+                .iter()
+                .filter(|(_, _, committed, _)| *committed)
+                .count();
+            let late_subscriptions = late_subscriptions
+                .into_iter()
+                .map(|(owner, key, _, subscription)| (owner, key, subscription))
+                .collect::<Vec<_>>();
+            (late_subscriptions, removed_pending, late_removed)
         };
         // Pending sources are user-owned and may re-enter runtime services in
         // Drop. Never release them while the subscription state lock is held.
@@ -1225,6 +1581,10 @@ impl SubscriptionRuntime {
         ));
         self.record_cleanup_result(request_cancel_all_no_unwind(&late_subscriptions));
         subscriptions.extend(late_subscriptions);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        for _ in 0..(_removed_subscriptions + _late_removed_subscriptions) {
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+        }
         self.record_cleanup_result(disconnect_all_no_unwind(subscriptions));
 
         let mut state = self.state.lock();
@@ -1237,19 +1597,29 @@ impl SubscriptionRuntime {
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
-        let mut subscriptions = {
+        let (mut subscriptions, _removed_subscriptions) = {
             let mut state = self.state.lock();
             state.closed = true;
-            state
+            let subscriptions = state
                 .active
                 .iter_mut()
                 .filter_map(|(owner, active)| {
+                    let committed = active.committed;
                     active
                         .subscription
                         .take()
-                        .map(|subscription| (*owner, active.key.clone(), subscription))
+                        .map(|subscription| (*owner, active.key.clone(), committed, subscription))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let removed = subscriptions
+                .iter()
+                .filter(|(_, _, committed, _)| *committed)
+                .count();
+            let subscriptions = subscriptions
+                .into_iter()
+                .map(|(owner, key, _, subscription)| (owner, key, subscription))
+                .collect::<Vec<_>>();
+            (subscriptions, removed)
         };
         let retired_notifications = {
             let mut notifications = self.notifications.write();
@@ -1258,12 +1628,13 @@ impl SubscriptionRuntime {
         drop(retired_notifications);
         self.record_cleanup_result(request_cancel_all_no_unwind(&subscriptions));
 
-        let (late_subscriptions, removed_pending) = {
+        let (late_subscriptions, removed_pending, _late_removed_subscriptions) = {
             let mut state = self.state.lock();
             while state.in_flight != 0 {
                 self.idle.wait(&mut state);
             }
             let removed_pending = std::mem::take(&mut state.pending);
+            state.pending_topic_bytes = 0;
             state.topic_ids.clear();
             state.updates.clear();
             state.source_ids.clear();
@@ -1276,10 +1647,18 @@ impl SubscriptionRuntime {
                 .filter_map(|(owner, active)| {
                     active
                         .subscription
-                        .map(|subscription| (owner, active.key, subscription))
+                        .map(|subscription| (owner, active.key, active.committed, subscription))
                 })
                 .collect::<Vec<_>>();
-            (late_subscriptions, removed_pending)
+            let late_removed = late_subscriptions
+                .iter()
+                .filter(|(_, _, committed, _)| *committed)
+                .count();
+            let late_subscriptions = late_subscriptions
+                .into_iter()
+                .map(|(owner, key, _, subscription)| (owner, key, subscription))
+                .collect::<Vec<_>>();
+            (late_subscriptions, removed_pending, late_removed)
         };
         // See terminate_server: source Drop is outside every runtime lock.
         self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
@@ -1288,13 +1667,17 @@ impl SubscriptionRuntime {
         ));
         self.record_cleanup_result(request_cancel_all_no_unwind(&late_subscriptions));
         subscriptions.extend(late_subscriptions);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        for _ in 0..(_removed_subscriptions + _late_removed_subscriptions) {
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+        }
         self.record_cleanup_result(disconnect_all_no_unwind(subscriptions));
         self.cleanup_result()
     }
 
     fn publish(&self, owner: TopicOwner, generation: u64, value: RtdValue) -> XllResult<()> {
         let _operation = self.enter_operation(Some(owner.server_generation))?;
-        {
+        let should_notify = {
             let mut state = self.state.lock();
             if state.closed {
                 return Err(XllError::Closing);
@@ -1307,27 +1690,41 @@ impl SubscriptionRuntime {
             {
                 return Err(XllError::Closing);
             }
+            if !state.updates.contains_key(&owner)
+                && state.updates.len() >= self.limits.max_queued_updates
+            {
+                return Err(XllError::Overloaded);
+            }
             let sequence = state.next_update_sequence;
             state.next_update_sequence = sequence.checked_add(1).ok_or(XllError::Internal {
                 diagnostic_id: 0x5254_4455_5044_4154,
             })?;
             let active = state.active.get_mut(&owner).expect("active checked above");
             active.latest = value.clone();
+            let should_notify = active.committed;
             state
                 .updates
                 .insert(owner, QueuedUpdate { sequence, value });
+            should_notify
+        };
+        if should_notify {
+            self.notify_with_retry_inner(owner.server_generation);
         }
-        self.notify_with_retry_inner(owner.server_generation);
         Ok(())
     }
 
     fn notify(&self, server_generation: u64) -> XllResult<()> {
         let notification = self.notifications.read().get(&server_generation).cloned();
         if let Some(notification) = notification {
-            match catch_unwind(AssertUnwindSafe(|| notification())) {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
+            let result = match catch_unwind(AssertUnwindSafe(|| notification())) {
                 Ok(result) => result,
                 Err(_) => Err(XllError::Panic),
-            }
+            };
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
+            result
         } else {
             Ok(())
         }
@@ -1588,6 +1985,271 @@ mod tests {
         }
     }
 
+    type PublishingSink = Arc<Mutex<Option<RtdSink<f64>>>>;
+
+    struct PublishingSource {
+        sink: PublishingSink,
+        initial: Option<f64>,
+        disconnected: Arc<AtomicBool>,
+    }
+
+    impl RtdSource for PublishingSource {
+        type Value = f64;
+
+        fn subscribe(
+            &self,
+            _topic: &RtdTopic,
+            sink: RtdSink<Self::Value>,
+        ) -> XllResult<Box<dyn RtdSubscription>> {
+            if let Some(initial) = self.initial {
+                sink.publish(initial)?;
+            }
+            self.sink.lock().replace(sink);
+            Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
+        }
+    }
+
+    fn publishing_source(
+        initial: Option<f64>,
+    ) -> (Arc<PublishingSource>, PublishingSink, Arc<AtomicBool>) {
+        let sink = Arc::new(Mutex::new(None));
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(PublishingSource {
+            sink: Arc::clone(&sink),
+            initial,
+            disconnected: Arc::clone(&disconnected),
+        });
+        (source, sink, disconnected)
+    }
+
+    #[test]
+    fn synchronous_initial_publish_is_isolated_until_connection_commit() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime.set_notification(
+            1,
+            Some({
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        );
+        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("initial-isolation").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+
+        let connection = runtime.connect_transaction(1, 1, &key).unwrap();
+        assert_eq!(connection.value(), &RtdValue::Number(12.5));
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+        assert!(runtime.snapshot_updates(1).updates.is_empty());
+
+        connection.commit().unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+        assert!(runtime.snapshot_updates(1).updates.is_empty());
+    }
+
+    #[test]
+    fn snapshot_updates_excludes_an_uncommitted_connection() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("snapshot-isolation").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+
+        let connection = runtime.connect_transaction(2, 2, &key).unwrap();
+        assert!(runtime.snapshot_updates(2).updates.is_empty());
+        drop(connection);
+        assert!(runtime.snapshot_updates(2).updates.is_empty());
+    }
+
+    #[test]
+    fn failed_initial_value_write_leaves_no_notification_history() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime.set_notification(
+            3,
+            Some({
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        );
+        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("failed-write").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+
+        let connection = runtime.connect_transaction(3, 3, &key).unwrap();
+        assert_eq!(connection.value(), &RtdValue::Number(12.5));
+        // Model ConnectData's failed VARIANT write: dropping the uncommitted
+        // connection must roll back the source and its queued initial value.
+        drop(connection);
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+        assert!(runtime.snapshot_updates(3).updates.is_empty());
+        assert!(runtime.state.lock().active.is_empty());
+    }
+
+    #[test]
+    fn publish_before_commit_notifies_once_after_commit() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime.set_notification(
+            4,
+            Some({
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        );
+        let (source, sink, _disconnected) = publishing_source(Some(12.5));
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("publish-before-commit").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+
+        let connection = runtime.connect_transaction(4, 4, &key).unwrap();
+        sink.lock()
+            .as_ref()
+            .expect("source captured the RTD sink")
+            .publish(13.5)
+            .unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+        assert!(runtime.snapshot_updates(4).updates.is_empty());
+
+        connection.commit().unwrap();
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        let updates = runtime.snapshot_updates(4);
+        assert_eq!(updates.updates.len(), 1);
+        assert_eq!(updates.updates[0].value, RtdValue::Number(13.5));
+    }
+
+    #[test]
+    fn rtd_topic_limits_are_checked_before_subscription_admission() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_topic_parts: 1,
+            max_topic_bytes: 3,
+            ..RtdLimits::standard()
+        }));
+        let source = Arc::new(TestSource {
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+
+        let too_many_parts = RtdTopic::new(["one", "two"]).unwrap();
+        assert!(matches!(
+            runtime.prepare(Arc::clone(&source), too_many_parts),
+            Err(XllError::Input {
+                reason: crate::InputError::TooLarge { .. },
+                ..
+            })
+        ));
+
+        let too_many_bytes = RtdTopic::single("four").unwrap();
+        assert!(matches!(
+            runtime.prepare(source, too_many_bytes),
+            Err(XllError::Input {
+                reason: crate::InputError::TooLarge { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pending_and_active_rtd_quotas_are_released_by_transaction_cleanup() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_pending: 1,
+            max_active: 1,
+            ..RtdLimits::standard()
+        }));
+        let first = Arc::new(TestSource {
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+        let second = Arc::new(TestSource {
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+
+        let pending = runtime
+            .prepare(Arc::clone(&first), RtdTopic::single("pending").unwrap())
+            .unwrap();
+        assert!(matches!(
+            runtime.prepare(Arc::clone(&first), RtdTopic::single("same-source").unwrap()),
+            Err(XllError::Overloaded)
+        ));
+        assert!(matches!(
+            runtime.prepare(Arc::clone(&second), RtdTopic::single("blocked").unwrap()),
+            Err(XllError::Overloaded)
+        ));
+        assert_eq!(runtime.state.lock().source_ids.len(), 1);
+        drop(pending);
+        let active_key = runtime
+            .prepare(Arc::clone(&first), RtdTopic::single("active").unwrap())
+            .unwrap();
+        let active_key = active_key.key().to_owned();
+        runtime
+            .connect_transaction(1, 1, &active_key)
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        let blocked_key = runtime
+            .prepare(second, RtdTopic::single("blocked").unwrap())
+            .unwrap();
+        let blocked_key = blocked_key.key().to_owned();
+        let preparation = match runtime.connect_transaction(1, 2, &blocked_key) {
+            Ok(_) => panic!("active RTD quota unexpectedly admitted a second stream"),
+            Err(error) => error,
+        };
+        assert!(matches!(preparation, XllError::Overloaded));
+
+        runtime.disconnect(1, 1);
+        runtime
+            .connect_transaction(1, 2, &blocked_key)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    #[test]
+    fn aggregate_pending_topic_bytes_are_released_with_the_pending_entry() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_total_topic_bytes: 3,
+            ..RtdLimits::standard()
+        }));
+        let first = Arc::new(TestSource {
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+        let second = Arc::new(TestSource {
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+        let pending = runtime
+            .prepare(Arc::clone(&first), RtdTopic::single("one").unwrap())
+            .unwrap();
+        assert!(matches!(
+            runtime.prepare(Arc::clone(&second), RtdTopic::single("two").unwrap()),
+            Err(XllError::Overloaded)
+        ));
+        drop(pending);
+        let released = runtime
+            .prepare(second, RtdTopic::single("two").unwrap())
+            .unwrap();
+        released.rollback();
+    }
+
     struct ReentrantDropSource {
         runtime: Weak<SubscriptionRuntime>,
         dropped: mpsc::SyncSender<()>,
@@ -1694,10 +2356,7 @@ mod tests {
         let initial = runtime.connect(1, 7, key.key()).unwrap();
         assert_eq!(initial, RtdValue::Number(12.5));
         let batch = runtime.snapshot_updates(1);
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].topic_id, 7);
-        assert_eq!(batch.updates[0].value, RtdValue::Number(12.5));
-        runtime.commit_updates(&batch);
+        assert!(batch.updates.is_empty());
         assert!(runtime.snapshot_updates(1).updates.is_empty());
         runtime.disconnect(1, 7);
         assert!(disconnected.load(Ordering::Acquire));
@@ -1720,7 +2379,7 @@ mod tests {
 
         let state = runtime.state.lock();
         assert_eq!(state.active.len(), 1);
-        assert_eq!(state.updates.len(), 1);
+        assert!(state.updates.is_empty());
         assert!(state.topic_ids.contains_key(created.key()));
         drop(state);
         assert!(!disconnected.load(Ordering::Acquire));
@@ -2194,7 +2853,7 @@ mod tests {
         let state = runtime.state.lock();
         assert!(state.pending.is_empty());
         assert_eq!(state.active.len(), 1);
-        assert_eq!(state.updates.len(), 1);
+        assert!(state.updates.is_empty());
         assert_eq!(state.topic_ids.len(), 1);
         drop(state);
         assert!(!disconnected.load(Ordering::Acquire));
@@ -2342,17 +3001,18 @@ mod tests {
             }),
         );
 
+        let (source, sink, _disconnected) = publishing_source(None);
         let key = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("notify-fail").unwrap(),
-            )
+            .prepare(source, RtdTopic::single("notify-fail").unwrap())
             .unwrap();
         runtime.connect(1, 15, key.key()).unwrap();
+        sink.lock()
+            .as_ref()
+            .expect("source captured the RTD sink")
+            .publish(12.5)
+            .unwrap();
 
-        // Initial publish attempts bounded retries (3 times) and fails
+        // A committed publication attempts bounded retries (3 times) and fails.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
         // Verify pending updates remain in the queue
@@ -2490,15 +3150,16 @@ mod tests {
                 })
             }),
         );
+        let (source, sink, _disconnected) = publishing_source(None);
         let key = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("retry-refresh").unwrap(),
-            )
+            .prepare(source, RtdTopic::single("retry-refresh").unwrap())
             .unwrap();
         runtime.connect(1, 12, key.key()).unwrap();
+        sink.lock()
+            .as_ref()
+            .expect("source captured the RTD sink")
+            .publish(12.5)
+            .unwrap();
         let batch = runtime.snapshot_updates(1);
 
         runtime.retry_updates(1);

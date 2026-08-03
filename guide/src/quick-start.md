@@ -2,11 +2,10 @@
 
 ## 1. Install the project tool
 
-For the current unpublished source snapshot, install from an audited Git revision:
+Install `cargo-xlfn` from crates.io and add the MSVC compilation targets:
 
 ```powershell
-cargo install --git https://github.com/nakashima-hikaru/xlfn `
-    --rev <COMMIT_SHA> cargo-xlfn --locked
+cargo install cargo-xlfn --locked
 rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 ```
 
@@ -16,12 +15,6 @@ From a local checkout, the equivalent command is:
 cargo install --path crates/cargo-xlfn --locked --force
 ```
 
-After an official crates.io release, install the matching published version instead:
-
-```powershell
-cargo install cargo-xlfn --version 0.1.0 --locked
-```
-
 Create a project outside the `xlfn` workspace checkout:
 
 ```powershell
@@ -29,7 +22,7 @@ cargo xlfn new hello-xlfn
 cd hello-xlfn
 ```
 
-Use `--bundle` when the add-in package needs sidecar files:
+Use `--bundle` when the application needs packaged sidecar files:
 
 ```powershell
 cargo xlfn new data-xlfn --bundle
@@ -50,14 +43,7 @@ xlfn = "0.1"
 artifact-name = "HelloXll"
 ```
 
-The scaffold uses the release version embedded in `cargo-xlfn`. With the current unpublished snapshot, replace that dependency immediately and pin it to the same source as the CLI:
-
-```toml
-[dependencies]
-xlfn = { git = "https://github.com/nakashima-hikaru/xlfn", rev = "<COMMIT_SHA>" }
-```
-
-For a sibling local checkout, use a path dependency instead:
+The scaffold uses the release version embedded in `cargo-xlfn`. For a sibling local checkout during development, use a path dependency instead:
 
 ```toml
 [dependencies]
@@ -86,8 +72,8 @@ impl Addin for HelloXll {
     type State = State;
     type Error = XllError;
 
-    fn open(_: &OpenContext) -> Result<State, XllError> {
-        xlfn::diagnostics::install_file_diagnostic_sink("hello-xlfn")
+    fn open(context: &OpenContext) -> Result<State, XllError> {
+        xlfn::diagnostics::install_file_diagnostic_sink(&context.build_info().addin_id)
             .map_err(|_| XllError::Internal {
                 diagnostic_id: 0x4449_4147_5349_4e4b,
             })?;
@@ -154,7 +140,7 @@ In Excel, open:
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
-Select the `.xll` in the directory matching the Excel process bitness. Keep the complete distribution directory together, including every packaged native DLL and `build-manifest.json`.
+Select the `.xll` in the directory matching the Excel process bitness. Keep the complete distribution directory together, including every packaged sidecar and `build-manifest.json`.
 
 Enter:
 

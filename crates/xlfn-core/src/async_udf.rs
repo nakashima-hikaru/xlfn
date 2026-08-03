@@ -21,10 +21,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 #[cfg(test)]
 use std::time::Duration;
-use std::time::{Instant, SystemTime};
+#[cfg(test)]
+use std::time::Instant;
+use std::time::SystemTime;
 use xlfn_sys::{
-    XL_ASYNC_RETURN, XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value,
-    XLRET_SUCCESS, XLTYPE_BIG_DATA, XLTYPE_BOOL,
+    XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL,
 };
 
 const MAX_PENDING: usize = 4096;
@@ -32,9 +33,16 @@ const MAX_ASYNC_HANDLE_BYTES: usize = 1024 * 1024;
 pub(crate) struct AsyncManager {
     state: Mutex<ExecutorState>,
     state_changed: Condvar,
+    generation_transition: Mutex<()>,
     current_generation: AtomicU64,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     after_generation_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_spawn_handle_snapshot_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_generation_transition_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 enum ExecutorState {
@@ -50,21 +58,53 @@ impl AsyncManager {
         Self {
             state: Mutex::new(ExecutorState::Stopped),
             state_changed: Condvar::new(),
+            generation_transition: Mutex::new(()),
             current_generation: AtomicU64::new(1),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
             #[cfg(test)]
             after_generation_publish_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_spawn_handle_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_generation_transition_hook: Mutex::new(None),
         }
     }
 
     pub(crate) fn start(&self, worker_count: usize) -> XllResult<()> {
+        let _generation_transition = self.generation_transition.lock();
         let mut state = self.state.lock();
-        match &*state {
-            ExecutorState::Stopped => {}
-            ExecutorState::Running(_) => return Ok(()),
-            ExecutorState::Closing(_) => return Err(XllError::Closing),
+        if !matches!(&*state, ExecutorState::Stopped) {
+            return match &*state {
+                ExecutorState::Running(_) => Ok(()),
+                ExecutorState::Closing(_) => Err(XllError::Closing),
+                ExecutorState::Stopped => unreachable!("executor state was checked above"),
+            };
         }
-        *state = ExecutorState::Running(Executor::start(worker_count, self.current_generation())?);
+        let executor = Executor::start(worker_count, self.current_generation())?;
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            executor.set_ghost(ghost);
+        }
+        *state = ExecutorState::Running(executor);
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncExecutor);
+        }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(Arc::clone(&ghost));
+        let mut state = self.state.lock();
+        match &mut *state {
+            ExecutorState::Running(executor) | ExecutorState::Closing(Some(executor)) => {
+                executor.set_ghost(ghost);
+            }
+            ExecutorState::Stopped | ExecutorState::Closing(None) => {}
+        }
     }
 
     pub(crate) fn current_generation(&self) -> u64 {
@@ -80,29 +120,35 @@ impl AsyncManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let result = {
+        let target: Result<ExecutorHandle, (XllError, bool)> = {
             let state = self.state.lock();
             match &*state {
                 ExecutorState::Running(_)
                     if generation != self.current_generation.load(Ordering::Acquire) =>
                 {
-                    Err(SpawnRejection {
-                        error: cancelled_calculation_error(),
-                        future,
-                        cancellation,
-                        cancel: true,
-                    })
+                    Err((cancelled_calculation_error(), true))
                 }
-                ExecutorState::Running(executor) => {
-                    executor.spawn(generation, future, cancellation)
+                ExecutorState::Running(executor) => Ok(executor.handle.clone()),
+                ExecutorState::Stopped | ExecutorState::Closing(_) => {
+                    Err((XllError::Closing, false))
                 }
-                ExecutorState::Stopped | ExecutorState::Closing(_) => Err(SpawnRejection {
-                    error: XllError::Closing,
-                    future,
-                    cancellation,
-                    cancel: false,
-                }),
             }
+        };
+        #[cfg(test)]
+        if target.is_ok() {
+            let hook = self.after_spawn_handle_snapshot_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let result = match target {
+            Ok(handle) => handle.spawn(generation, future, cancellation),
+            Err((error, cancel)) => Err(SpawnRejection {
+                error,
+                future,
+                cancellation,
+                cancel,
+            }),
         };
         match result {
             Ok(()) => Ok(()),
@@ -111,8 +157,8 @@ impl AsyncManager {
                     cancel_source_no_unwind(&rejection.cancellation);
                 }
                 // Rejected futures and their captured user values must be
-                // dropped after releasing the manager state mutex: Drop may
-                // legitimately re-enter calculation/runtime APIs.
+                // dropped after releasing the manager state and registry
+                // mutexes: Drop may legitimately re-enter runtime APIs.
                 drop(rejection.future);
                 Err(rejection.error)
             }
@@ -121,43 +167,82 @@ impl AsyncManager {
 
     #[cfg(test)]
     fn cancel_generation(&self, generation: u64) {
-        let tasks = match &*self.state.lock() {
-            ExecutorState::Running(executor) => executor.cancel_generation(generation),
-            ExecutorState::Stopped | ExecutorState::Closing(_) => Vec::new(),
+        let target = match &*self.state.lock() {
+            ExecutorState::Running(executor) => Some((executor.handle.clone(), generation)),
+            ExecutorState::Stopped | ExecutorState::Closing(_) => None,
         };
+        let tasks = target
+            .map(|(handle, generation)| handle.cancel_generation(generation))
+            .unwrap_or_default();
         // Manager state released — safe to invoke arbitrary Waker::wake().
         cancel_tasks(tasks);
     }
 
     pub(crate) fn cancel_current_generation(&self) {
-        let tasks = match &*self.state.lock() {
+        let target = match &*self.state.lock() {
             ExecutorState::Running(executor) => {
-                executor.cancel_generation(self.current_generation())
+                Some((executor.handle.clone(), self.current_generation()))
             }
-            ExecutorState::Stopped | ExecutorState::Closing(_) => Vec::new(),
+            ExecutorState::Stopped | ExecutorState::Closing(_) => None,
         };
+        let tasks = target
+            .map(|(handle, generation)| handle.cancel_generation(generation))
+            .unwrap_or_default();
         // Manager state released — safe to invoke arbitrary Waker::wake().
         cancel_tasks(tasks);
     }
 
     pub(crate) fn advance_generation(&self) -> bool {
-        let state = self.state.lock();
-        let current = self.current_generation();
-        let next = current.wrapping_add(1);
-        let advanced = match &*state {
-            ExecutorState::Stopped => {
-                self.current_generation.store(next, Ordering::Release);
-                true
+        #[cfg(test)]
+        {
+            let hook = self.before_generation_transition_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
             }
-            ExecutorState::Running(executor) => {
-                if !executor.advance_generation(next) {
+        }
+        let _generation_transition = self.generation_transition.lock();
+        let target = {
+            let state = self.state.lock();
+            match &*state {
+                ExecutorState::Stopped => {
+                    let current = self.current_generation();
+                    self.current_generation
+                        .store(current.wrapping_add(1), Ordering::Release);
+                    None
+                }
+                ExecutorState::Running(executor) => {
+                    Some((executor.handle.clone(), self.current_generation()))
+                }
+                ExecutorState::Closing(_) => return false,
+            }
+        };
+        let advanced = match target {
+            None => true,
+            Some((handle, current)) => {
+                let next = current.wrapping_add(1);
+                if !handle.advance_generation(next) {
                     false
                 } else {
-                    self.current_generation.store(next, Ordering::Release);
-                    true
+                    let state = self.state.lock();
+                    match &*state {
+                        ExecutorState::Running(executor)
+                            if Arc::ptr_eq(&executor.handle.inner, &handle.inner) =>
+                        {
+                            self.current_generation
+                                .compare_exchange(
+                                    current,
+                                    next,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                        }
+                        ExecutorState::Stopped
+                        | ExecutorState::Running(_)
+                        | ExecutorState::Closing(_) => false,
+                    }
                 }
             }
-            ExecutorState::Closing(_) => false,
         };
         #[cfg(test)]
         if advanced {
@@ -177,6 +262,25 @@ impl AsyncManager {
         *self.after_generation_publish_hook.lock() = hook;
     }
 
+    #[cfg(test)]
+    fn set_after_spawn_handle_snapshot_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.after_spawn_handle_snapshot_hook.lock() = hook;
+    }
+
+    #[cfg(test)]
+    fn set_before_generation_transition_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.before_generation_transition_hook.lock() = hook;
+    }
+
+    #[cfg(test)]
+    fn set_before_task_schedule_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let state = self.state.lock();
+        let ExecutorState::Running(executor) = &*state else {
+            panic!("async executor must be running when installing a test hook");
+        };
+        *executor.handle.inner.before_task_schedule_hook.lock() = hook;
+    }
+
     pub(crate) fn close(&self) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
         let Some(executor) = self.take_executor_for_close() else {
             return crate::shutdown::StopOutcome {
@@ -184,7 +288,7 @@ impl AsyncManager {
                 issues: Vec::new(),
             };
         };
-        let tasks = executor.request_close();
+        let tasks = executor.handle.request_close();
         // Manager state released — cancel/abort and run arbitrary task cleanup
         // without blocking re-entry into cancellation or generation APIs.
         cancel_tasks(tasks);
@@ -214,7 +318,7 @@ impl AsyncManager {
         let Some(executor) = self.take_executor_for_close() else {
             return Ok(());
         };
-        let tasks = executor.request_close();
+        let tasks = executor.handle.request_close();
         // Manager state released — cancel/abort without holding any locks.
         cancel_tasks(tasks);
 
@@ -285,10 +389,15 @@ impl AsyncManager {
 }
 
 struct Executor {
-    inner: Arc<ExecutorInner>,
-    sender: Sender<Runnable>,
+    handle: ExecutorHandle,
     receiver: Receiver<Runnable>,
     workers: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct ExecutorHandle {
+    inner: Arc<ExecutorInner>,
+    sender: Sender<Runnable>,
 }
 
 struct ExecutorInner {
@@ -299,10 +408,15 @@ struct ExecutorInner {
     registry: Mutex<TaskRegistry>,
     wait_lock: Mutex<()>,
     idle: Condvar,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    #[cfg(test)]
+    before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 struct TaskRegistry {
     closing: bool,
+    current_generation: u64,
     generations: HashMap<u64, CalculationGeneration>,
 }
 
@@ -335,6 +449,7 @@ impl Executor {
             fatal_worker_failure: AtomicBool::new(false),
             registry: Mutex::new(TaskRegistry {
                 closing: false,
+                current_generation: generation,
                 generations: HashMap::from([(
                     generation,
                     CalculationGeneration {
@@ -346,6 +461,10 @@ impl Executor {
             }),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
+            #[cfg(test)]
+            before_task_schedule_hook: Mutex::new(None),
         });
         let mut workers = scopeguard::guard(
             Vec::<JoinHandle<()>>::with_capacity(worker_count),
@@ -383,14 +502,24 @@ impl Executor {
             workers.push(worker);
         }
         let workers = scopeguard::ScopeGuard::into_inner(workers);
+        let handle = ExecutorHandle {
+            inner: Arc::clone(&inner),
+            sender: sender.clone(),
+        };
         Ok(Self {
-            inner,
-            sender,
+            handle,
             receiver,
             workers,
         })
     }
 
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.handle.inner.ghost.lock() = Some(ghost);
+    }
+}
+
+impl ExecutorHandle {
     fn spawn<F>(
         &self,
         generation: u64,
@@ -400,14 +529,9 @@ impl Executor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        if self
-            .inner
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_PENDING).then_some(active + 1)
-            })
-            .is_err()
-        {
+        let active = self.inner.active.fetch_add(1, Ordering::AcqRel);
+        if active >= MAX_PENDING {
+            self.inner.active.fetch_sub(1, Ordering::Release);
             return Err(SpawnRejection {
                 error: XllError::Overloaded,
                 future,
@@ -431,10 +555,26 @@ impl Executor {
                     cancel: true,
                 });
             }
-            let current = registry
-                .generations
-                .get_mut(&generation)
-                .expect("the current calculation generation is installed");
+            if registry.current_generation != generation {
+                drop(registry);
+                return Err(SpawnRejection {
+                    error: cancelled_calculation_error(),
+                    future,
+                    cancellation,
+                    cancel: true,
+                });
+            }
+            let Some(current) = registry.generations.get_mut(&generation) else {
+                drop(registry);
+                return Err(SpawnRejection {
+                    error: XllError::Internal {
+                        diagnostic_id: 0x4153_594e_4745_4e49,
+                    },
+                    future,
+                    cancellation,
+                    cancel: true,
+                });
+            };
             debug_assert_eq!(current.id, generation);
             if current.cancelled {
                 drop(registry);
@@ -457,12 +597,36 @@ impl Executor {
             inner: Arc::clone(&self.inner),
             generation,
             id,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
         };
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncTask);
+        }
         drop(scopeguard::ScopeGuard::into_inner(reservation));
         let wrapped = async move {
             let _completion = completion;
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            let result = Abortable::new(future, registration).await;
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            {
+                *_completion.completion.lock() = if result.is_ok() {
+                    crate::shutdown_refinement::Completion::Completed
+                } else {
+                    crate::shutdown_refinement::Completion::Canceled
+                };
+            }
+            #[cfg(not(any(test, feature = "shutdown-refinement")))]
             let _ = Abortable::new(future, registration).await;
         };
+        #[cfg(test)]
+        {
+            let hook = self.inner.before_task_schedule_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let sender = self.sender.clone();
         let schedule = move |runnable| {
             let _ = sender.try_send(runnable);
@@ -496,6 +660,7 @@ impl Executor {
                 cancelled: false,
                 tasks: HashMap::new(),
             });
+        registry.current_generation = next;
         registry
             .generations
             .retain(|generation, state| *generation == next || !state.tasks.is_empty());
@@ -511,16 +676,22 @@ impl Executor {
             .flat_map(|generation| generation.tasks.drain().map(|(_, task)| task))
             .collect()
     }
+}
 
+impl Executor {
     fn wait_for_idle(&self) -> bool {
-        let mut guard = self.inner.wait_lock.lock();
-        while self.inner.active.load(Ordering::Acquire) != 0 {
-            if self.inner.fatal_worker_failure.load(Ordering::Acquire)
-                && self.inner.live_workers.load(Ordering::Acquire) == 0
+        let mut guard = self.handle.inner.wait_lock.lock();
+        while self.handle.inner.active.load(Ordering::Acquire) != 0 {
+            if self
+                .handle
+                .inner
+                .fatal_worker_failure
+                .load(Ordering::Acquire)
+                && self.handle.inner.live_workers.load(Ordering::Acquire) == 0
             {
                 return false;
             }
-            self.inner.idle.wait(&mut guard);
+            self.handle.inner.idle.wait(&mut guard);
         }
         true
     }
@@ -528,10 +699,14 @@ impl Executor {
     #[cfg(test)]
     fn wait_for_idle_timeout(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        let mut guard = self.inner.wait_lock.lock();
-        while self.inner.active.load(Ordering::Acquire) != 0 {
-            if self.inner.fatal_worker_failure.load(Ordering::Acquire)
-                && self.inner.live_workers.load(Ordering::Acquire) == 0
+        let mut guard = self.handle.inner.wait_lock.lock();
+        while self.handle.inner.active.load(Ordering::Acquire) != 0 {
+            if self
+                .handle
+                .inner
+                .fatal_worker_failure
+                .load(Ordering::Acquire)
+                && self.handle.inner.live_workers.load(Ordering::Acquire) == 0
             {
                 return false;
             }
@@ -539,21 +714,21 @@ impl Executor {
             if now >= deadline {
                 return false;
             }
-            self.inner.idle.wait_for(&mut guard, deadline - now);
+            self.handle.inner.idle.wait_for(&mut guard, deadline - now);
         }
         true
     }
 
     fn drain_after_worker_failure(&self) -> bool {
-        self.sender.close();
+        self.handle.sender.close();
         while let Ok(runnable) = self.receiver.try_recv() {
             drop(runnable);
         }
-        self.inner.active.load(Ordering::Acquire) == 0
+        self.handle.inner.active.load(Ordering::Acquire) == 0
     }
 
     fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
-        self.sender.close();
+        self.handle.sender.close();
         let mut issues = Vec::new();
         for worker in self.workers.drain(..) {
             if worker.join().is_err() {
@@ -596,6 +771,8 @@ struct CompletionGuard {
     inner: Arc<ExecutorInner>,
     generation: u64,
     id: u64,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    completion: Mutex<crate::shutdown_refinement::Completion>,
 }
 
 impl Drop for CompletionGuard {
@@ -605,6 +782,12 @@ impl Drop for CompletionGuard {
             generation.tasks.remove(&self.id);
         }
         drop(registry);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndAsyncTask(
+                *self.completion.lock(),
+            ));
+        }
         release_active(&self.inner);
     }
 }
@@ -764,7 +947,7 @@ struct AsyncCompletionTracker {
     calculation_id: crate::execution::CalculationId,
     started_at: SystemTime,
     concurrent_calls: usize,
-    started: Instant,
+    timer: crate::execution::CallTimer,
     layers: Option<crate::execution::EnteredLayers>,
     completed: bool,
 }
@@ -772,7 +955,7 @@ struct AsyncCompletionTracker {
 impl AsyncCompletionTracker {
     fn new(
         metadata: &CallMetadata,
-        started: Instant,
+        timer: crate::execution::CallTimer,
         layers: crate::execution::EnteredLayers,
     ) -> Self {
         Self {
@@ -782,7 +965,7 @@ impl AsyncCompletionTracker {
             calculation_id: metadata.calculation_id,
             started_at: metadata.started_at,
             concurrent_calls: metadata.concurrent_calls,
-            started,
+            timer,
             layers: Some(layers),
             completed: false,
         }
@@ -809,7 +992,7 @@ impl AsyncCompletionTracker {
     fn finish_error(&mut self, error: &XllError) {
         if !self.completed {
             crate::diagnostics::report_no_unwind(self.udf_id, error);
-            let outcome = crate::execution::outcome_for_error(error, self.started.elapsed());
+            let outcome = crate::execution::outcome_for_error(error, self.timer.elapsed());
             self.finish(&outcome);
         }
     }
@@ -844,8 +1027,8 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     T: IntoExcelValue + Send + 'static,
 {
     let call_id = runtime.next_call_id();
-    let started = Instant::now();
-    let started_at = SystemTime::now();
+    let timer = crate::execution::CallTimer::start();
+    let started_at = timer.started_at();
     let guard = match runtime.enter() {
         Ok(guard) => guard,
         Err(error) => {
@@ -864,7 +1047,8 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
         started_at,
         concurrent_calls,
     };
-    let layers = match crate::execution::EnteredLayers::enter(&runtime.layers(), &metadata) {
+    let configured_layers = runtime.layers();
+    let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata) {
         Ok(layers) => layers,
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
@@ -874,7 +1058,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
         }
     };
     let tracker = Arc::new(Mutex::new(AsyncCompletionTracker::new(
-        &metadata, started, layers,
+        &metadata, timer, layers,
     )));
 
     // Excel does not raise CalculationEnded/CalculationCanceled for every
@@ -939,7 +1123,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
                                 result: UdfResultKind::Success,
                                 error: None,
                                 vendor_code: None,
-                                duration: started.elapsed(),
+                                duration: timer.elapsed(),
                             };
                             tracker_task.lock().finish(&outcome);
                         }
@@ -983,33 +1167,36 @@ unsafe fn return_error(udf_id: &'static str, handle: *mut XLOPER12, error: &XllE
 }
 
 unsafe fn async_return(handle: NonNull<XLOPER12>, result: NonNull<XLOPER12>) -> XllResult<()> {
-    #[cfg(test)]
-    if let Some(hook) = *ASYNC_RETURN_HOOK.lock() {
-        return hook(handle.as_ptr(), result.as_ptr());
-    }
-    let arguments = [handle, result];
-    // SAFETY: both XLOPER12 pointers are live for this call.
-    let (status, mut callback_value) =
-        unsafe { crate::callback_value::ExcelCallbackValue::call(XL_ASYNC_RETURN, &arguments) };
-    let accepted = status == XLRET_SUCCESS
-        && callback_value.base_type()? == XLTYPE_BOOL
+    let callback_gate = crate::callback_gate::enter().map_err(|suppressed| XllError::ExcelApi {
+        function: "xlAsyncReturn(suppressed)",
+        code: suppressed.status.raw_code(),
+    })?;
+    // SAFETY: both XLOPER12 pointers are live for this call. The specialized
+    // raw wrapper intentionally does not expose the worker-thread-forbidden
+    // xlFree cleanup path.
+    let (raw_status, callback_result, invoked) =
+        unsafe { xlfn_sys::excel12_async_return(handle, result) };
+    let status = crate::ExcelCallbackStatus::from_raw(raw_status);
+    callback_gate.observe(status);
+    drop(callback_gate);
+    let accepted = invoked
+        && status == crate::ExcelCallbackStatus::Success
+        && callback_result.base_type() == XLTYPE_BOOL
         // SAFETY: XLTYPE_BOOL selects the boolean union field.
-        && unsafe { callback_value.raw()?.value.boolean != 0 };
-    callback_value.try_release()?;
+        && unsafe { callback_result.value.boolean != 0 };
     if !accepted {
         let error = XllError::ExcelApi {
             function: "xlAsyncReturn",
-            code: if status == XLRET_SUCCESS { -1 } else { status },
+            code: if !invoked || status == crate::ExcelCallbackStatus::Success {
+                -1
+            } else {
+                status.raw_code()
+            },
         };
         return Err(error);
     }
     Ok(())
 }
-
-#[cfg(test)]
-type AsyncReturnHook = fn(*mut XLOPER12, *mut XLOPER12) -> XllResult<()>;
-#[cfg(test)]
-static ASYNC_RETURN_HOOK: Mutex<Option<AsyncReturnHook>> = Mutex::new(None);
 #[cfg(test)]
 static AFTER_ASYNC_EVALUATION_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
@@ -1025,14 +1212,45 @@ pub fn end_async_calculation<S>(runtime: &Runtime<S>) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     const TEST_GENERATION: u64 = 1;
-    static CALLBACK_SENDER: Mutex<Option<std::sync::mpsc::Sender<i32>>> = Mutex::new(None);
     static EVALUATION_BARRIER: Mutex<
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     > = Mutex::new(None);
+
+    struct AsyncTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        cleanup: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl Drop for AsyncTestGuard {
+        fn drop(&mut self) {
+            if let Some(cleanup) = self.cleanup.take() {
+                let ingress = crate::ingress::global_ingress();
+                if ingress.phase() != crate::ingress::PHASE_CLOSED {
+                    ingress.begin_close_with(|| {});
+                    let _ = ingress.seal_and_drain();
+                }
+                cleanup();
+            }
+        }
+    }
+
+    fn test_lock() -> AsyncTestGuard {
+        AsyncTestGuard {
+            _lock: TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+            cleanup: None,
+        }
+    }
+
+    fn test_lock_for_runtime<S: 'static>(runtime: &'static Runtime<S>) -> AsyncTestGuard {
+        AsyncTestGuard {
+            _lock: TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+            cleanup: Some(Box::new(move || runtime.release_test_module_lease())),
+        }
+    }
 
     fn stop_after_async_evaluation() {
         let barrier = EVALUATION_BARRIER.lock();
@@ -1045,26 +1263,20 @@ mod tests {
         CancellationSource::new(CancellationGuarantee::BestEffort).0
     }
 
-    fn record_callback(_handle: *mut XLOPER12, result: *mut XLOPER12) -> XllResult<()> {
-        // SAFETY: async_return invokes the hook synchronously with a live result.
-        let result = unsafe { &*result };
-        let value = if result.base_type() == xlfn_sys::XLTYPE_NUM {
-            // SAFETY: XLTYPE_NUM selects the number field.
-            unsafe { result.value.number as i32 }
-        } else {
-            -1
-        };
-        if let Some(sender) = CALLBACK_SENDER.lock().as_ref() {
-            sender.send(value).unwrap();
-        }
-        Ok(())
+    fn reset_test_callback() -> crate::test_callback::CallbackTestGuard {
+        let guard = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        guard
     }
 
-    fn reject_callback(_handle: *mut XLOPER12, _result: *mut XLOPER12) -> XllResult<()> {
-        Err(XllError::ExcelApi {
-            function: "xlAsyncReturn",
-            code: xlfn_sys::XLRET_FAILED,
-        })
+    fn wait_for_async_callback() -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while crate::test_callback::async_return_calls() == 0 {
+            assert!(Instant::now() < deadline, "async callback was not invoked");
+            std::thread::yield_now();
+        }
+        crate::test_callback::last_async_value()
     }
 
     #[test]
@@ -1168,6 +1380,165 @@ mod tests {
     }
 
     #[test]
+    fn spawn_handle_snapshot_is_revalidated_after_generation_advance() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        manager.set_after_spawn_handle_snapshot_hook(Some(Arc::new(move || {
+            snapshot_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("spawn snapshot should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+                .unwrap();
+        });
+
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should snapshot the executor handle");
+        assert!(manager.advance_generation());
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+        assert!(token.is_cancelled());
+        spawning.join().unwrap();
+        manager.set_after_spawn_handle_snapshot_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn concurrent_generation_advances_are_serialized() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let hook_barrier = Arc::clone(&barrier);
+        manager.set_before_generation_transition_hook(Some(Arc::new(move || {
+            hook_barrier.wait();
+        })));
+
+        let first_manager = Arc::clone(&manager);
+        let first = std::thread::spawn(move || first_manager.advance_generation());
+        let second_manager = Arc::clone(&manager);
+        let second = std::thread::spawn(move || second_manager.advance_generation());
+
+        assert!(first.join().unwrap());
+        assert!(second.join().unwrap());
+        assert_eq!(manager.current_generation(), TEST_GENERATION + 2);
+        manager
+            .spawn(TEST_GENERATION + 2, async {}, test_cancellation_source())
+            .unwrap();
+
+        manager.set_before_generation_transition_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn task_scheduling_does_not_hold_manager_state() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("task scheduling should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+                .unwrap();
+        });
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("task should be admitted before scheduling");
+
+        let cancelling_manager = Arc::clone(&manager);
+        let (cancel_done_tx, cancel_done_rx) = std::sync::mpsc::sync_channel(1);
+        let cancelling = std::thread::spawn(move || {
+            cancelling_manager.cancel_generation(TEST_GENERATION);
+            cancel_done_tx.send(()).unwrap();
+        });
+        cancel_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancellation should not wait for task scheduling");
+        assert!(token.is_cancelled());
+
+        release_tx.send(()).unwrap();
+        assert!(
+            spawn_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        spawning.join().unwrap();
+        cancelling.join().unwrap();
+        manager.set_before_task_schedule_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn close_rejects_a_spawn_using_a_snapshot_handle() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        manager.set_after_spawn_handle_snapshot_hook(Some(Arc::new(move || {
+            snapshot_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("spawn snapshot should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+                .unwrap();
+        });
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should snapshot the executor handle");
+
+        assert!(manager.close_with_timeout(Duration::from_secs(1)).is_ok());
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(XllError::Closing)
+        ));
+        assert!(token.is_cancelled());
+        spawning.join().unwrap();
+        manager.set_after_spawn_handle_snapshot_hook(None);
+        assert!(manager.is_stopped());
+    }
+
+    #[test]
     fn close_isolates_panicking_cancellation_waker_and_completes_shutdown() {
         struct PanicWake;
 
@@ -1225,6 +1596,7 @@ mod tests {
 
     #[test]
     fn close_allows_aborted_future_drop_to_reenter_runtime() {
+        let _guard = test_lock();
         struct ReentrantDrop {
             runtime: &'static Runtime<()>,
             dropped: std::sync::mpsc::Sender<()>,
@@ -1316,8 +1688,8 @@ mod tests {
             }
         }
 
-        let _guard = TEST_LOCK.lock().unwrap();
         let runtime: &'static Runtime<u32> = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let (exited_tx, exited_rx) = std::sync::mpsc::channel();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(
@@ -1329,8 +1701,7 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
-        *ASYNC_RETURN_HOOK.lock() = Some(record_callback);
-        *CALLBACK_SENDER.lock() = None;
+        let _callback_guard = reset_test_callback();
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1388,7 +1759,6 @@ mod tests {
             .unwrap()
             .unwrap();
         closer.join().unwrap();
-        *ASYNC_RETURN_HOOK.lock() = None;
     }
 
     #[test]
@@ -1690,16 +2060,14 @@ mod tests {
 
     #[test]
     fn async_boundary_returns_completed_value_through_callback() {
-        let _guard = TEST_LOCK.lock().unwrap();
         let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(2).unwrap();
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        *CALLBACK_SENDER.lock() = Some(sender);
-        *ASYNC_RETURN_HOOK.lock() = Some(record_callback);
+        let _callback_guard = reset_test_callback();
         let mut bytes = vec![1_u8, 2, 3, 4];
         let mut handle = XLOPER12 {
             value: XLOPER12Value {
@@ -1725,10 +2093,9 @@ mod tests {
                 },
             );
         }
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
+        assert_eq!(wait_for_async_callback(), 42);
+        assert_eq!(crate::test_callback::free_calls(), 0);
         assert!(runtime.close_async().issues.is_empty());
-        *ASYNC_RETURN_HOOK.lock() = None;
-        *CALLBACK_SENDER.lock() = None;
     }
 
     #[test]
@@ -1757,17 +2124,15 @@ mod tests {
             }
         }
 
-        let _guard = TEST_LOCK.lock().unwrap();
         let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let (event_sender, event_receiver) = std::sync::mpsc::channel();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, vec![Arc::new(Recorder(event_sender))]);
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(2).unwrap();
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        *CALLBACK_SENDER.lock() = Some(sender);
-        *ASYNC_RETURN_HOOK.lock() = Some(record_callback);
+        let _callback_guard = reset_test_callback();
         let mut bytes = vec![1_u8, 2, 3, 4];
         let mut handle = XLOPER12 {
             value: XLOPER12Value {
@@ -1797,15 +2162,13 @@ mod tests {
                 },
             );
         }
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), -1);
+        assert_eq!(wait_for_async_callback(), -1);
         let event = event_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(event.0, UdfResultKind::VendorError);
         assert_eq!(event.1, Some(73));
         assert_eq!(event.2, 1);
 
         assert!(runtime.close_async().issues.is_empty());
-        *ASYNC_RETURN_HOOK.lock() = None;
-        *CALLBACK_SENDER.lock() = None;
     }
 
     #[test]
@@ -1825,14 +2188,15 @@ mod tests {
             }
         }
 
-        let _guard = TEST_LOCK.lock().unwrap();
         let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let (event_sender, event_receiver) = std::sync::mpsc::channel();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, vec![Arc::new(Recorder(event_sender))]);
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
-        *ASYNC_RETURN_HOOK.lock() = Some(reject_callback);
+        let _callback_guard = reset_test_callback();
+        crate::test_callback::set_async_rejected(true);
 
         let mut bytes = vec![1_u8, 2, 3, 4];
         let mut handle = XLOPER12 {
@@ -1861,22 +2225,20 @@ mod tests {
             event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
             UdfResultKind::InternalError
         );
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
         assert!(runtime.close_async().issues.is_empty());
-        *ASYNC_RETURN_HOOK.lock() = None;
     }
 
     #[test]
     fn async_boundary_returns_error_on_cancellation() {
-        let _guard = TEST_LOCK.lock().unwrap();
         let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(2).unwrap();
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        *CALLBACK_SENDER.lock() = Some(sender);
-        *ASYNC_RETURN_HOOK.lock() = Some(record_callback);
+        let _callback_guard = reset_test_callback();
         let mut bytes = vec![1_u8, 2, 3, 4];
         let mut handle = XLOPER12 {
             value: XLOPER12Value {
@@ -1909,26 +2271,81 @@ mod tests {
         // Cancel all running async tasks. OwnedAsyncHandle::drop should fire and return error to hook.
         cancel_async_calculation(runtime);
         drop(release_tx);
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), -1);
+        assert_eq!(wait_for_async_callback(), -1);
 
         assert!(runtime.close_async().issues.is_empty());
-        *ASYNC_RETURN_HOOK.lock() = None;
-        *CALLBACK_SENDER.lock() = None;
     }
 
     #[test]
-    fn cancellation_after_evaluation_does_not_leak_the_return_block() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let before = crate::return_value::live_return_blocks();
+    fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
         let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
 
-        let (callback_tx, callback_rx) = std::sync::mpsc::channel();
-        *CALLBACK_SENDER.lock() = Some(callback_tx);
-        *ASYNC_RETURN_HOOK.lock() = Some(record_callback);
+        let _callback_guard = reset_test_callback();
+        let mut bytes = vec![1_u8, 2, 3, 4];
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: bytes.as_mut_ptr(),
+                    },
+                    byte_count: bytes.len() as i32,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+        unsafe {
+            async_udf_boundary_named(
+                runtime,
+                "test_async_terminal_gate",
+                "TEST.ASYNC.TERMINAL.GATE",
+                &mut handle,
+                move |_, _| {
+                    Ok(async move {
+                        started_tx.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                        Ok::<_, XllError>(123.0)
+                    })
+                },
+            );
+        }
+        // Ensure cancellation observes a task that has actually started. If
+        // the task were still queued, dropping it would not exercise the
+        // OwnedAsyncHandle fallback that must be suppressed by the gate.
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal-gate task did not start");
+
+        let callback_gate = crate::callback_gate::enter().unwrap();
+        callback_gate.observe(crate::ExcelCallbackStatus::Abort);
+        drop(callback_gate);
+        let callbacks_before_cancel = crate::test_callback::async_return_calls();
+        cancel_async_calculation(runtime);
+        assert!(runtime.close_async().issues.is_empty());
+        assert_eq!(
+            crate::test_callback::async_return_calls(),
+            callbacks_before_cancel,
+            "terminal callback gate must suppress async cancellation fallback"
+        );
+    }
+
+    #[test]
+    fn cancellation_after_evaluation_does_not_leak_the_return_block() {
+        let before = crate::return_value::live_return_blocks();
+        let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(7_u32, Vec::new());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        runtime.start_async(1).unwrap();
+
+        let _callback_guard = reset_test_callback();
         let (reached_tx, reached_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         *EVALUATION_BARRIER.lock() = Some((reached_tx, release_rx));
@@ -1960,16 +2377,11 @@ mod tests {
         reached_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         cancel_async_calculation(runtime);
         release_tx.send(()).unwrap();
-        assert_eq!(
-            callback_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            -1
-        );
+        assert_eq!(wait_for_async_callback(), -1);
         assert!(runtime.close_async().issues.is_empty());
 
         assert_eq!(crate::return_value::live_return_blocks(), before);
         *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;
         *EVALUATION_BARRIER.lock() = None;
-        *ASYNC_RETURN_HOOK.lock() = None;
-        *CALLBACK_SENDER.lock() = None;
     }
 }

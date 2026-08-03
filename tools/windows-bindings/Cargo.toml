@@ -1,0 +1,12 @@
+[package]
+name = "xlfn-windows-bindings-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+windows-bindgen.workspace = true
+
+[lints]
+workspace = true

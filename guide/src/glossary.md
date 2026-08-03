@@ -8,7 +8,7 @@
 
 **Bearer capability** — A value whose possession grants access. An xlfn handle token is a bearer capability: keep it unguessable and validate its type, authentication tag, and generation.
 
-**Bitness** — The process architecture, x86 or x64. XLL and native DLL bitness must match the Excel process, not merely the operating system.
+**Bitness** — The process architecture, x86 or x64. The XLL and every in-process binary dependency must match the Excel process, not merely the operating system.
 
 **Calculation ID** — A runtime correlation identifier for one Excel calculation generation. It is not a durable workbook key.
 
@@ -18,7 +18,7 @@
 
 **Caller/formula identity** — Framework identity for the worksheet formula currently producing a formula-owned handle. It lets re-evaluation replace the object's value while preserving the formula's stable handle token.
 
-**Cancellation guarantee** — The documented strength of cancellation for an async or native operation, such as guaranteed cancellation before start versus best-effort observation after start.
+**Cancellation guarantee** — The documented strength of cancellation for an async or application operation, such as guaranteed cancellation before start versus best-effort observation after start.
 
 **COM** — Microsoft's Component Object Model. Excel RTD uses COM interfaces for connection, notification, refresh, and server lifetime management.
 
@@ -36,7 +36,7 @@
 
 **Function Wizard** — Excel's UI for discovering functions and displaying category, description, help topic, and argument metadata.
 
-**Import closure** — The complete directed graph of DLL imports rooted at the XLL and every bundled native DLL, including delay imports.
+**Import closure** — The complete directed graph of DLL imports rooted at the XLL and every bundled PE sidecar, including delay imports.
 
 **Main-thread context** — A capability available only during a main-thread UDF invocation, permitting selected Excel callbacks, handle publication, and RTD subscription.
 
@@ -44,13 +44,11 @@
 
 **MTR (Multi-Threaded Recalculation)** — Excel's concurrent calculation engine. A `thread_safe` UDF may run simultaneously on Excel calculation threads and must avoid main-thread-only APIs.
 
-**Native call gate** — The per-canonical-DLL serialization and reentry guard selected by
-`VerifiedLibrary::serialized`; concurrent access requires the explicit unsafe native contract used
-by `VerifiedLibrary::assume_concurrent`.
+**Adapter call gate** — An application-defined admission, serialization, or reentry policy in front of an external implementation. xlfn does not provide or select this policy.
 
 **Owner/handle split** — A design in which a non-cloneable owner controls worker shutdown and resource destruction while cloneable handles submit bounded operations. This prevents worker ownership from escaping into jobs.
 
-**Package** — One bitness-specific deployment directory containing the XLL, bundled native files, and `build-manifest.json`.
+**Package** — One bitness-specific deployment directory containing the XLL, optional bundled sidecar files, and `build-manifest.json`.
 
 **PE (Portable Executable)** — The Windows executable format used by XLLs and DLLs. `cargo xlfn` inspects PE architecture, exports, imports, and delay imports.
 
@@ -66,7 +64,7 @@ by `VerifiedLibrary::assume_concurrent`.
 
 **System import policy** — The versioned list/rules that classify standard Windows DLLs as system-provided during package import validation.
 
-**Thread-affine state** — A resource that must be created, called, and destroyed on one OS thread. xlfn's native owner/worker types preserve this requirement.
+**Thread-affine state** — A resource that must be created, called, and destroyed on one OS thread. Preserving this requirement is the responsibility of the application adapter; xlfn does not provide an external-engine owner/worker abstraction.
 
 **Thread-safe context** — A capability for an MTR-safe UDF. It exposes shared add-in state but not main-thread-only Excel operations.
 
@@ -76,7 +74,7 @@ by `VerifiedLibrary::assume_concurrent`.
 
 **Volatile function** — A function Excel recalculates whenever a relevant recalculation occurs, even when explicit arguments appear unchanged. Volatility should be used sparingly.
 
-**Worker health** — The state reported by a native owner or pool, used to distinguish running, closing, failed, and stopped execution resources.
+**Worker health** — Application-defined state for an adapter worker or pool, used to distinguish running, closing, failed, and stopped execution resources. xlfn does not define this state.
 
 **XLL** — An Excel native add-in: a Windows DLL with Excel-defined lifecycle, registration, callback, and memory-management exports.
 

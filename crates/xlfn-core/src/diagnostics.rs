@@ -1,5 +1,6 @@
 use crate::{IntoXllError, XllError, XllResult};
 use parking_lot::{Mutex, RwLock};
+use serde::Serialize;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,8 @@ use std::{fs, io};
 const DIAGNOSTIC_QUEUE_CAPACITY: usize = 1024;
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_GENERATIONS: usize = 3;
+const DIAGNOSTIC_TEXT_MAX_BYTES: usize = 16 * 1024;
+const DIAGNOSTIC_TRUNCATION_SUFFIX: &str = "…[truncated]";
 
 /// Receives detailed failures while Excel continues to receive only safe error values.
 pub trait DiagnosticSink: Send + Sync + 'static {
@@ -44,8 +47,6 @@ pub enum DiagnosticInitError {
     ReentrantMutation,
     #[error("the diagnostic router is closing or closed")]
     RouterClosed,
-    #[error("invalid addin id: {0:?}")]
-    InvalidAddinId(#[from] InvalidAddinId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -90,6 +91,8 @@ enum DiagnosticPhase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DiagnosticTerminalCloseError {
+    #[error("diagnostic logger worker panicked during terminal close")]
+    WorkerPanicked,
     #[error("diagnostic logger cannot join itself")]
     ReentrantShutdown,
     #[error("diagnostic router invariant violated during terminal close")]
@@ -99,6 +102,7 @@ pub(crate) enum DiagnosticTerminalCloseError {
 impl IntoXllError for DiagnosticTerminalCloseError {
     fn into_xll_error(self) -> XllError {
         match self {
+            Self::WorkerPanicked => XllError::Panic,
             Self::ReentrantShutdown => XllError::ReentrantCall,
             Self::InvariantViolation => XllError::Internal {
                 diagnostic_id: 0x4449_4147_434c_4f53,
@@ -111,6 +115,8 @@ struct DiagnosticRouter {
     sink: RwLock<Option<Arc<AsyncDiagnosticSink>>>,
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 impl DiagnosticRouter {
@@ -140,14 +146,28 @@ impl DiagnosticRouter {
             .retain(|worker| *worker != sink.worker_thread_id);
     }
 
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(Arc::clone(&ghost));
+        if let Some(sink) = self.sink.read().as_ref() {
+            sink.set_ghost(ghost);
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
+        self.ghost.lock().clone()
+    }
+
     #[cfg(test)]
     fn phase(&self) -> DiagnosticPhase {
         *self.transition.lock()
     }
 
-    fn replace_with<F>(&self, make_sink: F) -> Result<(), DiagnosticInitError>
+    fn replace_with<F, H>(&self, make_sink: F, on_published: H) -> Result<(), DiagnosticInitError>
     where
         F: FnOnce() -> Result<Arc<AsyncDiagnosticSink>, DiagnosticInitError>,
+        H: FnOnce(bool) -> Result<(), DiagnosticInitError>,
     {
         if self.caller_is_worker() {
             return Err(DiagnosticInitError::ReentrantMutation);
@@ -165,17 +185,43 @@ impl DiagnosticRouter {
         // close. A close that wins the transition lock therefore cannot race a
         // worker that has been created but not yet published.
         let sink = make_sink()?;
-        self.replace_locked(sink)
-    }
+        let previous = crate::ingress::with_diagnostic_linearization(|| {
+            let previous = {
+                let mut guard = self.sink.write();
+                let previous = guard.replace(Arc::clone(&sink));
+                if let Some(previous) = previous.as_ref() {
+                    self.mark_retiring(previous);
+                }
+                previous
+            };
 
-    fn replace_locked(&self, sink: Arc<AsyncDiagnosticSink>) -> Result<(), DiagnosticInitError> {
-        let previous = {
-            let mut guard = self.sink.write();
-            let previous = guard.replace(Arc::clone(&sink));
-            if let Some(previous) = previous.as_ref() {
-                self.mark_retiring(previous);
+            if let Err(error) = on_published(previous.is_some()) {
+                let restored = {
+                    let mut guard = self.sink.write();
+                    if guard
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &sink))
+                    {
+                        *guard = previous.clone();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if restored && let Some(previous) = previous.as_ref() {
+                    self.unmark_retiring(previous);
+                }
+                return Err(error);
             }
-            previous
+            Ok(previous)
+        });
+
+        let previous = match previous {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = sink.shutdown();
+                return Err(error);
+            }
         };
 
         let Some(previous) = previous else {
@@ -199,6 +245,10 @@ impl DiagnosticRouter {
             }
             Err(DiagnosticShutdownError::WorkerPanicked) => {
                 self.unmark_retiring(&previous);
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                if let Some(ghost) = self.ghost_handle() {
+                    record_ghost_diagnostics_cleanup_issue(ghost);
+                }
                 sink.report(OwnedDiagnosticEvent {
                     udf_id: "diagnostic sink replacement",
                     argument: None,
@@ -221,6 +271,26 @@ impl DiagnosticRouter {
         self.sink.read().clone()
     }
 
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn ghost_snapshot(&self) -> GhostDiagnosticsSnapshot {
+        let sink = self.sink.read();
+        GhostDiagnosticsSnapshot {
+            running: sink.is_some(),
+            pending: sink.as_ref().map_or(0, |sink| sink.pending()),
+        }
+    }
+
+    fn record_stop_diagnostics(&self) {
+        crate::ingress::with_diagnostic_linearization(|| {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(ghost) = self.ghost_handle()
+                && ghost.state().resources.diagnostics_running
+            {
+                ghost.record_event(crate::shutdown_refinement::GhostEvent::StopDiagnostics);
+            }
+        });
+    }
+
     fn drain_reopenable(&self) -> Result<DiagnosticsDrained, DiagnosticShutdownError> {
         if self.caller_is_worker() {
             return Err(DiagnosticShutdownError::ReentrantShutdown);
@@ -238,14 +308,14 @@ impl DiagnosticRouter {
         }
         *phase = DiagnosticPhase::Closing;
 
-        let previous = {
+        let previous = crate::ingress::with_diagnostic_linearization(|| {
             let mut guard = self.sink.write();
             let previous = guard.take();
             if let Some(previous) = previous.as_ref() {
                 self.mark_retiring(previous);
             }
             previous
-        };
+        });
 
         let result = match previous {
             None => Ok(()),
@@ -255,7 +325,9 @@ impl DiagnosticRouter {
                     Ok(())
                 }
                 Err(DiagnosticShutdownError::ReentrantShutdown) => {
-                    *self.sink.write() = Some(Arc::clone(&previous));
+                    crate::ingress::with_diagnostic_linearization(|| {
+                        *self.sink.write() = Some(Arc::clone(&previous));
+                    });
                     self.unmark_retiring(&previous);
                     Err(DiagnosticShutdownError::ReentrantShutdown)
                 }
@@ -270,6 +342,18 @@ impl DiagnosticRouter {
             },
         };
         *phase = DiagnosticPhase::Open;
+        if result.is_ok() && self.sink.read().is_none() {
+            self.record_stop_diagnostics();
+        } else if matches!(result, Err(DiagnosticShutdownError::WorkerPanicked)) {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(ghost) = self.ghost_handle() {
+                record_ghost_diagnostics_cleanup_issue(ghost);
+            }
+            // A panicked reopenable worker has stopped the current dispatcher.
+            // The queue items lost with it are accounted for by the sink
+            // before this milestone is recorded.
+            self.record_stop_diagnostics();
+        }
         result.map(|_| DiagnosticsDrained { _private: () })
     }
 
@@ -301,29 +385,27 @@ impl DiagnosticRouter {
         }
         *phase = DiagnosticPhase::Closing;
 
-        let previous = {
+        let previous = crate::ingress::with_diagnostic_linearization(|| {
             let mut guard = self.sink.write();
             let previous = guard.take();
             if let Some(previous) = previous.as_ref() {
                 self.mark_retiring(previous);
             }
             previous
-        };
-        let mut issues = Vec::new();
+        });
+        let issues = Vec::new();
         if let Some(previous) = previous {
             match previous.shutdown() {
                 Ok(()) => {}
                 Err(DiagnosticShutdownError::WorkerPanicked) => {
-                    // join() has returned, so the worker is no longer live.
-                    // Preserve the stop certificate and report delivery loss.
-                    issues.push(crate::shutdown::CleanupIssue {
-                        component: "diagnostics",
-                        kind: crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin,
-                        error: XllError::Panic,
-                    });
+                    self.unmark_retiring(&previous);
+                    *phase = DiagnosticPhase::Closed;
+                    return Err(DiagnosticTerminalCloseError::WorkerPanicked);
                 }
                 Err(DiagnosticShutdownError::ReentrantShutdown) => {
-                    *self.sink.write() = Some(Arc::clone(&previous));
+                    crate::ingress::with_diagnostic_linearization(|| {
+                        *self.sink.write() = Some(Arc::clone(&previous));
+                    });
                     self.unmark_retiring(&previous);
                     return Err(DiagnosticTerminalCloseError::ReentrantShutdown);
                 }
@@ -372,7 +454,29 @@ fn router() -> &'static DiagnosticRouter {
         sink: RwLock::new(None),
         transition: Mutex::new(DiagnosticPhase::Closed),
         retiring_workers: Mutex::new(Vec::new()),
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        ghost: Mutex::new(None),
     })
+}
+
+fn admit_published_sink(
+    router: &DiagnosticRouter,
+    ingress: &crate::ingress::ExportIngress,
+    had_sink: bool,
+) -> Result<(), DiagnosticInitError> {
+    if !ingress.allows_diagnostic_mutation() {
+        return Err(DiagnosticInitError::RouterClosed);
+    }
+    #[cfg(not(any(test, feature = "shutdown-refinement")))]
+    let _ = (router, had_sink);
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    if let Some(ghost) = router.ghost_handle()
+        && !had_sink
+        && ghost.active()
+    {
+        ghost.record_event(crate::shutdown_refinement::GhostEvent::StartDiagnostics);
+    }
+    Ok(())
 }
 
 /// Installs or replaces the process-wide diagnostic sink.
@@ -381,8 +485,28 @@ fn router() -> &'static DiagnosticRouter {
 /// fully constructed and installed before the previous worker is flushed and
 /// joined, so a terminal previous worker is never restored over a healthy sink.
 pub fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), DiagnosticInitError> {
+    let router = router();
+    if router.caller_is_worker() {
+        return Err(DiagnosticInitError::ReentrantMutation);
+    }
+    let admitted = crate::ingress::with_diagnostic_linearization(|| {
+        crate::ingress::global_ingress().allows_diagnostic_mutation()
+    });
+    if !admitted {
+        return Err(DiagnosticInitError::RouterClosed);
+    }
     let sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
-    router().replace_with(|| AsyncDiagnosticSink::new(sink).map(Arc::new))
+    router.replace_with(
+        || {
+            let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(ghost) = router.ghost_handle() {
+                sink.set_ghost(ghost);
+            }
+            Ok(sink)
+        },
+        |had_sink| admit_published_sink(router, crate::ingress::global_ingress(), had_sink),
+    )
 }
 
 /// Flushes queued diagnostics, stops the logger worker, and releases its sink.
@@ -397,6 +521,63 @@ pub(crate) fn close_diagnostic_router()
 
 pub(crate) fn reset_diagnostic_router() -> XllResult<()> {
     router().reset()
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+#[derive(Clone, Copy)]
+pub(crate) struct GhostDiagnosticsSnapshot {
+    pub(crate) running: bool,
+    pub(crate) pending: u64,
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+pub(crate) fn connect_ghost<F>(
+    ghost: crate::shutdown_refinement::GhostHandle,
+    initialize: F,
+) -> XllResult<()>
+where
+    F: FnOnce(GhostDiagnosticsSnapshot) -> XllResult<()>,
+{
+    crate::ingress::with_diagnostic_linearization(|| {
+        let snapshot = router().ghost_snapshot();
+        initialize(snapshot)?;
+        router().set_ghost(ghost);
+        Ok(())
+    })
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+pub(crate) fn record_ghost_diagnostics_stopped(
+    ghost: crate::shutdown_refinement::GhostHandle,
+) -> XllResult<()> {
+    crate::ingress::with_diagnostic_linearization(|| {
+        let state = ghost.state();
+        if !state.resources.diagnostics_running {
+            return Ok(());
+        }
+        if state.resources.diagnostics_pending != 0 {
+            ghost
+                .fail_stop(crate::shutdown_refinement::GhostFailure::DiagnosticsShutdownFailed)
+                .map_err(|_| XllError::Internal {
+                    diagnostic_id: 0x4449_4147_4641_494c,
+                })?;
+            Err(XllError::Internal {
+                diagnostic_id: 0x4449_4147_5045_4e44,
+            })
+        } else {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::StopDiagnostics);
+            Ok(())
+        }
+    })
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+fn record_ghost_diagnostics_cleanup_issue(ghost: crate::shutdown_refinement::GhostHandle) {
+    crate::ingress::with_diagnostic_linearization(|| {
+        if ghost.active() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
+        }
+    });
 }
 
 /// Number of diagnostic events dropped because the bounded queue was full or closed.
@@ -436,6 +617,10 @@ struct AsyncDiagnosticSink {
     sender: Mutex<Option<SyncSender<OwnedDiagnosticEvent>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     worker_thread_id: std::thread::ThreadId,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pending: Arc<AtomicU64>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Arc<Mutex<Option<crate::shutdown_refinement::GhostHandle>>>,
 }
 
 impl AsyncDiagnosticSink {
@@ -455,11 +640,29 @@ impl AsyncDiagnosticSink {
         }
         let (sender, receiver) =
             std::sync::mpsc::sync_channel::<OwnedDiagnosticEvent>(DIAGNOSTIC_QUEUE_CAPACITY);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let pending = Arc::new(AtomicU64::new(0));
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let worker_pending = Arc::clone(&pending);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let ghost = Arc::new(Mutex::new(None::<crate::shutdown_refinement::GhostHandle>));
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let worker_ghost = Arc::clone(&ghost);
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())
             .spawn(move || {
                 while let Ok(event) = receiver.recv() {
                     event.deliver(&*sink);
+                    crate::ingress::with_diagnostic_linearization(|| {
+                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        if let Some(ghost) = worker_ghost.lock().as_ref().cloned() {
+                            ghost.record_event(
+                                crate::shutdown_refinement::GhostEvent::FlushDiagnostic,
+                            );
+                        }
+                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        worker_pending.fetch_sub(1, Ordering::AcqRel);
+                    });
                 }
             })
             .map_err(DiagnosticInitError::WorkerSpawn)?;
@@ -468,7 +671,21 @@ impl AsyncDiagnosticSink {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            pending,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost,
         })
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn pending(&self) -> u64 {
+        self.pending.load(Ordering::Acquire)
     }
 
     fn is_current_thread_worker(&self) -> bool {
@@ -476,11 +693,27 @@ impl AsyncDiagnosticSink {
     }
 
     fn report(&self, event: OwnedDiagnosticEvent) {
-        let sender = self.sender.lock();
-        let result = match sender.as_ref() {
-            Some(sender) => sender.try_send(event),
-            None => Err(TrySendError::Disconnected(event)),
-        };
+        let result = crate::ingress::with_diagnostic_linearization(|| {
+            let sender = self.sender.lock();
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.pending.fetch_add(1, Ordering::AcqRel);
+            let result = match sender.as_ref() {
+                Some(sender) => sender.try_send(event),
+                None => Err(TrySendError::Disconnected(event)),
+            };
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if result.is_err() {
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+            }
+            drop(sender);
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if result.is_ok()
+                && let Some(ghost) = self.ghost.lock().as_ref().cloned()
+            {
+                ghost.record_event(crate::shutdown_refinement::GhostEvent::EnqueueDiagnostic);
+            }
+            result
+        });
         if result.is_err() {
             DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
         }
@@ -490,12 +723,33 @@ impl AsyncDiagnosticSink {
         if self.is_current_thread_worker() {
             return Err(DiagnosticShutdownError::ReentrantShutdown);
         }
-        self.sender.lock().take();
+        // Closing the sender in the shared diagnostics linearization region
+        // gives shutdown a linearization point and lets the worker drain all
+        // events accepted before that point.
+        crate::ingress::with_diagnostic_linearization(|| {
+            self.sender.lock().take();
+        });
         let worker = self.worker.lock().take();
         if let Some(worker) = worker {
-            worker
-                .join()
-                .map_err(|_| DiagnosticShutdownError::WorkerPanicked)?;
+            let result = worker.join();
+            if result.is_err() {
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                {
+                    let discarded = self.pending.swap(0, Ordering::AcqRel);
+                    if discarded != 0
+                        && let Some(ghost) = self.ghost.lock().as_ref().cloned()
+                    {
+                        crate::ingress::with_diagnostic_linearization(|| {
+                            for _ in 0..discarded {
+                                ghost.record_event(
+                                    crate::shutdown_refinement::GhostEvent::DiscardDiagnostic,
+                                );
+                            }
+                        });
+                    }
+                }
+                return Err(DiagnosticShutdownError::WorkerPanicked);
+            }
         }
         Ok(())
     }
@@ -517,6 +771,33 @@ impl Drop for AsyncDiagnosticSink {
     }
 }
 
+#[derive(Serialize)]
+struct FileDiagnosticRecord {
+    timestamp_ms: u128,
+    diagnostic_id: u64,
+    udf: String,
+    argument: Option<String>,
+    error: String,
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    if value.len() <= DIAGNOSTIC_TEXT_MAX_BYTES {
+        return value.to_owned();
+    }
+
+    let suffix = DIAGNOSTIC_TRUNCATION_SUFFIX;
+    let prefix_limit = DIAGNOSTIC_TEXT_MAX_BYTES.saturating_sub(suffix.len());
+    let mut prefix_end = prefix_limit.min(value.len());
+    while prefix_end > 0 && !value.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+
+    let mut bounded = String::with_capacity(prefix_end + suffix.len());
+    bounded.push_str(&value[..prefix_end]);
+    bounded.push_str(suffix);
+    bounded
+}
+
 struct FileDiagnosticSink {
     log: Mutex<RotatingLog>,
 }
@@ -527,10 +808,20 @@ impl DiagnosticSink for FileDiagnosticSink {
             .timestamp
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis());
-        let line = format!(
-            "timestamp_ms={timestamp} diagnostic_id={} udf={} argument={:?} error={}",
-            event.diagnostic_id, event.udf_id, event.argument, event.error
-        );
+        let record = FileDiagnosticRecord {
+            timestamp_ms: timestamp,
+            diagnostic_id: event.diagnostic_id,
+            udf: bounded_diagnostic_text(event.udf_id),
+            argument: event.argument.map(bounded_diagnostic_text),
+            error: bounded_diagnostic_text(&event.error.to_string()),
+        };
+        let line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            Err(_) => {
+                FAILED_WRITES.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
         if self.log.lock().write_line(&line).is_err() {
             FAILED_WRITES.fetch_add(1, Ordering::Relaxed);
         }
@@ -570,6 +861,12 @@ impl RotatingLog {
 
     fn write_line(&mut self, line: &str) -> io::Result<()> {
         let incoming = u64::try_from(line.len().saturating_add(1)).unwrap_or(u64::MAX);
+        if incoming > self.maximum_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log record exceeds the maximum log size",
+            ));
+        }
         if self.size > 0 && self.size.saturating_add(incoming) > self.maximum_bytes {
             self.file.take();
             rotate_log_files(&self.path, self.generations)?;
@@ -621,7 +918,20 @@ fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn append_startup_log(path: &Path, message: &str) -> io::Result<()> {
-    RotatingLog::open(path.to_path_buf())?.write_line(message)
+    #[derive(Serialize)]
+    struct StartupLogRecord {
+        timestamp_ms: u128,
+        message: String,
+    }
+
+    let record = StartupLogRecord {
+        timestamp_ms: SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis()),
+        message: bounded_diagnostic_text(message),
+    };
+    let line = serde_json::to_string(&record).map_err(io::Error::other)?;
+    RotatingLog::open(path.to_path_buf())?.write_line(&line)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -633,29 +943,14 @@ pub struct InvalidAddinId;
 
 impl AddinId {
     pub fn parse(value: &str) -> Result<Self, InvalidAddinId> {
-        let trimmed = value.trim();
-        if trimmed.is_empty()
-            || trimmed.len() > 64
-            || trimmed.contains([
-                '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\r', '\n',
-            ])
-            || trimmed == "."
-            || trimmed == ".."
-            || trimmed.starts_with('.')
-        {
+        if value.len() > 64 || value.starts_with('.') {
+            return Err(InvalidAddinId);
+        }
+        if xlfn_common::validate_windows_basename(value).is_err() {
             return Err(InvalidAddinId);
         }
 
-        let upper = trimmed.to_ascii_uppercase();
-        let reserved = [
-            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-        ];
-        if reserved.contains(&upper.as_str()) {
-            return Err(InvalidAddinId);
-        }
-
-        Ok(Self(trimmed.to_owned()))
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -664,12 +959,11 @@ impl AddinId {
 }
 
 /// Installs a basic failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
-pub fn install_file_diagnostic_sink(addin_id: &str) -> Result<PathBuf, DiagnosticInitError> {
-    let id = AddinId::parse(addin_id)?;
+pub fn install_file_diagnostic_sink(addin_id: &AddinId) -> Result<PathBuf, DiagnosticInitError> {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let directory = base.join(id.as_str()).join("logs");
+    let directory = base.join(addin_id.as_str()).join("logs");
     fs::create_dir_all(&directory)?;
     install_file_diagnostic_sink_at(directory.join("diagnostics.log"))
 }
@@ -734,8 +1028,7 @@ mod tests {
 
     #[test]
     fn panicking_tracing_subscriber_does_not_unwind_report_no_unwind() {
-        let _test_guard = DIAGNOSTIC_TEST_MUTEX.lock();
-        prepare_global_router();
+        let _router_guard = prepare_global_router();
         struct PanickingSubscriber;
         impl tracing::Subscriber for PanickingSubscriber {
             fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -779,15 +1072,41 @@ mod tests {
         }
     }
 
-    fn prepare_global_router() {
+    struct GlobalRouterTestGuard {
+        _module_lease: crate::ingress::TestModuleLease,
+        _diagnostic_lock: parking_lot::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for GlobalRouterTestGuard {
+        fn drop(&mut self) {
+            let ingress = crate::ingress::global_ingress();
+            if ingress.phase() != crate::ingress::PHASE_CLOSED {
+                ingress.begin_close_with(|| {});
+                let _ = ingress.seal_and_drain();
+            }
+        }
+    }
+
+    fn prepare_global_router() -> GlobalRouterTestGuard {
+        let module_lease = crate::ingress::acquire_test_module_lease();
+        let diagnostic_lock = DIAGNOSTIC_TEST_MUTEX.lock();
+        let ingress = crate::ingress::global_ingress();
+        if ingress.phase() != crate::ingress::PHASE_CLOSED {
+            ingress.begin_close_with(|| {});
+            let _ = ingress.seal_and_drain();
+        }
+        ingress.begin_opening();
         let _ = close_diagnostic_router();
         router().reset().unwrap();
+        GlobalRouterTestGuard {
+            _module_lease: module_lease,
+            _diagnostic_lock: diagnostic_lock,
+        }
     }
 
     #[test]
     fn reentrant_clear_diagnostic_sink_returns_error_and_preserves_sink() {
-        let _test_guard = DIAGNOSTIC_TEST_MUTEX.lock();
-        prepare_global_router();
+        let _router_guard = prepare_global_router();
         let clear_result = Arc::new(Mutex::new(None));
         set_diagnostic_sink(ReentrantClearSink {
             clear_result: Arc::clone(&clear_result),
@@ -826,8 +1145,7 @@ mod tests {
 
     #[test]
     fn reentrant_set_diagnostic_sink_returns_error_and_does_not_commit() {
-        let _test_guard = DIAGNOSTIC_TEST_MUTEX.lock();
-        prepare_global_router();
+        let _router_guard = prepare_global_router();
         let replace_result = Arc::new(Mutex::new(None));
         set_diagnostic_sink(ReentrantReplaceSink {
             replace_result: Arc::clone(&replace_result),
@@ -851,6 +1169,45 @@ mod tests {
 
         // Clearing from the main thread succeeds since the original sink was preserved
         assert!(clear_diagnostic_sink().is_ok());
+    }
+
+    #[test]
+    fn published_sink_is_rejected_after_ingress_close() {
+        let ingress = crate::ingress::ExportIngress::new();
+        ingress.begin_opening();
+        ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+
+        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
+        ghost
+            .begin_generation(1, crate::shutdown_refinement::GhostResources::opened(0, 0))
+            .unwrap();
+        let ghost_for_close = Arc::clone(&ghost);
+        ingress.begin_close_with(move || {
+            ghost_for_close.record_event(crate::shutdown_refinement::GhostEvent::BeginClose);
+        });
+
+        let router = DiagnosticRouter {
+            sink: RwLock::new(None),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(Some(Arc::clone(&ghost))),
+        };
+        let result = router.replace_with(
+            || {
+                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                    .map(Arc::new)
+            },
+            |had_sink| admit_published_sink(&router, &ingress, had_sink),
+        );
+
+        assert!(matches!(result, Err(DiagnosticInitError::RouterClosed)));
+        assert!(router.current().is_none());
+        assert!(matches!(
+            ghost.state().phase,
+            crate::shutdown_refinement::GhostPhase::Closing(
+                crate::shutdown_refinement::GhostStage::DrainCalls
+            )
+        ));
     }
 
     #[test]
@@ -883,6 +1240,8 @@ mod tests {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
+            pending: Arc::new(AtomicU64::new(0)),
+            ghost: Arc::new(Mutex::new(None)),
         };
         assert_eq!(
             sink.shutdown(),
@@ -906,11 +1265,16 @@ mod tests {
             sink: RwLock::new(None),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         };
         router
-            .replace_with(|| {
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&first)))).map(Arc::new)
-            })
+            .replace_with(
+                || {
+                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&first))))
+                        .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
             .unwrap();
         router.current().unwrap().report(OwnedDiagnosticEvent {
             udf_id: "reload",
@@ -920,9 +1284,13 @@ mod tests {
             timestamp: SystemTime::now(),
         });
         router
-            .replace_with(|| {
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&second)))).map(Arc::new)
-            })
+            .replace_with(
+                || {
+                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&second))))
+                        .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
             .unwrap();
         router.current().unwrap().report(OwnedDiagnosticEvent {
             udf_id: "reload",
@@ -957,6 +1325,7 @@ mod tests {
             sink: RwLock::new(None),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -970,7 +1339,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        router.replace_with(|| Ok(old)).unwrap();
+        router.replace_with(|| Ok(old), |_| Ok(())).unwrap();
         router.current().unwrap().report(OwnedDiagnosticEvent {
             udf_id: "retiring",
             argument: None,
@@ -986,8 +1355,9 @@ mod tests {
         );
         let expected = Arc::clone(&replacement);
         let replacing_router = Arc::clone(&router);
-        let replacing =
-            std::thread::spawn(move || replacing_router.replace_with(|| Ok(replacement)));
+        let replacing = std::thread::spawn(move || {
+            replacing_router.replace_with(|| Ok(replacement), |_| Ok(()))
+        });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
@@ -1018,6 +1388,10 @@ mod tests {
 
     #[test]
     fn panicked_previous_worker_is_not_restored_over_a_healthy_replacement() {
+        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
+        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
+        resources.diagnostics_running = true;
+        ghost.begin_generation(1, resources).unwrap();
         let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
         let worker_thread_id = worker.thread().id();
         let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
@@ -1025,6 +1399,8 @@ mod tests {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
+            pending: Arc::new(AtomicU64::new(0)),
+            ghost: Arc::new(Mutex::new(None)),
         });
         let delivered = Arc::new(AtomicUsize::new(0));
         let replacement = Arc::new(
@@ -1034,10 +1410,11 @@ mod tests {
             sink: RwLock::new(Some(terminal)),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(Some(Arc::clone(&ghost))),
         };
 
         router
-            .replace_with(|| Ok(Arc::clone(&replacement)))
+            .replace_with(|| Ok(Arc::clone(&replacement)), |_| Ok(()))
             .unwrap();
         assert!(Arc::ptr_eq(&router.current().unwrap(), &replacement));
         router.current().unwrap().report(OwnedDiagnosticEvent {
@@ -1047,14 +1424,106 @@ mod tests {
             diagnostic_id: 1,
             timestamp: SystemTime::now(),
         });
+        assert_eq!(
+            ghost.state().phase,
+            crate::shutdown_refinement::GhostPhase::Open
+        );
+        assert_eq!(ghost.state().resources.cleanup_issues, 1);
+        assert!(ghost.state().resources.diagnostics_running);
         router.drain_reopenable().unwrap();
         assert_eq!(delivered.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            ghost.state().phase,
+            crate::shutdown_refinement::GhostPhase::Open
+        );
+        assert_eq!(ghost.state().resources.cleanup_issues, 1);
+        assert!(!ghost.state().resources.diagnostics_running);
+    }
+
+    #[test]
+    fn reopenable_worker_panic_does_not_fail_stop_the_live_router() {
+        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
+        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
+        resources.diagnostics_running = true;
+        ghost.begin_generation(1, resources).unwrap();
+        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
+        let worker_thread_id = worker.thread().id();
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let router = DiagnosticRouter {
+            sink: RwLock::new(Some(Arc::new(AsyncDiagnosticSink {
+                sender: Mutex::new(Some(sender)),
+                worker: Mutex::new(Some(worker)),
+                worker_thread_id,
+                pending: Arc::new(AtomicU64::new(0)),
+                ghost: Arc::new(Mutex::new(None)),
+            }))),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(Some(Arc::clone(&ghost))),
+        };
+
+        assert!(matches!(
+            router.drain_reopenable(),
+            Err(DiagnosticShutdownError::WorkerPanicked)
+        ));
+        assert_eq!(router.phase(), DiagnosticPhase::Open);
+        assert!(router.current().is_none());
+        assert_eq!(
+            ghost.state().phase,
+            crate::shutdown_refinement::GhostPhase::Open
+        );
+        assert_eq!(ghost.state().resources.cleanup_issues, 1);
+        assert!(!ghost.state().resources.diagnostics_running);
+    }
+
+    #[test]
+    fn panicked_worker_accounts_for_queued_events_as_discarded() {
+        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
+        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
+        resources.diagnostics_running = true;
+        ghost.begin_generation(1, resources).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            panic!("injected diagnostic worker panic");
+        });
+        entered_rx.recv().unwrap();
+        let worker_thread_id = worker.thread().id();
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let sink = AsyncDiagnosticSink {
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(Some(worker)),
+            worker_thread_id,
+            pending: Arc::new(AtomicU64::new(0)),
+            ghost: Arc::new(Mutex::new(Some(Arc::clone(&ghost)))),
+        };
+        sink.report(OwnedDiagnosticEvent {
+            udf_id: "discarded",
+            argument: None,
+            error: XllError::Panic,
+            diagnostic_id: 1,
+            timestamp: SystemTime::now(),
+        });
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            sink.shutdown(),
+            Err(DiagnosticShutdownError::WorkerPanicked)
+        ));
+        assert_eq!(
+            ghost.state().phase,
+            crate::shutdown_refinement::GhostPhase::Open
+        );
+        assert_eq!(ghost.state().resources.diagnostics_pending, 0);
+        assert!(ghost.trace_json().unwrap().contains("discardDiagnostic"));
     }
 
     #[test]
     fn failed_file_sink_construction_preserves_the_current_sink() {
-        let _test_guard = DIAGNOSTIC_TEST_MUTEX.lock();
-        prepare_global_router();
+        let _router_guard = prepare_global_router();
         let delivered = Arc::new(AtomicUsize::new(0));
         set_diagnostic_sink(CountingSink(Arc::clone(&delivered))).unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -1089,6 +1558,43 @@ mod tests {
         assert!(failed_diagnostic_writes() > before);
     }
 
+    #[test]
+    fn file_diagnostic_records_are_single_bounded_json_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.log");
+        let sink = FileDiagnosticSink {
+            log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),
+        };
+        let error = XllError::Native {
+            code: 17,
+            message: format!(
+                "first line\nsecond\tline \"quoted\" {}",
+                "x".repeat(32 * 1024)
+            ),
+        };
+
+        sink.report(&DiagnosticEvent {
+            udf_id: "native_failure",
+            argument: Some("currency"),
+            error: &error,
+            diagnostic_id: 42,
+            timestamp: SystemTime::UNIX_EPOCH,
+        });
+
+        let contents = fs::read_to_string(path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        let record: serde_json::Value = serde_json::from_str(contents.trim_end()).unwrap();
+        assert_eq!(record["diagnostic_id"], 42);
+        assert_eq!(record["udf"], "native_failure");
+        assert_eq!(record["argument"], "currency");
+        let logged_error = record["error"].as_str().unwrap();
+        assert!(logged_error.len() <= DIAGNOSTIC_TEXT_MAX_BYTES);
+        assert!(logged_error.ends_with(DIAGNOSTIC_TRUNCATION_SUFFIX));
+        assert!(contents.contains("\\n"));
+        assert!(contents.contains("\\t"));
+        assert!(contents.len() < LOG_MAX_BYTES as usize);
+    }
+
     struct BlockingSink {
         first: AtomicBool,
         started: std::sync::mpsc::SyncSender<()>,
@@ -1121,18 +1627,22 @@ mod tests {
             sink: RwLock::new(None),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         router
-            .replace_with(|| {
-                AsyncDiagnosticSink::new(Arc::new(BlockingSink {
-                    first: AtomicBool::new(true),
-                    started: started_tx,
-                    release: Mutex::new(release_rx),
-                }))
-                .map(Arc::new)
-            })
+            .replace_with(
+                || {
+                    AsyncDiagnosticSink::new(Arc::new(BlockingSink {
+                        first: AtomicBool::new(true),
+                        started: started_tx,
+                        release: Mutex::new(release_rx),
+                    }))
+                    .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
             .unwrap();
         router.current().unwrap().report(OwnedDiagnosticEvent {
             udf_id: "terminal-close-race",
@@ -1155,11 +1665,14 @@ mod tests {
         let (install_started_tx, install_started_rx) = std::sync::mpsc::sync_channel(1);
         let installing = std::thread::spawn(move || {
             install_started_tx.send(()).unwrap();
-            installing_router.replace_with(|| {
-                factory_calls_for_install.fetch_add(1, Ordering::AcqRel);
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                    .map(Arc::new)
-            })
+            installing_router.replace_with(
+                || {
+                    factory_calls_for_install.fetch_add(1, Ordering::AcqRel);
+                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                        .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
         });
         install_started_rx
             .recv_timeout(std::time::Duration::from_secs(1))
@@ -1187,17 +1700,21 @@ mod tests {
             sink: RwLock::new(None),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         });
         let (factory_entered_tx, factory_entered_rx) = std::sync::mpsc::sync_channel(1);
         let (release_factory_tx, release_factory_rx) = std::sync::mpsc::sync_channel(1);
         let installing_router = Arc::clone(&router);
         let installing = std::thread::spawn(move || {
-            installing_router.replace_with(|| {
-                factory_entered_tx.send(()).unwrap();
-                release_factory_rx.recv().unwrap();
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                    .map(Arc::new)
-            })
+            installing_router.replace_with(
+                || {
+                    factory_entered_tx.send(()).unwrap();
+                    release_factory_rx.recv().unwrap();
+                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                        .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
         });
         factory_entered_rx
             .recv_timeout(std::time::Duration::from_secs(1))
@@ -1223,30 +1740,37 @@ mod tests {
             sink: RwLock::new(None),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         };
         let _certificate = router.close_terminal().unwrap().certificate;
 
         let factory_calls = AtomicUsize::new(0);
-        let result = router.replace_with(|| {
-            factory_calls.fetch_add(1, Ordering::AcqRel);
-            AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                .map(Arc::new)
-        });
+        let result = router.replace_with(
+            || {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                    .map(Arc::new)
+            },
+            |_| Ok(()),
+        );
         assert!(matches!(result, Err(DiagnosticInitError::RouterClosed)));
         assert_eq!(factory_calls.load(Ordering::Acquire), 0);
 
         router.reset().unwrap();
         router
-            .replace_with(|| {
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                    .map(Arc::new)
-            })
+            .replace_with(
+                || {
+                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                        .map(Arc::new)
+                },
+                |_| Ok(()),
+            )
             .unwrap();
         let _certificate = router.close_terminal().unwrap().certificate;
     }
 
     #[test]
-    fn terminal_close_certifies_after_a_worker_panic() {
+    fn terminal_close_rejects_a_worker_panic() {
         let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
         let worker_thread_id = worker.thread().id();
         let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
@@ -1255,19 +1779,25 @@ mod tests {
                 sender: Mutex::new(Some(sender)),
                 worker: Mutex::new(Some(worker)),
                 worker_thread_id,
+                pending: Arc::new(AtomicU64::new(0)),
+                ghost: Arc::new(Mutex::new(None)),
             }))),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
+            ghost: Mutex::new(None),
         };
 
-        let outcome = router.close_terminal().unwrap();
-        assert!(outcome.issues.iter().any(|issue| {
-            issue.kind == crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin
-        }));
+        let error = match router.close_terminal() {
+            Ok(_) => panic!("worker panic must fail terminal close"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DiagnosticTerminalCloseError::WorkerPanicked
+        ));
         assert!(router.current().is_none());
         assert_eq!(router.phase(), DiagnosticPhase::Closed);
         assert!(router.retiring_workers.lock().is_empty());
-        let _certificate = outcome.certificate;
     }
 
     #[test]
@@ -1310,21 +1840,31 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("diagnostics.log");
 
-        for value in ["first-rotation", "second-rotation", "third-rotation"] {
+        for value in ["first", "second", "third"] {
             let mut log = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
             log.write_line(value).unwrap();
         }
 
-        assert_eq!(fs::read_to_string(&path).unwrap(), "third-rotation\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
         assert_eq!(
             fs::read_to_string(path.with_file_name("diagnostics.log.1")).unwrap(),
-            "second-rotation\n"
+            "second\n"
         );
         assert_eq!(
             fs::read_to_string(path.with_file_name("diagnostics.log.2")).unwrap(),
-            "first-rotation\n"
+            "first\n"
         );
         assert!(!path.with_file_name("diagnostics.log.3").exists());
+    }
+
+    #[test]
+    fn rotating_log_rejects_a_record_larger_than_the_log_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.log");
+        let mut log = RotatingLog::open_with_policy(path, 4, 2).unwrap();
+
+        let error = log.write_line("1234").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -1337,11 +1877,18 @@ mod tests {
             ".",
             "..",
             "CON",
+            "CON.txt",
             "PRN",
             "AUX",
             "NUL",
+            "NUL.log",
             "COM1",
+            "LPT1.data",
+            "CONIN$",
+            "CONOUT$",
             "LPT1",
+            "addin.",
+            "addin ",
             "bad/path",
             "bad\\path",
             "",
@@ -1353,5 +1900,6 @@ mod tests {
         }
 
         assert!(AddinId::parse("valid-addin-id_123").is_ok());
+        assert!(AddinId::parse(" valid-addin-id_123").is_ok());
     }
 }

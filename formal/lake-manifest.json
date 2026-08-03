@@ -1,6 +1,8 @@
-{"version": "1.2.0",
- "packagesDir": ".lake/packages",
- "packages": [],
- "name": "ExcelXllFormal",
- "lakeDir": ".lake",
- "fixedToolchain": false}
+{
+    "version": "1.2.0",
+    "packagesDir": ".lake/packages",
+    "packages": [],
+    "name": "XlFnFormal",
+    "lakeDir": ".lake",
+    "fixedToolchain": false
+}

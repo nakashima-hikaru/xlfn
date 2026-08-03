@@ -10,21 +10,20 @@ description = "XLL bundle validation, PE dependency checks, and package staging"
 
 [dependencies]
 fs-err.workspace = true
+libc.workspace = true
 object.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+xlfn-common.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = [
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",
-] }
+windows-link.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

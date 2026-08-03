@@ -1,15 +1,51 @@
 use crate::{InputError, XllError, XllResult};
+use smallvec::SmallVec;
 
 pub(crate) const EXCEL_STRING_LIMIT: usize = 32_767;
+const INLINE_UTF16_CAPACITY: usize = 64;
+
+/// Compares UTF-16 code units using the same ASCII-only folding as
+/// `str::eq_ignore_ascii_case`, without first allocating a UTF-8 `String`.
+#[doc(hidden)]
+#[inline]
+pub fn utf16_eq_ignore_ascii_case(left: &[u16], right: &[u16]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| fold_ascii(left) == fold_ascii(right))
+}
+
+#[inline]
+const fn fold_ascii(unit: u16) -> u16 {
+    match unit {
+        0x41..=0x5a => unit + (0x61 - 0x41),
+        _ => unit,
+    }
+}
 
 pub(crate) fn encode_bounded(
     text: &str,
     argument: &'static str,
     limit: usize,
-) -> XllResult<Vec<u16>> {
-    let length = bounded_len(text, argument, limit)?;
-    let mut units = Vec::with_capacity(length);
-    units.extend(text.encode_utf16());
+) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
+    let mut units = SmallVec::with_capacity(text.len().min(limit));
+    let mut length = 0_usize;
+    for unit in text.encode_utf16() {
+        length += 1;
+        if length <= limit {
+            units.push(unit);
+        }
+    }
+    if length > limit {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit,
+                actual: length,
+            },
+        ));
+    }
     Ok(units)
 }
 
@@ -17,29 +53,27 @@ pub(crate) fn encode_counted(
     text: &str,
     argument: &'static str,
     limit: usize,
-) -> XllResult<Vec<u16>> {
-    let length = bounded_len(text, argument, limit)?;
-    let mut units = Vec::with_capacity(length + 1);
-    units.push(length as u16);
-    units.extend(text.encode_utf16());
-    Ok(units)
-}
-
-fn bounded_len(text: &str, argument: &'static str, limit: usize) -> XllResult<usize> {
+) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
+    let mut units = SmallVec::with_capacity(text.len().min(limit).saturating_add(1));
+    units.push(0);
     let mut length = 0_usize;
-    for character in text.chars() {
-        length += character.len_utf16();
-        if length > limit {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit,
-                    actual: length,
-                },
-            ));
+    for unit in text.encode_utf16() {
+        length += 1;
+        if length <= limit {
+            units.push(unit);
         }
     }
-    Ok(length)
+    if length > limit {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit,
+                actual: length,
+            },
+        ));
+    }
+    units[0] = length as u16;
+    Ok(units)
 }
 
 #[cfg(test)]
@@ -49,22 +83,59 @@ mod tests {
     #[test]
     fn counted_encoding_uses_one_final_buffer() {
         assert_eq!(
-            encode_counted("価格", "test", EXCEL_STRING_LIMIT).unwrap(),
+            encode_counted("価格", "test", EXCEL_STRING_LIMIT)
+                .unwrap()
+                .as_slice(),
             [2, 0x4fa1, 0x683c]
         );
     }
 
     #[test]
-    fn bounded_encoding_stops_at_the_first_unit_over_the_limit() {
+    fn bounded_encoding_reports_the_full_utf16_length() {
         assert!(matches!(
-            encode_bounded("😀😀", "test", 3),
+            encode_bounded("a😀", "test", 1),
             Err(XllError::Input {
                 reason: InputError::TooLarge {
-                    limit: 3,
-                    actual: 4
+                    limit: 1,
+                    actual: 3
                 },
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn utf16_ascii_case_folding_matches_without_decoding() {
+        assert!(utf16_eq_ignore_ascii_case(
+            &[
+                b'L' as u16,
+                b'i' as u16,
+                b'n' as u16,
+                b'e' as u16,
+                b'a' as u16,
+                b'r' as u16
+            ],
+            &[
+                b'l' as u16,
+                b'i' as u16,
+                b'n' as u16,
+                b'e' as u16,
+                b'a' as u16,
+                b'r' as u16
+            ],
+        ));
+        assert!(!utf16_eq_ignore_ascii_case(
+            &[
+                b'L' as u16,
+                b'i' as u16,
+                b'n' as u16,
+                b'e' as u16,
+                b'a' as u16,
+                b'r' as u16
+            ],
+            &[b'l' as u16, b'o' as u16, b'g' as u16],
+        ));
+        assert!(utf16_eq_ignore_ascii_case(&[0x00e9], &[0x00e9]));
+        assert!(!utf16_eq_ignore_ascii_case(&[0x00e9], &[0x00c9]));
     }
 }

@@ -2,10 +2,10 @@ error[E0308]: mismatched types
  --> tests/ui/fail/context_reference_removed.rs:8:1
   |
 8 | #[excel_function(name = "FAIL.CONTEXT.REFERENCE")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&MainThreadContext<'_, State>`, found `MainThreadContext<'_, State>`
-9 | fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, State>) -> f64 {
-  |                                               ----------------------------- expected due to this
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&MainThreadContext<'_, '_, State>`, found `MainThreadContext<'_, '_, State>`
+9 | fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, '_, State>) -> f64 {
+  |                                               --------------------------------- expected due to this
   |
-  = note: expected reference `&xlfn::context::MainThreadContext<'_, State>`
-                found struct `xlfn::context::MainThreadContext<'_, State>`
+  = note: expected reference `&xlfn::context::MainThreadContext<'_, '_, State>`
+                found struct `xlfn::context::MainThreadContext<'_, '_, State>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

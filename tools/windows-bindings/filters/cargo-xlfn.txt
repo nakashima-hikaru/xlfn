@@ -1,0 +1,21 @@
+--out crates/cargo-xlfn/src/win32.rs
+--flat
+--sys
+--no-deps
+--filter
+    Windows.Win32.Foundation.HANDLE
+    Windows.Win32.Storage.FileSystem.BY_HANDLE_FILE_INFORMATION
+    Windows.Win32.Storage.FileSystem.FILE_FLAG_BACKUP_SEMANTICS
+    Windows.Win32.Storage.FileSystem.FILE_FLAG_OPEN_REPARSE_POINT
+    Windows.Win32.Storage.FileSystem.FILE_FLAG_WRITE_THROUGH
+    Windows.Win32.Storage.FileSystem.FILE_SHARE_DELETE
+    Windows.Win32.Storage.FileSystem.FILE_SHARE_READ
+    Windows.Win32.Storage.FileSystem.FILE_SHARE_WRITE
+    Windows.Win32.Storage.FileSystem.FILE_ID_INFO
+    Windows.Win32.Storage.FileSystem.FILE_INFO_BY_HANDLE_CLASS
+    Windows.Win32.Storage.FileSystem.FileIdInfo
+    Windows.Win32.Storage.FileSystem.GetFileInformationByHandle
+    Windows.Win32.Storage.FileSystem.GetFileInformationByHandleEx
+    Windows.Win32.Storage.FileSystem.MOVEFILE_REPLACE_EXISTING
+    Windows.Win32.Storage.FileSystem.MOVEFILE_WRITE_THROUGH
+    Windows.Win32.Storage.FileSystem.MoveFileExW

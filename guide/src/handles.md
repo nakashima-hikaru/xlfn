@@ -38,7 +38,7 @@ impl Dataset {
 }
 ```
 
-The derived trait requires the value to be `Any + Send + Sync + 'static`. The object may contain synchronized native submission handles, immutable data, or other owned resources. It must not contain call-scoped Excel references.
+The derived trait requires the value to be `Any + Send + Sync + 'static`. The object may contain synchronized application-adapter clients, immutable data, or other owned resources. It must not contain call-scoped Excel references.
 
 ## Produce and consume
 
@@ -89,6 +89,8 @@ For the same formula identity, the framework keeps the visible token and RTD top
 
 A formula identity includes the caller sheet/cell, stable UDF ID, and a canonical fingerprint of raw arguments. The fingerprint is streamed through BLAKE3 and is bounded to 16 MiB.
 
+The caller sheet portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new handle identity.
+
 Changing the caller, function ID, or arguments creates a different formula identity. A producer must be deterministic enough that repeated evaluation is operationally safe; it should not create irreversible side effects merely because Excel recalculated.
 
 ## Handle alias functions
@@ -113,7 +115,7 @@ Destructors must obey the same shutdown rules as any in-process code:
 - do not call Excel;
 - do not block indefinitely;
 - do not panic;
-- release thread-affine native resources through the correct owner rather than directly from an arbitrary handle destructor.
+- release thread-affine external resources through the application adapter rather than directly from an arbitrary handle destructor.
 
 The runtime supports at most 16,384 live handles per open generation. This is a safety bound, not a capacity target.
 
@@ -148,9 +150,9 @@ A good handle object is:
 
 - immutable or internally synchronized;
 - cheap to share through `Arc`;
-- explicit about native thread-affinity through submission handles;
+- explicit about external thread-affinity through application-adapter clients;
 - free of workbook-owned pointers;
 - bounded in memory;
 - safe to drop during orderly add-in close.
 
-For native resources, continue with [Native objects as handles](native-objects.md).
+For external resources, continue with [External objects as formula handles](native-objects.md).

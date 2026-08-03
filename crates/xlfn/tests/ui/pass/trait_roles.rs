@@ -20,7 +20,7 @@ pub struct Dataset;
 type DatasetHandle = Handle<Dataset>;
 type DatasetObject = Dataset;
 type FunctionResult<T> = XllResult<T>;
-type MainContext<'a> = MainThreadContext<'a, State>;
+type MainContext<'state, 'scope> = MainThreadContext<'state, 'scope, State>;
 
 mod reexported {
     pub use xlfn::context::ThreadSafeContext as WorkerContext;
@@ -71,7 +71,7 @@ fn optional_handle(value: Option<DatasetHandle>) -> f64 {
 }
 
 #[excel_function(name = "TEST.CONTEXT.ALIAS")]
-fn alias_context(#[excel_context(main_thread)] context: MainContext<'_>) -> f64 {
+fn alias_context(#[excel_context(main_thread)] context: MainContext<'_, '_>) -> f64 {
     let _ = context.state();
     1.0
 }

@@ -24,7 +24,7 @@ cargo xlfn check --target i686-pc-windows-msvc
 3. reads the generated `.xllexp` manifest;
 4. compares required lifecycle, COM, calculation-event, and UDF exports with the PE export table;
 5. verifies the PE machine type against the requested target;
-6. stages configured native DLLs;
+6. stages configured bundle files;
 7. checks the import closure using the package's system-import policy.
 
 Use Cargo build-selection flags normally:
@@ -36,13 +36,13 @@ cargo xlfn check `
   --locked
 ```
 
-The default is `--crt static`, which reduces deployment dependence on a separately installed VC runtime. The command reports that default rather than changing the profile silently. Use `--crt dynamic` for `/MD` native dependencies, or `--crt inherit` to preserve Cargo, environment, and toolchain CRT settings exactly.
+The default is `--crt static`, which reduces deployment dependence on a separately installed VC runtime. The command reports that default rather than changing the profile silently. Use `--crt dynamic` when the linked application and its binary dependencies require `/MD`, or `--crt inherit` to preserve Cargo, environment, and toolchain CRT settings exactly.
 
 `static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `dist` verify. The CRT observer recognizes an exact, case-insensitive allowlist of release/debug MSVC runtime DLLs and Universal CRT API-set DLLs; lookalike names are not classified. Under `static`, an observed dynamic CRT import is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
 
 CRT observation does not approve an external dependency. Any runtime DLL not included in the package must be listed explicitly in `external-imports`, where it remains a deliberate deployment exception and is not validated as part of the package closure.
 
-The policy cannot recompile an existing `.lib`. Build native code with a matching MSVC runtime: `/MT` (or `/MTd`) for `static`, and `/MD` (or `/MDd`) for `dynamic`. Matching CRT settings also do not make cross-module allocator ownership safe: allocate and free an object in the same module, or expose an explicit paired deallocator/caller-owned buffer contract.
+The policy cannot recompile an existing `.lib`. Build linked binary components with a matching MSVC runtime: `/MT` (or `/MTd`) for `static`, and `/MD` (or `/MDd`) for `dynamic`. Matching CRT settings also do not make cross-module allocator ownership safe: allocate and free an object in the same module, or expose an explicit paired deallocator/caller-owned buffer contract.
 
 ## Release distribution
 
@@ -72,7 +72,7 @@ dist/
     └── NativeEngine.dll
 ```
 
-For `--all`, every target is built, staged, and verified before the previous output root is replaced. If the final replacement and its rollback both fail, the tool preserves the previous distribution in a recovery directory and reports that path. Do not delete the recovery directory until the failure has been investigated.
+For `--all`, every target is built, staged, and verified before the previous output root is transactionally replaced. The replacement is not reader-visible atomicity; the journal provides crash recovery on the next invocation, while rollback remains best effort. If the final replacement and its rollback both fail, the tool preserves the previous distribution in a recovery directory and reports that path. Do not delete the recovery directory until the failure has been investigated.
 
 ## Loading in Excel
 
@@ -86,7 +86,7 @@ When Excel reports that a file cannot be opened or is not a valid add-in, check 
 1. Excel process bitness versus XLL bitness;
 2. whether the complete distribution directory was copied;
 3. Windows file blocking and code-signing policy;
-4. missing or wrong-architecture native dependencies;
+4. missing or wrong-architecture binary dependencies;
 5. diagnostics emitted during `xlAutoOpen`;
 6. endpoint protection or application-control policy.
 
@@ -97,10 +97,10 @@ See [Troubleshooting](troubleshooting.md) for a symptom-oriented procedure.
 `cargo xlfn check` proves properties of the linked and staged bytes. It does not prove that:
 
 - a worksheet function has correct business semantics;
-- an unsafe native declaration matches the native binary;
-- a library advertised as thread-safe actually is thread-safe;
+- an application-defined ABI declaration matches an external binary;
+- an external implementation advertised as thread-safe actually is thread-safe;
 - cancellation is timely;
 - every supported Excel channel behaves identically;
 - installation ACLs or code signatures are correct.
 
-Treat linked-artifact validation, Rust tests, native ABI tests, and real-Excel qualification as separate release gates. The [Testing and release qualification](testing.md) chapter defines a complete matrix.
+Treat linked-artifact validation, Rust tests, application-adapter tests, and real-Excel qualification as separate release gates. The [Testing and release qualification](testing.md) chapter defines a complete matrix.

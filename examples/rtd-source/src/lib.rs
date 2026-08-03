@@ -41,7 +41,7 @@ impl Addin for RtdSourceExample {
 
 #[excel_function(name = "METRIC.LAST")]
 pub fn last_metric(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
     symbol: String,
 ) -> XllResult<RtdValue> {
     let topic = RtdTopic::new(["last", symbol.as_str()])?;

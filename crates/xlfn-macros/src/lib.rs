@@ -1,4 +1,9 @@
-//! Attribute macros for the public `xlfn` API.
+//! Attribute and derive macros for the public `xlfn` API.
+//!
+//! The macros generate the Excel ABI entry points, registration metadata, and
+//! add-in lifecycle exports consumed by `xlfn`. They intentionally keep raw
+//! pointer handling at the generated FFI boundary; user functions receive the
+//! safe values and contexts exposed by `xlfn-core`.
 
 #![forbid(unsafe_code)]
 
@@ -9,20 +14,8 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{
     Data, DeriveInput, Expr, ExprLit, Fields, FnArg, ItemFn, ItemStruct, Lit, Meta, Pat,
-    ReturnType, Token, Type, parse_macro_input,
+    ReturnType, Token, parse_macro_input,
 };
-
-fn is_borrowed_array_type(ty: &Type) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    path.qself.is_none()
-        && path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "XlArrayRef")
-}
 
 #[derive(Default)]
 struct FunctionOptions {
@@ -139,9 +132,7 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             continue;
         }
         attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("ascii_case_insensitive")
-                || meta.path.is_ident("case_insensitive")
-            {
+            if meta.path.is_ident("ascii_case_insensitive") {
                 if ascii_case_insensitive {
                     return Err(meta.error("duplicate ASCII case-insensitive option"));
                 }
@@ -205,22 +196,30 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         variants.push((variant.ident.clone(), excel_name));
     }
     let ident = &input.ident;
-    let (_, type_generics, _) = input.generics.split_for_impl();
-    let mut conversion_generics = input.generics.clone();
-    conversion_generics
+    let (base_impl_generics, type_generics, base_where_clause) = input.generics.split_for_impl();
+    let mut from_excel_generics = input.generics.clone();
+    from_excel_generics
         .params
         .insert(0, syn::parse_quote!('__xlfn_call));
-    let (impl_generics, _, where_clause) = conversion_generics.split_for_impl();
+    let (from_excel_impl_generics, _, from_excel_where_clause) =
+        from_excel_generics.split_for_impl();
     let comparisons = variants.iter().map(|(variant, name)| {
+        let units = name
+            .encode_utf16()
+            .map(|unit| quote!(#unit))
+            .collect::<Vec<_>>();
         if ascii_case_insensitive {
             quote! {
-                if __text.eq_ignore_ascii_case(#name) {
+                if ::xlfn::__private::utf16_eq_ignore_ascii_case(
+                    __text.as_utf16(),
+                    &[#(#units),*],
+                ) {
                     return ::core::result::Result::Ok(Self::#variant);
                 }
             }
         } else {
             quote! {
-                if __text == #name {
+                if __text.as_utf16() == &[#(#units),*] {
                     return ::core::result::Result::Ok(Self::#variant);
                 }
             }
@@ -231,30 +230,32 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .map(|(variant, name)| quote!(Self::#variant => #name))
         .collect::<Vec<_>>();
     Ok(quote! {
-        impl #impl_generics ::xlfn::convert::FromExcel<'__xlfn_call>
-            for #ident #type_generics #where_clause
+        impl #from_excel_impl_generics ::xlfn::convert::FromExcel<'__xlfn_call>
+            for #ident #type_generics #from_excel_where_clause
         {
             fn from_excel(
                 __value: ::xlfn::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
                 __context: &::xlfn::convert::CallContext,
             ) -> ::xlfn::error::XllResult<Self> {
-                let __text =
-                    <::std::string::String as ::xlfn::convert::FromExcel<'__xlfn_call>>::from_excel(
-                        __value,
-                        __argument,
-                        __context,
-                    )?;
+                let __text = __value.as_str_with_argument(__argument)?;
                 #(#comparisons)*
-                ::core::result::Result::Err(::xlfn::error::XllError::input(
-                    __argument,
-                    ::xlfn::error::InputError::Malformed("unknown enum value"),
-                ))
+                if __text.chars().any(|__decoded| __decoded.is_err()) {
+                    ::core::result::Result::Err(::xlfn::error::XllError::input(
+                        __argument,
+                        ::xlfn::error::InputError::InvalidUtf16,
+                    ))
+                } else {
+                    ::core::result::Result::Err(::xlfn::error::XllError::input(
+                        __argument,
+                        ::xlfn::error::InputError::Malformed("unknown enum value"),
+                    ))
+                }
             }
         }
 
-        impl #impl_generics ::xlfn::convert::IntoExcelValue
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::IntoExcelValue
+            for #ident #type_generics #base_where_clause
         {
             fn into_excel_value(
                 self,
@@ -266,33 +267,33 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
         }
 
-        impl #impl_generics ::xlfn::convert::ExcelReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::ExcelReturn
+            for #ident #type_generics #base_where_clause
         {
             type Output = Self;
 
             fn into_excel(
                 self,
-                _: &mut ::xlfn::__private::ReturnContext<'_>,
+                _: &mut ::xlfn::__private::ReturnContext<'_, '_>,
             ) -> ::xlfn::error::XllResult<Self::Output> {
                 ::core::result::Result::Ok(self)
             }
         }
 
-        impl #impl_generics ::xlfn::convert::MainThreadReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::MainThreadReturn
+            for #ident #type_generics #base_where_clause
         {}
-        impl #impl_generics ::xlfn::convert::ThreadSafeReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::ThreadSafeReturn
+            for #ident #type_generics #base_where_clause
         {}
-        impl #impl_generics ::xlfn::convert::MacroSheetReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::MacroSheetReturn
+            for #ident #type_generics #base_where_clause
         {}
-        impl #impl_generics ::xlfn::convert::AsyncReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::AsyncReturn
+            for #ident #type_generics #base_where_clause
         {}
-        impl #impl_generics ::xlfn::convert::VolatileReturn
-            for #ident #type_generics #where_clause
+        impl #base_impl_generics ::xlfn::convert::VolatileReturn
+            for #ident #type_generics #base_where_clause
         {}
 
     })
@@ -312,7 +313,7 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
             type Output = ::std::string::String;
 
             fn invoke(
-                __context: &mut ::xlfn::__private::ReturnContext<'_>,
+                __context: &mut ::xlfn::__private::ReturnContext<'_, '_>,
                 __operation: impl ::core::ops::FnOnce()
                     -> ::xlfn::error::XllResult<Self>,
             ) -> ::xlfn::error::XllResult<Self::Output> {
@@ -321,7 +322,7 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
 
             fn into_excel(
                 self,
-                __context: &mut ::xlfn::__private::ReturnContext<'_>,
+                __context: &mut ::xlfn::__private::ReturnContext<'_, '_>,
             ) -> ::xlfn::error::XllResult<Self::Output> {
                 __context.publish_new_handle(|| ::core::result::Result::Ok(self))
             }
@@ -640,14 +641,6 @@ fn expand_excel_function(
         argument_names.push(pattern.ident.clone());
         argument_types.push(argument.ty.as_ref().clone());
     }
-    if is_async && let Some(borrowed) = argument_types.iter().find(|ty| is_borrowed_array_type(ty))
-    {
-        return Err(syn::Error::new_spanned(
-            borrowed,
-            "borrowed Excel array arguments cannot be used by an asynchronous UDF; use Matrix<T> or Vec<T> when the input must outlive the exported call",
-        ));
-    }
-
     let raw_names = (0..argument_names.len())
         .map(|index| format_ident!("__raw_{index}"))
         .collect::<Vec<_>>();
@@ -704,8 +697,14 @@ fn expand_excel_function(
         ContextKind::MainThread => quote!(::xlfn::context::MainThreadContext::new(
             __state,
             &crate::__XLFN_RUNTIME,
+            __call_scope,
         )),
-        ContextKind::MacroSheet => quote!(::xlfn::context::MacroSheetContext::new(__state)),
+        ContextKind::MacroSheet => {
+            quote!(::xlfn::context::MacroSheetContext::new(
+                __state,
+                __call_scope
+            ))
+        }
         ContextKind::Async => {
             quote!(::xlfn::context::AsyncContext::new(__state, __cancellation))
         }
@@ -780,6 +779,8 @@ fn expand_excel_function(
         .map(|((((converted, ty), argument), raw), options)| {
             let conversion = if options.reference {
                 quote! {
+                    // SAFETY: Excel supplies the live reference pointer and
+                    // raw argument slot for this ABI call.
                     unsafe {
                         ::xlfn::__private::reference_from_raw(#argument, #raw)
                     }
@@ -792,6 +793,8 @@ fn expand_excel_function(
                     {
                         #async_assertion
                         ::xlfn::__private::assert_excel_parameter::<#ty>(__call_scope);
+                        // SAFETY: Excel supplies the live XLOPER12 pointer and
+                        // raw argument slot for this ABI call.
                         unsafe {
                             ::xlfn::__private::argument_from_raw_with_context(
                                 __call_scope,
@@ -826,6 +829,8 @@ fn expand_excel_function(
                     quote!()
                 };
                 quote! {
+                    // SAFETY: the raw argument belongs to the current Excel
+                    // call and is validated by the conversion boundary.
                     let #converted: #ty = match unsafe {
                         ::xlfn::__private::cell_presence_from_raw(#argument, #raw)
                     }? {
@@ -879,21 +884,26 @@ fn expand_excel_function(
                     let __raw_arguments:
                         [*mut ::xlfn::sys::XLOPER12; #raw_argument_count] =
                         [#(#raw_names),*];
-                    let mut __return_context = unsafe {
-                        ::xlfn::__private::ReturnContext::for_call(
-                            &crate::__XLFN_RUNTIME,
-                            #udf_id,
-                            &__raw_arguments,
+                    // SAFETY: the raw argument array and runtime belong to
+                    // this Excel ABI invocation.
+                    ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                        let mut __return_context = unsafe {
+                            ::xlfn::__private::ReturnContext::for_call(
+                                &crate::__XLFN_RUNTIME,
+                                #udf_id,
+                                &__raw_arguments,
+                                __call_scope,
+                            )
+                        };
+                        ::xlfn::convert::ExcelReturn::invoke(
+                            &mut __return_context,
+                            || {
+                                #context_setup
+                                #(#conversions)*
+                                ::core::result::Result::Ok(#invocation)
+                            },
                         )
-                    };
-                    ::xlfn::convert::ExcelReturn::invoke(
-                        &mut __return_context,
-                        || ::xlfn::__private::with_excel_call_scope(|__call_scope| {
-                            #context_setup
-                            #(#conversions)*
-                            ::core::result::Result::Ok(#invocation)
-                        }),
-                    )
+                    })
                 },
             )
         }
@@ -902,12 +912,15 @@ fn expand_excel_function(
         quote! {
             #gating
             #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
+            #[doc = ""]
+            #[doc = "# Safety"]
+            #[doc = "Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_names: *mut ::xlfn::sys::XLOPER12,)*
                 __async_handle: *mut ::xlfn::sys::XLOPER12,
             ) {
-                ::xlfn::__private::ffi_boundary_void(|| {
+                ::xlfn::__private::ffi_boundary_void(&crate::__XLFN_RUNTIME, || {
                     #boundary
                 })
             }
@@ -1028,6 +1041,15 @@ fn expand_excel_addin(
         > = ::xlfn::__private::Runtime::new();
 
         #gating
+        #[doc(hidden)]
+        static __XLFN_ADDIN_ID: ::std::sync::OnceLock<
+            ::core::result::Result<
+                ::xlfn::__private::AddinId,
+                ::xlfn::__private::InvalidAddinId,
+            >
+        > = ::std::sync::OnceLock::new();
+
+        #gating
         #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
         #[used]
         #[unsafe(link_section = ".drectve")]
@@ -1042,11 +1064,19 @@ fn expand_excel_addin(
             *b"xlAutoOpen\0xlAutoClose\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
 
         #gating
-        ::xlfn::__xlfn_async_exports!();
+        ::xlfn::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
+            let __addin_id = match crate::__XLFN_ADDIN_ID.get_or_init(|| {
+                ::xlfn::__private::AddinId::parse(
+                    <#ident as ::xlfn::addin::AddinMetadata>::ID,
+                )
+            }) {
+                Ok(__addin_id) => __addin_id,
+                Err(_) => return 0,
+            };
             let mut __descriptors =
                 ::xlfn::__private::inventory::iter::<
                     ::xlfn::__private::RegistrationDescriptor
@@ -1063,7 +1093,7 @@ fn expand_excel_addin(
             __descriptors.sort_unstable_by_key(|__descriptor| __descriptor.excel_name);
             ::xlfn::__private::open_addin::<#ident>(
                 &crate::__XLFN_RUNTIME,
-                <#ident as ::xlfn::addin::AddinMetadata>::ID,
+                __addin_id,
                 env!("CARGO_PKG_VERSION"),
                 ::xlfn::__private::BUILD_TARGET,
                 &__descriptors,
@@ -1085,6 +1115,7 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAutoFree12(
             __pointer: *mut ::xlfn::sys::XLOPER12,
         ) {
+            // SAFETY: Excel passes the live return pointer produced by this XLL.
             let __free_operation =
                 unsafe { ::xlfn::__private::free_return_boundary(__pointer) };
             ::core::mem::drop(__free_operation);
@@ -1103,6 +1134,8 @@ fn expand_excel_addin(
                 &crate::__XLFN_RUNTIME,
                 || {
                     ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                        // SAFETY: Excel supplies `__action` as a live XLOPER12
+                        // for this ABI call.
                         let __action: f64 = unsafe {
                             ::xlfn::__private::argument_from_raw(
                                 __call_scope,
@@ -1132,6 +1165,8 @@ fn expand_excel_addin(
             __interface_id: *const ::core::ffi::c_void,
             __output: *mut *mut ::core::ffi::c_void,
         ) -> i32 {
+            // SAFETY: Excel/COM supplies the three live ABI pointers for this
+            // entry point, and the boundary validates their use.
             unsafe {
                 ::xlfn::__private::dll_get_class_object(
                     __class_id,

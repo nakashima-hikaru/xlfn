@@ -1,6 +1,10 @@
-name = "ExcelXllFormal"
+name = "XlFnFormal"
 version = "0.1.0"
-defaultTargets = ["ExcelXllFormal"]
+defaultTargets = ["XlFnFormal"]
 
 [[lean_lib]]
-name = "ExcelXllFormal"
+name = "XlFnFormal"
+
+[[lean_exe]]
+name = "shutdown_trace_checker"
+root = "XlFnFormal.Shutdown.TraceChecker"

@@ -1,242 +1,93 @@
-# Native objects as handles
+# External objects as formula handles
 
-A common add-in API creates an opaque native object in one formula and consumes it in other functions. Combine formula-owned `Handle<T>` values with worker-owned native storage; do not put a raw native pointer directly in the formula-owned Rust object unless its thread and destruction contract genuinely permit arbitrary-thread drop.
+A worksheet formula can own an application object through xlfn's `Handle<T>`. xlfn manages the authenticated formula token and the lifetime of the Rust value `T`; it does not create, validate, or destroy the corresponding object in an external engine.
 
-## Recommended representation
+## Store a safe adapter reference and logical identity
 
-For a pool of thread-affine contexts, store native objects inside the owning worker and expose a logical identifier:
+For an external object, the formula-owned Rust type should normally contain:
 
-```rust
-#[derive(Clone, Copy)]
-struct NativeObjectId(u64);
+- a cloneable, `Send + Sync` application-adapter reference;
+- a typed logical object identifier;
+- any application identity needed to reject cross-engine or cross-session use;
+- synchronized release state when explicit close and `Drop` can race.
 
-struct NativeContext {
-    next_id: u64,
-    objects: HashMap<u64, NonNull<native_object>>,
-    api: ConcurrentLibrary<NativeApi>,
-    raw: NonNull<native_context>,
-}
+```rust,ignore
+use std::sync::Arc;
+use xlfn::prelude::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct CurveId(u64);
 
 #[derive(ExcelHandleObject)]
-pub struct Dataset {
-    inner: Arc<NativeResource<DatasetSpec>>,
-}
-
-trait ResourceSpec: Send + Sync + 'static {
-    type Id: Copy + Send + Sync + 'static;
-    fn destroy(context: &mut NativeContext, id: Self::Id) -> Result<(), Error>;
-}
-
-struct NativeResource<S: ResourceSpec> {
-    id: S::Id,
-    context: ContextIdentity,
-    engine: Arc<EngineInner>,
-    release: Arc<ReleaseState>,
-    marker: PhantomData<fn() -> S>,
+pub struct Curve {
+    adapter: Arc<EngineAdapter>,
+    id: CurveId,
 }
 ```
 
-The formula-owned object is `Send + Sync` because it contains only an immutable
-logical ID, an opaque context identity, shared engine lifecycle state, and synchronized
-release state. The raw pointer remains in the worker-local map. Using a typed
-resource specification binds each ID kind to its destructor.
+`EngineAdapter` and `CurveId` are application types. The adapter may represent a direct Rust engine, a library, a process, a service, or another implementation. xlfn has no knowledge of that choice.
 
-## Creation
+Avoid storing a raw external pointer in a formula-owned object unless the application has independently proved that movement, concurrent access, and destruction from every possible drop thread are valid. Adding unsafe `Send` or `Sync` implementations merely to satisfy `ExcelHandleObject` hides rather than enforces the external contract.
 
-Create independent top-level resources directly through the engine. Worker
-selection and native creation are one executor operation:
+## Create and consume
 
-```rust
-#[excel_function(name = "DATASET.CREATE")]
-fn dataset_create(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, State>,
-    rate: f64,
-) -> Result<Dataset, Error> {
-    context.state().engine.create_dataset(rate)
+A handle producer returns the application object itself. A consumer receives `Handle<T>` and calls the application's safe adapter API.
+
+```rust,ignore
+#[excel_function(name = "CURVE.CREATE")]
+fn curve_create(
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
+    quotes: Row<f64>,
+) -> XllResult<Curve> {
+    context.state().engine.create_curve(quotes.into_vec())
+}
+
+#[excel_function(name = "CURVE.DISCOUNT", thread_safe)]
+fn curve_discount(curve: Handle<Curve>, time: f64) -> XllResult<f64> {
+    curve.adapter.discount(curve.id, time)
 }
 ```
 
-Create a context-pinned session when resources may reference one another, then
-create all of them through that session:
+The producer is a main-thread function because it returns a newly constructed handle object. The adapter may perform its own work elsewhere, provided the producer returns only after it has a valid Rust object to publish.
 
-```rust
-fn create_session(&self) -> Result<EngineSession, Error> {
-    let _lease = self.inner.admission.enter()?;
-    let (worker, ()) = self.inner.workers.call_with_worker(|_| Ok(()))?;
-    Ok(EngineSession {
-        engine: Arc::clone(&self.inner),
-        context: ContextIdentity::new(worker),
-    })
-}
+The consumer must validate application-level identity before dispatch. For example, reject an object identifier from another engine instance or session rather than relying only on its numeric value.
 
-fn create_dataset(&self, rate: f64) -> Result<Dataset, Error> {
-    let id = self.engine.workers.call_on(self.context.worker(), move |context| {
-        context.create_dataset(rate, Vec::new())
-    })?;
-    Ok(Dataset {
-        inner: Arc::new(NativeResource {
-            id,
-            context: self.context,
-            engine: Arc::clone(&self.engine),
-            release: Arc::new(ReleaseState::new()),
-            marker: PhantomData,
-        }),
-    })
-}
+## Destruction belongs to the adapter
 
-```
+When the last Rust reference is dropped, xlfn only drops `Curve`. The application adapter must decide how the external object is released.
 
-The worksheet producer is main-thread because it returns a new handle object. The native creation itself may execute on the owner worker.
+During ordinary operation, `Drop` may enqueue a non-blocking release request to the owning adapter rather than call a thread-affine external destructor directly. Important constraints are:
 
-## Use from an async UDF
+- explicit close and `Drop` cannot destroy the same object twice;
+- a failed or rejected release remains visible to final adapter shutdown;
+- release submission never blocks indefinitely;
+- cleanup failures are diagnosed because `Drop` cannot return them to Excel;
+- object destruction never calls Excel.
 
-```rust
-#[excel_function(name = "DATASET.COMPUTE")]
-async fn dataset_fetch_data(
-    #[excel_context(asynchronous)] context: AsyncContext<State>,
-    dataset: Handle<Dataset>,
-    factor: f64,
-    beta: f64,
-) -> Result<f64, Error> {
-    let engine = &context.state().engine;
-    dataset.inner.validate_engine(engine)?;
-    let _lease = engine.inner.admission.enter()?;
-    dataset.inner.release.ensure_release_not_requested()?;
-    let id = dataset.inner.id;
-    match engine
-        .inner
-        .workers
-        .call_on_async(dataset.inner.context.worker(), move |native| {
-            native.fetch_data(id, alpha, beta)
-        })
-        .await
-    {
-        Ok(value) => Ok(value),
-        Err(WorkerCallError::User(error)) => Err(error),
-        Err(WorkerCallError::Infrastructure(error)) => Err(Error::Worker(error)),
-    }
-}
-```
+At XLL close, `Addin::quiesce` runs before xlfn closes the formula-handle registry. Formula-owned Rust wrappers can therefore still exist while the application must stop its workers. The adapter must maintain an independent registry of live external objects, destroy or invalidate all of them during `quiesce`, and make later wrapper drops idempotent no-ops or local bookkeeping only. A handle `Drop` must not require a worker that `quiesce` has already joined.
 
-Check same engine, same context, and open state before dispatch. Do not expose
-`PoolWorkerId` as domain identity: it is an executor detail, while
-`ContextIdentity` states the native pointer-compatibility contract.
+If release can fail and callers need to observe the result, provide an explicit application operation in addition to `Drop`. The automatic drop path is a normal-runtime convenience and final local safety net, not the sole shutdown protocol.
 
-## Destruction
+## Dependencies between external objects
 
-The formula-owned wrapper should enqueue destruction on the same worker:
+When one external object depends on another, record that relationship in the application adapter or external engine. Keeping only a Rust `Arc` to another formula handle is insufficient when explicit external close can invalidate the shared object while Rust references remain.
 
-```rust
-impl Dataset {
-    fn close(&self) -> Result<(), Error> {
-        self.inner.close()
-    }
-}
-
-impl<S: ResourceSpec> NativeResource<S> {
-    fn close(&self) -> Result<(), Error> {
-        let _lease = self.engine.admission.enter()?;
-        if !self.release.begin_or_wait()? {
-            return Ok(());
-        }
-        let id = self.id;
-        let result = self.engine.workers.call_on(self.context.worker(), move |context| {
-            S::destroy(context, id)
-        });
-        self.release.complete_from(&result);
-        result?
-    }
-}
-
-impl<S: ResourceSpec> Drop for NativeResource<S> {
-    fn drop(&mut self) {
-        let Ok(_lease) = self.engine.admission.enter() else {
-            return;
-        };
-        if !self.release.claim_for_drop() {
-            return;
-        }
-        let id = self.id;
-        let release = self.release.clone();
-        if let Err(error) = self.engine.workers.enqueue_release_on(
-            self.context.worker(),
-            move |context| release.complete(S::destroy(context, id)),
-        ) {
-            self.release.complete_indeterminate(error);
-        }
-    }
-}
-```
-
-`ReleaseState` uses `Mutex<ReleasePhase>` plus `Condvar`, where the phases are
-`Open`, `Releasing`, `Released`, `Failed`, and `Indeterminate`. A second
-`close` waits while the first is `Releasing` and then returns the same outcome.
-An atomic boolean is insufficient because it cannot distinguish “release was
-requested” from “release completed successfully.”
-
-`enqueue_release_on` is non-blocking, bypasses normal operation capacity, and
-shares FIFO order with accepted operations. It can still fail after worker
-shutdown or panic, so that failure is recorded as indeterminate. The design
-also requires all of the following:
-
-- the owner remains alive until all formula-owned objects have been released;
-- a failed native destructor leaves the object registered for final cleanup;
-- the worker-side context performs fallible finalization before `Drop`, then
-  destroys any residual objects in `Drop` as a best-effort fallback;
-- explicit close and queued cleanup cannot destroy the same object twice.
-
-Worker-side destruction must use `lookup → native destroy → remove`; removing
-the pointer before the native call can leak it if call admission fails.
-Destructors cannot return errors to the worksheet, so important cleanup
-failures must be diagnosed.
-
-## Dependencies between native resources
-
-When one native object retains or refers to another, register that edge at
-creation. Each registry entry stores dependency keys, dependent count, and a
-monotonic creation sequence. Explicit close returns `ResourceInUse` while any
-dependent remains. Shutdown repeatedly destroys zero-dependent entries; among
-equally eligible entries it selects the newest creation first. Because a new
-entry can depend only on already-open entries in the same session, the graph
-remains acyclic and this is a deterministic reverse-topological order.
-The dependency list is a set. Repeating the same resource key is rejected
-before native creation, so each edge increments the parent's dependent count
-exactly once.
-
-Keeping only an `Arc` to a parent Rust handle is insufficient: explicit close
-affects the shared native object even while Rust clones remain. The dependency
-edge must therefore live in the worker registry that owns native destruction.
-
-## Shutdown ordering
-
-The framework closes handle topics before application state is finally released, but application architecture should not rely on an undocumented incidental drop order. Make the shutdown protocol explicit:
-
-1. stop new worksheet/application submissions;
-2. let framework-managed formula handles release or mark the engine closing;
-3. flush logical object-release jobs;
-4. destroy remaining native objects defensively on their owner workers;
-5. shut down and join every owner;
-6. release the loaded DLL.
-
-A worker context's destructor should regard its object map as the final safety net and destroy each remaining object exactly once.
+Use typed identifiers and an application-owned dependency graph or ownership tree. Define deterministic shutdown ordering and reject cross-session dependency edges.
 
 ## Re-evaluation and replacement
 
-A handle producer runs on every Excel evaluation. For the same formula identity, xlfn replaces the Rust `Dataset` behind the stable token after successful observation. The old `Dataset` is then dropped and should release its previous native object.
+A handle-producing formula executes on every Excel evaluation. For the same formula identity, xlfn preserves the visible token and replaces the Rust object after successful observation. The previous Rust object is then dropped.
 
-This means a producer such as `DATASET.CREATE(value)` may create and destroy native objects on each recalculation. When that cost is undesirable, design inputs and workbook volatility carefully, or add an application cache keyed by immutable dataset content. Do not depend on the handle system to skip the producer body.
+Consequently, a producer may create and release an external object on each recalculation. When that is too expensive, use an application cache keyed by immutable inputs or change the workbook calculation design. Do not expect the handle runtime to skip the producer body.
 
-## Avoid raw-pointer handle objects
+## Shutdown ordering
 
-This is usually unsound or operationally fragile:
+Do not rely on an incidental drop order between formula objects and application state. The implemented close order is relevant: xlfn calls `Addin::quiesce`, then closes the formula-handle registry, then calls `Addin::cleanup`. The adapter should therefore use this sequence:
 
-```rust,ignore
-#[derive(ExcelHandleObject)]
-struct BadDataset {
-    raw: NonNull<native_dataset>,
-}
-```
+1. stop new application submissions and mark the adapter closing;
+2. destroy or invalidate every registered external object in dependency order while owner threads are still available;
+3. join owner threads or close external sessions before `quiesce` returns;
+4. let the subsequent xlfn handle-registry close drop Rust wrappers without performing external work;
+5. use `Addin::cleanup` only for bounded best-effort disposal of already-quiescent state.
 
-The derive requires `Send + Sync`, and the object may be dropped on a lifecycle or formula-management thread rather than the native creation thread. Adding unsafe `Send`/`Sync` impls merely to satisfy the derive hides the native contract instead of enforcing it.
-
-Use a logical ID and owner-worker submission handle unless the native explicitly guarantees arbitrary-thread movement, shared access, and destruction.
+xlfn enforces its own handle-runtime quiescence, but external object quiescence is the application's responsibility and must be completed by `Addin::quiesce`.

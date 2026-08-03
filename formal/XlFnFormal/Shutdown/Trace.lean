@@ -1,8 +1,8 @@
-import ExcelXllFormal.Shutdown.Transition
+import XlFnFormal.Shutdown.Transition
 
 set_option autoImplicit false
 
-namespace ExcelXllFormal.Shutdown
+namespace XlFnFormal.Shutdown
 
 /-- Reflexive-transitive execution carrying the exact event trace. -/
 inductive Steps : State → List Event → State → Prop where
@@ -58,4 +58,4 @@ theorem reachable
 
 end Steps
 
-end ExcelXllFormal.Shutdown
+end XlFnFormal.Shutdown

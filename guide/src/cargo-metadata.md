@@ -33,7 +33,7 @@ explicit CLI `--crt`, then this metadata value, then the `static` default.
 
 ## Bundle metadata
 
-List sidecar files by target:
+List optional sidecar files by target. Bundle metadata controls staging and PE dependency validation; it does not define or implement runtime loading:
 
 ```toml
 [package.metadata.xlfn.bundle]
@@ -54,13 +54,13 @@ strict-paths = true
 | `x86` | array of strings | files packaged for `i686-pc-windows-msvc` |
 | `x64` | array of strings | files packaged for `x86_64-pc-windows-msvc` |
 | `external-imports` | array of strings | approved non-system DLL basenames supplied outside the package |
-| `strict-paths` | Boolean | reject symbolic links/reparse points in configured source paths; defaults to `true` |
+| `strict-paths` | Boolean | reject symbolic links/reparse points present in configured source paths; defaults to `true` |
 
 Unknown fields are rejected.
 
 ### Bundle path rules
 
-Every configured native path must:
+Every configured bundle path must:
 
 - be a non-empty relative path;
 - contain only normal path components—no root, drive prefix, `.` or `..`;
@@ -69,7 +69,7 @@ Every configured native path must:
 - have a case-insensitively unique output basename;
 - not collide with `<artifact-name>.xll` or `build-manifest.json`.
 
-With `strict-paths = true`, each configured component is also rejected when it is a symbolic link or Windows reparse point. This is the default, including when the key is omitted. To relax the check, set `strict-paths = false` explicitly; that still enforces canonical containment but permits links, and should be limited to a controlled development workflow whose trust boundary is documented.
+With `strict-paths = true`, each configured component is also rejected when it is a symbolic link or Windows reparse point at validation time. This is the default, including when the key is omitted. The check is path-based and does not protect against a concurrent adversary replacing a checked component between validation and open; use an immutable or otherwise trusted manifest tree when that threat is in scope. To relax the check, set `strict-paths = false` explicitly; that still enforces canonical containment but permits links, and should be limited to a controlled development workflow whose trust boundary is documented.
 
 The output package is flat. Directory structure in configured paths is not preserved, so basename uniqueness is mandatory.
 
@@ -83,7 +83,7 @@ external-imports = ["OrganizationRuntime.dll"]
 
 Paths and non-DLL names are rejected. Matching is case-insensitive.
 
-This option is an explicit deployment exception: the dependency need not be packaged because the deployment environment promises to resolve it. Do not list a missing native DLL merely to make validation pass. Record who installs the dependency, where it is loaded from, how it is versioned, and how its bitness is controlled.
+This option is an explicit deployment exception: the dependency need not be packaged because the deployment environment promises to resolve it. Do not list a missing application dependency merely to make validation pass. Record who installs the dependency, where it is loaded from, how it is versioned, and how its bitness is controlled.
 
 Windows system imports are accepted by the versioned built-in `windows-system-v1` policy. Every other direct or transitive import must resolve to a packaged basename or an approved external import.
 
@@ -146,7 +146,7 @@ Every distribution directory contains schema version 6 audit metadata. Its top-l
 | `integrity` | explicit trust-boundary statement |
 | `files` | relative path, byte size, and SHA-256 for every distributed file |
 
-The integrity block deliberately states that hashes are **audit metadata only** and are not verified before native code executes. Windows loads and initializes a DLL before application-level ABI checks can run. Use access-controlled installation directories and code signing for runtime trust; do not treat the JSON file as a secure loader.
+The integrity block deliberately states that hashes are **audit metadata only** and are not verified before executable sidecar code runs. Windows may load and initialize a DLL before application-level protocol or ABI checks can run. Use access-controlled installation directories and code signing for runtime trust; do not treat the JSON file as a secure loader.
 
 ## Metadata review checklist
 

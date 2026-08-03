@@ -1,0 +1,220 @@
+error[E0277]: `Rc<()>` cannot be sent between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `Rc<()>` cannot be sent between threads safely
+   |
+   = help: within `xlfn::convert::XlArrayRef<'_>`, the trait `Send` is not implemented for `Rc<()>`
+note: required because it appears within the type `PhantomData<Rc<()>>`
+  --> $RUST/core/src/marker.rs
+   |
+   | pub struct PhantomData<T: PointeeSized>;
+   |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `*mut u16` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `*mut u16` cannot be shared between threads safely
+   |
+   = help: within `[xlfn::sys::XLOPER12]`, the trait `Sync` is not implemented for `*mut u16`
+note: required because it appears within the type `xlfn::sys::XLOPER12Value`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12Value {
+   |           ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12 {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `[xlfn::sys::XLOPER12]`
+   = note: required for `&[xlfn::sys::XLOPER12]` to implement `Send`
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `*mut xlfn::sys::XLMREF12` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `*mut xlfn::sys::XLMREF12` cannot be shared between threads safely
+   |
+   = help: within `[xlfn::sys::XLOPER12]`, the trait `Sync` is not implemented for `*mut xlfn::sys::XLMREF12`
+note: required because it appears within the type `xlfn::sys::XLOPER12MRef`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12MRef {
+   |            ^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12Value`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12Value {
+   |           ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12 {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `[xlfn::sys::XLOPER12]`
+   = note: required for `&[xlfn::sys::XLOPER12]` to implement `Send`
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `*mut xlfn::sys::XLOPER12` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `*mut xlfn::sys::XLOPER12` cannot be shared between threads safely
+   |
+   = help: within `[xlfn::sys::XLOPER12]`, the trait `Sync` is not implemented for `*mut xlfn::sys::XLOPER12`
+note: required because it appears within the type `xlfn::sys::XLOPER12Array`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12Array {
+   |            ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12Value`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12Value {
+   |           ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12 {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `[xlfn::sys::XLOPER12]`
+   = note: required for `&[xlfn::sys::XLOPER12]` to implement `Send`
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `*mut u8` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `*mut u8` cannot be shared between threads safely
+   |
+   = help: within `[xlfn::sys::XLOPER12]`, the trait `Sync` is not implemented for `*mut u8`
+note: required because it appears within the type `xlfn::sys::XLOPER12BigDataHandle`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12BigDataHandle {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12BigData`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12BigData {
+   |            ^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12Value`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12Value {
+   |           ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12 {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `[xlfn::sys::XLOPER12]`
+   = note: required for `&[xlfn::sys::XLOPER12]` to implement `Send`
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `*mut c_void` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_array_alias.rs:18:22
+   |
+18 | async fn bad(values: BorrowedArray<'_>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^ `*mut c_void` cannot be shared between threads safely
+   |
+   = help: within `[xlfn::sys::XLOPER12]`, the trait `Sync` is not implemented for `*mut c_void`
+note: required because it appears within the type `xlfn::sys::XLOPER12BigDataHandle`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12BigDataHandle {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12BigData`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12BigData {
+   |            ^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12Value`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub union XLOPER12Value {
+   |           ^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::sys::XLOPER12`
+  --> $WORKSPACE/crates/xlfn-sys/src/types.rs
+   |
+   | pub struct XLOPER12 {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `[xlfn::sys::XLOPER12]`
+   = note: required for `&[xlfn::sys::XLOPER12]` to implement `Send`
+note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub struct XlArrayRef<'call> {
+   |            ^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`

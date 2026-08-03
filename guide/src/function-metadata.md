@@ -35,6 +35,10 @@ fn calculate_area(
 
 The `id` must be a Rust identifier fragment: ASCII letters, digits, and underscores, not beginning with a digit. It becomes part of an exported symbol and should remain stable once released.
 
+Excel-visible function names use one ASCII case-insensitive identity rule for
+duplicate validation and cleanup. Unicode case folding is not applied; if a
+project uses non-ASCII names, their exact non-ASCII code points remain distinct.
+
 ## Argument metadata
 
 ```rust

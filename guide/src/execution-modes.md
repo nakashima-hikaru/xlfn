@@ -7,13 +7,13 @@ xlfn separates Excel-visible arguments from injected capabilities. A context, wh
 ```rust
 #[excel_function(name = "APP.DESK")]
 fn desk(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
 ) -> String {
     context.state().desk.clone()
 }
 ```
 
-`MainThreadContext` is neither `Send` nor `Sync`. It gives access to state and to `subscribe`, which establishes a streaming RTD dependency. Formula-owned object producers also use main-thread return semantics, even when they do not explicitly request a context.
+`MainThreadContext` is neither `Send` nor `Sync`. Its two inferred lifetimes are the state borrow and the current Excel-call scope; the scope lifetime keeps callback capability tied to the invocation. It gives access to state and to `subscribe`, which establishes a streaming RTD dependency. Formula-owned object producers also use main-thread return semantics, even when they do not explicitly request a context.
 
 Do not combine a main-thread context with `thread_safe`.
 
@@ -35,14 +35,14 @@ fn version(
 ```rust
 #[excel_function(name = "APP.RANGE.NAME")]
 fn range_name(
-    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, State>,
+    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, '_, State>,
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<String> {
     context.sheet_name(&reference)
 }
 ```
 
-A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`. It provides:
+A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; like `MainThreadContext`, its second inferred lifetime is the current Excel-call scope. It provides:
 
 - `coerce` for an owned `OwnedExcelValue`;
 - `coerce_matrix<T>` for an owned matrix;

@@ -66,7 +66,7 @@ Typical causes:
 - a blank or missing policy rejected the argument;
 - invalid UTF-16 or malformed array/reference structure;
 - a failed Excel callback or coercion;
-- an internal or native adapter error.
+- an internal or application-adapter error.
 
 Check the argument named in diagnostics. xlfn does not perform broad Excel coercion for ordinary parameters.
 
@@ -109,7 +109,7 @@ Test the object's behavior or expose a safe version field rather than using toke
 - Ensure the future retains every needed owned input and does not wait on a resource that requires the Excel thread.
 - Verify that an external client actually wakes the future.
 
-A cancellation token cannot interrupt a blocking foreign call. Instrument queue wait and native execution separately.
+A cancellation token cannot interrupt a blocking foreign call. Instrument queue wait and adapter execution separately.
 
 ## RTD does not update
 
@@ -125,9 +125,9 @@ A cancellation token cannot interrupt a blocking foreign call. Instrument queue 
 
 A tight retry loop after a permanent publish failure can create an error storm and fill diagnostics.
 
-## Native DLL fails to load
+## External adapter fails to initialize
 
-Typical diagnostics include path-resolution failure, unsupported platform, missing symbol, symbol lookup error, ABI mismatch, or wrong architecture.
+Typical diagnostics depend on the application adapter and may include configuration failure, path-resolution failure, missing sidecar, protocol mismatch, authentication failure, unavailable service, missing symbol, ABI mismatch, or wrong architecture.
 
 Check:
 
@@ -135,26 +135,21 @@ Check:
 2. x86 and x64 metadata point to the correct files;
 3. the DLL and all non-system dependencies are in the package;
 4. required symbols match spelling and decoration;
-5. the ABI version function returns the expected value;
+5. any application-defined protocol or ABI negotiation returns the expected version;
 6. antivirus or policy did not block the DLL;
 7. the final installation directory has not been modified.
 
-Use an external PE inspection tool and `cargo xlfn check`; do not "fix" a missing required symbol by making it optional.
+For packaged PE components, use an external PE inspection tool and `cargo xlfn check`. For other adapters, use the diagnostics and qualification tools appropriate to the chosen transport. Do not weaken a required contract merely to bypass initialization failure.
 
-## Native calls serialize unexpectedly
+## External calls serialize unexpectedly
 
-`SerializedLibrary<A>` serializes calls per canonical DLL path. A worker pool does not bypass that
-gate.
-
-Only call `VerifiedLibrary::assume_concurrent` when the native contract covers concurrent
-functions, contexts, object operations, callbacks, and destruction. Then measure whether Excel
-MTR, worker selection, and backend capacity actually produce concurrency.
+Serialization is an application-adapter policy, not an xlfn runtime policy. Inspect the adapter's locks, queue topology, per-session affinity, downstream rate limits, and external implementation contract. Multiple Excel MTR calls or multiple application workers do not imply downstream concurrency. Enable concurrent dispatch only when the complete application contract covers calls, contexts, object operations, callbacks, and destruction, then measure actual throughput.
 
 ## Excel hangs during close
 
 A safe XLL close waits for in-process work to become quiescent. A hang usually indicates:
 
-- running native code cannot be cancelled or bounded;
+- running external or application code cannot be cancelled or bounded;
 - an RTD subscription did not honor `request_cancel`;
 - `disconnect_and_wait` waits for a callback that needs a held lock;
 - application-owned background work was not joined;
@@ -166,9 +161,9 @@ Do not add a timeout that lets Excel unload while code may still execute. Captur
 ## `cargo xlfn dist` refuses paths or imports
 
 - `artifact-name` must be a valid non-reserved Windows basename.
-- Native metadata paths are relative to the package manifest directory.
-- Native basenames must be unique case-insensitively and must not collide with the XLL or `build-manifest.json`.
-- With `strict-paths = true`, configured paths cannot traverse symlinks or reparse points.
+- Bundle metadata paths are relative to the package manifest directory.
+- Bundled basenames must be unique case-insensitively and must not collide with the XLL or `build-manifest.json`.
+- With `strict-paths = true`, configured paths reject symlinks or reparse points observed during validation; protect the manifest tree from concurrent mutation when that threat is in scope.
 - Every non-system import must be packaged or explicitly approved as an external import.
 - `dist --all` requires a dedicated replaceable output directory.
 
@@ -176,4 +171,4 @@ When commit and rollback both fail, preserve and inspect the recovery path repor
 
 ## Escalating an issue
 
-A useful OSS issue contains a minimal reproducer, exact command output, environment matrix, diagnostic IDs, and a statement of whether the failure occurs in Rust tests, package validation, or real Excel. Remove proprietary workbooks and native binaries unless redistribution is authorized; replace them with a minimal mock when possible.
+A useful OSS issue contains a minimal reproducer, exact command output, environment matrix, diagnostic IDs, and a statement of whether the failure occurs in Rust tests, package validation, or real Excel. Remove proprietary workbooks and external binaries unless redistribution is authorized; replace them with a minimal mock when possible.

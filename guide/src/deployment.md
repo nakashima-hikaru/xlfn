@@ -1,6 +1,6 @@
 # Deployment and distribution
 
-A deployable add-in is a versioned directory, not an isolated `.xll` file. Build, validate, sign, and install the XLL together with every packaged native dependency and its audit manifest.
+A deployable add-in is a versioned directory, not an isolated `.xll` file. Build, validate, sign, and install the XLL together with every packaged sidecar required by the application and its audit manifest.
 
 ## Produce target directories
 
@@ -23,7 +23,7 @@ The `--all` operation stages and validates both targets before replacing the out
 Each target directory contains:
 
 - `<artifact-name>.xll`;
-- configured native DLLs and their packaged dependencies;
+- configured sidecar files and their packaged PE dependencies;
 - `build-manifest.json`.
 
 The manifest records schema version 6, package and artifact identity, target, profile, selected
@@ -31,7 +31,7 @@ features, requested and observed CRT policy, configured/resolved bundle sources,
 version, file sizes, and SHA-256 values. Its integrity section explicitly states that hashes are
 audit metadata and are not verified before DLL execution.
 
-Keep all files together. Renaming a native DLL or moving it to another directory can break both explicit loading and transitive imports.
+Keep all files together. Renaming a sidecar DLL or moving it to another directory can break both explicit loading and transitive imports.
 
 ## Versioning worksheet APIs
 
@@ -43,7 +43,7 @@ A released workbook depends on more than the crate's semantic version. Treat the
 - enum strings;
 - handle object types and producer semantics;
 - RTD topic identity;
-- native ABI version policy;
+- application-adapter protocol or ABI version policy;
 - add-in ID and category.
 
 Adding a new function is usually compatible. Renaming a function, changing argument order, changing a default, or changing an enum text can silently alter existing workbooks.
@@ -60,17 +60,17 @@ Avoid:
 - workbook-adjacent writable directories;
 - network shares without a deliberate trust policy;
 - search-path-dependent DLL placement;
-- copying only the XLL while resolving native DLLs from a global directory.
+- copying only the XLL while resolving application sidecars from an ambient global directory.
 
-The add-in loads a declared native DLL from its own module directory. Transitive dependencies still need to resolve according to Windows loader behavior and the validated package import closure.
+If the application adapter loads a packaged DLL, it should use an explicit path derived from the installed package rather than ambient search paths. xlfn does not perform that load. Transitive dependencies still resolve according to Windows loader behavior and the validated package import closure.
 
 ## Code signing
 
 Authenticode signing is intentionally external to xlfn because keys, hardware security modules, timestamps, and enterprise trust policy are deployment concerns. Sign:
 
 - the XLL;
-- every first-party native DLL;
-- native DLLs when redistribution terms and native signing policy permit;
+- every first-party executable sidecar;
+- third-party executable sidecars when redistribution terms and signing policy permit;
 - installers or package containers.
 
 Verify signatures after the final byte-producing step. Signing changes the file hash, so generate or update release audit metadata in the order required by your release system. Do not sign one set of bytes and distribute another.
@@ -86,7 +86,7 @@ An external import is an explicit deployment exception, not a general bypass. Us
 external-imports = ["approved-inbox-component.dll"]
 ```
 
-Do not add a missing native DLL to `external-imports` merely to pass the verifier.
+Do not add a missing application dependency to `external-imports` merely to pass the verifier.
 
 ## Upgrade and rollback
 
@@ -94,12 +94,12 @@ Do not overwrite a loaded XLL in place. Excel can retain module and DLL file han
 
 1. close every Excel process using the add-in;
 2. verify that no background Excel process remains;
-3. install the complete new target directory atomically or under a versioned path;
+3. install the complete new target directory transactionally with best-effort rollback, or publish it under a versioned path;
 4. preserve the previous signed directory for rollback;
 5. load the new version and run smoke tests;
 6. remove old versions only after the rollback window.
 
-When the add-in's native data format, token semantics, or RTD ownership schema changes, restart Excel rather than attempting an in-process hot swap.
+When the add-in's external data format or adapter protocol, token semantics, or RTD ownership schema changes, restart Excel rather than attempting an in-process hot swap.
 
 ## Distribution checklist
 

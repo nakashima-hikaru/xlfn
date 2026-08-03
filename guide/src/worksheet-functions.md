@@ -63,7 +63,7 @@ fn evaluate(dataset: Handle<Dataset>, time: f64) -> XllResult<f64> {
 }
 ```
 
-This includes application state, native libraries, caches, logging, and destruction paths. The attribute is not a performance hint; it is a contract with Excel.
+This includes application state, external adapters, caches, logging, and destruction paths. The attribute is not a performance hint; it is a contract with Excel.
 
 ## Return ownership
 

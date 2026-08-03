@@ -1,13 +1,28 @@
+//! Cargo subcommand for checking, staging, and distributing Rust Excel XLLs.
+//!
+//! `cargo xlfn check` validates the selected Windows target and CRT policy,
+//! while `cargo xlfn dist` builds a closed-world package and commits it through
+//! the transactional staging API in `xlfn-package`.
+
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs_err as fs;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, ErrorKind};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::undocumented_unsafe_blocks)]
+mod win32;
 
 mod crt;
 
@@ -48,9 +63,18 @@ enum Commands {
 #[derive(Args)]
 struct NewArgs {
     name: PathBuf,
-    /// Include empty XLL bundle metadata and vendor directories.
+    /// Include empty XLL bundle metadata and native directories.
     #[arg(long)]
     bundle: bool,
+    /// Use a local xlfn crate path in the generated manifest.
+    #[arg(long, conflicts_with_all = ["xlfn_git", "xlfn_rev"])]
+    xlfn_path: Option<PathBuf>,
+    /// Use an xlfn Git repository in the generated manifest.
+    #[arg(long, conflicts_with = "xlfn_path")]
+    xlfn_git: Option<String>,
+    /// Pin --xlfn-git to a specific revision.
+    #[arg(long, requires = "xlfn_git")]
+    xlfn_rev: Option<String>,
 }
 
 #[derive(Args)]
@@ -199,10 +223,31 @@ fn normalize_cargo_subcommand_args(mut args: Vec<std::ffi::OsString>) -> Vec<std
 fn run() -> Result {
     let args = normalize_cargo_subcommand_args(std::env::args_os().collect());
     match Cli::parse_from(args).command {
-        Commands::New(args) => scaffold(&args.name, args.bundle),
+        Commands::New(args) => {
+            let dependency = xlfn_dependency_spec(&args)?;
+            scaffold(&args.name, args.bundle, &dependency)
+        }
         Commands::Check(args) => check(&args),
         Commands::Dist(args) => distribute(&args),
     }
+}
+
+fn xlfn_dependency_spec(args: &NewArgs) -> Result<String> {
+    if let Some(path) = &args.xlfn_path {
+        let path = path.to_str().context("--xlfn-path must be valid UTF-8")?;
+        return Ok(format!("xlfn = {{ path = {path:?} }}"));
+    }
+    if let Some(git) = &args.xlfn_git {
+        let revision = args
+            .xlfn_rev
+            .as_deref()
+            .context("--xlfn-git requires --xlfn-rev for a pinned dependency")?;
+        return Ok(format!("xlfn = {{ git = {git:?}, rev = {revision:?} }}"));
+    }
+    Ok(format!(
+        "xlfn = {{ version = {:?} }}",
+        env!("CARGO_PKG_VERSION")
+    ))
 }
 
 fn check(args: &CheckArgs) -> Result {
@@ -245,8 +290,11 @@ fn check(args: &CheckArgs) -> Result {
             .prefix(".cargo-xlfn-check-")
             .tempdir()?;
         let package = staging_guard.path().join("package");
-        let staged_bundle = xlfn_package::stage_bundle(&bundle, &package)?;
-        let xll = package.join(format!("{}.xll", metadata.artifact_name));
+        let package_staging = xlfn_package::PrivateStagingDirectory::create(&package)?;
+        let staged_bundle = xlfn_package::stage_bundle(&bundle, &package_staging)?;
+        let xll = package_staging
+            .path()
+            .join(format!("{}.xll", metadata.artifact_name));
         if fs::symlink_metadata(&xll).is_ok() {
             bail!(
                 "bundle basename collides with generated XLL: {}",
@@ -306,57 +354,135 @@ fn is_reserved_distribution_name(name: &str, artifact_name: &str) -> bool {
         || name.eq_ignore_ascii_case("build-manifest.json")
 }
 
-fn scaffold(root: &Path, bundle: bool) -> Result {
+fn scaffold(root: &Path, bundle: bool, dependency: &str) -> Result {
+    scaffold_with_writer(root, bundle, dependency, |path, contents| {
+        fs::write(path, contents).map(|_| ())
+    })
+}
+
+fn scaffold_with_writer<F>(root: &Path, bundle: bool, dependency: &str, mut write_file: F) -> Result
+where
+    F: FnMut(&Path, &[u8]) -> io::Result<()>,
+{
     let canonical = if root == Path::new(".") {
         std::env::current_dir()?
     } else {
         root.to_path_buf()
     };
-    if root != Path::new(".") && root.exists() {
+    if root != Path::new(".") && fs::symlink_metadata(root).is_ok() {
         bail!("{} already exists", root.display());
     }
-    if root == Path::new(".") && root.join("Cargo.toml").exists() {
+    if root == Path::new(".") && fs::symlink_metadata(root.join("Cargo.toml")).is_ok() {
         bail!("Cargo.toml already exists in current directory");
+    }
+    if root == Path::new(".") && fs::symlink_metadata(root.join("src")).is_ok() {
+        bail!("src already exists in current directory");
     }
     let package_name = canonical
         .file_name()
         .and_then(|name| name.to_str())
         .context("project path must end in valid UTF-8")?;
     validate_project_name(package_name)?;
-    let version = env!("CARGO_PKG_VERSION");
     let artifact_name = pascal_name(package_name);
     let display_name = display_name(package_name);
     let excel_prefix = package_name.replace('-', "_").to_ascii_uppercase();
-    fs::create_dir_all(root.join("src"))?;
+    let destination = if root == Path::new(".") {
+        canonical.clone()
+    } else {
+        root.to_path_buf()
+    };
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staging_guard = tempfile::Builder::new()
+        .prefix(".cargo-xlfn-new-")
+        .tempdir_in(parent)?;
+    let staging = staging_guard.path().join("project");
+    fs::create_dir_all(staging.join("src"))?;
     let bundle_metadata = if bundle {
         "\n[package.metadata.xlfn.bundle]\nx86 = []\nx64 = []\nexternal-imports = []\nstrict-paths = true\n"
     } else {
         ""
     };
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.97.1\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nxlfn = {{ version = {version:?} }}\n\n[package.metadata.xlfn]\nartifact-name = {artifact_name:?}\n{bundle_metadata}"
-        ),
-    )?;
+    let cargo_manifest = format!(
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.97.1\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n{dependency}\n\n[package.metadata.xlfn]\nartifact-name = {artifact_name:?}\n{bundle_metadata}"
+    );
+    write_file(&staging.join("Cargo.toml"), cargo_manifest.as_bytes())?;
     let struct_name = format!("{artifact_name}Addin");
-    fs::write(
-        root.join("src/lib.rs"),
-        format!(
-            "#![deny(unsafe_op_in_unsafe_fn)]\nuse xlfn::prelude::*;\nmod udf;\n\npub struct State;\n\n#[excel_addin(name = {display_name:?}, id = {package_name:?}, category = {artifact_name:?})]\npub struct {struct_name};\n\nimpl Addin for {struct_name} {{\n    type State = State;\n    type Error = XllError;\n\n    fn open(_: &OpenContext) -> Result<State, XllError> {{\n        xlfn::diagnostics::install_file_diagnostic_sink({package_name:?})\n            .map_err(|_| XllError::Internal {{ diagnostic_id: 0x4449_4147_5349_4e4b }})?;\n        Ok(State)\n    }}\n}}\n"
-        ),
-    )?;
-    fs::write(
-        root.join("src/udf.rs"),
-        format!(
-            "use xlfn::prelude::*;\n/// Returns the Add-in version.\n#[excel_function(name = \"{excel_prefix}.VERSION\", thread_safe)]\npub fn version() -> XllResult<String> {{ Ok(env!(\"CARGO_PKG_VERSION\").to_owned()) }}\n"
-        ),
-    )?;
+    let library = format!(
+        "#![deny(unsafe_op_in_unsafe_fn)]\nuse xlfn::prelude::*;\nmod udf;\n\npub struct State;\n\n#[excel_addin(name = {display_name:?}, id = {package_name:?}, category = {artifact_name:?})]\npub struct {struct_name};\n\nimpl Addin for {struct_name} {{\n    type State = State;\n    type Error = XllError;\n\n    fn open(context: &OpenContext) -> Result<State, XllError> {{\n        xlfn::diagnostics::install_file_diagnostic_sink(&context.build_info().addin_id)\n            .map_err(|_| XllError::Internal {{ diagnostic_id: 0x4449_4147_5349_4e4b }})?;\n        Ok(State)\n    }}\n}}\n"
+    );
+    write_file(&staging.join("src/lib.rs"), library.as_bytes())?;
+    let udf = format!(
+        "use xlfn::prelude::*;\n/// Returns the Add-in version.\n#[excel_function(name = \"{excel_prefix}.VERSION\", thread_safe)]\npub fn version() -> XllResult<String> {{ Ok(env!(\"CARGO_PKG_VERSION\").to_owned()) }}\n"
+    );
+    write_file(&staging.join("src/udf.rs"), udf.as_bytes())?;
     if bundle {
-        fs::create_dir_all(root.join("vendor/x86"))?;
-        fs::create_dir_all(root.join("vendor/x64"))?;
+        fs::create_dir_all(staging.join("native/x86"))?;
+        fs::create_dir_all(staging.join("native/x64"))?;
+    }
+    sync_scaffold_files(&staging)?;
+    if root == Path::new(".") {
+        commit_scaffold_into_existing_directory(&staging, &destination, bundle)?;
+    } else {
+        if fs::symlink_metadata(&destination).is_ok() {
+            bail!("{} already exists", root.display());
+        }
+        fs::rename(&staging, &destination)?;
     }
     println!("created {}", root.display());
+    Ok(())
+}
+
+fn sync_scaffold_files(staging: &Path) -> io::Result<()> {
+    for path in [
+        staging.join("Cargo.toml"),
+        staging.join("src/lib.rs"),
+        staging.join("src/udf.rs"),
+    ] {
+        std::fs::File::open(path)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn commit_scaffold_into_existing_directory(
+    staging: &Path,
+    destination: &Path,
+    bundle: bool,
+) -> io::Result<()> {
+    let entries = if bundle {
+        &["Cargo.toml", "src", "native"][..]
+    } else {
+        &["Cargo.toml", "src"][..]
+    };
+    for entry in entries {
+        if fs::symlink_metadata(destination.join(entry)).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("scaffold destination already contains {entry}"),
+            ));
+        }
+    }
+
+    let mut committed = Vec::new();
+    for entry in entries {
+        let source = staging.join(entry);
+        let target = destination.join(entry);
+        if let Err(error) = fs::rename(&source, &target) {
+            let rollback = committed.iter().rev().try_for_each(|entry: &&str| {
+                fs::rename(destination.join(entry), staging.join(entry))
+            });
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(io::Error::other(format!(
+                    "{error}; scaffold rollback failed: {rollback_error}"
+                ))),
+            };
+        }
+        committed.push(entry);
+    }
     Ok(())
 }
 
@@ -601,51 +727,123 @@ fn distribute(args: &DistArgs) -> Result {
         .tempdir_in(&target_parent)?;
     let build_target_directory = build_target_guard.path();
     if args.all {
-        validate_atomic_output_root(&args.out)?;
+        validate_transactional_output_root(&args.out)?;
         let output_parent = args
             .out
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(output_parent)?;
+        // The parent may have been created after the initial check. Verify
+        // the complete path again before placing any staging directory in it.
+        validate_output_destination(&args.out)?;
         let staging_guard = tempfile::Builder::new()
             .prefix(".cargo-xlfn-dist-all-")
             .tempdir_in(output_parent)?;
-        let staging_root = staging_guard.path().join("distribution");
-        fs::create_dir(&staging_root)?;
+        let staging_root = xlfn_package::PrivateStagingDirectory::create(
+            &staging_guard.path().join("distribution"),
+        )?;
+        let mut prepared_packages = Vec::with_capacity(targets.len());
         for target in &targets {
+            let target_staging = xlfn_package::PrivateStagingDirectory::create(
+                &staging_root.path().join(target.directory()),
+            )?;
             validate_output_destination(&args.out.join(target.directory()))?;
-            stage_distribution_target(
+            let verified = stage_distribution_target(
                 *target,
                 args,
                 &metadata,
-                &staging_root.join(target.directory()),
+                &target_staging,
                 build_target_directory,
             )?;
+            let prepared = verified.prepare_commit(target_staging.path(), target.triple())?;
+            prepared_packages.push((*target, prepared));
         }
         for target in &targets {
             validate_output_destination(&args.out.join(target.directory()))?;
         }
-        commit_staged_directory(&staging_root, &args.out)?;
+        let shared_artifacts = prepared_packages
+            .iter()
+            .flat_map(|(target, prepared)| {
+                prepared
+                    .shared_artifacts()
+                    .map(|(path, bytes)| (PathBuf::from(target.directory()).join(path), bytes))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let prepared_root = xlfn_package::PreparedDirectoryCommit::prepare_with_shared_artifacts(
+            staging_root.path(),
+            &[
+                WindowsTarget::X86.directory(),
+                WindowsTarget::X64.directory(),
+            ],
+            &shared_artifacts,
+        )?;
+        commit_prepared_directory(
+            &prepared_root,
+            &args.out,
+            |_root| {
+                for (_target, prepared) in &prepared_packages {
+                    prepared.verify_source_contents()?;
+                }
+                Ok(())
+            },
+            |root| {
+                prepared_root.verify_committed_contents(root)?;
+                for (target, prepared) in &prepared_packages {
+                    prepared.verify_committed_contents(&root.join(target.directory()))?;
+                }
+                Ok(())
+            },
+        )?;
         println!("created {}", args.out.display());
     } else {
         validate_output_destination(&args.out)?;
         fs::create_dir_all(&args.out)?;
+        validate_output_destination(&args.out)?;
         let target = targets[0];
         let destination = args.out.join(target.directory());
         validate_output_destination(&destination)?;
         let staging_guard = tempfile::Builder::new()
             .prefix(&format!(".{}.tmp-", target.directory()))
             .tempdir_in(&args.out)?;
-        let staging = staging_guard.path().join("distribution");
-        stage_distribution_target(target, args, &metadata, &staging, build_target_directory)?;
-        commit_staged_directory(&staging, &destination)?;
+        let staging = xlfn_package::PrivateStagingDirectory::create(
+            &staging_guard.path().join("distribution"),
+        )?;
+        let verified =
+            stage_distribution_target(target, args, &metadata, &staging, build_target_directory)?;
+        let prepared = verified.prepare_commit(staging.path(), target.triple())?;
+        let expected_names = verified
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .relative_path()
+                    .to_str()
+                    .context("verified artifact basename is not valid UTF-8")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let shared_artifacts = prepared.shared_artifacts().collect::<BTreeMap<_, _>>();
+        let prepared_root = xlfn_package::PreparedDirectoryCommit::prepare_with_shared_artifacts(
+            staging.path(),
+            &expected_names,
+            &shared_artifacts,
+        )?;
+        commit_prepared_directory(
+            &prepared_root,
+            &destination,
+            |_root| Ok(prepared.verify_source_contents()?),
+            |root| {
+                prepared_root.verify_committed_contents(root)?;
+                prepared.verify_committed_contents(root)?;
+                Ok(())
+            },
+        )?;
         println!("created {}", destination.display());
     }
     Ok(())
 }
 
-fn validate_atomic_output_root(destination: &Path) -> Result {
+fn validate_transactional_output_root(destination: &Path) -> Result {
     if !matches!(
         destination.components().next_back(),
         Some(Component::Normal(_))
@@ -670,46 +868,17 @@ fn validate_atomic_output_root(destination: &Path) -> Result {
 }
 
 fn validate_output_destination(destination: &Path) -> Result {
-    match fs::symlink_metadata(destination) {
-        Ok(metadata) if output_path_is_reparse_point(&metadata) => {
-            bail!(
-                "output destination must not be a symlink or reparse point: {}",
-                destination.display()
-            );
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            bail!(
-                "output destination must be a directory: {}",
-                destination.display()
-            );
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
+    xlfn_package::validate_directory_path(destination)?;
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn output_path_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(target_os = "windows"))]
-fn output_path_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
 }
 
 fn stage_distribution_target(
     target: WindowsTarget,
     args: &DistArgs,
     metadata: &ProjectMetadata,
-    staging: &Path,
+    staging: &xlfn_package::PrivateStagingDirectory,
     target_directory: &Path,
-) -> Result {
+) -> Result<xlfn_package::VerifiedPackage> {
     let profile = args.build.profile.as_deref().unwrap_or("release");
     let mut command = cargo_command();
     command
@@ -764,8 +933,13 @@ fn stage_distribution_target(
         .collect::<Result<Vec<_>>>()?;
     let external_imports = bundle.external_imports().collect::<Vec<_>>();
 
-    let staged_bundle = xlfn_package::stage_bundle(&bundle, staging)?;
-    let xll = staging.join(format!("{}.xll", metadata.artifact_name));
+    let validation_staging = xlfn_package::PrivateStagingDirectory::create(
+        &staging.path().with_extension("validation"),
+    )?;
+    let staged_bundle = xlfn_package::stage_bundle(&bundle, &validation_staging)?;
+    let xll = validation_staging
+        .path()
+        .join(format!("{}.xll", metadata.artifact_name));
     if fs::symlink_metadata(&xll).is_ok() {
         bail!(
             "bundle basename collides with generated XLL: {}",
@@ -774,24 +948,33 @@ fn stage_distribution_target(
     }
     fs::write(&xll, source_snapshot.as_ref())?;
 
-    let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
-    observation.warn_if_mixed();
-
     // Inspect only the isolated files. These same staged bytes are hashed
     // below and become the committed distribution directory.
     let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
+    let xll_artifact = verified
+        .artifacts()
+        .iter()
+        .find(|artifact| {
+            artifact.relative_path() == Path::new(&format!("{}.xll", metadata.artifact_name))
+        })
+        .context("verified package is missing the generated XLL artifact")?;
+    let observation = CrtObservation::inspect(
+        &xlfn_package::parse_pe_bytes(xll_artifact.bytes())?,
+        metadata.crt,
+    )?;
+    observation.warn_if_mixed();
 
     let files = verified
-        .files()
+        .artifacts()
         .iter()
-        .map(|path| -> Result<_> {
-            Ok(json!({
-                "relative_path": path.strip_prefix(staging)?.to_string_lossy(),
-                "size": fs::metadata(path)?.len(),
-                "sha256": xlfn_package::sha256(path)?,
-            }))
+        .map(|artifact| {
+            json!({
+                "relative_path": artifact.relative_path().to_string_lossy(),
+                "size": artifact.size(),
+                "sha256": artifact.sha256_hex(),
+            })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     let manifest = json!({
         "schema": 6,
         "package": metadata.package_name,
@@ -825,16 +1008,16 @@ fn stage_distribution_target(
         },
         "files": files,
     });
-    fs::write(
-        staging.join("build-manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    Ok(())
+    let verified = verified.with_manifest_bytes(serde_json::to_vec_pretty(&manifest)?)?;
+    verified.materialize(staging)?;
+    fs::remove_dir_all(validation_staging.path())?;
+    Ok(verified)
 }
 
 trait DistributionFileOps {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
+    fn sync_directory(&self, path: &Path) -> io::Result<()>;
 }
 
 struct SystemDistributionFileOps;
@@ -846,6 +1029,10 @@ impl DistributionFileOps for SystemDistributionFileOps {
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         fs::remove_dir_all(path)
+    }
+
+    fn sync_directory(&self, path: &Path) -> io::Result<()> {
+        sync_directory(path)
     }
 }
 
@@ -873,13 +1060,566 @@ impl fmt::Display for DistributionRecoveryError {
 
 impl std::error::Error for DistributionRecoveryError {}
 
-fn commit_staged_directory(staging: &Path, destination: &Path) -> Result {
-    commit_staged_directory_with(staging, destination, &SystemDistributionFileOps)
+#[derive(Debug)]
+struct DistributionRecoveryQuarantineError {
+    transaction: PathBuf,
+    quarantine: Option<PathBuf>,
+    reason: String,
 }
 
-fn commit_staged_directory_with(
-    staging: &Path,
+impl fmt::Display for DistributionRecoveryQuarantineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(quarantine) = &self.quarantine {
+            write!(
+                formatter,
+                "distribution transaction at {} was quarantined at {}: {}",
+                self.transaction.display(),
+                quarantine.display(),
+                self.reason
+            )
+        } else {
+            write!(
+                formatter,
+                "distribution transaction at {} could not be quarantined: {}",
+                self.transaction.display(),
+                self.reason
+            )
+        }
+    }
+}
+
+impl std::error::Error for DistributionRecoveryQuarantineError {}
+
+const TRANSACTION_JOURNAL: &str = "journal";
+const TRANSACTION_SCHEMA: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum TransactionState {
+    Prepared,
+    NoPrevious,
+    PreviousSaved,
+    InstallPending,
+    InstallPendingNoPrevious,
+    Installed,
+    InstalledNoPrevious,
+    RollbackPending,
+    RollbackPendingNoPrevious,
+    RolledBack,
+    // The installed directory is authoritative. `previous`, when present,
+    // is cleanup payload only and is never a recovery source in this state.
+    Committed,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DirectoryIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DirectoryIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DirectoryIdentity;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LockFileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TransactionJournal {
+    schema: u32,
+    transaction_id: String,
+    destination_name: String,
+    parent_identity: DirectoryIdentity,
+    transaction_identity: DirectoryIdentity,
+    destination_identity: Option<DirectoryIdentity>,
+    state: TransactionState,
+    previous_identity: Option<DirectoryIdentity>,
+    installed_identity: Option<DirectoryIdentity>,
+    sequence: u64,
+    checksum: String,
+}
+
+impl TransactionJournal {
+    fn new(
+        transaction_id: String,
+        destination_name: String,
+        parent_identity: DirectoryIdentity,
+        transaction_identity: DirectoryIdentity,
+        destination_identity: Option<DirectoryIdentity>,
+    ) -> Result<Self> {
+        let mut journal = Self {
+            schema: TRANSACTION_SCHEMA,
+            transaction_id,
+            destination_name,
+            parent_identity,
+            transaction_identity,
+            destination_identity,
+            state: TransactionState::Prepared,
+            previous_identity: None,
+            installed_identity: None,
+            sequence: 0,
+            checksum: String::new(),
+        };
+        journal.refresh_checksum()?;
+        Ok(journal)
+    }
+
+    fn refresh_checksum(&mut self) -> Result<()> {
+        self.checksum = journal_checksum(self)?;
+        Ok(())
+    }
+}
+
+fn journal_checksum(journal: &TransactionJournal) -> Result<String> {
+    let mut unsigned = journal.clone();
+    unsigned.checksum.clear();
+    let encoded = serde_json::to_vec(&unsigned)?;
+    let digest = Sha256::digest(encoded);
+    use std::fmt::Write as _;
+    let mut checksum = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut checksum, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(checksum)
+}
+
+struct DistributionCommitGuard {
+    lock_file: std::fs::File,
+    lock_path: PathBuf,
+    #[cfg(unix)]
+    lock_identity: LockFileIdentity,
+    destination: PathBuf,
+}
+
+impl DistributionCommitGuard {
+    fn acquire(parent: &Path, destination_name: &str) -> Result<Self> {
+        let lock_path = parent.join(format!(".{destination_name}.lock"));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use crate::win32::FILE_FLAG_OPEN_REPARSE_POINT;
+            use std::os::windows::fs::OpenOptionsExt;
+
+            options
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(0);
+        }
+
+        let lock_file = options.open(&lock_path).with_context(|| {
+            format!(
+                "failed to open distribution commit lock {}",
+                lock_path.display()
+            )
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            // SAFETY: the file descriptor is valid for the lifetime of the
+            // lock file; LOCK_EX serializes operations that use this inode,
+            // while ensure_held detects pathname replacement.
+            let status = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+            if status != 0 {
+                return Err(io::Error::last_os_error()).with_context(|| {
+                    format!("failed to lock distribution commit {}", lock_path.display())
+                });
+            }
+        }
+
+        #[cfg(unix)]
+        let lock_identity = lock_file_identity(&lock_file)?;
+        let guard = Self {
+            lock_file,
+            lock_path,
+            #[cfg(unix)]
+            lock_identity,
+            destination: parent.join(destination_name),
+        };
+        guard.ensure_held()?;
+        Ok(guard)
+    }
+
+    fn ensure_held(&self) -> io::Result<()> {
+        let metadata = self.lock_file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other(
+                "distribution commit lock handle is not a file",
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            let path_metadata = fs::symlink_metadata(&self.lock_path)?;
+            if !path_metadata.is_file() {
+                return Err(io::Error::other(
+                    "distribution commit lock path is not a regular file",
+                ));
+            }
+            let path_identity = lock_file_identity_from_metadata(&path_metadata);
+            if path_identity != self.lock_identity {
+                return Err(io::Error::other(
+                    "distribution commit lock path was replaced while held",
+                ));
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // share_mode(0) on the held handle prevents pathname deletion or
+            // replacement while the lock is held; the path check below also
+            // detects an externally forced replacement before a destructive
+            // phase.
+            let path_metadata = fs::symlink_metadata(&self.lock_path)?;
+            if !path_metadata.is_file() {
+                return Err(io::Error::other(
+                    "distribution commit lock path is not a regular file",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct DistributionTransactionDirectory {
+    path: PathBuf,
+    capability: Option<xlfn_package::PrivateStagingDirectory>,
+}
+
+impl DistributionTransactionDirectory {
+    fn create(
+        parent: &Path,
+        destination_name: &str,
+        destination_identity: Option<DirectoryIdentity>,
+        file_ops: &impl DistributionFileOps,
+    ) -> Result<(Self, TransactionJournal)> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for _ in 0..64 {
+            let counter = TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let transaction_id = format!("{}-{timestamp}-{counter}", std::process::id());
+            let final_path =
+                parent.join(format!(".{destination_name}.transaction-{transaction_id}"));
+            let private_path = parent.join(format!(
+                ".{destination_name}.transaction-private-{transaction_id}"
+            ));
+            if fs::symlink_metadata(&final_path).is_ok()
+                || fs::symlink_metadata(&private_path).is_ok()
+            {
+                continue;
+            }
+
+            let capability = match xlfn_package::PrivateStagingDirectory::create(&private_path) {
+                Ok(capability) => capability,
+                Err(_error)
+                    if fs::symlink_metadata(&private_path).is_ok()
+                        || fs::symlink_metadata(&final_path).is_ok() =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let parent_identity = directory_identity(parent)?;
+            let transaction_identity = directory_identity(&private_path)?;
+            let mut journal_state = TransactionJournal::new(
+                transaction_id.clone(),
+                destination_name.to_owned(),
+                parent_identity,
+                transaction_identity,
+                destination_identity,
+            )?;
+            let journal = private_path.join(TRANSACTION_JOURNAL);
+            if let Err(error) = write_transaction_state(
+                &journal,
+                parent,
+                &mut journal_state,
+                TransactionState::Prepared,
+                file_ops,
+            ) {
+                drop(capability);
+                return Err(error.into());
+            }
+            capability.verify()?;
+            drop(capability);
+            fs::rename(&private_path, &final_path)?;
+            sync_rename_parents(&private_path, &final_path, file_ops)?;
+            let capability = xlfn_package::PrivateStagingDirectory::open(&final_path)?;
+            return Ok((
+                Self {
+                    path: final_path,
+                    capability: Some(capability),
+                },
+                journal_state,
+            ));
+        }
+        bail!("failed to allocate a unique distribution transaction directory")
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn verify(&self) -> Result<()> {
+        self.capability
+            .as_ref()
+            .context("distribution transaction capability was released")?
+            .verify()?;
+        Ok(())
+    }
+
+    fn keep(mut self) -> PathBuf {
+        self.capability.take();
+        std::mem::take(&mut self.path)
+    }
+
+    fn cleanup_now(mut self, parent: &Path, file_ops: &impl DistributionFileOps) -> io::Result<()> {
+        self.capability.take();
+        file_ops.remove_dir_all(&self.path)?;
+        file_ops.sync_directory(parent)
+    }
+}
+
+impl Drop for DistributionTransactionDirectory {
+    fn drop(&mut self) {}
+}
+
+fn directory_identity(path: &Path) -> Result<DirectoryIdentity> {
+    xlfn_package::validate_path_components(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        bail!(
+            "expected a directory for identity check: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(DirectoryIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        directory_identity_windows(path)
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        Ok(DirectoryIdentity)
+    }
+}
+
+#[cfg(unix)]
+fn lock_file_identity(file: &std::fs::File) -> io::Result<LockFileIdentity> {
+    Ok(lock_file_identity_from_metadata(&file.metadata()?))
+}
+
+#[cfg(unix)]
+fn lock_file_identity_from_metadata(metadata: &std::fs::Metadata) -> LockFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    LockFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn directory_identity_windows(path: &Path) -> Result<DirectoryIdentity> {
+    use crate::win32::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, HANDLE,
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let file = options.open(path)?;
+    let mut information = std::mem::MaybeUninit::<FILE_ID_INFO>::uninit();
+    // SAFETY: file remains open for the duration of the call and information
+    // points to writable storage of the documented size.
+    let status = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            information.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if status == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: a successful GetFileInformationByHandleEx initializes the output.
+    let information = unsafe { information.assume_init() };
+    Ok(DirectoryIdentity {
+        volume_serial_number: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
+}
+
+fn optional_directory_identity(path: &Path) -> Result<Option<DirectoryIdentity>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => directory_identity(path).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn require_directory_identity(path: &Path, expected: DirectoryIdentity, label: &str) -> Result<()> {
+    let actual = directory_identity(path)?;
+    if actual != expected {
+        bail!("{} identity changed: {}", label, path.display());
+    }
+    Ok(())
+}
+
+fn transaction_id(transaction: &Path, prefix: &str) -> Result<String> {
+    let name = transaction
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("transaction directory name is not valid UTF-8")?;
+    let suffix = name
+        .strip_prefix(prefix)
+        .filter(|id| !id.is_empty())
+        .context("transaction directory has an invalid name")?;
+    Ok(suffix.strip_prefix("private-").unwrap_or(suffix).to_owned())
+}
+
+fn is_private_transaction(transaction: &Path, prefix: &str) -> Result<bool> {
+    let name = transaction
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("transaction directory name is not valid UTF-8")?;
+    let suffix = name
+        .strip_prefix(prefix)
+        .filter(|id| !id.is_empty())
+        .context("transaction directory has an invalid name")?;
+    Ok(suffix.starts_with("private-"))
+}
+
+fn read_transaction_journal(path: &Path) -> Result<TransactionJournal> {
+    let bytes = fs::read(path)?;
+    let journal: TransactionJournal = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "distribution transaction journal is invalid: {}",
+            path.display()
+        )
+    })?;
+    if journal.schema != TRANSACTION_SCHEMA {
+        bail!(
+            "unsupported distribution transaction journal schema {} in {}",
+            journal.schema,
+            path.display()
+        );
+    }
+    if journal.sequence == 0 {
+        bail!(
+            "distribution transaction journal has no committed sequence: {}",
+            path.display()
+        );
+    }
+    if journal_checksum(&journal)? != journal.checksum {
+        bail!(
+            "distribution transaction journal checksum mismatch: {}",
+            path.display()
+        );
+    }
+    Ok(journal)
+}
+
+fn validate_transaction_provenance(
+    parent: &Path,
+    destination_name: &str,
+    prefix: &str,
+    transaction: &Path,
+    journal: &TransactionJournal,
+) -> Result<xlfn_package::PrivateStagingDirectory> {
+    let transaction_directory = xlfn_package::PrivateStagingDirectory::open(transaction)?;
+    transaction_directory.verify()?;
+    let expected_id = transaction_id(transaction, prefix)?;
+    if journal.transaction_id != expected_id {
+        bail!(
+            "distribution transaction ID does not match its directory: {}",
+            transaction.display()
+        );
+    }
+    if journal.destination_name != destination_name {
+        bail!(
+            "distribution transaction destination does not match its directory: {}",
+            transaction.display()
+        );
+    }
+    require_directory_identity(parent, journal.parent_identity, "transaction parent")?;
+    require_directory_identity(
+        transaction,
+        journal.transaction_identity,
+        "transaction directory",
+    )?;
+    Ok(transaction_directory)
+}
+
+fn validate_commit_location(parent: &Path, destination: &Path) -> Result {
+    xlfn_package::validate_directory_path(parent)?;
+    validate_output_destination(destination)?;
+    Ok(())
+}
+
+fn commit_prepared_directory(
+    prepared: &xlfn_package::PreparedDirectoryCommit,
     destination: &Path,
+    verify_source: impl Fn(&Path) -> Result,
+    verify_destination: impl Fn(&Path) -> Result,
+) -> Result {
+    commit_prepared_directory_with(
+        prepared,
+        destination,
+        verify_source,
+        verify_destination,
+        &SystemDistributionFileOps,
+    )
+}
+
+fn commit_prepared_directory_with(
+    prepared: &xlfn_package::PreparedDirectoryCommit,
+    destination: &Path,
+    verify_source: impl Fn(&Path) -> Result,
+    verify_destination: impl Fn(&Path) -> Result,
     file_ops: &impl DistributionFileOps,
 ) -> Result {
     validate_output_destination(destination)?;
@@ -887,41 +1627,986 @@ fn commit_staged_directory_with(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    validate_commit_location(parent, destination)?;
     let destination_name = destination
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("distribution");
-    // The backup lives inside this invocation's private transaction
-    // directory. Never claim or remove a predictable user-owned path such as
-    // `<destination>.previous`.
-    let transaction = tempfile::Builder::new()
-        .prefix(&format!(".{destination_name}.transaction-"))
-        .tempdir_in(parent)?;
+        .context("distribution destination name is not valid UTF-8")?;
+    let commit_guard = DistributionCommitGuard::acquire(parent, destination_name)?;
+    recover_stale_transactions(parent, destination_name, &commit_guard, file_ops)?;
+    validate_commit_location(parent, destination)?;
+
+    prepared.verify_source_contents()?;
+    verify_source(prepared.staging_directory())?;
+
+    let destination_identity = optional_directory_identity(destination)?;
+    let (transaction, mut journal_state) = DistributionTransactionDirectory::create(
+        parent,
+        destination_name,
+        destination_identity,
+        file_ops,
+    )?;
+    transaction.verify()?;
     let previous = transaction.path().join("previous");
-    let had_previous = destination.exists();
+    let journal = transaction.path().join(TRANSACTION_JOURNAL);
+    validate_commit_location(parent, destination)?;
+    let had_previous = destination_identity.is_some();
     if had_previous {
+        validate_commit_location(parent, destination)?;
+        commit_guard.ensure_held()?;
         file_ops.rename(destination, &previous)?;
+        sync_rename_parents(destination, &previous, file_ops)?;
+        journal_state.previous_identity = Some(directory_identity(&previous)?);
+        write_transaction_state(
+            &journal,
+            parent,
+            &mut journal_state,
+            TransactionState::PreviousSaved,
+            file_ops,
+        )?;
+    } else {
+        write_transaction_state(
+            &journal,
+            parent,
+            &mut journal_state,
+            TransactionState::NoPrevious,
+            file_ops,
+        )?;
     }
-    if let Err(commit_error) = file_ops.rename(staging, destination) {
-        if had_previous && let Err(rollback_error) = file_ops.rename(&previous, destination) {
-            let recovery_root = transaction.keep();
-            let recovery_path = recovery_root.join("previous");
-            return Err(DistributionRecoveryError {
-                destination: destination.to_path_buf(),
-                commit_error,
+    prepared.verify_source_contents()?;
+    verify_source(prepared.staging_directory())?;
+    validate_commit_location(parent, destination)?;
+    journal_state.installed_identity = Some(directory_identity(prepared.staging_directory())?);
+    write_transaction_state(
+        &journal,
+        parent,
+        &mut journal_state,
+        if had_previous {
+            TransactionState::InstallPending
+        } else {
+            TransactionState::InstallPendingNoPrevious
+        },
+        file_ops,
+    )?;
+    commit_guard.ensure_held()?;
+    // The lease closes the final publication window to new writers on
+    // Windows. Mandatory exclusion of a process that already owns a writable
+    // handle is not available through portable Rust file APIs; the staged
+    // tree remains private and the final verification is the integrity check
+    // for that out-of-scope case.
+    let source_lease = prepared.lock_source_for_commit()?;
+    prepared.verify_source_contents()?;
+    verify_source(prepared.staging_directory())?;
+    commit_guard.ensure_held()?;
+    if let Err(commit_error) = file_ops.rename(prepared.staging_directory(), destination) {
+        let rollback_state = if had_previous {
+            TransactionState::RollbackPending
+        } else {
+            TransactionState::RollbackPendingNoPrevious
+        };
+        if let Err(state_error) = write_transaction_state(
+            &journal,
+            parent,
+            &mut journal_state,
+            rollback_state,
+            file_ops,
+        ) {
+            return Err(anyhow!(
+                "distribution commit failed: {commit_error}; recording rollback state also failed: {state_error}"
+            ));
+        }
+        if had_previous {
+            let expected_previous = journal_state
+                .previous_identity
+                .context("transaction has no previous destination identity")
+                .map_err(error_as_io);
+            let rollback = validate_commit_location(parent, destination)
+                .map_err(error_as_io)
+                .and_then(|_| ensure_destination_absent(destination).map_err(error_as_io))
+                .and(expected_previous)
+                .and_then(|expected| {
+                    require_directory_identity(&previous, expected, "previous backup")
+                        .map_err(error_as_io)
+                })
+                .and_then(|_| file_ops.rename(&previous, destination))
+                .and_then(|_| sync_rename_parents(&previous, destination, file_ops))
+                .and_then(|_| {
+                    let expected = journal_state
+                        .previous_identity
+                        .context("transaction has no previous destination identity")
+                        .map_err(error_as_io)?;
+                    require_directory_identity(destination, expected, "restored destination")
+                        .map_err(error_as_io)
+                });
+            if let Err(rollback_error) = rollback {
+                return Err(distribution_recovery_error(
+                    transaction,
+                    destination,
+                    commit_error,
+                    rollback_error,
+                )
+                .into());
+            }
+            let state_result = write_transaction_state(
+                &journal,
+                parent,
+                &mut journal_state,
+                TransactionState::RolledBack,
+                file_ops,
+            );
+            if let Err(state_error) = state_result {
+                return Err(anyhow!(
+                    "distribution commit failed: {commit_error}; rollback succeeded but recording its state failed: {state_error}"
+                ));
+            }
+            transaction.cleanup_now(parent, file_ops)?;
+        }
+        file_ops.sync_directory(parent)?;
+        return Err(commit_error.into());
+    }
+    sync_rename_parents(prepared.staging_directory(), destination, file_ops)?;
+    drop(source_lease);
+    journal_state.installed_identity = Some(directory_identity(destination)?);
+    write_transaction_state(
+        &journal,
+        parent,
+        &mut journal_state,
+        if had_previous {
+            TransactionState::Installed
+        } else {
+            TransactionState::InstalledNoPrevious
+        },
+        file_ops,
+    )?;
+
+    if let Err(verification_error) =
+        validate_output_destination(destination).and_then(|_| verify_destination(destination))
+    {
+        let rollback_state = if had_previous {
+            TransactionState::RollbackPending
+        } else {
+            TransactionState::RollbackPendingNoPrevious
+        };
+        if let Err(state_error) = write_transaction_state(
+            &journal,
+            parent,
+            &mut journal_state,
+            rollback_state,
+            file_ops,
+        ) {
+            return Err(anyhow!(
+                "post-commit verification failed: {verification_error}; recording rollback state also failed: {state_error}"
+            ));
+        }
+        if had_previous {
+            let failed = transaction.path().join("failed-install");
+            let expected_installed = journal_state
+                .installed_identity
+                .context("transaction has no installed destination identity")?;
+            let failed_install = validate_commit_location(parent, destination)
+                .map_err(error_as_io)
+                .and_then(|_| {
+                    require_directory_identity(
+                        destination,
+                        expected_installed,
+                        "installed destination",
+                    )
+                    .map_err(error_as_io)
+                })
+                .and_then(|_| file_ops.rename(destination, &failed))
+                .and_then(|_| sync_rename_parents(destination, &failed, file_ops));
+            if let Err(rollback_error) = failed_install {
+                return Err(distribution_recovery_error(
+                    transaction,
+                    destination,
+                    error_as_io(verification_error),
+                    rollback_error,
+                )
+                .into());
+            }
+            let expected_previous = journal_state
+                .previous_identity
+                .or(journal_state.destination_identity)
+                .context("transaction has no previous destination identity")?;
+            let rollback = validate_commit_location(parent, destination)
+                .map_err(error_as_io)
+                .and_then(|_| ensure_destination_absent(destination).map_err(error_as_io))
+                .and_then(|_| {
+                    require_directory_identity(&previous, expected_previous, "previous backup")
+                        .map_err(error_as_io)
+                })
+                .and_then(|_| file_ops.rename(&previous, destination))
+                .and_then(|_| sync_rename_parents(&previous, destination, file_ops))
+                .and_then(|_| {
+                    require_directory_identity(
+                        destination,
+                        expected_previous,
+                        "restored destination",
+                    )
+                    .map_err(error_as_io)
+                });
+            if let Err(rollback_error) = rollback {
+                return Err(distribution_recovery_error(
+                    transaction,
+                    destination,
+                    error_as_io(verification_error),
+                    rollback_error,
+                )
+                .into());
+            }
+            if let Err(state_error) = write_transaction_state(
+                &journal,
+                parent,
+                &mut journal_state,
+                TransactionState::RolledBack,
+                file_ops,
+            ) {
+                return Err(anyhow!(
+                    "post-commit verification failed: {verification_error}; rollback succeeded but recording its state failed: {state_error}"
+                ));
+            }
+            remove_installed_distribution_with(&failed, &journal_state, file_ops)?;
+            transaction.cleanup_now(parent, file_ops)?;
+        } else if let Err(rollback_error) = validate_commit_location(parent, destination)
+            .map_err(error_as_io)
+            .and_then(|_| {
+                remove_installed_distribution_with(destination, &journal_state, file_ops)
+                    .map_err(error_as_io)
+            })
+        {
+            return Err(distribution_recovery_error(
+                transaction,
+                destination,
+                error_as_io(verification_error),
                 rollback_error,
-                recovery_path,
+            )
+            .into());
+        } else {
+            transaction.cleanup_now(parent, file_ops)?;
+        }
+        return Err(verification_error);
+    }
+
+    write_transaction_state(
+        &journal,
+        parent,
+        &mut journal_state,
+        TransactionState::Committed,
+        file_ops,
+    )?;
+    if had_previous {
+        if let Err(error) = file_ops.remove_dir_all(&previous) {
+            eprintln!(
+                "cargo xlfn: warning: committed {} but could not remove backup {}: {error}",
+                destination.display(),
+                previous.display()
+            );
+            return Ok(());
+        }
+        file_ops.sync_directory(transaction.path())?;
+    }
+    transaction.cleanup_now(parent, file_ops)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct IoErrorSource(anyhow::Error);
+
+impl fmt::Display for IoErrorSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for IoErrorSource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let error: &(dyn std::error::Error + 'static) = self.0.as_ref();
+        error.source()
+    }
+}
+
+fn error_as_io<E>(error: E) -> io::Error
+where
+    E: Into<anyhow::Error>,
+{
+    // Keep the original anyhow chain behind the standard I/O error rather
+    // than flattening it to a display string.
+    io::Error::other(IoErrorSource(error.into()))
+}
+
+fn ensure_destination_absent(destination: &Path) -> Result {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => bail!("destination unexpectedly exists: {}", destination.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn sync_rename_parents(
+    from: &Path,
+    to: &Path,
+    file_ops: &impl DistributionFileOps,
+) -> io::Result<()> {
+    // A rename changes both directory entries: persist the source removal and
+    // the destination insertion before advancing the transaction state.
+    let from_parent = from
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let to_parent = to
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    file_ops.sync_directory(from_parent)?;
+    if to_parent != from_parent {
+        file_ops.sync_directory(to_parent)?;
+    }
+    Ok(())
+}
+
+fn distribution_recovery_error(
+    transaction: DistributionTransactionDirectory,
+    destination: &Path,
+    commit_error: io::Error,
+    rollback_error: io::Error,
+) -> DistributionRecoveryError {
+    let recovery_root = transaction.keep();
+    DistributionRecoveryError {
+        destination: destination.to_path_buf(),
+        commit_error,
+        rollback_error,
+        recovery_path: recovery_root.join("previous"),
+    }
+}
+
+fn write_transaction_state(
+    journal: &Path,
+    parent: &Path,
+    transaction: &mut TransactionJournal,
+    state: TransactionState,
+    file_ops: &impl DistributionFileOps,
+) -> io::Result<()> {
+    // Journal durability protocol: write the next state, sync the file,
+    // atomically replace the journal, then sync both directory entries that
+    // make the replacement observable after a power loss.
+    transaction.state = state;
+    transaction.sequence = transaction
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("distribution transaction journal sequence overflow"))?;
+    transaction
+        .refresh_checksum()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let encoded = serde_json::to_vec_pretty(transaction)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let next = journal.with_file_name(format!("{}.next", TRANSACTION_JOURNAL));
+    let mut next_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&next)?;
+    next_file.write_all(&encoded)?;
+    next_file.sync_all()?;
+    drop(next_file);
+    atomic_replace_file(&next, journal)?;
+    let transaction_directory = journal
+        .parent()
+        .ok_or_else(|| io::Error::other("transaction journal has no parent directory"))?;
+    file_ops.sync_directory(transaction_directory)?;
+    file_ops.sync_directory(parent)?;
+    Ok(())
+}
+
+fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        use std::os::windows::ffi::OsStrExt;
+
+        let from_wide = from
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let to_wide = to
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: both paths are NUL-terminated buffers valid for this call.
+        let replaced = unsafe {
+            MoveFileExW(
+                from_wide.as_ptr(),
+                to_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fs::rename(from, to)
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = std::fs::File::open(path)?;
+        directory.sync_all()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use crate::win32::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_WRITE_THROUGH)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        let directory = options.open(path)?;
+        directory.sync_all()
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "directory synchronization is unsupported on this platform",
+        ))
+    }
+}
+
+fn transaction_payloads(transaction: &Path) -> Result<Vec<PathBuf>> {
+    Ok(fs::read_dir(transaction)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(TRANSACTION_JOURNAL) | Some("journal.next")
+            )
+        })
+        .collect())
+}
+
+fn remove_empty_transaction(
+    parent: &Path,
+    transaction: &Path,
+    file_ops: &impl DistributionFileOps,
+) -> Result {
+    let transaction_directory = xlfn_package::PrivateStagingDirectory::open(transaction)?;
+    transaction_directory.verify()?;
+    file_ops.remove_dir_all(transaction)?;
+    file_ops.sync_directory(parent)?;
+    Ok(())
+}
+
+fn quarantine_transaction(
+    parent: &Path,
+    destination_name: &str,
+    prefix: &str,
+    transaction: &Path,
+    reason: impl Into<String>,
+    file_ops: &impl DistributionFileOps,
+) -> Result {
+    let reason = reason.into();
+    let id = transaction_id(transaction, prefix).unwrap_or_else(|_| "unknown".to_owned());
+    for _ in 0..64 {
+        let counter = TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let quarantine = parent.join(format!(
+            ".{destination_name}.quarantine-transaction-{id}-{counter}"
+        ));
+        if fs::symlink_metadata(&quarantine).is_ok() {
+            continue;
+        }
+        if let Err(error) = file_ops.rename(transaction, &quarantine) {
+            return Err(DistributionRecoveryQuarantineError {
+                transaction: transaction.to_path_buf(),
+                quarantine: None,
+                reason: format!("{reason}; quarantine rename failed: {error}"),
             }
             .into());
         }
-        return Err(commit_error.into());
+        if let Err(error) = file_ops.sync_directory(parent) {
+            return Err(DistributionRecoveryQuarantineError {
+                transaction: transaction.to_path_buf(),
+                quarantine: Some(quarantine),
+                reason: format!("{reason}; quarantine directory sync failed: {error}"),
+            }
+            .into());
+        }
+        return Err(DistributionRecoveryQuarantineError {
+            transaction: transaction.to_path_buf(),
+            quarantine: Some(quarantine),
+            reason,
+        }
+        .into());
     }
-    if had_previous && let Err(error) = file_ops.remove_dir_all(&previous) {
-        eprintln!(
-            "cargo xlfn: warning: committed {} but could not remove backup {}: {error}",
-            destination.display(),
-            previous.display()
-        );
+    Err(DistributionRecoveryQuarantineError {
+        transaction: transaction.to_path_buf(),
+        quarantine: None,
+        reason: format!("{reason}; could not allocate a quarantine name"),
+    }
+    .into())
+}
+
+fn recover_stale_transactions(
+    parent: &Path,
+    destination_name: &str,
+    commit_guard: &DistributionCommitGuard,
+    file_ops: &impl DistributionFileOps,
+) -> Result {
+    commit_guard.ensure_held()?;
+    if commit_guard.destination != parent.join(destination_name) {
+        bail!("distribution recovery lock does not match its destination");
+    }
+    xlfn_package::validate_directory_path(parent)?;
+    let prefix = format!(".{destination_name}.transaction-");
+    let destination = parent.join(destination_name);
+    let transactions = fs::read_dir(parent)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect::<Vec<_>>();
+
+    for transaction in transactions {
+        commit_guard.ensure_held()?;
+        xlfn_package::validate_path_components(&transaction)?;
+        let private_transaction = is_private_transaction(&transaction, &prefix)?;
+        let payloads = transaction_payloads(&transaction)?;
+        let journal = transaction.join(TRANSACTION_JOURNAL);
+        let next = transaction.join("journal.next");
+        xlfn_package::validate_path_components(&journal)?;
+        xlfn_package::validate_path_components(&next)?;
+
+        let journal_metadata = match fs::symlink_metadata(&journal) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut next_metadata = match fs::symlink_metadata(&next) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut journal_state = if let Some(metadata) = journal_metadata.as_ref() {
+            if !metadata.is_file() {
+                return quarantine_transaction(
+                    parent,
+                    destination_name,
+                    &prefix,
+                    &transaction,
+                    "transaction journal is not a regular file",
+                    file_ops,
+                );
+            }
+            match read_transaction_journal(&journal) {
+                Ok(state) => state,
+                Err(error) => {
+                    return quarantine_transaction(
+                        parent,
+                        destination_name,
+                        &prefix,
+                        &transaction,
+                        format!("transaction journal is invalid: {error}"),
+                        file_ops,
+                    );
+                }
+            }
+        } else if let Some(metadata) = next_metadata.as_ref() {
+            if !metadata.is_file() {
+                return quarantine_transaction(
+                    parent,
+                    destination_name,
+                    &prefix,
+                    &transaction,
+                    "journal.next is not a regular file",
+                    file_ops,
+                );
+            }
+            let next_state = match read_transaction_journal(&next) {
+                Ok(state) => state,
+                Err(_error) if payloads.is_empty() => {
+                    fs::remove_file(&next)?;
+                    file_ops.sync_directory(&transaction)?;
+                    remove_empty_transaction(parent, &transaction, file_ops)?;
+                    continue;
+                }
+                Err(error) => {
+                    return quarantine_transaction(
+                        parent,
+                        destination_name,
+                        &prefix,
+                        &transaction,
+                        format!("journal.next is invalid: {error}"),
+                        file_ops,
+                    );
+                }
+            };
+            let transaction_directory = validate_transaction_provenance(
+                parent,
+                destination_name,
+                &prefix,
+                &transaction,
+                &next_state,
+            )?;
+            transaction_directory.verify()?;
+            atomic_replace_file(&next, &journal)?;
+            file_ops.sync_directory(&transaction)?;
+            file_ops.sync_directory(parent)?;
+            next_metadata = None;
+            next_state
+        } else if payloads.is_empty() {
+            remove_empty_transaction(parent, &transaction, file_ops)?;
+            continue;
+        } else {
+            return quarantine_transaction(
+                parent,
+                destination_name,
+                &prefix,
+                &transaction,
+                "transaction journal is missing while recovery payloads remain",
+                file_ops,
+            );
+        };
+
+        let transaction_directory = validate_transaction_provenance(
+            parent,
+            destination_name,
+            &prefix,
+            &transaction,
+            &journal_state,
+        )?;
+
+        if let Some(metadata) = next_metadata.as_ref() {
+            if metadata.is_file() {
+                match read_transaction_journal(&next) {
+                    Ok(next_state) if next_state.sequence > journal_state.sequence => {
+                        validate_transaction_provenance(
+                            parent,
+                            destination_name,
+                            &prefix,
+                            &transaction,
+                            &next_state,
+                        )?
+                        .verify()?;
+                        atomic_replace_file(&next, &journal)?;
+                        file_ops.sync_directory(&transaction)?;
+                        file_ops.sync_directory(parent)?;
+                        journal_state = next_state;
+                    }
+                    Ok(_) | Err(_) => {
+                        fs::remove_file(&next)?;
+                        file_ops.sync_directory(&transaction)?;
+                    }
+                }
+            } else {
+                return quarantine_transaction(
+                    parent,
+                    destination_name,
+                    &prefix,
+                    &transaction,
+                    "journal.next is not a regular file",
+                    file_ops,
+                );
+            }
+        }
+
+        if private_transaction && !payloads.is_empty() {
+            return quarantine_transaction(
+                parent,
+                destination_name,
+                &prefix,
+                &transaction,
+                "private transaction directory contains recovery payloads",
+                file_ops,
+            );
+        }
+
+        let previous = transaction.join("previous");
+        xlfn_package::validate_path_components(&previous)?;
+        commit_guard.ensure_held()?;
+        match journal_state.state {
+            TransactionState::Prepared => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    let expected_previous = journal_state
+                        .previous_identity
+                        .or(journal_state.destination_identity)
+                        .context("prepared transaction has no previous identity")?;
+                    require_directory_identity(&previous, expected_previous, "previous backup")?;
+                    if optional_directory_identity(&destination)?.is_some() {
+                        bail!(
+                            "distribution transaction journal is inconsistent: {}",
+                            transaction.display()
+                        );
+                    }
+                    file_ops.rename(&previous, &destination)?;
+                    sync_rename_parents(&previous, &destination, file_ops)?;
+                    require_directory_identity(
+                        &destination,
+                        expected_previous,
+                        "restored destination",
+                    )?;
+                } else if let Some(expected) = journal_state.destination_identity {
+                    require_directory_identity(&destination, expected, "original destination")?;
+                }
+            }
+            TransactionState::NoPrevious => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    bail!(
+                        "distribution transaction journal is inconsistent: {}",
+                        transaction.display()
+                    );
+                }
+                if optional_directory_identity(&destination)?.is_some()
+                    && journal_state.destination_identity.is_none()
+                {
+                    bail!(
+                        "no-previous transaction has an unexpected destination: {}",
+                        transaction.display()
+                    );
+                }
+                if let Some(expected) = journal_state.destination_identity {
+                    require_directory_identity(&destination, expected, "original destination")?;
+                }
+            }
+            TransactionState::InstallPending => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    restore_previous_distribution(
+                        &destination,
+                        &transaction,
+                        &previous,
+                        &journal_state,
+                        file_ops,
+                    )?;
+                } else {
+                    bail!(
+                        "install-pending transaction lost its backup: {}",
+                        transaction.display()
+                    );
+                }
+            }
+            TransactionState::InstallPendingNoPrevious => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    bail!(
+                        "distribution transaction journal is inconsistent: {}",
+                        transaction.display()
+                    );
+                }
+                remove_installed_distribution_with(&destination, &journal_state, file_ops)?;
+                remove_recovery_install(&transaction, &journal_state, file_ops)?;
+            }
+            TransactionState::PreviousSaved => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    restore_previous_distribution(
+                        &destination,
+                        &transaction,
+                        &previous,
+                        &journal_state,
+                        file_ops,
+                    )?;
+                } else {
+                    bail!(
+                        "previous-saved transaction lost its backup: {}",
+                        transaction.display()
+                    );
+                }
+            }
+            TransactionState::Installed | TransactionState::RollbackPending => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    restore_previous_distribution(
+                        &destination,
+                        &transaction,
+                        &previous,
+                        &journal_state,
+                        file_ops,
+                    )?;
+                } else if journal_state.state == TransactionState::RollbackPending {
+                    require_original_destination(&destination, &journal_state)?;
+                    remove_recovery_install(&transaction, &journal_state, file_ops)?;
+                } else {
+                    bail!(
+                        "installed transaction lost its backup: {}",
+                        transaction.display()
+                    );
+                }
+            }
+            TransactionState::InstalledNoPrevious | TransactionState::RollbackPendingNoPrevious => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    bail!(
+                        "distribution transaction journal is inconsistent: {}",
+                        transaction.display()
+                    );
+                }
+                remove_installed_distribution_with(&destination, &journal_state, file_ops)?;
+                remove_recovery_install(&transaction, &journal_state, file_ops)?;
+            }
+            TransactionState::RolledBack => {
+                if optional_directory_identity(&previous)?.is_some() {
+                    restore_previous_distribution(
+                        &destination,
+                        &transaction,
+                        &previous,
+                        &journal_state,
+                        file_ops,
+                    )?;
+                } else {
+                    require_original_destination(&destination, &journal_state)?;
+                }
+                remove_recovery_install(&transaction, &journal_state, file_ops)?;
+            }
+            TransactionState::Committed => {
+                let installed = journal_state
+                    .installed_identity
+                    .context("committed transaction has no installed identity")?;
+                if optional_directory_identity(&destination)?.is_none() {
+                    // Committed means the installed directory is authoritative.
+                    // The old distribution is cleanup payload only and must
+                    // never become a recovery source after commit.
+                    return quarantine_transaction(
+                        parent,
+                        destination_name,
+                        &prefix,
+                        &transaction,
+                        "committed destination is missing; refusing to restore the previous distribution",
+                        file_ops,
+                    );
+                }
+                require_directory_identity(&destination, installed, "installed destination")?;
+                if optional_directory_identity(&previous)?.is_some() {
+                    let expected = journal_state
+                        .previous_identity
+                        .context("committed transaction has no previous identity")?;
+                    require_directory_identity(&previous, expected, "committed backup")?;
+                    file_ops.remove_dir_all(&previous)?;
+                    file_ops.sync_directory(&transaction)?;
+                }
+                remove_recovery_install(&transaction, &journal_state, file_ops)?;
+            }
+        }
+        commit_guard.ensure_held()?;
+        transaction_directory.verify()?;
+        file_ops.remove_dir_all(&transaction)?;
+        file_ops.sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn require_original_destination(destination: &Path, journal: &TransactionJournal) -> Result<()> {
+    let expected = journal
+        .destination_identity
+        .context("transaction has no original destination identity")?;
+    require_directory_identity(destination, expected, "restored destination")
+}
+
+fn remove_installed_distribution_with(
+    destination: &Path,
+    journal: &TransactionJournal,
+    file_ops: &impl DistributionFileOps,
+) -> Result<()> {
+    if optional_directory_identity(destination)?.is_none() {
+        return Ok(());
+    }
+    let expected = journal
+        .installed_identity
+        .context("transaction has no installed destination identity")?;
+    require_directory_identity(destination, expected, "installed destination")?;
+    file_ops.remove_dir_all(destination)?;
+    file_ops.sync_directory(
+        destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+    )?;
+    Ok(())
+}
+
+fn restore_previous_distribution(
+    destination: &Path,
+    transaction: &Path,
+    previous: &Path,
+    journal: &TransactionJournal,
+    file_ops: &impl DistributionFileOps,
+) -> Result {
+    validate_output_destination(destination)?;
+    let expected_previous = journal
+        .previous_identity
+        .or(journal.destination_identity)
+        .context("transaction has no previous destination identity")?;
+    require_directory_identity(previous, expected_previous, "previous backup")?;
+    let recovery_install = transaction.join("recovery-install");
+    xlfn_package::validate_path_components(&recovery_install)?;
+    if optional_directory_identity(destination)?.is_some() {
+        let expected_installed = journal
+            .installed_identity
+            .context("transaction has no installed destination identity")?;
+        require_directory_identity(destination, expected_installed, "installed destination")?;
+        if optional_directory_identity(&recovery_install)?.is_some() {
+            require_directory_identity(
+                &recovery_install,
+                expected_installed,
+                "recovery installation",
+            )?;
+            file_ops.remove_dir_all(&recovery_install)?;
+            file_ops.sync_directory(transaction)?;
+        }
+        file_ops.rename(destination, &recovery_install)?;
+        sync_rename_parents(destination, &recovery_install, file_ops)?;
+        require_directory_identity(previous, expected_previous, "previous backup")?;
+        file_ops.rename(previous, destination)?;
+        sync_rename_parents(previous, destination, file_ops)?;
+        require_directory_identity(destination, expected_previous, "restored destination")?;
+        file_ops.remove_dir_all(&recovery_install)?;
+        file_ops.sync_directory(transaction)?;
+    } else {
+        if optional_directory_identity(&recovery_install)?.is_some() {
+            let expected_installed = journal
+                .installed_identity
+                .context("transaction has no installed identity")?;
+            require_directory_identity(
+                &recovery_install,
+                expected_installed,
+                "recovery installation",
+            )?;
+        }
+        file_ops.rename(previous, destination)?;
+        sync_rename_parents(previous, destination, file_ops)?;
+        require_directory_identity(destination, expected_previous, "restored destination")?;
+        if optional_directory_identity(&recovery_install)?.is_some() {
+            file_ops.remove_dir_all(&recovery_install)?;
+            file_ops.sync_directory(transaction)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_recovery_install(
+    transaction: &Path,
+    journal: &TransactionJournal,
+    file_ops: &impl DistributionFileOps,
+) -> Result {
+    let recovery_install = transaction.join("recovery-install");
+    xlfn_package::validate_path_components(&recovery_install)?;
+    if optional_directory_identity(&recovery_install)?.is_some() {
+        let expected = journal
+            .installed_identity
+            .context("transaction has no installed identity for recovery installation")?;
+        require_directory_identity(&recovery_install, expected, "recovery installation")?;
+        file_ops.remove_dir_all(&recovery_install)?;
+        file_ops.sync_directory(transaction)?;
     }
     Ok(())
 }
@@ -956,7 +2641,11 @@ mod tests {
     #[derive(Default)]
     struct InjectedFileOps {
         failed_renames: BTreeSet<usize>,
+        failed_removes: BTreeSet<usize>,
+        failed_syncs: BTreeSet<usize>,
         rename_count: Cell<usize>,
+        remove_count: Cell<usize>,
+        sync_count: Cell<usize>,
         operations: RefCell<Vec<FileOperation>>,
     }
 
@@ -964,6 +2653,20 @@ mod tests {
         fn failing_renames(calls: impl IntoIterator<Item = usize>) -> Self {
             Self {
                 failed_renames: calls.into_iter().collect(),
+                ..Self::default()
+            }
+        }
+
+        fn failing_removes(calls: impl IntoIterator<Item = usize>) -> Self {
+            Self {
+                failed_removes: calls.into_iter().collect(),
+                ..Self::default()
+            }
+        }
+
+        fn failing_syncs(calls: impl IntoIterator<Item = usize>) -> Self {
+            Self {
+                failed_syncs: calls.into_iter().collect(),
                 ..Self::default()
             }
         }
@@ -984,10 +2687,28 @@ mod tests {
         }
 
         fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            let call = self.remove_count.get() + 1;
+            self.remove_count.set(call);
             self.operations
                 .borrow_mut()
                 .push(FileOperation::RemoveDirectory(path.to_path_buf()));
+            if self.failed_removes.contains(&call) {
+                return Err(io::Error::other(format!(
+                    "injected directory removal failure #{call}"
+                )));
+            }
             fs::remove_dir_all(path)
+        }
+
+        fn sync_directory(&self, path: &Path) -> io::Result<()> {
+            let call = self.sync_count.get() + 1;
+            self.sync_count.set(call);
+            if self.failed_syncs.contains(&call) {
+                return Err(io::Error::other(format!(
+                    "injected directory sync failure #{call}"
+                )));
+            }
+            sync_directory(path)
         }
     }
 
@@ -1002,6 +2723,24 @@ mod tests {
         (directory, destination, staging)
     }
 
+    fn prepared_test_directory(staging: &Path) -> xlfn_package::PreparedDirectoryCommit {
+        xlfn_package::PreparedDirectoryCommit::prepare(staging, &["new.xll"]).unwrap()
+    }
+
+    fn commit_test_directory_with(
+        prepared: &xlfn_package::PreparedDirectoryCommit,
+        destination: &Path,
+        file_ops: &impl DistributionFileOps,
+    ) -> Result {
+        commit_prepared_directory_with(
+            prepared,
+            destination,
+            |_| Ok(()),
+            |path| Ok(prepared.verify_committed_contents(path)?),
+            file_ops,
+        )
+    }
+
     fn transaction_directories(parent: &Path) -> Vec<PathBuf> {
         fs::read_dir(parent)
             .unwrap()
@@ -1011,6 +2750,36 @@ mod tests {
                     .is_some_and(|name| name.to_string_lossy().starts_with(".win-x64.transaction-"))
             })
             .collect()
+    }
+
+    fn write_stale_journal(
+        parent: &Path,
+        transaction: &Path,
+        destination_name: &str,
+        destination_identity: Option<DirectoryIdentity>,
+        state: TransactionState,
+        previous_identity: Option<DirectoryIdentity>,
+        installed_identity: Option<DirectoryIdentity>,
+    ) {
+        let prefix = format!(".{destination_name}.transaction-");
+        let mut journal = TransactionJournal::new(
+            transaction_id(transaction, &prefix).unwrap(),
+            destination_name.to_owned(),
+            directory_identity(parent).unwrap(),
+            directory_identity(transaction).unwrap(),
+            destination_identity,
+        )
+        .unwrap();
+        journal.previous_identity = previous_identity;
+        journal.installed_identity = installed_identity;
+        write_transaction_state(
+            &transaction.join(TRANSACTION_JOURNAL),
+            parent,
+            &mut journal,
+            state,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1044,7 +2813,8 @@ mod tests {
     fn default_scaffold_is_one_crate_without_build_script() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("demo");
-        scaffold(&root, false).unwrap();
+        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
+        scaffold(&root, false, &dependency).unwrap();
         let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
         assert!(cargo.contains(&format!(
@@ -1060,18 +2830,72 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_write_failure_leaves_no_partial_destination_or_staging_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("demo");
+        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
+        let mut writes = 0;
+
+        let result = scaffold_with_writer(&root, false, &dependency, |path, contents| {
+            writes += 1;
+            if writes == 2 {
+                return Err(io::Error::other("injected scaffold write failure"));
+            }
+            fs::write(path, contents).map(|_| ())
+        });
+
+        assert!(result.is_err());
+        assert!(!root.exists());
+        let leftovers = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".cargo-xlfn-new-"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
     fn bundle_scaffold_uses_generic_bundle_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("bundle-demo");
-        scaffold(&root, true).unwrap();
+        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
+        scaffold(&root, true, &dependency).unwrap();
         let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("[package.metadata.xlfn.bundle]"));
         assert!(cargo.contains("x86 = []"));
         assert!(!cargo.contains("features = [\"dynamic\"]"));
         assert!(!root.join("src/dynamic.rs").exists());
-        assert!(root.join("vendor/x86").is_dir());
-        assert!(root.join("vendor/x64").is_dir());
+        assert!(root.join("native/x86").is_dir());
+        assert!(root.join("native/x64").is_dir());
         assert!(!root.join("build.rs").exists());
+    }
+
+    #[test]
+    fn scaffold_dependency_source_is_explicit_and_pinned() {
+        let args = NewArgs {
+            name: PathBuf::from("demo"),
+            bundle: false,
+            xlfn_path: None,
+            xlfn_git: Some("https://github.com/nakashima-hikaru/xlfn".to_owned()),
+            xlfn_rev: Some("0123456789abcdef".to_owned()),
+        };
+
+        assert_eq!(
+            xlfn_dependency_spec(&args).unwrap(),
+            "xlfn = { git = \"https://github.com/nakashima-hikaru/xlfn\", rev = \"0123456789abcdef\" }"
+        );
+
+        let path_args = NewArgs {
+            name: PathBuf::from("demo"),
+            bundle: false,
+            xlfn_path: Some(PathBuf::from("../xlfn/crates/xlfn")),
+            xlfn_git: None,
+            xlfn_rev: None,
+        };
+        assert_eq!(
+            xlfn_dependency_spec(&path_args).unwrap(),
+            "xlfn = { path = \"../xlfn/crates/xlfn\" }"
+        );
     }
 
     #[test]
@@ -1087,7 +2911,14 @@ mod tests {
         fs::write(unrelated.join("sentinel.txt"), b"keep").unwrap();
         fs::write(staging.join("new.xll"), b"new").unwrap();
 
-        commit_staged_directory(&staging, &destination).unwrap();
+        let prepared = prepared_test_directory(&staging);
+        commit_prepared_directory(
+            &prepared,
+            &destination,
+            |_| Ok(()),
+            |path| Ok(prepared.verify_committed_contents(path)?),
+        )
+        .unwrap();
 
         assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
         assert!(!destination.join("old.xll").exists());
@@ -1098,14 +2929,15 @@ mod tests {
     fn distribution_commit_removes_backup_only_after_installing_staging() {
         let (directory, destination, staging) = distribution_fixture();
         let file_ops = InjectedFileOps::default();
+        let prepared = prepared_test_directory(&staging);
 
-        commit_staged_directory_with(&staging, &destination, &file_ops).unwrap();
+        commit_test_directory_with(&prepared, &destination, &file_ops).unwrap();
 
         assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
         assert!(!destination.join("old.xll").exists());
         assert!(transaction_directories(directory.path()).is_empty());
         let operations = file_ops.operations.borrow();
-        assert_eq!(operations.len(), 3);
+        assert_eq!(operations.len(), 4);
         let FileOperation::Rename {
             from: old_destination,
             to: backup,
@@ -1127,14 +2959,58 @@ mod tests {
             operations[2],
             FileOperation::RemoveDirectory(backup.clone())
         );
+        assert!(matches!(
+            &operations[3],
+            FileOperation::RemoveDirectory(path)
+                if path.file_name().is_some_and(|name| name
+                    .to_string_lossy()
+                    .starts_with(".win-x64.transaction-"))
+        ));
+    }
+
+    #[test]
+    fn committed_cleanup_failure_never_restores_previous_distribution() {
+        let (directory, destination, staging) = distribution_fixture();
+        let file_ops = InjectedFileOps::failing_removes([1]);
+        let prepared = prepared_test_directory(&staging);
+
+        commit_test_directory_with(&prepared, &destination, &file_ops).unwrap();
+        assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+
+        let transaction = transaction_directories(directory.path())
+            .into_iter()
+            .next()
+            .expect("failed backup cleanup must leave the committed journal");
+        fs::remove_dir_all(&destination).unwrap();
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let error = recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap_err();
+        let quarantine = error
+            .downcast_ref::<DistributionRecoveryQuarantineError>()
+            .and_then(|error| error.quarantine.as_ref())
+            .expect("a missing committed destination must be quarantined");
+
+        assert!(!destination.exists());
+        assert!(!transaction.exists());
+        assert_eq!(
+            fs::read(quarantine.join("previous/old.xll")).unwrap(),
+            b"old"
+        );
     }
 
     #[test]
     fn distribution_commit_failure_rolls_previous_distribution_back() {
         let (directory, destination, staging) = distribution_fixture();
         let file_ops = InjectedFileOps::failing_renames([2]);
+        let prepared = prepared_test_directory(&staging);
 
-        let error = commit_staged_directory_with(&staging, &destination, &file_ops).unwrap_err();
+        let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
 
         assert!(error.to_string().contains("injected rename failure #2"));
         assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
@@ -1142,20 +3018,362 @@ mod tests {
         assert!(transaction_directories(directory.path()).is_empty());
         assert_eq!(file_ops.rename_count.get(), 3);
         assert!(
-            !file_ops
+            file_ops
                 .operations
                 .borrow()
                 .iter()
-                .any(|operation| matches!(operation, FileOperation::RemoveDirectory(_)))
+                .any(|operation| matches!(
+                    operation,
+                    FileOperation::RemoveDirectory(path)
+                        if path.file_name().is_some_and(|name| name
+                            .to_string_lossy()
+                            .starts_with(".win-x64.transaction-"))
+                ))
         );
+    }
+
+    #[test]
+    fn post_commit_verification_failure_restores_previous_distribution() {
+        let (directory, destination, staging) = distribution_fixture();
+        let file_ops = InjectedFileOps::default();
+        let prepared = prepared_test_directory(&staging);
+
+        let error = commit_prepared_directory_with(
+            &prepared,
+            &destination,
+            |_| Ok(()),
+            |_| Err(anyhow!("post-commit verification failed")),
+            &file_ops,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("post-commit verification failed")
+        );
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!destination.join("new.xll").exists());
+        assert!(!staging.exists());
+        assert!(transaction_directories(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn post_commit_verification_failure_without_previous_removes_install() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        let staging = directory.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.xll"), b"new").unwrap();
+        let file_ops = InjectedFileOps::default();
+        let prepared = prepared_test_directory(&staging);
+
+        let error = commit_prepared_directory_with(
+            &prepared,
+            &destination,
+            |_| Ok(()),
+            |_| Err(anyhow!("post-commit verification failed")),
+            &file_ops,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("post-commit verification failed")
+        );
+        assert!(!destination.exists());
+        assert!(!staging.exists());
+        assert!(transaction_directories(directory.path()).is_empty());
+        assert!(matches!(
+            file_ops.operations.borrow().as_slice(),
+            [
+                FileOperation::Rename { .. },
+                FileOperation::RemoveDirectory(path),
+                FileOperation::RemoveDirectory(transaction)
+            ] if path == &destination
+                && transaction
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".win-x64.transaction-"))
+        ));
+    }
+
+    #[test]
+    fn stale_distribution_transaction_restores_previous_distribution() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        let transaction = directory.path().join(".win-x64.transaction-stale");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old.xll"), b"old").unwrap();
+        let previous_identity = directory_identity(&previous).unwrap();
+        write_stale_journal(
+            directory.path(),
+            &transaction,
+            "win-x64",
+            Some(previous_identity),
+            TransactionState::PreviousSaved,
+            Some(previous_identity),
+            None,
+        );
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!transaction.exists());
+    }
+
+    #[test]
+    fn stale_prepared_transaction_restores_backup_after_first_rename() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        let transaction = directory.path().join(".win-x64.transaction-before-journal");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old.xll"), b"old").unwrap();
+        let previous_identity = directory_identity(&previous).unwrap();
+        write_stale_journal(
+            directory.path(),
+            &transaction,
+            "win-x64",
+            Some(previous_identity),
+            TransactionState::Prepared,
+            None,
+            None,
+        );
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!transaction.exists());
+    }
+
+    #[test]
+    fn stale_empty_transaction_without_journal_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let transaction = directory.path().join(".win-x64.transaction-private-empty");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert!(!transaction.exists());
+    }
+
+    #[test]
+    fn stale_journal_next_is_promoted_before_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        let transaction = directory.path().join(".win-x64.transaction-next");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old.xll"), b"old").unwrap();
+        let previous_identity = directory_identity(&previous).unwrap();
+        let prefix = ".win-x64.transaction-";
+        let mut journal = TransactionJournal::new(
+            transaction_id(&transaction, prefix).unwrap(),
+            "win-x64".to_owned(),
+            directory_identity(directory.path()).unwrap(),
+            directory_identity(&transaction).unwrap(),
+            Some(previous_identity),
+        )
+        .unwrap();
+        journal.previous_identity = Some(previous_identity);
+        journal.sequence = 1;
+        journal.refresh_checksum().unwrap();
+        fs::write(
+            transaction.join("journal.next"),
+            serde_json::to_vec_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!transaction.exists());
+    }
+
+    #[test]
+    fn journalless_transaction_with_payload_is_quarantined() {
+        let directory = tempfile::tempdir().unwrap();
+        let transaction = directory.path().join(".win-x64.transaction-orphan");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old.xll"), b"old").unwrap();
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let error = recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap_err();
+        let quarantine = error
+            .downcast_ref::<DistributionRecoveryQuarantineError>()
+            .and_then(|error| error.quarantine.as_ref())
+            .expect("journalless payload must be quarantined");
+
+        assert!(!transaction.exists());
+        assert_eq!(
+            fs::read(quarantine.join("previous/old.xll")).unwrap(),
+            b"old"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distribution_lock_replacement_is_detected() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_path = directory.path().join(".win-x64.lock");
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(&lock_path, b"replacement").unwrap();
+
+        assert!(guard.ensure_held().is_err());
+    }
+
+    #[test]
+    fn directory_sync_failure_leaves_a_recoverable_install() {
+        let (directory, destination, staging) = distribution_fixture();
+        let file_ops = InjectedFileOps::failing_syncs([10]);
+        let prepared = prepared_test_directory(&staging);
+
+        let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected directory sync failure #10")
+        );
+        assert!(transaction_directories(directory.path()).len() == 1);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!destination.join("new.xll").exists());
+        assert!(transaction_directories(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn initial_journal_sync_failure_leaves_only_a_recoverable_private_transaction() {
+        let (directory, destination, staging) = distribution_fixture();
+        let file_ops = InjectedFileOps::failing_syncs([1]);
+        let prepared = prepared_test_directory(&staging);
+
+        let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected directory sync failure #1")
+        );
+        assert_eq!(transaction_directories(directory.path()).len(), 1);
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert!(transaction_directories(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn stale_rollback_transaction_preserves_already_restored_distribution() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        let transaction = directory.path().join(".win-x64.transaction-rollback");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let recovery_install = transaction.join("recovery-install");
+        fs::create_dir_all(&destination).unwrap();
+        fs::create_dir_all(&recovery_install).unwrap();
+        fs::write(destination.join("old.xll"), b"old").unwrap();
+        fs::write(recovery_install.join("new.xll"), b"new").unwrap();
+        let destination_identity = directory_identity(&destination).unwrap();
+        let installed_identity = directory_identity(&recovery_install).unwrap();
+        write_stale_journal(
+            directory.path(),
+            &transaction,
+            "win-x64",
+            Some(destination_identity),
+            TransactionState::RollbackPending,
+            None,
+            Some(installed_identity),
+        );
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        recover_stale_transactions(
+            directory.path(),
+            "win-x64",
+            &guard,
+            &SystemDistributionFileOps,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!transaction.exists());
     }
 
     #[test]
     fn distribution_preserves_recovery_path_when_commit_and_rollback_fail() {
         let (directory, destination, staging) = distribution_fixture();
         let file_ops = InjectedFileOps::failing_renames([2, 3]);
+        let prepared = prepared_test_directory(&staging);
 
-        let error = commit_staged_directory_with(&staging, &destination, &file_ops).unwrap_err();
+        let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
         let recovery = error
             .downcast_ref::<DistributionRecoveryError>()
             .expect("commit and rollback failure must expose the recovery path");
@@ -1188,11 +3406,11 @@ mod tests {
     }
 
     #[test]
-    fn atomic_distribution_requires_a_dedicated_output_directory() {
-        assert!(validate_atomic_output_root(Path::new(".")).is_err());
-        assert!(validate_atomic_output_root(Path::new("..")).is_err());
-        assert!(validate_atomic_output_root(Path::new("/")).is_err());
-        assert!(validate_atomic_output_root(Path::new("dist")).is_ok());
+    fn transactional_distribution_requires_a_dedicated_output_directory() {
+        assert!(validate_transactional_output_root(Path::new(".")).is_err());
+        assert!(validate_transactional_output_root(Path::new("..")).is_err());
+        assert!(validate_transactional_output_root(Path::new("/")).is_err());
+        assert!(validate_transactional_output_root(Path::new("dist")).is_ok());
     }
 
     #[test]
@@ -1208,7 +3426,8 @@ mod tests {
         fs::create_dir_all(&staging).unwrap();
         fs::write(staging.join("new.xll"), b"new").unwrap();
         let file_ops = InjectedFileOps::default();
-        assert!(commit_staged_directory_with(&staging, &destination, &file_ops).is_err());
+        let prepared = prepared_test_directory(&staging);
+        assert!(commit_test_directory_with(&prepared, &destination, &file_ops).is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"do not replace");
         assert!(file_ops.operations.borrow().is_empty());
     }
@@ -1223,6 +3442,22 @@ mod tests {
         let destination = directory.path().join("win-x64");
         fs::create_dir(&real_destination).unwrap();
         symlink(&real_destination, &destination).unwrap();
+
+        let error = validate_output_destination(&destination).unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_destination_rejects_symlinked_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real_parent = directory.path().join("real-parent");
+        let linked_parent = directory.path().join("linked-parent");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let destination = linked_parent.join("nested").join("win-x64");
 
         let error = validate_output_destination(&destination).unwrap_err();
         assert!(error.to_string().contains("must not be a symlink"));
@@ -1338,6 +3573,19 @@ mod tests {
             let value = value.to_string_lossy();
             value.contains("crt-static") || value.contains("RUSTFLAGS")
         }));
+    }
+
+    #[test]
+    fn error_as_io_retains_the_original_error_object() {
+        let io_error = error_as_io(anyhow!("root cause").context("commit failed"));
+
+        assert_eq!(io_error.to_string(), "commit failed");
+        assert!(io_error.get_ref().is_some());
+        let preserved = io_error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<IoErrorSource>())
+            .expect("the anyhow error should remain attached");
+        assert_eq!(preserved.0.chain().count(), 2);
     }
 
     #[test]

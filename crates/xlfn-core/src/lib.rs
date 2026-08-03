@@ -7,15 +7,24 @@
 //! UDF completions and framework failures are emitted as structured `tracing`
 //! events. This library never installs a global tracing subscriber; the XLL or
 //! another host component owns subscriber configuration.
+//!
+//! Enable the `async` feature to include the calculation-scoped async UDF
+//! executor and cancellation protocol. The default build contains the
+//! synchronous runtime and the same FFI-safe lifecycle primitives.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unsafe_code)]
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
+pub(crate) mod win32;
 
 #[allow(unsafe_code)]
 mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
 mod cache;
+mod callback_gate;
 #[allow(unsafe_code)]
 mod callback_value;
 #[cfg(any(feature = "async", test))]
@@ -43,6 +52,8 @@ mod return_value;
 mod rtd;
 mod runtime;
 mod shutdown;
+#[cfg(any(test, feature = "shutdown-refinement"))]
+mod shutdown_refinement;
 #[allow(unsafe_code)]
 mod subscription;
 mod utf16;
@@ -62,8 +73,8 @@ pub use callback_value::{CallbackValueReleaseState, ExcelCallbackValue};
 #[cfg(any(feature = "async", test))]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use diagnostics::{
-    DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
-    clear_diagnostic_sink, dropped_diagnostic_events, failed_diagnostic_writes,
+    AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
+    InvalidAddinId, clear_diagnostic_sink, dropped_diagnostic_events, failed_diagnostic_writes,
     install_file_diagnostic_sink, set_diagnostic_sink,
 };
 pub use error::{
@@ -97,9 +108,14 @@ pub use return_value::{
 pub use rtd::{dll_can_unload_now, dll_get_class_object};
 
 inventory::collect!(RegistrationDescriptor);
+
 #[doc(hidden)]
 pub use runtime::{CallGuard, LifecyclePhase, Runtime};
-pub use subscription::{IntoRtdValue, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
+pub use subscription::{
+    IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue,
+};
+#[doc(hidden)]
+pub use utf16::utf16_eq_ignore_ascii_case;
 pub use value::{
     AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column, ExcelDateSystem,
     ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, FromExcel, IntoExcelValue,
@@ -114,3 +130,192 @@ pub use value::{
     assert_thread_safe_return, assert_volatile_return, cell_presence_from_raw,
     with_excel_call_scope,
 };
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+pub(crate) mod test_callback {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard, TryLockError};
+    use xlfn_sys::{XL_ASYNC_RETURN, XL_FREE, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS};
+
+    static TOTAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ASYNC_RETURN_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LAST_ASYNC_VALUE: AtomicI32 = AtomicI32::new(-2);
+    static TERMINAL_FUNCTION: AtomicI32 = AtomicI32::new(-1);
+    static TERMINAL_STATUS: AtomicI32 = AtomicI32::new(XLRET_ABORT);
+    static TERMINAL_USED: AtomicBool = AtomicBool::new(false);
+    static ASYNC_REJECTED: AtomicBool = AtomicBool::new(false);
+    static CALLBACK_ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+    static CALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static CALLBACK_TEST_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) struct CallbackTestGuard {
+        guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    pub(crate) fn lock() -> CallbackTestGuard {
+        let reentrant = CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.get() != 0);
+        let guard = if reentrant {
+            None
+        } else {
+            Some(
+                CALLBACK_TEST_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+        };
+        CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        CallbackTestGuard { guard }
+    }
+
+    pub(crate) fn try_lock() -> Option<CallbackTestGuard> {
+        let reentrant = CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.get() != 0);
+        let guard = if reentrant {
+            None
+        } else {
+            match CALLBACK_TEST_LOCK.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => return None,
+            }
+        };
+        CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Some(CallbackTestGuard { guard })
+    }
+
+    impl Drop for CallbackTestGuard {
+        fn drop(&mut self) {
+            let depth = CALLBACK_TEST_LOCK_DEPTH.with(|depth| {
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("callback test lock depth remains balanced")
+            });
+            if depth == 0 {
+                drop(self.guard.take());
+            }
+            CALLBACK_TEST_LOCK_DEPTH.with(|current| current.set(depth));
+        }
+    }
+
+    pub(crate) fn install() {
+        // SAFETY: `callback` has the exact MdCallBack12 ABI and remains a
+        // process-live function for the duration of the test binary.
+        unsafe {
+            xlfn_sys::install_callback_for_abi_probe(
+                callback as *const () as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    pub(crate) fn reset() {
+        crate::callback_gate::reset();
+        TOTAL_CALLS.store(0, Ordering::Relaxed);
+        ASYNC_RETURN_CALLS.store(0, Ordering::Relaxed);
+        FREE_CALLS.store(0, Ordering::Relaxed);
+        LAST_ASYNC_VALUE.store(-2, Ordering::Relaxed);
+        TERMINAL_FUNCTION.store(-1, Ordering::Relaxed);
+        TERMINAL_STATUS.store(XLRET_ABORT, Ordering::Relaxed);
+        TERMINAL_USED.store(false, Ordering::Relaxed);
+        ASYNC_REJECTED.store(false, Ordering::Relaxed);
+        CALLBACK_ORDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn set_terminal(function: i32, status: i32) {
+        TERMINAL_FUNCTION.store(function, Ordering::Relaxed);
+        TERMINAL_STATUS.store(status, Ordering::Relaxed);
+        TERMINAL_USED.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_async_rejected(rejected: bool) {
+        ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn total_calls() -> usize {
+        TOTAL_CALLS.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn async_return_calls() -> usize {
+        ASYNC_RETURN_CALLS.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn free_calls() -> usize {
+        FREE_CALLS.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn last_async_value() -> i32 {
+        LAST_ASYNC_VALUE.load(Ordering::Relaxed)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn callback_order() -> Vec<i32> {
+        CALLBACK_ORDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    unsafe extern "system" fn callback(
+        function: i32,
+        argument_count: i32,
+        arguments: *mut *mut XLOPER12,
+        result: *mut XLOPER12,
+    ) -> i32 {
+        CALLBACK_ORDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(function);
+        TOTAL_CALLS.fetch_add(1, Ordering::Relaxed);
+        if function == XL_FREE {
+            FREE_CALLS.fetch_add(1, Ordering::Relaxed);
+            return XLRET_SUCCESS;
+        }
+        if function == XL_ASYNC_RETURN {
+            if ASYNC_REJECTED.load(Ordering::Relaxed) {
+                ASYNC_RETURN_CALLS.fetch_add(1, Ordering::Release);
+                return XLRET_FAILED;
+            }
+            if argument_count != 2 || arguments.is_null() || result.is_null() {
+                ASYNC_RETURN_CALLS.fetch_add(1, Ordering::Release);
+                return XLRET_FAILED;
+            }
+            // SAFETY: the callback contract supplies the two live argument
+            // pointers for xlAsyncReturn.
+            let returned = unsafe { *arguments.add(1) };
+            let value = if returned.is_null() {
+                -1
+            } else {
+                // SAFETY: `returned` is the live async result pointer.
+                let returned = unsafe { &*returned };
+                if returned.base_type() == xlfn_sys::XLTYPE_NUM {
+                    // SAFETY: XLTYPE_NUM selects the number union member.
+                    unsafe { returned.value.number as i32 }
+                } else {
+                    -1
+                }
+            };
+            LAST_ASYNC_VALUE.store(value, Ordering::Release);
+            ASYNC_RETURN_CALLS.fetch_add(1, Ordering::Release);
+            // SAFETY: the callback contract supplies writable result storage.
+            unsafe {
+                *result = XLOPER12::boolean(true);
+            }
+            return XLRET_SUCCESS;
+        }
+
+        let terminal_function = TERMINAL_FUNCTION.load(Ordering::Relaxed);
+        if function == terminal_function && !TERMINAL_USED.swap(true, Ordering::AcqRel) {
+            return TERMINAL_STATUS.load(Ordering::Relaxed);
+        }
+        XLRET_FAILED
+    }
+}

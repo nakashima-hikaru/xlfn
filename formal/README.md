@@ -1,106 +1,110 @@
 # xlfn shutdown formalization
 
-This directory contains an executable Lean 4 specification of the XLL shutdown
-protocol. It proves safety properties of the abstract protocol; it does **not**
-by itself prove that the current Rust implementation refines the model.
+This directory contains the Lean 4 specification of the XLL shutdown
+protocol. The abstract machine starts immediately after a successful
+`Runtime::finish_open`; Rust opening and rollback states are implementation
+states and are certified separately.
 
 ## Toolchain
 
-The project is pinned to Lean `v4.32.1`. It has no Mathlib or third-party
-package dependency.
+The project is pinned to Lean `v4.32.1` and has no third-party Lean package
+dependency.
 
 ```text
 cd formal
 lake build
 ```
 
-The CI job runs `leanchecker` (the official Lean 4 external kernel checker)
-and rejects committed `sorry` or `admit` placeholders.
+## Shutdown protocol
 
-## Protocol represented by the model
+The successful path has one order in both the model and the Rust close path:
 
-The successful path is ordered as follows:
+```text
+open
+  ↓ beginClose
+drainCalls
+  ↓ callsDrained
+drainReturns
+  ↓ returnsDrained
+drainAsync
+  ↓ asyncDrained
+stopSubscriptions
+  ↓ subscriptionsDrained
+detachHost
+  ↓ hostDetached
+closeState
+  ↓ stateClosed
+drainHandles
+  ↓ handlesDrained
+stopDiagnostics
+  ↓ diagnosticsDrained
+drainRtd
+  ↓ rtdDrained
+finalize
+  ↓ finishClose
+closed
+```
 
-1. reject new work and detach Excel function/event registrations;
-2. drain synchronous `CallGuard`s;
-3. wait until Excel owns no DLL return block and no `xlAutoFree12` callback is
-   executing;
-4. cancel/drain async tasks and join the async executor;
-5. terminate RTD operations, subscriptions, callbacks, class factories, COM
-   servers, and server locks;
-6. drain handle operations and stored handle values;
-7. prove that there is no escaped state lease, worker, worker job, or other
-   Add-in-owned resource, then consume the runtime's state root;
-8. flush and join diagnostics;
-9. enter `closed` only when every resource class is quiescent.
+`beginClose` closes the unified external ingress. `callsDrained` therefore
+follows both `ExportIngress::seal_and_drain` and
+`Runtime::wait_for_calls`; `returnsDrained` follows
+`Runtime::wait_for_returns`. Subscription teardown is separate from host
+registration detachment, and RTD module quiescence is separate from both.
 
-Any boundary or shutdown failure that prevents one of these postconditions
-from being established must transition to `failStopped`. In an in-process XLL,
-this denotes aborting or another host-level mechanism that prevents module
-unload. It is intentionally not a recoverable `closed` state.
+`Resources` contains only evidence available to the framework or supplied by
+an explicit Add-in contract:
 
-## Main theorems
+- ingress, external entries, calls, worksheet return blocks and free callbacks;
+- async tasks and executor state;
+- subscriptions, callbacks, RTD operations, factories, servers and locks;
+- handle operations and published handles;
+- registration state and callback-gate state;
+- `stateUnique`, `addinQuiesced`, and `stateOwnedByRuntime` for Add-in state;
+- diagnostics and cleanup-issue accounting.
 
-`ExcelXllFormal/Shutdown/Invariant.lean` proves:
+Arbitrary user threads and native callbacks are not represented by unverifiable
+ghost counters. `Arc::try_unwrap(state)` establishes `stateUnique`,
+`Addin::quiesce` establishes `addinQuiesced`, and consuming the runtime root
+establishes `stateOwnedByRuntime = false`.
 
-- `Step.certified_preserved`, the cumulative stage-invariant preservation theorem;
-- `Reachable.certified` and `Steps.certified`, lifting it to arbitrary traces;
-- `reachable_finalize_is_quiescent`, showing that the ordered milestones and
-  resource-creation gates establish full quiescence before finalization.
+`RtdDrained` is intentionally limited to RTD operations, class factories,
+servers, and server locks. `SubscriptionsDrained` owns the separate
+subscription/callback postcondition.
 
-`ExcelXllFormal/Shutdown/Safety.lean` proves:
+## Proofs
 
-- `Step.closed_target_is_quiescent`;
-- `reachable_closed_is_quiescent`;
-- `Steps.successful_shutdown_is_quiescent`;
-- `reachable_closed_has_no_executable_work`, including return blocks and
-  in-flight `xlAutoFree12` callbacks;
-- `closed_terminal` and `failStopped_terminal`;
-- `Step.phaseRank_mono` and `Steps.never_reopens`;
-- `Step.externalAdmission_requires_open`;
-- `stateEscape_cannot_reach_closed`;
-- `nonquiescent_cannot_finish`;
-- the bundled certificate `shutdownSafety`.
+`XlFnFormal/Shutdown/Invariant.lean` proves cumulative certificate
+preservation across the ordered stages. `Safety.lean` proves monotone phase
+progress, terminal `closed`/`failStopped` states, external-admission gating,
+and the `successIsClosed` obligations used by the refinement structure.
+`Counterexample.lean` demonstrates why assigning `closed` without a quiescence
+certificate is not a valid transition.
 
-`ExcelXllFormal/Shutdown/Refinement.lean` proves the implementation bridge
-`concrete_successful_shutdown_is_quiescent`.
+The Rust `shutdown_refinement` module is enabled only for tests or with the
+`shutdown-refinement` feature. Its `GhostMachine::apply` method is the single
+runtime transition implementation used for invariant checking; it rejects an
+event before updating state. The optional `shutdown-trace` feature enables a
+bounded event-only trace for the executable checker. Each successful open
+starts a new generation, and each trace is tied to that generation. The JSON
+trace includes `schema_version`, `generation`, `initial`, `events`, a
+`trace_truncated` budget marker, and an explicit outcome.
+The executable checker can validate a trace directly:
 
-`Counterexample.lean` demonstrates that an unchecked assignment of the
-`closed` phase admits a closed state with an active call, and proves that this
-operation has no `Step` certificate.
+```text
+lake exe shutdown_trace_checker < shutdown-trace.json
+```
 
-## Rust refinement obligations
+Recoverable diagnostic-worker replacement and reopenable drain failures remain
+live traces: they record a cleanup issue, and any queue entries lost with the
+panicked worker are recorded as discarded diagnostics. A terminal diagnostic
+failure instead ends the generation with `failStop`.
 
-The Rust implementation should expose one linearization point for each model
-event. The principal mapping is:
-
-| Lean event/stage | Rust responsibility |
-|---|---|
-| `beginClose` | `Runtime::begin_final_close` closes admission gates |
-| `hostDetached` | all function and event registrations are removed |
-| `callsDrained` | `Runtime::wait_for_calls` returns with count zero |
-| `returnsDrained` | no live `ReturnBlock`; no `xlAutoFree12` is executing |
-| `asyncDrained` | cancel tasks, await completion, join executor |
-| `rtdDrained` | close subscriptions and wait for callbacks, factories, servers, locks, and COM operations |
-| `handlesDrained` | close handle runtime and drop stored values |
-| `stateClosed` | no escaped `Arc<State>`; `Addin::quiesce` joins workers before best-effort cleanup |
-| `diagnosticsDrained` | flush and join diagnostic dispatcher |
-| `finishClose` | call `Runtime::finish_close` only after `Quiescent` is checked |
-| `failStop` | do not return to Excel when quiescence cannot be established |
-
-`ShutdownRefinement` formalizes that integration boundary. The Rust runtime now
-contains concrete counters and admission gates for DLL-owned return blocks,
-in-flight `xlAutoFree12` callbacks, handle leases, COM class factories, COM
-server objects, `LockServer` holds, and in-flight COM calls. Checked
-subscription/handle teardown and terminal fail-stop propagation prevent a
-cleanup failure from being converted into `closed`.
-
-These counters are implementation evidence, not yet a machine-checked
-refinement proof. The next integration step is to add a Rust-side ghost
-event log, prove or test every `stepSound` obligation, and connect the checked
-`Runtime::finish_close` path to `successIsClosed`. Property tests can then
-compare implementation traces with this transition system.
+The Lean model proves that an accepted abstract trace is safe. Rust tests are
+still responsible for placing each event at the actual Rust linearization
+point; the formal model does not inspect machine code or infer arbitrary
+user-thread behavior.
 
 See the repository [lifecycle guide](../guide/src/lifecycle.md),
-[testing guide](../guide/src/testing.md), and [security model](../guide/src/security.md)
-for the implementation-facing lifecycle, qualification, and deployment requirements.
+[testing guide](../guide/src/testing.md), and
+[security model](../guide/src/security.md) for implementation-facing
+lifecycle and deployment requirements.

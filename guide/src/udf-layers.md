@@ -81,9 +81,9 @@ The calculation ID is a runtime correlation identifier, not a workbook persisten
 
 `CallOutcome` contains:
 
-- `UdfResultKind`: success, input, domain, native, panic, closing, or internal;
+- `UdfResultKind`: success, input, domain, vendor, panic, closing, or internal;
 - an optional borrowed `XllError`;
-- an optional native status code;
+- an optional vendor status code;
 - framework-measured duration.
 
 The borrowed error is valid only during `exit`. Copy a bounded classification or stable code into an asynchronous telemetry queue; do not retain the reference.
@@ -135,7 +135,7 @@ Good uses include:
 - trace correlation;
 - maintenance-mode rejection;
 - bounded license/admission checks that do not call Excel;
-- recording native error-code distributions.
+- recording external-adapter error-code distributions.
 
 Avoid:
 

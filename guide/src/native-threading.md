@@ -1,175 +1,83 @@
-# Thread-affine native state
+# Thread-affine application adapters
 
-Many native APIs require a context and every derived object to be created, used, and destroyed on one thread. A thread-bound worker architecture encodes that operational model without declaring `T: Send`.
+Some external implementations require a context and every derived object to be created, used, and destroyed on one OS thread. xlfn does not provide a worker, executor, or thread-affinity abstraction for this case. The add-in application must implement or select one that matches the external contract.
 
-## Owner and handle
+## Owner and client split
 
-Use a channel or dedicated worker thread model (such as a worker thread receiving channel commands):
+A common design separates:
 
-```rust
-use std::sync::mpsc;
-use std::thread;
+- an **owner**, which creates the thread-affine state, runs its event loop, performs final destruction, and joins the worker;
+- a cloneable **client**, which contains only thread-safe submission state and may be stored in the add-in `State` or in formula-owned objects.
 
-pub struct ThreadBoundWorker {
-    tx: mpsc::Sender<Box<dyn FnOnce(&mut NativeContext) + Send>>,
+An application-owned shape may look like this:
+
+```rust,ignore
+use std::sync::mpsc::SyncSender;
+use std::thread::JoinHandle;
+
+pub struct EngineClient {
+    tx: SyncSender<Command>,
+}
+
+pub struct EngineRuntime {
+    client: EngineClient,
+    worker: Option<JoinHandle<()>>,
+}
+
+enum Command {
+    Price(PriceRequest),
+    Release(ObjectId),
+    Shutdown,
 }
 ```
 
-The owner contains the join responsibility and is deliberately not the object to place in formula state or capture in a job. The handle is cloneable and may be shared between worksheet calls.
+These are illustrative application types. xlfn does not export `EngineClient`, `EngineRuntime`, `Command`, or an equivalent worker API.
 
-The initializer and the eventual destructor of `T` run on the worker. Calls receive `&mut T`:
+The worker should create and destroy the thread-affine context on the same thread. A worksheet call sends owned data to the client and receives an owned result; raw pointers and borrowed Excel values must not cross that queue.
 
-```rust
-let value = handle.call(|context| context.fetch_data(query))?;
-```
+## Define dispatch semantics explicitly
 
-The closure, its result, and its user error must be `Send + 'static`; the native `T` itself need not be.
+The adapter contract should state:
 
-## Error separation
+- whether submission blocks, fails immediately, or returns a future;
+- queue capacity and overload behavior;
+- whether queued work can be cancelled before it starts;
+- whether running work can observe cancellation;
+- reentry and callback rules;
+- which thread destroys each object;
+- how worker panic or process failure is reported;
+- whether shutdown drains or rejects queued work.
 
-Call methods return `WorkerCallError<E>`:
+Keep application/domain failures distinct from adapter-infrastructure failures. This allows stable mapping to worksheet errors without parsing diagnostic strings.
 
-```rust
-match handle.call(|context| context.fetch_data(query)) {
-    Ok(value) => Ok(value),
-    Err(WorkerCallError::User(error)) => Err(error),
-    Err(WorkerCallError::Infrastructure(error)) => Err(Error::Worker(error)),
-}
-```
+## Synchronous and asynchronous worksheet calls
 
-`User(E)` comes from the submitted operation. `Infrastructure(WorkerError)` describes queue, lifecycle, reentry, worker panic, or ownership failure. Keeping them distinct prevents infrastructure code from executing a user-defined error conversion on the worker.
+A synchronous UDF must not wait without a documented upper bound. For a saturated adapter, choose an explicit policy such as immediate overload, bounded waiting, or an asynchronous UDF.
 
-Common infrastructure states include queue full, closed/closing worker, reentrant call, panic, wrong pool, and invalid worker count. Map them to a stable operational error policy rather than string matching.
+For an async UDF, the application adapter may expose a future or bridge a response channel into one. Dropping the Excel-side future does not automatically interrupt a running external call. Cancellation remains an application-adapter property; xlfn only coordinates cancellation and result delivery at the Excel boundary.
 
-## Blocking, non-blocking, and async submission
+## Concurrency
 
-```rust
-handle.call(operation);      // wait for capacity and completion
-handle.try_call(operation);  // fail immediately when not accepted
-handle.call_async(operation).await;
-handle.enqueue(cleanup);     // non-blocking fire-and-forget
-```
+Creating several workers improves throughput only when the external implementation permits independent concurrent contexts. The application must decide whether calls are:
 
-`call_async` is cancellation-aware while a job is queued. Dropping the returned future races with the worker through a `Queued -> Running` or `Queued -> Canceled` state transition. Once the operation is running, dropping the future cannot interrupt arbitrary native code.
-Same-worker async reentry is rejected, while an async call from one worker to a
-different worker is allowed. Synchronous calls from any worker to another
-worker remain rejected because they block the caller and can form a cycle.
+- globally serialized;
+- serialized per context or object;
+- independently concurrent;
+- externally rate-limited.
 
-`enqueue` reports a full or stopped queue immediately and never waits for
-completion. Use it only when worker-owned state performs a final defensive
-cleanup during shutdown.
+Do not infer concurrency from the existence of multiple Excel calculation threads. A `thread_safe` UDF allows Excel to call the Rust boundary concurrently; it does not make the downstream implementation thread-safe.
 
-Do not make a synchronous worksheet function wait indefinitely on a saturated worker. Choose between:
+## Shutdown
 
-- a bounded `try_call` failure;
-- an asynchronous UDF that awaits `call_async`;
-- a deliberately bounded synchronous operation with measured latency.
+`Addin::quiesce` must establish application-level quiescence before returning:
 
-## Worker pools
+1. reject new adapter submissions;
+2. signal cancellation or shutdown;
+3. resolve or reject queued requests according to the documented policy;
+4. release external objects on their required owner;
+5. join every worker or coordinator thread;
+6. release any library, process, connection, or other adapter root.
 
-Use a pool when the native supports several independent thread-affine contexts:
+A timeout that abandons in-process code is not a safe unload strategy. If a running operation cannot be bounded or cooperatively stopped, isolate it behind a process boundary whose failure cannot leave code executing in the XLL after unload.
 
-```rust
-let pool = ThreadBoundPool::spawn(
-    PoolOptions::new(4)
-        .named("data processing")
-        .queue_capacity(64),
-    |_| NativeContext::create(),
-    NativeContext::shutdown,
-)?;
-let handle = pool.handle();
-```
-
-If a later worker fails to initialize, the pool runs the rollback function on
-every context already created and reports initialization, rollback, and worker
-shutdown failures separately. The registered finalizer is also used by normal
-shutdown and Drop fallback. The pool selects the worker with the fewest pending
-calls, using a rotating tie break.
-
-```rust
-let value = handle.call(|context| context.fetch_data(query))?;
-let (worker, object) = handle.call_with_worker(|context| context.create_object())?;
-let value = handle.call_on(worker, move |context| context.use_object(object))?;
-```
-
-`PoolWorkerId` binds an opaque native object to the worker and pool that owns it. Passing an ID from another pool returns `WorkerError::WrongPool`.
-
-Async equivalents are available:
-
-```rust
-let value = handle.call_async(operation).await?;
-let (worker, object) = handle.call_with_worker_async(create).await?;
-let value = handle.call_on_async(worker, operation).await?;
-```
-
-A pool improves concurrency only when contexts and the loaded DLL can actually execute
-concurrently. `SerializedLibrary<A>` keeps all workers behind one canonical-path gate. Select
-`ConcurrentLibrary<A>` through `VerifiedLibrary::assume_concurrent` only under a separately
-verified native guarantee.
-
-## Shutdown policies
-
-The coordinator-backed pool cancels queued calls, preserves accepted release
-commands, runs one finalizer per worker, joins workers, and finally drops its
-lifecycle root:
-
-```rust
-pool.shutdown()?;
-```
-
-`ThreadBoundPool::shutdown` may be called concurrently and every caller
-observes the same result. It rejects a blocking call made by one of its own
-workers. Dropping the pool only requests shutdown; the coordinator completes
-cleanup without blocking the dropping thread.
-
-The lower-level single-worker owner retains explicit canceling and graceful
-shutdown policies:
-
-```rust
-owner.shutdown()?;
-owner.shutdown_graceful()?;
-```
-
-Use graceful shutdown only when completing every queued operation is required and bounded. For an XLL unload, cancellation of work that has not started is normally preferable.
-
-Neither method can forcibly stop a running foreign function. Running operations must cooperate with cancellation or have a documented upper bound. The owner must be joined before XLL unload.
-
-## Coordinator-owned pool lifecycle
-
-`ThreadBoundOwner<T>` remains `!Send + !Sync`. A pool never exposes its
-collection of these owners: private `LocalPoolRuntime` state is created and
-dropped on a coordinator thread. Shared state can own `ThreadBoundPool<T, F>`
-directly and calculation paths clone only its handle:
-
-```text
-State / EngineInner: ThreadBoundPool<T, F>
-calculation paths: ThreadBoundPoolHandle<T>
-session: engine handle + opaque ContextIdentity
-handle objects: engine handle + ContextIdentity + logical native object ID
-```
-
-Use `spawn_with_root` when DLL load and final unload must occur on that
-coordinator. The root is created before worker initialization and dropped only
-after every context has been finalized and every worker joined.
-
-## Lower-level wrappers
-
-The worker module also supplies narrower assertions and synchronization tools:
-
-### `Serialized<T>`
-
-Use when `T: Send` may move to shared state but only one mutable call may execute at a time. `with` waits; `try_with` reports immediate unavailability. Same-thread reentry is rejected.
-
-### `ContextPool<T>`
-
-Use when independent `T: Send` contexts can be leased on arbitrary caller threads. `with` waits for one context; `try_with` fails immediately. The pool must be non-empty and rejects same-wrapper reentry.
-
-### `ThreadMobile<T>`
-
-An unsafe assertion that a value, including its destruction, may move between threads. It grants `Send` without granting concurrent access.
-
-### `Reentrant<T>`
-
-An unsafe assertion that all shared operations, movement, and destruction are safe under concurrency. It grants both `Send` and `Sync`. This is the strongest contract and should be the rarest choice.
-
-Prefer owners and safe synchronization types. Unsafe wrappers document native guarantees; they do not discover them.
+The framework does not verify these properties. They are part of the application's adapter design, tests, and release qualification.

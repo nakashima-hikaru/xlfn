@@ -1,8 +1,8 @@
-import ExcelXllFormal.Shutdown.Safety
+import XlFnFormal.Shutdown.Safety
 
 set_option autoImplicit false
 
-namespace ExcelXllFormal.Shutdown
+namespace XlFnFormal.Shutdown
 
 universe u
 
@@ -62,8 +62,8 @@ end ConcreteSteps
 Once the Rust ghost state discharges `ShutdownRefinement`, every successful
 concrete shutdown return is proved to have no registration, active call,
 DLL-owned return block, in-flight `xlAutoFree12`, async task/executor, RTD
-resource, handle, escaped state lease, worker/job, Add-in resource, or
-diagnostic dispatcher left alive. -/
+resource, handle operation/value, escaped Add-in state, or diagnostic
+dispatcher left alive. -/
 theorem concrete_successful_shutdown_is_quiescent
     {Concrete : Type u}
     {refinement : ShutdownRefinement Concrete}
@@ -76,4 +76,4 @@ theorem concrete_successful_shutdown_is_quiescent
   exact hSteps.sound.successful_shutdown_is_quiescent
     hInitialOpen (refinement.successIsClosed hSuccess)
 
-end ExcelXllFormal.Shutdown
+end XlFnFormal.Shutdown

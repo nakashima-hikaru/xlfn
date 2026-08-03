@@ -10,6 +10,8 @@ description = "Safe value, lifecycle, registration, and ownership layer for Exce
 
 [features]
 default = []
+shutdown-refinement = []
+shutdown-trace = ["shutdown-refinement"]
 async = [
     "dep:async-channel",
     "dep:async-task",
@@ -17,6 +19,7 @@ async = [
 ]
 
 [dependencies]
+arc-swap.workspace = true
 async-channel = { workspace = true, optional = true }
 async-task = { workspace = true, optional = true }
 blake3.workspace = true
@@ -28,13 +31,19 @@ inventory.workspace = true
 moka.workspace = true
 parking_lot.workspace = true
 scopeguard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+xlfn-common.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+proptest.workspace = true
 static_assertions.workspace = true
 tempfile.workspace = true
+xlfn-sys = { workspace = true, features = ["abi-probe"] }
 
 # loom/shuttle currently depend on a generator backend without 32-bit Windows
 # support. Their architecture-independent models still run on every other host;
@@ -44,16 +53,7 @@ loom.workspace = true
 shuttle.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Com",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Ole",
-    "Win32_System_Registry",
-    "Win32_System_Threading",
-    "Win32_System_Variant",
-] }
+windows-link.workspace = true
 
 [lints]
 workspace = true

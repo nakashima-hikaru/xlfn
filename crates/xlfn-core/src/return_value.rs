@@ -1,3 +1,4 @@
+use crate::host_callback::HostCallbackSession;
 use crate::{
     CallId, CallMetadata, CallOutcome, ExcelErrorValue, IntoExcelValue, OwnedExcelValue, Runtime,
     UdfResultKind, XllError, XllResult,
@@ -8,7 +9,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
 use xlfn_sys::{
     XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLRET_ABORT, XLRET_SUCCESS,
     XLRET_UNCALCED, XLTYPE_MULTI, XLTYPE_STR,
@@ -99,6 +99,8 @@ struct ReturnTrackerState {
 pub(crate) struct ReturnTracker {
     state: Mutex<ReturnTrackerState>,
     quiescent: Condvar,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 impl ReturnTracker {
@@ -106,6 +108,20 @@ impl ReturnTracker {
         Self {
             state: Mutex::new(ReturnTrackerState::default()),
             quiescent: Condvar::new(),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(event);
         }
     }
 
@@ -127,6 +143,9 @@ impl ReturnTracker {
             .blocks
             .checked_add(1)
             .expect("return block count cannot overflow");
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
     }
 
     fn release_block(&self) {
@@ -136,6 +155,9 @@ impl ReturnTracker {
             .checked_sub(1)
             .expect("return block count remains balanced");
         self.quiescent.notify_all();
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
     }
 
     fn enter_free(self: &Arc<Self>) -> ReturnFreeGuard {
@@ -145,6 +167,8 @@ impl ReturnTracker {
             .checked_add(1)
             .expect("return free-operation count cannot overflow");
         drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
         ReturnFreeGuard {
             tracker: Arc::clone(self),
         }
@@ -202,19 +226,24 @@ impl Drop for ReturnFreeGuard {
             .checked_sub(1)
             .expect("return free-operation count remains balanced");
         self.tracker.quiescent.notify_all();
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.tracker
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
     }
 }
 
 /// Call-scoped services used by [`crate::ExcelReturn`] implementations.
 #[doc(hidden)]
-pub struct ReturnContext<'call> {
+pub struct ReturnContext<'call, 'scope> {
     runtime: Option<&'call dyn crate::value::HandleRuntimeProvider>,
     udf_id: Option<&'static str>,
     raw_arguments: Option<&'call [*mut XLOPER12]>,
+    callbacks: Option<&'scope HostCallbackSession>,
     lifetime: PhantomData<Rc<()>>,
 }
 
-impl<'call> ReturnContext<'call> {
+impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     #[must_use]
     pub const fn new() -> Self {
@@ -222,6 +251,7 @@ impl<'call> ReturnContext<'call> {
             runtime: None,
             udf_id: None,
             raw_arguments: None,
+            callbacks: None,
             lifetime: PhantomData,
         }
     }
@@ -237,11 +267,13 @@ impl<'call> ReturnContext<'call> {
         runtime: &'call Runtime<S>,
         udf_id: &'static str,
         raw_arguments: &'call [*mut XLOPER12],
+        scope: &'scope crate::CallScope<'scope>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
             udf_id: Some(udf_id),
             raw_arguments: Some(raw_arguments),
+            callbacks: Some(scope.callbacks()),
             lifetime: PhantomData,
         }
     }
@@ -284,20 +316,23 @@ impl<'call> ReturnContext<'call> {
         let raw_arguments = self.raw_arguments.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_4449_4745,
         })?;
+        let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
+            diagnostic_id: 0x4841_4e44_4342_4b53,
+        })?;
         // SAFETY: for_call's contract keeps every argument and nested payload
         // live for this context's lifetime.
         let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
-        let key = crate::handle::formula_topic_key(udf_id, &argument_digest)?;
+        let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
         let handles = runtime.handle_runtime()?;
         let observer_handles = Arc::clone(&handles);
         let (token, _) = handles.prepare_observed(key, operation, move |key, token| {
-            crate::rtd::observe(observer_handles, key, token)
+            crate::rtd::observe(observer_handles, key, token, callbacks)
         })?;
         Ok(token)
     }
 }
 
-impl Default for ReturnContext<'_> {
+impl Default for ReturnContext<'_, '_> {
     fn default() -> Self {
         Self::new()
     }
@@ -408,8 +443,10 @@ impl ReturnBlock {
         #[cfg(test)]
         LIVE_BLOCKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if let ReturnOwnership::Excel(tracker) = &ownership {
-            tracker.register_block();
+        match &ownership {
+            ReturnOwnership::Excel(tracker) => tracker.register_block(),
+            #[cfg(any(feature = "async", test))]
+            ReturnOwnership::Local => {}
         }
 
         Ok(Box::new(Self {
@@ -464,11 +501,15 @@ fn base_allocation_payload_bytes(array_cells: usize, string_count: usize) -> Xll
 impl Drop for ReturnBlock {
     fn drop(&mut self) {
         debug_assert_eq!(self.magic, RETURN_MAGIC);
-        if let ReturnOwnership::Excel(tracker) = &self.ownership {
-            // This runs before field drop glue. The matching free-operation
-            // guard remains active until the complete block, including every
-            // UTF-16 buffer and array cell, has been released.
-            tracker.release_block();
+        match &self.ownership {
+            ReturnOwnership::Excel(tracker) => {
+                // This runs before field drop glue. The matching free-operation
+                // guard remains active until the complete block, including every
+                // UTF-16 buffer and array cell, has been released.
+                tracker.release_block();
+            }
+            #[cfg(any(feature = "async", test))]
+            ReturnOwnership::Local => {}
         }
         #[cfg(test)]
         LIVE_BLOCKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -568,13 +609,12 @@ fn allocate_excel_error(error: &XllError, tracker: &Arc<ReturnTracker>) -> *mut 
 
 static CLOSING_ERROR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
-pub(crate) fn allocate_detached_error(error: &XllError) -> *mut XLOPER12 {
+pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     // Return admission is already closed, so publishing another DLL-free block
     // would race the terminal drain. A permanently owned scalar has no
     // xlAutoFree12 callback and remains valid even if Excel keeps the pointer
     // until after the XLL has been unmapped.
     // Use a process-wide static singleton to prevent memory leaks on repeated late calls.
-    let _code = error.excel_error().code();
     let ptr = *CLOSING_ERROR.get_or_init(|| {
         Box::into_raw(Box::new(XLOPER12::error(
             XllError::Closing.excel_error().code(),
@@ -631,15 +671,28 @@ where
     F: FnOnce() -> XllResult<T>,
     T: IntoExcelValue,
 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter();
+    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
     if !accepted {
-        return allocate_detached_error(&XllError::Closing);
+        return closing_error_pointer();
     }
+    let _call = match runtime.enter() {
+        Ok(call) => call,
+        Err(_) => {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+            return closing_error_pointer();
+        }
+    };
     let Some(producer) = runtime.enter_return_producer() else {
-        return allocate_detached_error(&XllError::Closing);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+        return closing_error_pointer();
     };
     let tracker = producer.tracker();
-    match catch_unwind(AssertUnwindSafe(|| {
+    let result = match catch_unwind(AssertUnwindSafe(|| {
         let value = operation()?;
         let value = value.into_excel_value()?;
         allocate_excel_owned(value, tracker)
@@ -647,7 +700,10 @@ where
         Ok(Ok(pointer)) => pointer,
         Ok(Err(error)) => allocate_excel_error(&error, tracker),
         Err(_) => allocate_excel_error(&XllError::Panic, tracker),
-    }
+    };
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+    result
 }
 
 /// Outermost panic boundary for void-returning `extern "system"` entry points.
@@ -657,12 +713,25 @@ where
 /// Excel callbacks.
 #[doc(hidden)]
 #[allow(dead_code)]
-pub fn ffi_boundary_void(operation: impl FnOnce()) {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter();
+pub fn ffi_boundary_void<S>(runtime: &Runtime<S>, operation: impl FnOnce()) {
+    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
     if !accepted {
         return;
     }
+    let _call = match runtime.enter() {
+        Ok(call) => call,
+        Err(_) => {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+            return;
+        }
+    };
     let _ = catch_unwind(AssertUnwindSafe(operation));
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
 }
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
@@ -677,20 +746,28 @@ where
     F: FnOnce(&S) -> XllResult<T>,
     T: IntoExcelValue,
 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter();
+    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
     if !accepted {
-        return allocate_detached_error(&XllError::Closing);
+        return closing_error_pointer();
     }
     let Some(producer) = runtime.enter_return_producer() else {
-        return allocate_detached_error(&XllError::Closing);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+        return closing_error_pointer();
     };
     let tracker = producer.tracker();
-    match catch_unwind(AssertUnwindSafe(|| {
+    let result = match catch_unwind(AssertUnwindSafe(|| {
         udf_boundary_named_inner(runtime, tracker, udf_id, excel_name, operation)
     })) {
         Ok(pointer) => pointer,
         Err(_) => allocate_excel_error(&XllError::Panic, tracker),
-    }
+    };
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+    result
 }
 
 fn udf_boundary_named_inner<S, F, T>(
@@ -705,8 +782,8 @@ where
     T: IntoExcelValue,
 {
     let call_id = runtime.next_call_id();
-    let started_at = SystemTime::now();
-    let started = Instant::now();
+    let timer = crate::execution::CallTimer::start();
+    let started_at = timer.started_at();
     match runtime.enter() {
         Ok(guard) => {
             let concurrent_calls = guard.concurrent_calls();
@@ -718,12 +795,13 @@ where
                 started_at,
                 concurrent_calls,
             };
-            let layers = match crate::execution::EnteredLayers::enter(&runtime.layers(), &metadata)
+            let configured_layers = runtime.layers();
+            let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata)
             {
                 Ok(layers) => layers,
                 Err(error) => {
                     crate::diagnostics::report_no_unwind(udf_id, &error);
-                    let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
+                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
                     crate::execution::trace(&metadata, &outcome);
                     return allocate_excel_error(&error, tracker);
                 }
@@ -740,7 +818,7 @@ where
                         result: UdfResultKind::Success,
                         error: None,
                         vendor_code: None,
-                        duration: started.elapsed(),
+                        duration: timer.elapsed(),
                     };
                     layers.exit(&outcome);
                     crate::execution::trace(&metadata, &outcome);
@@ -748,7 +826,7 @@ where
                 }
                 Err(error) => {
                     crate::diagnostics::report_no_unwind(udf_id, &error);
-                    let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
+                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
                     layers.exit(&outcome);
                     crate::execution::trace(&metadata, &outcome);
                     allocate_excel_error(&error, tracker)
@@ -767,7 +845,7 @@ where
                 started_at,
                 concurrent_calls: 0,
             };
-            let outcome = crate::execution::outcome_for_error(&error, started.elapsed());
+            let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
             crate::execution::trace(&metadata, &outcome);
             allocate_excel_error(&error, tracker)
         }
@@ -837,6 +915,10 @@ unsafe fn free_return_block(pointer: *mut XLOPER12) {
     // SAFETY: The caller contract guarantees this is a unique ReturnBlock.
     let block = unsafe { Box::from_raw(block_pointer) };
     debug_assert_eq!(block.magic, RETURN_MAGIC);
+    destroy_return_block(block);
+}
+
+fn destroy_return_block(block: Box<ReturnBlock>) {
     drop(block);
 }
 
@@ -861,10 +943,9 @@ mod tests {
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if crate::ingress::global_ingress().phase() != crate::ingress::PHASE_CLOSED {
-            crate::ingress::global_ingress().begin_close();
+            crate::ingress::global_ingress().begin_close_with(|| {});
             let _ = crate::ingress::global_ingress().seal_and_drain();
         }
-        crate::ingress::global_ingress().reset();
         guard
     }
 
@@ -892,6 +973,7 @@ mod tests {
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_NUM);
         // Excel-owned returns carry the free bit and are registered with the
         // runtime before the producer is released.
+        // SAFETY: pointer remains the live return from ffi_boundary.
         assert_ne!(unsafe { (*pointer).xltype } & XLBIT_DLL_FREE, 0);
         assert_eq!(
             LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed),
@@ -1188,11 +1270,27 @@ mod tests {
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(pointer) };
 
-        let events = events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "test_conversion");
-        assert_eq!(events[0].1, UdfResultKind::InputError);
-        assert_eq!(events[0].2, 1);
+        {
+            let recorded = events.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].0, "test_conversion");
+            assert_eq!(recorded[0].1, UdfResultKind::InputError);
+            assert_eq!(recorded[0].2, 1);
+        }
+
+        let panic_pointer = udf_boundary_named(
+            &runtime,
+            "test_panic",
+            "TEST.PANIC",
+            |_| -> XllResult<f64> { panic!("injected UDF panic") },
+        );
+        // SAFETY: this test owns the live return pointer.
+        unsafe { free_return(panic_pointer) };
+
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[1].0, "test_panic");
+        assert_eq!(recorded[1].1, UdfResultKind::Panic);
     }
 
     #[test]
@@ -1224,11 +1322,14 @@ mod tests {
             xltype: xlfn_sys::XLTYPE_SREF,
         };
         let raw_arguments = [&mut unsupported as *mut _];
-        // SAFETY: unsupported and its inline reference remain live for the
-        // context lifetime. A handle fingerprint would reject this type.
-        let mut context = unsafe { ReturnContext::for_call(&runtime, "scalar", &raw_arguments) };
-        let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
-        assert_eq!(value, 4.5);
+        crate::with_excel_call_scope(|scope| {
+            // SAFETY: unsupported and its inline reference remain live for the
+            // context lifetime. A handle fingerprint would reject this type.
+            let mut context =
+                unsafe { ReturnContext::for_call(&runtime, "scalar", &raw_arguments, scope) };
+            let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
+            assert_eq!(value, 4.5);
+        });
     }
 
     #[test]

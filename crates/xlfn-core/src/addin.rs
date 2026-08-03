@@ -1,17 +1,18 @@
+use crate::host_callback::HostCallbackSession;
 use crate::{
-    CleanupReporter, ExcelCallbackValue, ExcelReference, FromExcel, IntoXllError, Matrix,
-    OwnedExcelValue, UdfLayer, XllError, XllResult,
+    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, FromExcel,
+    IntoXllError, Matrix, OwnedExcelValue, UdfLayer, XllError, XllResult,
 };
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use xlfn_sys::{XL_COERCE, XL_SHEET_NM, XLRET_SUCCESS};
+use xlfn_sys::{XL_COERCE, XL_SHEET_NM};
 
 #[derive(Clone, Debug)]
 pub struct BuildInfo {
-    pub addin_id: &'static str,
+    pub addin_id: AddinId,
     pub version: &'static str,
     pub target: &'static str,
 }
@@ -193,14 +194,14 @@ impl<S> AsRef<S> for AsyncContext<S> {
     }
 }
 
-impl<S> Deref for MainThreadContext<'_, S> {
+impl<S> Deref for MainThreadContext<'_, '_, S> {
     type Target = S;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-impl<S> AsRef<S> for MainThreadContext<'_, S> {
+impl<S> AsRef<S> for MainThreadContext<'_, '_, S> {
     fn as_ref(&self) -> &S {
         self.state
     }
@@ -219,55 +220,65 @@ impl<'call, S> ThreadSafeContext<'call, S> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct MainThreadContext<'call, S> {
-    state: &'call S,
-    runtime: &'call crate::Runtime<S>,
+#[derive(Clone)]
+pub struct MainThreadContext<'state, 'scope, S> {
+    state: &'state S,
+    runtime: &'state crate::Runtime<S>,
+    callbacks: &'scope HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-#[derive(Clone, Copy)]
-pub struct MacroSheetContext<'call, S> {
-    state: &'call S,
+#[derive(Clone)]
+pub struct MacroSheetContext<'state, 'scope, S> {
+    state: &'state S,
+    callbacks: &'scope HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl<S> Deref for MacroSheetContext<'_, S> {
+impl<S> Deref for MacroSheetContext<'_, '_, S> {
     type Target = S;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-impl<S> AsRef<S> for MacroSheetContext<'_, S> {
+impl<S> AsRef<S> for MacroSheetContext<'_, '_, S> {
     fn as_ref(&self) -> &S {
         self.state
     }
 }
 
-impl<'call, S> MacroSheetContext<'call, S> {
+impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call S) -> Self {
+    pub fn new(state: &'state S, scope: &'scope CallScope<'scope>) -> Self {
         Self {
             state,
+            callbacks: scope.callbacks(),
             _not_send_or_sync: PhantomData,
         }
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'call S {
+    pub const fn state(&self) -> &'state S {
         self.state
     }
 
     pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<OwnedExcelValue> {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XL_COERCE, &arguments) };
-        if status != XLRET_SUCCESS {
+        let (status, mut result) = unsafe {
+            self.callbacks
+                .call(XL_COERCE, &arguments)
+                .map_err(|suppressed| XllError::ExcelApi {
+                    function: "xlCoerce(suppressed)",
+                    code: suppressed.status.raw_code(),
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
                 function: "xlCoerce",
-                code: status,
+                code: status.raw_code(),
             }));
         }
         let converted = OwnedExcelValue::from_excel(
@@ -285,11 +296,18 @@ impl<'call, S> MacroSheetContext<'call, S> {
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XL_COERCE, &arguments) };
-        if status != XLRET_SUCCESS {
+        let (status, mut result) = unsafe {
+            self.callbacks
+                .call(XL_COERCE, &arguments)
+                .map_err(|suppressed| XllError::ExcelApi {
+                    function: "xlCoerce(suppressed)",
+                    code: suppressed.status.raw_code(),
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
                 function: "xlCoerce",
-                code: status,
+                code: status.raw_code(),
             }));
         }
         let converted = Matrix::<T>::from_excel(
@@ -304,11 +322,18 @@ impl<'call, S> MacroSheetContext<'call, S> {
     pub fn sheet_name(&self, reference: &ExcelReference<'_>) -> XllResult<String> {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe { ExcelCallbackValue::call(XL_SHEET_NM, &arguments) };
-        if status != XLRET_SUCCESS {
+        let (status, mut result) = unsafe {
+            self.callbacks
+                .call(XL_SHEET_NM, &arguments)
+                .map_err(|suppressed| XllError::ExcelApi {
+                    function: "xlSheetNm(suppressed)",
+                    code: suppressed.status.raw_code(),
+                })?
+        };
+        if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
                 function: "xlSheetNm",
-                code: status,
+                code: status.raw_code(),
             }));
         }
         let converted = String::from_excel(
@@ -321,19 +346,24 @@ impl<'call, S> MacroSheetContext<'call, S> {
     }
 }
 
-impl<'call, S> MainThreadContext<'call, S> {
+impl<'state, 'scope, S> MainThreadContext<'state, 'scope, S> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call S, runtime: &'call crate::Runtime<S>) -> Self {
+    pub fn new(
+        state: &'state S,
+        runtime: &'state crate::Runtime<S>,
+        scope: &'scope CallScope<'scope>,
+    ) -> Self {
         Self {
             state,
             runtime,
+            callbacks: scope.callbacks(),
             _not_send_or_sync: PhantomData,
         }
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'call S {
+    pub const fn state(&self) -> &'state S {
         self.state
     }
 
@@ -347,7 +377,11 @@ impl<'call, S> MainThreadContext<'call, S> {
     {
         let subscriptions = self.runtime.subscriptions();
         let prepared = subscriptions.prepare(source, topic)?;
-        match crate::rtd::observe_subscription(Arc::clone(&subscriptions), prepared.key()) {
+        match crate::rtd::observe_subscription(
+            Arc::clone(&subscriptions),
+            prepared.key(),
+            self.callbacks,
+        ) {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)
@@ -370,26 +404,68 @@ mod tests {
     use std::sync::Arc;
 
     assert_impl_all!(ThreadSafeContext<'static, ()>: Copy, Clone, Send, Sync);
-    assert_impl_all!(MainThreadContext<'static, ()>: Copy, Clone);
-    assert_impl_all!(MacroSheetContext<'static, ()>: Copy, Clone);
-    assert_not_impl_any!(MainThreadContext<'static, ()>: Send, Sync);
-    assert_not_impl_any!(MacroSheetContext<'static, ()>: Send, Sync);
+    assert_impl_all!(MainThreadContext<'static, 'static, ()>: Clone);
+    assert_impl_all!(MacroSheetContext<'static, 'static, ()>: Clone);
+    assert_not_impl_any!(MainThreadContext<'static, 'static, ()>: Send, Sync);
+    assert_not_impl_any!(MacroSheetContext<'static, 'static, ()>: Send, Sync);
 
     #[test]
     fn synchronous_contexts_expose_their_state_by_value() {
         let state = 17_u32;
         let runtime = crate::Runtime::new();
         let thread_safe = ThreadSafeContext::new(&state);
-        let main_thread = MainThreadContext::new(&state, &runtime);
-        let macro_sheet = MacroSheetContext::new(&state);
+        crate::with_excel_call_scope(|scope| {
+            let main_thread = MainThreadContext::new(&state, &runtime, scope);
+            let macro_sheet = MacroSheetContext::new(&state, scope);
 
-        assert_eq!(thread_safe.state(), &17);
-        assert_eq!(main_thread.state(), &17);
-        assert_eq!(macro_sheet.state(), &17);
+            assert_eq!(thread_safe.state(), &17);
+            assert_eq!(main_thread.state(), &17);
+            assert_eq!(macro_sheet.state(), &17);
 
-        let copied = main_thread;
-        assert_eq!(copied.state(), &17);
-        assert_eq!(main_thread.state(), &17);
+            let copied = main_thread.clone();
+            assert_eq!(copied.state(), &17);
+            assert_eq!(main_thread.state(), &17);
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn one_call_scope_suppresses_later_macro_sheet_callbacks_after_abort() {
+        use xlfn_sys::{
+            XL_SHEET_NM, XLOPER12, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT, XLTYPE_SREF,
+        };
+
+        let _callback_guard = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        crate::test_callback::set_terminal(XL_SHEET_NM, XLRET_ABORT);
+
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                sref: XLOPER12SRef {
+                    count: 1,
+                    reference: XLREF12 {
+                        rw_first: 0,
+                        rw_last: 0,
+                        col_first: 0,
+                        col_last: 0,
+                    },
+                },
+            },
+            xltype: XLTYPE_SREF,
+        };
+        // SAFETY: `raw` remains live for the reference and callback scope.
+        let reference: crate::ExcelReference<'_> =
+            unsafe { crate::reference_from_raw("reference", &mut raw) }.unwrap();
+        let state = ();
+
+        crate::with_excel_call_scope(|scope| {
+            let context = MacroSheetContext::new(&state, scope);
+            assert!(context.sheet_name(&reference).is_err());
+            let _ = context.coerce(&reference);
+            assert_eq!(crate::test_callback::total_calls(), 1);
+            assert_eq!(crate::test_callback::free_calls(), 0);
+        });
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -427,6 +503,9 @@ mod tests {
         }
 
         let runtime = crate::Runtime::<()>::new();
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions();
         let disconnected = Arc::new(AtomicBool::new(false));
         let source = Arc::new(TestSource {
@@ -442,19 +521,19 @@ mod tests {
         );
 
         let state = ();
-        let context = MainThreadContext::new(&state, &runtime);
-        assert!(matches!(
-            context.subscribe(source, topic),
-            Err(crate::XllError::ExcelApi {
-                function: "xlfRtd",
-                code: xlfn_sys::XLRET_FAILED,
-            })
-        ));
+        crate::with_excel_call_scope(|scope| {
+            let context = MainThreadContext::new(&state, &runtime, scope);
+            assert!(matches!(
+                context.subscribe(source, topic),
+                Err(crate::XllError::ExcelApi {
+                    function: "xlfRtd",
+                    code: xlfn_sys::XLRET_FAILED,
+                })
+            ));
+        });
 
         let updates = subscriptions.snapshot_updates(51);
-        assert_eq!(updates.updates.len(), 1);
-        assert_eq!(updates.updates[0].topic_id, 7);
-        assert_eq!(updates.updates[0].value, crate::RtdValue::Number(17.5));
+        assert!(updates.updates.is_empty());
         assert_eq!(
             subscriptions.connect(51, 7, prepared.key()).unwrap(),
             crate::RtdValue::Number(17.5),

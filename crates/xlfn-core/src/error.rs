@@ -105,6 +105,8 @@ pub enum XllError {
     ExcelApi { function: &'static str, code: i32 },
     #[error("Excel name {name} is already registered")]
     RegistrationConflict { name: &'static str },
+    #[error("Excel name {name} no longer refers to the expected registration")]
+    MetadataDebtBindingChanged { name: &'static str },
     #[error("failed to load {} (OS error {os_error})", path.display())]
     LibraryLoad { path: PathBuf, os_error: u32 },
     #[error("missing symbol {symbol}")]
@@ -166,6 +168,7 @@ impl XllError {
             | Self::ElementCountMismatch { .. }
             | Self::ExcelApi { .. }
             | Self::RegistrationConflict { .. }
+            | Self::MetadataDebtBindingChanged { .. }
             | Self::LibraryLoad { .. }
             | Self::MissingSymbol { .. }
             | Self::AbiMismatch { .. }

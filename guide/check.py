@@ -16,6 +16,12 @@ INCLUDE = re.compile(r"\{\{#include\s+([^}:]+)(?::[^}]*)?\}\}")
 
 errors: list[str] = []
 
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(GUIDE))
+    except ValueError:
+        return str(path.relative_to(GUIDE.parent))
+
 def parse_simple_toml(text: str) -> dict:
     config: dict = {"book": {}, "build": {}, "output": {"html": {}}}
     current_section = None
@@ -75,7 +81,7 @@ for path in markdown_files:
     if path.resolve() not in listed:
         errors.append(f"Markdown file is not listed in SUMMARY.md: {path.relative_to(SRC)}")
 
-for path in [GUIDE / "README.md", *markdown_files]:
+for path in [GUIDE / "README.md", GUIDE.parent / "README.md", *markdown_files]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     fence_count = sum(line.startswith("```") for line in lines)
@@ -96,11 +102,11 @@ for path in [GUIDE / "README.md", *markdown_files]:
             continue
         resolved = (path.parent / target_path).resolve()
         if not resolved.exists():
-            errors.append(f"Broken local link in {path.relative_to(GUIDE)}: {target}")
+            errors.append(f"Broken local link in {display_path(path)}: {target}")
     for target in INCLUDE.findall(text):
         resolved = (path.parent / target).resolve()
         if not resolved.is_file():
-            errors.append(f"Broken mdBook include in {path.relative_to(GUIDE)}: {target}")
+            errors.append(f"Broken mdBook include in {display_path(path)}: {target}")
 
 if errors:
     print("Guide validation failed:", file=sys.stderr)

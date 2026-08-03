@@ -1,8 +1,8 @@
-import ExcelXllFormal.Shutdown.Safety
+import XlFnFormal.Shutdown.Safety
 
 set_option autoImplicit false
 
-namespace ExcelXllFormal.Shutdown
+namespace XlFnFormal.Shutdown
 
 /-- A state similar to an implementation that reports a cleanup error but
 unconditionally calls `finish_close`: one active call still owns module code. -/
@@ -64,4 +64,4 @@ theorem outstanding_return_has_no_finish_certificate :
   simp [outstandingReturnPreFinalState, Resources.Quiescent,
     Resources.HostDetached, Resources.CallsDrained, Resources.ReturnsDrained]
 
-end ExcelXllFormal.Shutdown
+end XlFnFormal.Shutdown

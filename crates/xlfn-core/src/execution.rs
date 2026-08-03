@@ -1,7 +1,7 @@
 use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CallId(u64);
@@ -45,6 +45,29 @@ pub struct CallMetadata {
     pub concurrent_calls: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CallTimer {
+    started_at: SystemTime,
+    started: Instant,
+}
+
+impl CallTimer {
+    pub(crate) fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            started_at: SystemTime::now(),
+        }
+    }
+
+    pub(crate) const fn started_at(self) -> SystemTime {
+        self.started_at
+    }
+
+    pub(crate) fn elapsed(self) -> Duration {
+        self.started.elapsed()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UdfResultKind {
     Success,
@@ -83,20 +106,22 @@ pub(crate) struct EnteredLayers {
 
 impl EnteredLayers {
     pub(crate) fn enter(layers: &SharedUdfLayers, metadata: &CallMetadata) -> XllResult<Self> {
-        let mut guards = Vec::with_capacity(layers.len());
+        let mut entered = Self {
+            guards: Vec::with_capacity(layers.len()),
+        };
         for layer in layers.iter() {
-            let entered = catch_unwind(AssertUnwindSafe(|| layer.enter(metadata)))
+            let entry = catch_unwind(AssertUnwindSafe(|| layer.enter(metadata)))
                 .unwrap_or(Err(XllError::Panic));
-            match entered {
-                Ok(guard) => guards.push(guard),
+            match entry {
+                Ok(guard) => entered.guards.push(guard),
                 Err(error) => {
                     let outcome = outcome_for_error(&error, Duration::ZERO);
-                    exit_guards(guards, &outcome);
+                    exit_guards(std::mem::take(&mut entered.guards), &outcome);
                     return Err(error);
                 }
             }
         }
-        Ok(Self { guards })
+        Ok(entered)
     }
 
     pub(crate) fn exit(mut self, outcome: &CallOutcome<'_>) {
@@ -115,7 +140,7 @@ impl Drop for EnteredLayers {
             vendor_code: None,
             duration: Duration::ZERO,
         };
-        exit_guards(std::mem::take(&mut self.guards), &outcome);
+        exit_guards_no_unwind(std::mem::take(&mut self.guards), &outcome);
     }
 }
 
@@ -124,6 +149,21 @@ fn exit_guards(mut guards: Vec<Box<dyn UdfLayerGuard>>, outcome: &CallOutcome<'_
         let Some(guard) = guards.pop() else {
             break;
         };
+        // A layer is user-provided instrumentation. Its cleanup must not
+        // prevent outer layers from observing the call or escape the async
+        // completion worker.
+        drop(catch_unwind(AssertUnwindSafe(|| guard.exit(outcome))));
+    }
+}
+
+fn exit_guards_no_unwind(mut guards: Vec<Box<dyn UdfLayerGuard>>, outcome: &CallOutcome<'_>) {
+    loop {
+        let Some(guard) = guards.pop() else {
+            break;
+        };
+        // This path runs while unwinding from a layer or user panic. A second
+        // panic during cleanup must not turn a recoverable Excel error into an
+        // abort.
         drop(catch_unwind(AssertUnwindSafe(|| guard.exit(outcome))));
     }
 }
@@ -182,6 +222,18 @@ mod tests {
         order: Arc<Mutex<Vec<&'static str>>>,
     }
 
+    struct PanicExitLayer {
+        name: &'static str,
+        order: Arc<Mutex<Vec<&'static str>>>,
+        panic_on_exit: bool,
+    }
+
+    struct PanicExitGuard {
+        name: &'static str,
+        order: Arc<Mutex<Vec<&'static str>>>,
+        panic_on_exit: bool,
+    }
+
     impl UdfLayer for OrderedLayer {
         fn enter(&self, _metadata: &CallMetadata) -> XllResult<Box<dyn UdfLayerGuard>> {
             self.order.lock().push(self.name);
@@ -203,6 +255,23 @@ mod tests {
                 "enter-b" => "exit-b",
                 _ => "exit",
             });
+        }
+    }
+
+    impl UdfLayer for PanicExitLayer {
+        fn enter(&self, _metadata: &CallMetadata) -> XllResult<Box<dyn UdfLayerGuard>> {
+            Ok(Box::new(PanicExitGuard {
+                name: self.name,
+                order: Arc::clone(&self.order),
+                panic_on_exit: self.panic_on_exit,
+            }))
+        }
+    }
+
+    impl UdfLayerGuard for PanicExitGuard {
+        fn exit(self: Box<Self>, _outcome: &CallOutcome<'_>) {
+            self.order.lock().push(self.name);
+            assert!(!self.panic_on_exit, "injected layer cleanup panic");
         }
     }
 
@@ -265,5 +334,33 @@ mod tests {
             Err(XllError::Overloaded)
         ));
         assert_eq!(order.lock().as_slice(), ["enter-a", "reject", "exit-a"]);
+    }
+
+    #[test]
+    fn panicking_layer_exit_does_not_skip_outer_layers() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let layers: SharedUdfLayers = vec![
+            Arc::new(PanicExitLayer {
+                name: "outer",
+                order: Arc::clone(&order),
+                panic_on_exit: false,
+            }),
+            Arc::new(PanicExitLayer {
+                name: "inner",
+                order: Arc::clone(&order),
+                panic_on_exit: true,
+            }),
+        ];
+        let entered = EnteredLayers::enter(&layers, &metadata()).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            entered.exit(&CallOutcome {
+                result: UdfResultKind::Success,
+                error: None,
+                vendor_code: None,
+                duration: Duration::ZERO,
+            });
+        }));
+        assert!(result.is_ok());
+        assert_eq!(order.lock().as_slice(), ["inner", "outer"]);
     }
 }

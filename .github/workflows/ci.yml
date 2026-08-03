@@ -1,140 +1,267 @@
 name: CI
 
 "on":
-  push:
-  pull_request:
-  workflow_dispatch:
+    push:
+    pull_request:
+    workflow_dispatch:
 
 permissions:
-  contents: read
+    contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: ci-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Rust and guide
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+    rust:
+        name: Rust and guide
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
+            - name: Set up Python
+              uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+              with:
+                  python-version: "3.13"
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+            - name: Verify generated Windows bindings
+              run: |
+                  cargo run --locked --package xlfn-windows-bindings-gen
+                  git diff --exit-code -- \
+                    crates/xlfn-sys/src/win32.rs \
+                    crates/xlfn-core/src/win32.rs \
+                    crates/xlfn-package/src/win32.rs \
+                    crates/cargo-xlfn/src/win32.rs
 
-      - name: Run Clippy
-        run: >-
-          cargo clippy
-          --workspace
-          --exclude excel-abi-probe
-          --all-targets
-          --all-features
-          --locked
-          --
-          -D warnings
+            - name: Check formatting
+              run: cargo fmt --all -- --check
 
-      - name: Check facade feature combinations
-        run: |
-          cargo check --package xlfn --locked
-          cargo check --package xlfn --features async --locked
+            - name: Run Clippy
+              run: >-
+                  cargo clippy
+                  --workspace
+                  --exclude excel-abi-probe
+                  --all-targets
+                  --all-features
+                  --locked
+                  --
+                  -D warnings
 
-      - name: Run Rust tests
-        run: >-
-          cargo test
-          --workspace
-          --exclude excel-abi-probe
-          --all-targets
-          --all-features
-          --locked
+            - name: Check facade feature combinations
+              run: |
+                  cargo check --package xlfn --locked
+                  cargo check --package xlfn --features async --locked
 
-      - name: Compile-test the RTD guide fixture
-        run: cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
+            - name: Run Rust tests
+              run: >-
+                  cargo test
+                  --workspace
+                  --exclude excel-abi-probe
+                  --all-targets
+                  --all-features
+                  --locked
 
-      - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          # Keep this in sync with deploy-guide.yml; update through an explicit dependency PR.
-          mdbook-version: 0.5.4
+            - name: Model-check handle close race
+              run: >-
+                  cargo test
+                  --package xlfn-core
+                  --all-features
+                  shuttle_insert_racing_close_never_leaves_a_live_handle
+                  --locked
+                  --
+                  --ignored
 
-      - name: Build the user guide
-        run: mdbook build guide
+            - name: Compile-test the RTD guide fixture
+              run: cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
 
-      - name: Validate the user guide
-        run: python guide/check.py
+            - name: Install mdBook
+              uses: peaceiris/actions-mdbook@062dc9e3eab0bad35531417c6bb6c6a7a184764f # v2
+              with:
+                  # Keep this in sync with deploy-guide.yml; update through an explicit dependency PR.
+                  mdbook-version: 0.5.4
 
-  windows-artifact:
-    name: Windows artifact (${{ matrix.target }})
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - i686-pc-windows-msvc
-          - x86_64-pc-windows-msvc
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+            - name: Build the user guide
+              run: mdbook build guide
 
-      - name: Run Windows-targeted tests
-        shell: pwsh
-        run: |
-          cargo test `
-            --workspace `
-            --exclude excel-abi-probe `
-            --all-targets `
-            --all-features `
-            --target ${{ matrix.target }} `
-            --locked
+            - name: Validate the user guide
+              run: python guide/check.py
 
-      - name: Build and validate the basic example XLL across CRT policies
-        shell: pwsh
-        run: |
-          foreach ($crt in @("static", "dynamic", "inherit")) {
-            cargo run --locked --package cargo-xlfn -- check `
-              --manifest-path examples/basic-xll/Cargo.toml `
-              --target ${{ matrix.target }} `
-              --crt $crt `
-              --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+    windows-artifact:
+        name: Windows artifact (${{ matrix.target }})
+        runs-on: windows-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                target:
+                    - i686-pc-windows-msvc
+                    - x86_64-pc-windows-msvc
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Build and validate the async/RTD fixture XLL across CRT policies
-        shell: pwsh
-        run: |
-          foreach ($crt in @("static", "dynamic", "inherit")) {
-            cargo run --locked --package cargo-xlfn -- check `
-              --manifest-path tests/xlfn-e2e-fixture/Cargo.toml `
-              --target ${{ matrix.target }} `
-              --crt $crt `
-              --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+            - name: Reject direct windows-sys dependencies
+              shell: pwsh
+              run: |
+                  $matches = Get-ChildItem crates -Recurse -Filter Cargo.toml |
+                    Select-String -Pattern '^\s*windows-sys\s*='
+                  if ($matches) {
+                    $matches | ForEach-Object { Write-Error $_ }
+                    exit 1
+                  }
 
-  lean:
-    name: Lean shutdown model
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+            - name: Run Windows-targeted tests
+              shell: pwsh
+              env:
+                  XLFN_WINDOWS_RTD_TRACE: ${{ github.workspace }}\windows-rtd-shutdown-trace-${{ matrix.target }}.json
+              run: |
+                  cargo test `
+                    --workspace `
+                    --exclude excel-abi-probe `
+                    --all-targets `
+                    --all-features `
+                    --target ${{ matrix.target }} `
+                    --locked
 
-      - name: Reject unfinished proof placeholders
-        shell: bash
-        run: |
-          if grep -RInE --include='*.lean' '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' formal; then
-            echo "Lean proof placeholders are not allowed under formal/." >&2
-            exit 1
-          fi
+            - name: Upload Windows RTD shutdown trace
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: windows-rtd-shutdown-trace-${{ matrix.target }}
+                  path: windows-rtd-shutdown-trace-${{ matrix.target }}.json
+                  if-no-files-found: error
 
-      - name: Build and independently check Lean declarations
-        uses: leanprover/lean-action@v1
-        with:
-          lake-package-directory: formal
-          build: true
-          leanchecker: true
-          use-mathlib-cache: false
+            - name: Build and validate the basic example XLL across CRT policies
+              shell: pwsh
+              run: |
+                  foreach ($crt in @("static", "dynamic", "inherit")) {
+                    cargo run --locked --package cargo-xlfn -- check `
+                      --manifest-path examples/basic-xll/Cargo.toml `
+                      --target ${{ matrix.target }} `
+                      --crt $crt `
+                      --locked
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
+
+            - name: Build and validate the async/RTD fixture XLL across CRT policies
+              shell: pwsh
+              run: |
+                  foreach ($crt in @("static", "dynamic", "inherit")) {
+                    cargo run --locked --package cargo-xlfn -- check `
+                      --manifest-path tests/xlfn-e2e-fixture/Cargo.toml `
+                      --target ${{ matrix.target }} `
+                      --crt $crt `
+                      --locked
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
+
+    excel-abi-probe:
+        name: Excel SDK ABI probe (${{ matrix.target }})
+        runs-on: windows-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                target:
+                    - i686-pc-windows-msvc
+                    - x86_64-pc-windows-msvc
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Download and extract the pinned Excel SDK
+              shell: pwsh
+              run: |
+                  $sdkUrl = "https://download.microsoft.com/download/d/a/c/dac9c321-279c-4625-b381-bcb044eef7b2/xlfnsdk.msi"
+                  $sdkSha256 = "1a59a4877f80881d0e8e931f39d5507b3a4eea97fa18008554c425d7df013930"
+                  $sdkRoot = Join-Path $env:RUNNER_TEMP "excel-xll-sdk"
+                  $msi = Join-Path $env:RUNNER_TEMP "xlfnsdk.msi"
+                  New-Item -ItemType Directory -Force -Path $sdkRoot | Out-Null
+                  Invoke-WebRequest -Uri $sdkUrl -OutFile $msi
+                  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $msi).Hash.ToLowerInvariant()
+                  if ($actual -ne $sdkSha256) {
+                    throw "Excel XLL SDK digest mismatch: expected $sdkSha256, got $actual"
+                  }
+                  $signature = Get-AuthenticodeSignature -FilePath $msi
+                  if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft") {
+                    throw "Excel XLL SDK signature verification failed"
+                  }
+                  $install = Start-Process -FilePath msiexec.exe -ArgumentList @(
+                    "/a", "`"$msi`"", "/qn", "TARGETDIR=`"$sdkRoot`""
+                  ) -Wait -PassThru
+                  if ($install.ExitCode -ne 0) {
+                    throw "Excel XLL SDK extraction failed with exit code $($install.ExitCode)"
+                  }
+                  $header = Get-ChildItem -Path $sdkRoot -Filter XLCALL.H -File -Recurse |
+                    Select-Object -First 1
+                  if ($null -eq $header) {
+                    throw "XLCALL.H was not found in the extracted Excel XLL SDK"
+                  }
+                  "XLFN_SDK_INCLUDE=$($header.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            - name: Run the SDK-backed ABI probe
+              shell: pwsh
+              run: >
+                  cargo test
+                  --package excel-abi-probe
+                  --features sdk-bindgen
+                  --target ${{ matrix.target }}
+                  --locked
+
+    lean:
+        name: Lean shutdown model
+        runs-on: ubuntu-latest
+        needs: windows-artifact
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Download Windows RTD shutdown traces
+              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  pattern: windows-rtd-shutdown-trace-*
+                  path: windows-rtd-shutdown-traces
+                  merge-multiple: true
+
+            - name: Reject unfinished proof placeholders
+              shell: bash
+              run: |
+                  if grep -RInE --include='*.lean' '(^|[^[:alnum:]_])(sorry|admit)([^[:alnum:]_]|$)' formal; then
+                    echo "Lean proof placeholders are not allowed under formal/." >&2
+                    exit 1
+                  fi
+
+            - name: Build and independently check Lean declarations
+              uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
+              with:
+                  lake-package-directory: formal
+                  build: true
+                  leanchecker: true
+                  use-mathlib-cache: false
+
+            - name: Build the shutdown trace checker executable
+              working-directory: formal
+              run: lake build shutdown_trace_checker
+
+            - name: Validate Windows RTD shutdown traces
+              shell: bash
+              run: |
+                  traces=(windows-rtd-shutdown-traces/*.json)
+                  if [ "${#traces[@]}" -eq 0 ]; then
+                    echo "No Windows RTD shutdown traces were downloaded." >&2
+                    exit 1
+                  fi
+                  for trace in "${traces[@]}"; do
+                    formal/.lake/build/bin/shutdown_trace_checker < "$trace"
+                  done
+
+            - name: Validate a Rust-generated shutdown trace
+              env:
+                  XLFN_SHUTDOWN_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/shutdown_trace_checker
+              run: >-
+                  cargo test
+                  --package xlfn-core
+                  --lib
+                  --features "async shutdown-refinement"
+                  rust_shutdown_resource_traces_are_accepted_by_lean_checker
+                  --locked
+                  --
+                  --ignored

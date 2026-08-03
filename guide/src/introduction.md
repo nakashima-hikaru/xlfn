@@ -25,13 +25,12 @@ The attribute generates the Excel ABI wrapper and registration descriptor. Argum
 - native Excel asynchronous UDFs behind an optional feature;
 - generic push-based RTD subscriptions;
 - bounded diagnostic delivery and structured `tracing` events;
-- typed loading and lifecycle tools for native DLLs;
-- linked-artifact, PE architecture, export, and dependency validation;
-- atomic x86/x64 distribution through `cargo xlfn`.
+- linked-artifact, PE architecture, export, dependency, and optional sidecar-package validation;
+- transactional x86/x64 distribution with best-effort rollback through `cargo xlfn`.
 
 ## What the framework does not infer
 
-xlfn deliberately does not infer business semantics. In particular, it does not generate C declarations from headers, decide whether a native context is thread-safe, interpret status codes or output buffers, choose cache keys, or decide how an RTD source should cancel background work. Those contracts remain explicit in the adapter.
+xlfn deliberately does not provide an external-engine adapter. It does not generate bindings, load libraries, select an ABI or transport, create external-engine worker pools, interpret external status codes or buffers, or manage external object registries. It also does not infer business semantics, cache keys, or RTD-source cancellation policy. Those contracts remain explicit in application code.
 
 ## Documentation map
 
@@ -41,7 +40,7 @@ Use this guide for workflows, mental models, constraints, and operational practi
 cargo doc --package xlfn --all-features --open
 ```
 
-Start with [Requirements and compatibility](requirements.md), then complete [Create your first add-in](quick-start.md). Native-library users should first understand [Formula-owned handles](handles.md), [Asynchronous functions](async-functions.md), and the [Native integration overview](native-overview.md).
+Start with [Requirements and compatibility](requirements.md), then complete [Create your first add-in](quick-start.md). Applications that integrate an external engine should first understand [Formula-owned handles](handles.md), [Asynchronous functions](async-functions.md), and [External engine integration](native-overview.md).
 
 ## Status and release claims
 

@@ -1,8 +1,8 @@
-import ExcelXllFormal.Shutdown.Trace
+import XlFnFormal.Shutdown.Trace
 
 set_option autoImplicit false
 
-namespace ExcelXllFormal.Shutdown
+namespace XlFnFormal.Shutdown
 
 namespace State
 
@@ -17,42 +17,51 @@ certified transition.
 def Certified (s : State) : Prop :=
   match s.phase with
   | .open => True
-  | .closing .detachHost => True
-  | .closing .drainCalls =>
-      s.resources.HostDetached
+  | .closing .drainCalls => True
   | .closing .drainReturns =>
-      s.resources.HostDetached ∧
       s.resources.CallsDrained
   | .closing .drainAsync =>
-      s.resources.HostDetached ∧
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained
-  | .closing .drainRtd =>
-      s.resources.HostDetached ∧
+  | .closing .stopSubscriptions =>
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained ∧
       s.resources.AsyncDrained
-  | .closing .drainHandles =>
-      s.resources.HostDetached ∧
+  | .closing .detachHost =>
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained ∧
       s.resources.AsyncDrained ∧
-      s.resources.RtdDrained
+      s.resources.SubscriptionsDrained
   | .closing .closeState =>
-      s.resources.HostDetached ∧
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained ∧
       s.resources.AsyncDrained ∧
-      s.resources.RtdDrained ∧
-      s.resources.HandlesDrained
-  | .closing .stopDiagnostics =>
-      s.resources.HostDetached ∧
+      s.resources.SubscriptionsDrained ∧
+      s.resources.HostDetached
+  | .closing .drainHandles =>
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained ∧
       s.resources.AsyncDrained ∧
-      s.resources.RtdDrained ∧
-      s.resources.HandlesDrained ∧
+      s.resources.SubscriptionsDrained ∧
+      s.resources.HostDetached ∧
       s.resources.StateClosed
+  | .closing .stopDiagnostics =>
+      s.resources.CallsDrained ∧
+      s.resources.ReturnsDrained ∧
+      s.resources.AsyncDrained ∧
+      s.resources.SubscriptionsDrained ∧
+      s.resources.HostDetached ∧
+      s.resources.StateClosed ∧
+      s.resources.HandlesDrained
+  | .closing .drainRtd =>
+      s.resources.CallsDrained ∧
+      s.resources.ReturnsDrained ∧
+      s.resources.AsyncDrained ∧
+      s.resources.SubscriptionsDrained ∧
+      s.resources.HostDetached ∧
+      s.resources.StateClosed ∧
+      s.resources.HandlesDrained ∧
+      s.resources.DiagnosticsDrained
   | .closing .finalize =>
       s.resources.Quiescent
   | .closed =>
@@ -98,49 +107,53 @@ theorem Step.certified_preserved
         simp_all [State.Certified,
         Resources.HostDetached, Resources.CallsDrained,
         Resources.ReturnsDrained, Resources.AsyncDrained,
-        Resources.RtdDrained, Resources.HandlesDrained,
+        Resources.SubscriptionsDrained, Resources.RtdDrained,
+        Resources.HandlesDrained,
         Resources.StateClosed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
-        Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
-        Phase.AllowsStateResourceCreation]
+        Phase.AllowsSubscriptionCreation, Phase.AllowsRtdCreation,
+        Phase.AllowsHandleCreation, Phase.AllowsDiagnosticCreation]
   | closing stage =>
       cases stage <;> cases hStep <;>
         simp_all [State.Certified,
         Resources.HostDetached, Resources.CallsDrained,
         Resources.ReturnsDrained, Resources.AsyncDrained,
-        Resources.RtdDrained, Resources.HandlesDrained,
+        Resources.SubscriptionsDrained, Resources.RtdDrained,
+        Resources.HandlesDrained,
         Resources.StateClosed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
-        Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
-        Phase.AllowsStateResourceCreation]
+        Phase.AllowsSubscriptionCreation, Phase.AllowsRtdCreation,
+        Phase.AllowsHandleCreation, Phase.AllowsDiagnosticCreation]
   | closed =>
       cases hStep <;>
         simp_all [State.Certified,
         Resources.HostDetached, Resources.CallsDrained,
         Resources.ReturnsDrained, Resources.AsyncDrained,
-        Resources.RtdDrained, Resources.HandlesDrained,
+        Resources.SubscriptionsDrained, Resources.RtdDrained,
+        Resources.HandlesDrained,
         Resources.StateClosed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
-        Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
-        Phase.AllowsStateResourceCreation]
+        Phase.AllowsSubscriptionCreation, Phase.AllowsRtdCreation,
+        Phase.AllowsHandleCreation, Phase.AllowsDiagnosticCreation]
   | failStopped reason =>
       cases hStep <;>
         simp_all [State.Certified,
         Resources.HostDetached, Resources.CallsDrained,
         Resources.ReturnsDrained, Resources.AsyncDrained,
-        Resources.RtdDrained, Resources.HandlesDrained,
+        Resources.SubscriptionsDrained, Resources.RtdDrained,
+        Resources.HandlesDrained,
         Resources.StateClosed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
-        Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
-        Phase.AllowsStateResourceCreation]
+        Phase.AllowsSubscriptionCreation, Phase.AllowsRtdCreation,
+        Phase.AllowsHandleCreation, Phase.AllowsDiagnosticCreation]
 
 end CertifiedPreservation
 
@@ -175,4 +188,4 @@ theorem reachable_finalize_is_quiescent
     (State.certified_of_open hInitialOpen) hReachable
   simpa [State.Certified, hFinalize] using hCertified
 
-end ExcelXllFormal.Shutdown
+end XlFnFormal.Shutdown

@@ -2,6 +2,7 @@
 use crate::XllError;
 use crate::XllResult;
 use crate::handle::HandleRuntime;
+use crate::host_callback::HostCallbackSession;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,6 +17,14 @@ pub(crate) fn begin_module_open() {
 
 pub(crate) fn begin_module_close() {
     MODULE_UNLOAD_CERTIFIED.store(false, Ordering::Release);
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
+    #[cfg(target_os = "windows")]
+    windows::set_ghost(ghost);
+    #[cfg(not(target_os = "windows"))]
+    let _ = ghost;
 }
 
 pub(crate) fn certify_module_unload() {
@@ -37,14 +46,19 @@ pub(crate) struct RtdQuiescenceError {
     pub(crate) revocation_debt: usize,
 }
 
-pub(crate) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> XllResult<()> {
+pub(crate) fn observe(
+    handles: Arc<HandleRuntime>,
+    key: &str,
+    token: &str,
+    callbacks: &HostCallbackSession,
+) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
-        windows::observe(handles, key, token)
+        windows::observe(handles, key, token, callbacks)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (handles, key, token);
+        let _ = (handles, key, token, callbacks);
         Err(XllError::ExcelApi {
             function: "xlfRtd",
             code: xlfn_sys::XLRET_FAILED,
@@ -55,14 +69,15 @@ pub(crate) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> Xl
 pub(crate) fn observe_subscription(
     subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
     key: &str,
+    callbacks: &HostCallbackSession,
 ) -> XllResult<crate::RtdValue> {
     #[cfg(target_os = "windows")]
     {
-        windows::observe_subscription(subscriptions, key)
+        windows::observe_subscription(subscriptions, key, callbacks)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (subscriptions, key);
+        let _ = (subscriptions, key, callbacks);
         Err(XllError::ExcelApi {
             function: "xlfRtd",
             code: xlfn_sys::XLRET_FAILED,

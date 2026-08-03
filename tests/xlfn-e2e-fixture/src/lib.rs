@@ -147,7 +147,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
 
 #[excel_function(name = "FRAMEWORK.RTD.FIXTURE")]
 pub fn rtd_fixture(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
     topic_id: i32,
 ) -> XllResult<RtdValue> {
     if !(1..=3).contains(&topic_id) {

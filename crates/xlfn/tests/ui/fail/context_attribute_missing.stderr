@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, State>: ExcelParameter<'_>` is not satisfied
+error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: ExcelParameter<'_>` is not satisfied
  --> tests/ui/fail/context_attribute_missing.rs:8:17
   |
-8 | fn bad(context: MainThreadContext<'_, State>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, State>`
+8 | fn bad(context: MainThreadContext<'_, '_, State>) -> f64 {
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             BoundedVarArgs<T, MAX>
@@ -14,18 +14,18 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, State>: Exce
             OptionalExcelValue<T>
             OwnedExcelValue
           and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, State>` to implement `ExcelParameter<'_>`
+  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `ExcelParameter<'_>`
 note: required by a bound in `xlfn::__private::assert_excel_parameter`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |
-  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: CallScope<'call>) {}
+  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
   |                                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
 
-error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, State>: FromExcel<'_>` is not satisfied
+error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: FromExcel<'_>` is not satisfied
  --> tests/ui/fail/context_attribute_missing.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.CONTEXT")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, State>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             BoundedVarArgs<T, MAX>

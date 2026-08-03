@@ -1,7 +1,25 @@
 use super::HandleRuntime;
 use crate::RtdValue;
+use crate::host_callback::HostCallbackSession;
 use crate::subscription::{RtdUpdate, SubscriptionRuntime};
-use crate::{ExcelCallbackValue, FromExcel, InputError, OwnedExcelValue, XllError, XllResult};
+use crate::win32::{
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, CO_E_SERVER_STOPPING, COWAIT_DISPATCH_CALLS,
+    CloseHandle, CoCreateGuid, CoWaitForMultipleHandles, CreateEventW, CreateMutexW,
+    DISP_E_BADINDEX, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND,
+    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPATCH_METHOD,
+    DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY,
+    E_POINTER, E_UNEXPECTED, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, EXCEPINFO,
+    GUID, GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, INFINITE, KEY_READ, KEY_WRITE,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RPC_E_CHANGED_MODE, RegCloseKey, RegCreateKeyExW,
+    RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, ReleaseMutex,
+    ResetEvent, S_FALSE, S_OK, SAFEARRAY, SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy,
+    SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayGetVartype, SafeArrayPutElement, SetEvent, SysAllocStringLen, SysFreeString,
+    SysStringLen, VARIANT, VARIANT_BOOL, VARIANT_FALSE, VARIANT_TRUE, VT_ARRAY, VT_BOOL, VT_BSTR,
+    VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT, VariantClear,
+    WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WaitForSingleObject,
+};
+use crate::{ExcelCallbackStatus, FromExcel, InputError, OwnedExcelValue, XllError, XllResult};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -15,43 +33,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread::ThreadId;
-use windows_sys::Win32::Foundation::{
-    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, CO_E_SERVER_STOPPING, CloseHandle, E_FAIL,
-    E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, E_UNEXPECTED,
-    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GetLastError, HANDLE, S_OK,
-    VARIANT_BOOL, VARIANT_FALSE, VARIANT_TRUE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
-};
-use windows_sys::Win32::Foundation::{
-    DISP_E_BADINDEX, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND,
-    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME,
-};
-use windows_sys::Win32::Foundation::{SysAllocStringLen, SysFreeString, SysStringLen};
-use windows_sys::Win32::System::Com::{
-    COWAIT_DISPATCH_CALLS, CoCreateGuid, CoWaitForMultipleHandles, DISPATCH_METHOD, DISPPARAMS,
-    EXCEPINFO, SAFEARRAY, SAFEARRAYBOUND,
-};
-use windows_sys::Win32::System::Ole::{
-    DISPID_UNKNOWN, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
-    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayPutElement,
-};
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW,
-};
-use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, INFINITE, ReleaseMutex, ResetEvent, SetEvent, WaitForSingleObject,
-};
-use windows_sys::Win32::System::Variant::{
-    VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8,
-    VT_UNKNOWN, VT_VARIANT, VariantClear,
-};
-use windows_sys::core::{GUID, IID_IUnknown, IUnknown_Vtbl};
-use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLRET_SUCCESS, XLTYPE_STR};
+use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
-// windows-sys exposes IID_IUnknown but not these two standard COM IIDs in its
-// raw bindings. Keep their SDK values here and verify them independently,
-// field-by-field, in the Windows tests below.
+mod com_abi;
+mod global_interface_table;
+use com_abi::{IID_IUNKNOWN, IUnknown_Vtbl};
+use global_interface_table::get_git;
+
 const IID_ICLASS_FACTORY: GUID = GUID::from_u128(0x0000_0001_0000_0000_c000_0000_0000_0046);
 const IID_IDISPATCH: GUID = GUID::from_u128(0x0002_0400_0000_0000_c000_0000_0000_0046);
 const IID_NULL: GUID = GUID::from_u128(0);
@@ -64,9 +52,6 @@ const DISPID_DISCONNECT_DATA: i32 = 13;
 const DISPID_HEARTBEAT: i32 = 14;
 const DISPID_SERVER_TERMINATE: i32 = 15;
 
-const CLSID_STD_GLOBAL_INTERFACE_TABLE: GUID =
-    GUID::from_u128(0x00000323_0000_0000_c000_000000000046);
-const IID_IGLOBAL_INTERFACE_TABLE: GUID = GUID::from_u128(0x00000146_0000_0000_c000_000000000046);
 const IID_IRTD_UPDATE_EVENT: GUID = GUID::from_u128(0xa43788c1_d91b_11d3_8f39_00c04f3651b8);
 const RTD_REGISTRATION_OWNER: &str = "xlfn";
 // Schema 2 registrations are protected by one cross-process mutex for the
@@ -74,63 +59,12 @@ const RTD_REGISTRATION_OWNER: &str = "xlfn";
 // an older live XLL does not participate in that protocol, so its registration
 // cannot be proven stale.
 const RTD_REGISTRATION_SCHEMA: &str = "2";
-const RTD_PROG_ID_PREFIX: &str = "ExcelXllRtd_";
+const RTD_PROG_ID_PREFIX: &str = "XlFnRtd_";
 const SERVER_NOT_STARTED: u8 = 0;
 const SERVER_STARTING: u8 = 1;
 const SERVER_STARTED: u8 = 2;
 const SERVER_START_FAILED: u8 = 3;
 static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
-
-#[repr(C)]
-struct IGlobalInterfaceTable {
-    vtable: *const IGlobalInterfaceTableVtable,
-}
-
-#[repr(C)]
-struct IGlobalInterfaceTableVtable {
-    query_interface:
-        unsafe extern "system" fn(*mut IGlobalInterfaceTable, *const GUID, *mut *mut c_void) -> i32,
-    add_ref: unsafe extern "system" fn(*mut IGlobalInterfaceTable) -> u32,
-    release: unsafe extern "system" fn(*mut IGlobalInterfaceTable) -> u32,
-    register_interface_in_global: unsafe extern "system" fn(
-        *mut IGlobalInterfaceTable,
-        *mut c_void,
-        *const GUID,
-        *mut u32,
-    ) -> i32,
-    revoke_interface_from_global: unsafe extern "system" fn(*mut IGlobalInterfaceTable, u32) -> i32,
-    get_interface_from_global: unsafe extern "system" fn(
-        *mut IGlobalInterfaceTable,
-        u32,
-        *const GUID,
-        *mut *mut c_void,
-    ) -> i32,
-}
-
-unsafe fn get_git() -> Result<NonNull<IGlobalInterfaceTable>, i32> {
-    use windows_sys::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-
-    let mut git: *mut c_void = ptr::null_mut();
-
-    // SAFETY: `git` is a valid writable output slot, the aggregation pointer is
-    // null as required for this COM class, and both GUID pointers identify the
-    // standard Global Interface Table class and interface.
-    let status = unsafe {
-        CoCreateInstance(
-            &CLSID_STD_GLOBAL_INTERFACE_TABLE,
-            ptr::null_mut(),
-            CLSCTX_INPROC_SERVER,
-            &IID_IGLOBAL_INTERFACE_TABLE,
-            &mut git,
-        )
-    };
-
-    if status == S_OK {
-        NonNull::new(git.cast()).ok_or(status)
-    } else {
-        Err(status)
-    }
-}
 
 #[derive(Clone)]
 struct ActiveServer {
@@ -188,6 +122,8 @@ struct ComModuleQuiescenceError {
 struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 impl ComModuleLifetime {
@@ -205,6 +141,20 @@ impl ComModuleLifetime {
                 git_revocation_debt: Vec::new(),
             }),
             quiescent: Condvar::new(),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: Mutex::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        *self.ghost.lock() = Some(ghost);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
+        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+            ghost.record_event(event);
         }
     }
 
@@ -269,7 +219,10 @@ impl ComModuleLifetime {
     }
 
     fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
-        let (ingress_guard, accepted) = crate::ingress::global_ingress().enter();
+        let (ingress_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+        });
         let mut inner = self.inner.lock();
         Self::increment(&mut inner.state.in_flight_calls);
         drop(inner);
@@ -277,6 +230,8 @@ impl ComModuleLifetime {
             ComModuleCallGuard {
                 lifetime: self,
                 _ingress_guard: ingress_guard,
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                record_ghost: accepted,
             },
             accepted,
         )
@@ -288,6 +243,12 @@ impl ComModuleLifetime {
             ComObjectKind::Factory => Self::increment(&mut inner.state.live_factories),
             ComObjectKind::Server => Self::increment(&mut inner.state.live_servers),
         }
+        drop(inner);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(match kind {
+            ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::AddRtdClassFactory,
+            ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::AddRtdServer,
+        });
     }
 
     fn object_destroyed(&self, kind: ComObjectKind) {
@@ -296,12 +257,18 @@ impl ComModuleLifetime {
             ComObjectKind::Factory => Self::decrement(&mut inner.state.live_factories),
             ComObjectKind::Server => Self::decrement(&mut inner.state.live_servers),
         }
+        drop(inner);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(match kind {
+            ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::RemoveRtdClassFactory,
+            ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::RemoveRtdServer,
+        });
         self.quiescent.notify_all();
     }
 
     fn set_server_lock(&self, lock: bool) -> bool {
         let mut inner = self.inner.lock();
-        if lock {
+        let changed = if lock {
             Self::increment(&mut inner.state.server_locks);
             true
         } else if inner.state.server_locks == 0 {
@@ -310,7 +277,17 @@ impl ComModuleLifetime {
             Self::decrement(&mut inner.state.server_locks);
             self.quiescent.notify_all();
             true
+        };
+        drop(inner);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if changed {
+            self.record_ghost_event(if lock {
+                crate::shutdown_refinement::GhostEvent::LockRtdServer
+            } else {
+                crate::shutdown_refinement::GhostEvent::UnlockRtdServer
+            });
         }
+        changed
     }
 
     fn can_unload_now(&self) -> bool {
@@ -348,6 +325,8 @@ static COM_MODULE_LIFETIME: ComModuleLifetime = ComModuleLifetime::new();
 struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportCallGuard<'static>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    record_ghost: bool,
 }
 
 impl Drop for ComModuleCallGuard {
@@ -355,6 +334,12 @@ impl Drop for ComModuleCallGuard {
         let mut inner = self.lifetime.inner.lock();
         ComModuleLifetime::decrement(&mut inner.state.in_flight_calls);
         self.lifetime.quiescent.notify_all();
+        drop(inner);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if self.record_ghost {
+            self.lifetime
+                .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        }
     }
 }
 
@@ -512,7 +497,7 @@ struct Win32EventError {
 }
 
 struct ManualResetEvent {
-    // HANDLE is a pointer alias in windows-sys and is therefore not Send/Sync.
+    // The generated HANDLE alias is a pointer and is therefore not Send/Sync.
     // The underlying unnamed kernel event is process-wide and safely waitable
     // from any thread, so retain its non-zero bit pattern in a plain integer.
     handle: usize,
@@ -1190,19 +1175,28 @@ struct ServerBackends {
 
 struct ComApartmentGuard {
     should_uninit: bool,
+    _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl ComApartmentGuard {
-    fn enter() -> Self {
-        use windows_sys::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+    fn enter() -> Result<Self, i32> {
+        use crate::win32::{COINIT_MULTITHREADED, CoInitializeEx};
 
         // SAFETY: the reserved pointer is null as required by CoInitializeEx.
-        // A non-negative HRESULT means this call acquired one COM initialization
-        // that Drop balances with one CoUninitialize call on this thread.
-        let hr = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED as u32) };
+        let status = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED as u32) };
 
-        Self {
-            should_uninit: hr >= 0,
+        match status {
+            S_OK | S_FALSE => Ok(Self {
+                should_uninit: true,
+                _not_send_or_sync: PhantomData,
+            }),
+            RPC_E_CHANGED_MODE => Ok(Self {
+                // The thread already owns a different COM apartment. This
+                // call did not add an initialization reference to balance.
+                should_uninit: false,
+                _not_send_or_sync: PhantomData,
+            }),
+            error => Err(error),
         }
     }
 }
@@ -1210,7 +1204,7 @@ impl ComApartmentGuard {
 impl Drop for ComApartmentGuard {
     fn drop(&mut self) {
         if self.should_uninit {
-            use windows_sys::Win32::System::Com::CoUninitialize;
+            use crate::win32::CoUninitialize;
 
             // SAFETY: `should_uninit` is set only after a successful
             // CoInitializeEx call, and this guard performs exactly one matching
@@ -1296,18 +1290,19 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
         return Ok(());
     }
 
-    let _apartment = ComApartmentGuard::enter();
+    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::ExcelApi {
+        function: "CoInitializeEx",
+        code,
+    })?;
     // SAFETY: this thread has entered a COM apartment. `get_git` returns one
-    // owned GIT reference. The reference is released exactly once after the
+    // owned GIT wrapper. Its COM reference is released exactly once after the
     // synchronous revocation attempt.
     unsafe {
         let git = get_git().map_err(|status| XllError::ExcelApi {
             function: "CoCreateInstance(IGlobalInterfaceTable)",
             code: status,
         })?;
-        let git = git.as_ptr();
-        let status = ((*(*git).vtable).revoke_interface_from_global)(git, cookie);
-        let _ = ((*(*git).vtable).release)(git);
+        let status = git.revoke(cookie);
         if status >= 0 {
             Ok(())
         } else {
@@ -1342,25 +1337,21 @@ impl RetainedUpdateCallback {
             return Ok(());
         };
         let cookie = cookie.raw();
-        let _apartment = ComApartmentGuard::enter();
+        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::ExcelApi {
+            function: "CoInitializeEx",
+            code,
+        })?;
 
         // SAFETY: this thread has entered a COM apartment. `get_git` returns
-        // one live IGlobalInterfaceTable reference on success.
+        // one live IGlobalInterfaceTable wrapper on success.
         // GetInterfaceFromGlobal writes one IRTDUpdateEvent reference into
         // `proxy`; both returned COM references are released exactly once.
         unsafe {
             let git = get_git().map_err(|_| XllError::Internal {
                 diagnostic_id: 0x4749_545f_4e55_4c4c,
             })?;
-            let git = git.as_ptr();
             let mut proxy: *mut c_void = ptr::null_mut();
-            let status = ((*(*git).vtable).get_interface_from_global)(
-                git,
-                cookie,
-                &IID_IRTD_UPDATE_EVENT,
-                &mut proxy,
-            );
-            let _ = ((*(*git).vtable).release)(git);
+            let status = git.get_interface(cookie, &IID_IRTD_UPDATE_EVENT, &mut proxy);
 
             if status != S_OK || proxy.is_null() {
                 return Err(XllError::ExcelApi {
@@ -1568,7 +1559,13 @@ static RTD_SERVER_VTABLE: RtdServerVtable = RtdServerVtable {
     server_terminate,
 };
 
-pub(super) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> XllResult<()> {
+pub(super) fn observe(
+    handles: Arc<HandleRuntime>,
+    key: &str,
+    token: &str,
+    callbacks: &HostCallbackSession,
+) -> XllResult<()> {
+    let _rtd_operation = handles.begin_rtd_operation()?;
     let ensured = ensure_server(Some(Arc::clone(&handles)), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
@@ -1579,7 +1576,7 @@ pub(super) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> Xl
     {
         None
     } else {
-        let module_path = match module_path() {
+        let module_path = match module_path(callbacks) {
             Ok(path) => path,
             Err(error) => {
                 discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -1626,14 +1623,21 @@ pub(super) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> Xl
 
     // SAFETY: every pointer in `arguments` refers to a live XLOPER12 that
     // remains valid and stationary for the duration of the Excel callback.
-    let (status, mut result) = unsafe { ExcelCallbackValue::call(XLF_RTD, &arguments) };
+    let (status, mut result) = unsafe {
+        callbacks
+            .call(XLF_RTD, &arguments)
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlfRtd(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
 
     drop(registration);
 
-    if status != XLRET_SUCCESS {
+    if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
             function: "xlfRtd",
-            code: status,
+            code: status.raw_code(),
         }));
     }
 
@@ -1656,7 +1660,9 @@ pub(super) fn observe(handles: Arc<HandleRuntime>, key: &str, token: &str) -> Xl
 pub(super) fn observe_subscription(
     subscriptions: Arc<SubscriptionRuntime>,
     key: &str,
+    callbacks: &HostCallbackSession,
 ) -> XllResult<RtdValue> {
+    let _rtd_operation = subscriptions.enter_external_operation()?;
     let ensured = ensure_server(None, Some(Arc::clone(&subscriptions)))?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
@@ -1667,7 +1673,7 @@ pub(super) fn observe_subscription(
     {
         None
     } else {
-        let module_path = match module_path() {
+        let module_path = match module_path(callbacks) {
             Ok(path) => path,
             Err(error) => {
                 discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -1714,14 +1720,21 @@ pub(super) fn observe_subscription(
 
     // SAFETY: every pointer in `arguments` refers to a live XLOPER12 that
     // remains valid and stationary for the duration of the Excel callback.
-    let (status, mut result) = unsafe { ExcelCallbackValue::call(XLF_RTD, &arguments) };
+    let (status, mut result) = unsafe {
+        callbacks
+            .call(XLF_RTD, &arguments)
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlfRtd(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
 
     drop(registration);
 
-    if status != XLRET_SUCCESS {
+    if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
             function: "xlfRtd",
-            code: status,
+            code: status.raw_code(),
         }));
     }
 
@@ -2133,7 +2146,7 @@ fn ensure_server(
     let pointer = Box::into_raw(server) as usize;
     let entry = ActiveServer {
         class_id,
-        prog_id: format!("ExcelXllRtd_{}", guid_compact(class_id)),
+        prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
         pointer,
         generation,
     };
@@ -2245,7 +2258,7 @@ unsafe extern "system" fn factory_query_interface(
     // readable GUID for the duration of this method.
     let interface_id = unsafe { *interface_id };
 
-    if guid_eq(interface_id, IID_IUnknown) || guid_eq(interface_id, IID_ICLASS_FACTORY) {
+    if guid_eq(interface_id, IID_IUNKNOWN) || guid_eq(interface_id, IID_ICLASS_FACTORY) {
         // SAFETY: `output` is writable and `this` is a live factory pointer.
         // AddRef creates the reference returned through `output`.
         unsafe {
@@ -2378,7 +2391,7 @@ unsafe extern "system" fn server_query_interface(
     // readable GUID for the duration of this method.
     let interface_id = unsafe { *interface_id };
 
-    if guid_eq(interface_id, IID_IUnknown)
+    if guid_eq(interface_id, IID_IUNKNOWN)
         || guid_eq(interface_id, IID_IDISPATCH)
         || guid_eq(interface_id, IID_IRTD_SERVER)
     {
@@ -3090,30 +3103,18 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     retry_git_revocation_debt();
 
     // SAFETY: the caller entered this method through COM, so the current thread
-    // has a usable COM apartment. `get_git` returns one owned GIT reference or
-    // an HRESULT error.
+    // has a usable COM apartment. `get_git` returns one owned GIT wrapper or an
+    // HRESULT error.
     let git = unsafe { get_git() };
 
     let Ok(git) = git else {
         return E_FAIL;
     };
-    let git = git.as_ptr();
 
-    // SAFETY: `git` is a live IGlobalInterfaceTable pointer, `callback_ptr` is
-    // the live IRTDUpdateEvent supplied by Excel, the IID is valid, and
-    // `cookie` is writable.
-    let status = unsafe {
-        ((*(*git).vtable).register_interface_in_global)(
-            git,
-            callback_ptr.cast(),
-            &IID_IRTD_UPDATE_EVENT,
-            &mut cookie,
-        )
-    };
-
-    // SAFETY: `git` owns the one reference returned by get_git and has not yet
-    // been released.
-    unsafe { ((*(*git).vtable).release)(git) };
+    // SAFETY: `git` owns a live IGlobalInterfaceTable, `callback_ptr` is the
+    // live IRTDUpdateEvent supplied by Excel, the IID is valid, and `cookie`
+    // is writable.
+    let status = unsafe { git.register(callback_ptr.cast(), &IID_IRTD_UPDATE_EVENT, &mut cookie) };
 
     if status < 0 {
         return E_FAIL;
@@ -3683,6 +3684,11 @@ fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 
     }
 }
 
+#[cfg(any(test, feature = "shutdown-refinement"))]
+pub(super) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
+    COM_MODULE_LIFETIME.set_ghost(ghost);
+}
+
 pub(super) fn dll_can_unload_now() -> i32 {
     if crate::rtd::module_unload_certified() && COM_MODULE_LIFETIME.can_unload_now() {
         S_OK
@@ -3896,7 +3902,7 @@ unsafe fn write_refresh_data(
 }
 
 const MAX_RTD_TOPIC_PARTS: usize = 253;
-const MAX_RTD_TOPIC_KEY_BYTES: usize = 1024 * 1024;
+const REQUIRED_RTD_TOPIC_PARTS: usize = 1;
 
 fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usize> {
     if upper < lower {
@@ -3949,46 +3955,6 @@ fn checked_topic_part_length(length: usize) -> XllResult<()> {
     }
 }
 
-fn checked_topic_key_size(current: usize, part_bytes: usize, multiple: bool) -> XllResult<usize> {
-    let framing = if multiple {
-        decimal_digits(part_bytes).checked_add(1)
-    } else {
-        Some(0)
-    };
-    let actual = framing
-        .and_then(|framing| current.checked_add(framing))
-        .and_then(|current| current.checked_add(part_bytes))
-        .ok_or_else(|| {
-            XllError::input(
-                "RTD topic",
-                InputError::TooLarge {
-                    limit: MAX_RTD_TOPIC_KEY_BYTES,
-                    actual: usize::MAX,
-                },
-            )
-        })?;
-    if actual > MAX_RTD_TOPIC_KEY_BYTES {
-        Err(XllError::input(
-            "RTD topic",
-            InputError::TooLarge {
-                limit: MAX_RTD_TOPIC_KEY_BYTES,
-                actual,
-            },
-        ))
-    } else {
-        Ok(actual)
-    }
-}
-
-const fn decimal_digits(mut value: usize) -> usize {
-    let mut digits = 1;
-    while value >= 10 {
-        value /= 10;
-        digits += 1;
-    }
-    digits
-}
-
 unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<String> {
     let Some(strings) = NonNull::new(strings) else {
         return Err(XllError::InvalidHandle);
@@ -4026,6 +3992,9 @@ unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<St
         return Err(XllError::InvalidHandle);
     }
     let count = checked_topic_part_count(lower, upper)?;
+    if count != REQUIRED_RTD_TOPIC_PARTS {
+        return Err(XllError::InvalidHandle);
+    }
 
     let mut vt = 0u16;
 
@@ -4038,7 +4007,6 @@ unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<St
     }
 
     let mut parts = Vec::with_capacity(count);
-    let mut encoded_size = 0;
 
     for offset in 0..count {
         let index = i64::from(lower)
@@ -4122,22 +4090,10 @@ unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<St
             _ => return Err(XllError::InvalidHandle),
         };
 
-        encoded_size = checked_topic_key_size(encoded_size, part_str.len(), count > 1)?;
         parts.push(part_str);
     }
 
-    if parts.len() == 1 {
-        Ok(parts.remove(0))
-    } else {
-        use std::fmt::Write;
-
-        let mut encoded = String::with_capacity(encoded_size);
-        for part in &parts {
-            let _ = write!(encoded, "{}:{}", part.len(), part);
-        }
-
-        Ok(encoded)
-    }
+    parts.pop().ok_or(XllError::InvalidHandle)
 }
 
 struct BstrGuard(NonNull<u16>);
@@ -4160,15 +4116,22 @@ impl Drop for VariantGuard {
     }
 }
 
-fn module_path() -> XllResult<String> {
+fn module_path(callbacks: &HostCallbackSession) -> XllResult<String> {
     // SAFETY: xlGetName takes no arguments. ExcelCallbackValue assumes ownership
     // of the callback result and exposes it through its managed result wrapper.
-    let (status, mut result) = unsafe { ExcelCallbackValue::call(XL_GET_NAME, &[]) };
+    let (status, mut result) = unsafe {
+        callbacks
+            .call(XL_GET_NAME, &[])
+            .map_err(|suppressed| XllError::ExcelApi {
+                function: "xlGetName(suppressed)",
+                code: suppressed.status.raw_code(),
+            })?
+    };
 
-    if status != XLRET_SUCCESS {
+    if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
             function: "xlGetName",
-            code: status,
+            code: status.raw_code(),
         }));
     }
 
@@ -4235,14 +4198,14 @@ impl TemporaryRegistration {
         };
 
         let result = (|| {
-            set_registry_value(&prog_key, Some("ExcelXllOwner"), RTD_REGISTRATION_OWNER)?;
+            set_registry_value(&prog_key, Some("XlFnOwner"), RTD_REGISTRATION_OWNER)?;
             set_registry_value(
                 &prog_key,
-                Some("ExcelXllRegistrationSchema"),
+                Some("XlFnRegistrationSchema"),
                 RTD_REGISTRATION_SCHEMA,
             )?;
-            set_registry_value(&prog_key, Some("ExcelXllOwnerModule"), module_path)?;
-            set_registry_value(&prog_key, Some("ExcelXllClassId"), &class)?;
+            set_registry_value(&prog_key, Some("XlFnOwnerModule"), module_path)?;
+            set_registry_value(&prog_key, Some("XlFnClassId"), &class)?;
             set_registry_value(&format!("{prog_key}\\CLSID"), None, &class)?;
             set_registry_value(&format!("{class_key}\\InProcServer32"), None, module_path)?;
             set_registry_value(
@@ -4272,7 +4235,7 @@ impl CrossProcessRegistrationGuard {
         // The registry location is shared by all xlfn modules for one user, so
         // use one session-wide acquisition order rather than deriving a name
         // from a path string that may have aliases (case, short names, or symlinks).
-        Self::acquire_named("Local\\ExcelXllRtdRegistration_v1")
+        Self::acquire_named("Local\\XlFnRtdRegistration_v1")
     }
 
     fn acquire_named(name: &str) -> XllResult<Self> {
@@ -4329,10 +4292,10 @@ fn scavenge_owned_registrations(module_path: &str, keep_prog_id: Option<&str>) -
         }
 
         let prog_key = format!("Software\\Classes\\{prog_id}");
-        let owner = read_registry_string(&prog_key, "ExcelXllOwner")?;
-        let schema = read_registry_string(&prog_key, "ExcelXllRegistrationSchema")?;
-        let owner_module = read_registry_string(&prog_key, "ExcelXllOwnerModule")?;
-        let class_id = read_registry_string(&prog_key, "ExcelXllClassId")?;
+        let owner = read_registry_string(&prog_key, "XlFnOwner")?;
+        let schema = read_registry_string(&prog_key, "XlFnRegistrationSchema")?;
+        let owner_module = read_registry_string(&prog_key, "XlFnOwnerModule")?;
+        let class_id = read_registry_string(&prog_key, "XlFnClassId")?;
 
         if owner.as_deref() != Some(RTD_REGISTRATION_OWNER)
             || schema.as_deref() != Some(RTD_REGISTRATION_SCHEMA)
@@ -4696,10 +4659,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use crate::win32::{
+        COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
+        SafeArrayGetDim,
+    };
     use static_assertions::assert_not_impl_any;
-    use windows_sys::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
-    use windows_sys::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-    use windows_sys::Win32::System::Ole::SafeArrayGetDim;
 
     assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
     assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
@@ -5007,7 +4971,7 @@ mod tests {
     fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
         let _guard = TEST_LOCK.lock().unwrap();
         let ingress = crate::ingress::global_ingress();
-        ingress.begin_close();
+        ingress.begin_close_with(|| {});
         let _ = ingress.seal_and_drain();
         crate::rtd::certify_module_unload();
         let baseline = COM_MODULE_LIFETIME.snapshot();
@@ -5022,9 +4986,10 @@ mod tests {
         }
         assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
 
-        ingress.reset();
+        ingress.begin_opening();
+        ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
         crate::rtd::begin_module_open();
-        ingress.begin_close();
+        ingress.begin_close_with(|| {});
         crate::rtd::begin_module_close();
         assert_eq!(dll_can_unload_now(), S_FALSE);
 
@@ -5066,6 +5031,58 @@ mod tests {
         assert_eq!(dll_can_unload_now(), S_FALSE);
         drop(server);
         assert_eq!(dll_can_unload_now(), S_OK);
+    }
+
+    #[test]
+    fn com_module_lifetime_emits_rtd_resource_trace_events() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let ingress = crate::ingress::global_ingress();
+        ingress.begin_close_with(|| {});
+        let _ = ingress.seal_and_drain();
+        ingress.begin_opening();
+        ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+        crate::rtd::begin_module_open();
+
+        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
+        ghost
+            .begin_generation(1, crate::shutdown_refinement::GhostResources::opened(0, 0))
+            .unwrap();
+        COM_MODULE_LIFETIME.set_ghost(Arc::clone(&ghost));
+
+        let (call, accepted) = COM_MODULE_LIFETIME.enter_call();
+        assert!(accepted);
+        let factory = ComObjectLease::new(ComObjectKind::Factory);
+        let server = ComObjectLease::new(ComObjectKind::Server);
+        assert!(COM_MODULE_LIFETIME.set_server_lock(true));
+        assert!(COM_MODULE_LIFETIME.set_server_lock(false));
+        drop(server);
+        drop(factory);
+        drop(call);
+
+        let trace = ghost.trace_json().unwrap();
+        if let Some(path) = std::env::var_os("XLFN_WINDOWS_RTD_TRACE") {
+            std::fs::write(path, &trace).expect("write Windows RTD shutdown trace");
+        }
+        *COM_MODULE_LIFETIME.ghost.lock() = None;
+        ingress.begin_close_with(|| {});
+        let _ = ingress.seal_and_drain();
+        crate::rtd::certify_module_unload();
+
+        for event in [
+            "beginRtdOperation",
+            "endRtdOperation",
+            "addRtdClassFactory",
+            "removeRtdClassFactory",
+            "addRtdServer",
+            "removeRtdServer",
+            "lockRtdServer",
+            "unlockRtdServer",
+        ] {
+            assert!(
+                trace.contains(event),
+                "RTD trace is missing {event}: {trace}"
+            );
+        }
     }
 
     #[test]
@@ -5701,7 +5718,7 @@ mod tests {
     #[test]
     fn standard_com_iids_match_their_field_definitions() {
         assert!(guid_eq(IID_NULL, iid_null_from_fields()));
-        assert!(guid_eq(IID_IUnknown, iid_iunknown_from_fields()));
+        assert!(guid_eq(IID_IUNKNOWN, iid_iunknown_from_fields()));
         assert!(guid_eq(
             IID_ICLASS_FACTORY,
             iid_iclass_factory_from_fields()
@@ -5717,6 +5734,18 @@ mod tests {
                 data4: [0x8f, 0x39, 0x00, 0xc0, 0x4f, 0x36, 0x51, 0xb8],
             }
         ));
+    }
+
+    #[test]
+    fn iunknown_vtable_has_three_pointer_slots() {
+        assert_eq!(
+            std::mem::size_of::<IUnknown_Vtbl>(),
+            3 * std::mem::size_of::<usize>(),
+        );
+        assert_eq!(
+            std::mem::align_of::<IUnknown_Vtbl>(),
+            std::mem::align_of::<usize>(),
+        );
     }
 
     #[test]
@@ -5927,12 +5956,10 @@ mod tests {
         assert!(checked_topic_part_count(i32::MIN, i32::MAX).is_err());
         assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT).is_ok());
         assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT + 1).is_err());
-        assert!(checked_topic_key_size(0, MAX_RTD_TOPIC_KEY_BYTES, false).is_ok());
-        assert!(checked_topic_key_size(1, MAX_RTD_TOPIC_KEY_BYTES, false).is_err());
     }
 
     #[test]
-    fn topic_key_from_safearray_handles_single_multi_and_invalid_dimensions() {
+    fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensions() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         // 1. Single part SAFEARRAY of VARIANT BSTR.
@@ -5974,7 +6001,9 @@ mod tests {
         // SAFETY: `array` remains owned by this test and is destroyed exactly once.
         unsafe { SafeArrayDestroy(array) };
 
-        // 2. Multi part SAFEARRAY of VARIANT BSTR.
+        // 2. Multi-part SAFEARRAYs are rejected because the COM topic key is
+        // always one opaque string. Keeping one representation avoids topic
+        // identity collisions between arities.
         let mut bounds = [SAFEARRAYBOUND {
             cElements: 2,
             lLbound: 0,
@@ -6009,8 +6038,7 @@ mod tests {
 
         // SAFETY: `array_multi_ptr` points to a live SAFEARRAY variable. The
         // function reads but does not take ownership of the array.
-        let key_multi = unsafe { topic_key_from_safearray(&mut array_multi_ptr) }.unwrap();
-        assert_eq!(key_multi, "5:part15:part2");
+        assert!(unsafe { topic_key_from_safearray(&mut array_multi_ptr) }.is_err());
 
         // SAFETY: `array_multi` remains owned by this test and is destroyed once.
         unsafe { SafeArrayDestroy(array_multi) };
@@ -6750,7 +6778,7 @@ mod tests {
             RtdValue::Number(12.5)
         );
         drop(prepared);
-        assert!(subscriptions.has_pending_updates(generation));
+        assert!(!subscriptions.has_pending_updates(generation));
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
         // factory and dispatch interface are used.
@@ -6976,7 +7004,7 @@ mod tests {
     #[test]
     fn temporary_registration_mutex_serializes_other_threads() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let name = format!("Local\\ExcelXllRtdRegistrationTest_{}", std::process::id());
+        let name = format!("Local\\XlFnRtdRegistrationTest_{}", std::process::id());
         let first = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
@@ -7037,25 +7065,25 @@ mod tests {
             ),
             (&legacy_key, &legacy_class, RTD_REGISTRATION_OWNER, "1"),
         ] {
-            set_registry_value(key, Some("ExcelXllOwner"), owner).unwrap();
-            set_registry_value(key, Some("ExcelXllRegistrationSchema"), schema).unwrap();
-            set_registry_value(key, Some("ExcelXllOwnerModule"), module).unwrap();
-            set_registry_value(key, Some("ExcelXllClassId"), class).unwrap();
+            set_registry_value(key, Some("XlFnOwner"), owner).unwrap();
+            set_registry_value(key, Some("XlFnRegistrationSchema"), schema).unwrap();
+            set_registry_value(key, Some("XlFnOwnerModule"), module).unwrap();
+            set_registry_value(key, Some("XlFnClassId"), class).unwrap();
         }
 
         scavenge_owned_registrations(module, None).unwrap();
 
         assert!(
-            read_registry_string(&owned_key, "ExcelXllOwner")
+            read_registry_string(&owned_key, "XlFnOwner")
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            read_registry_string(&foreign_key, "ExcelXllOwner").unwrap(),
+            read_registry_string(&foreign_key, "XlFnOwner").unwrap(),
             Some("another-owner".to_owned())
         );
         assert_eq!(
-            read_registry_string(&legacy_key, "ExcelXllRegistrationSchema").unwrap(),
+            read_registry_string(&legacy_key, "XlFnRegistrationSchema").unwrap(),
             Some("1".to_owned())
         );
 

@@ -40,7 +40,7 @@ impl RtdSource for MetricSource {
         let client = Arc::clone(&self.client);
 
         let worker = std::thread::spawn(move || {
-            while !worker_cancelled.load(Ordering::Acquire) {
+            while !worker_cancelled.load(Ordering::Relaxed) {
                 match client.try_next_metric(&symbol) {
                     Ok(Some(value)) => {
                         if sink.publish(RtdValue::Number(value)).is_err() {

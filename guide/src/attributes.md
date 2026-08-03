@@ -87,9 +87,9 @@ fn lookup(
 
 | Role | Rust context | Capability |
 |---|---|---|
-| `main_thread` | `MainThreadContext<'_, State>` | main-thread Excel callbacks, handles, RTD |
+| `main_thread` | `MainThreadContext<'_, '_, State>` | main-thread Excel callbacks, handles, RTD |
 | `thread_safe` | `ThreadSafeContext<'_, State>` | shared state during MTR; no unsafe Excel callbacks |
-| `macro_sheet` | `MacroSheetContext<'_, State>` | Excel references and macro-sheet registration |
+| `macro_sheet` | `MacroSheetContext<'_, '_, State>` | Excel references and macro-sheet registration |
 | `asynchronous` | `AsyncContext<State>` | cancellation and shared state for an async UDF |
 
 An `async fn` may omit a context. When it has one, the role must be `asynchronous`. A synchronous function cannot use the asynchronous role.
@@ -139,20 +139,13 @@ Without an explicit presence policy, the parameter's conversion type controls bl
 Derive strict text conversion for a fieldless enum:
 
 ```rust
-#[derive(Clone, Copy, ExcelEnum)]
-#[excel_enum(ascii_case_insensitive)]
-enum Direction {
-    #[excel_value(name = "FORWARD")]
-    Forward,
-    #[excel_value(name = "REVERSE")]
-    Reverse,
-}
+{{#include ../../crates/xlfn/tests/ui/pass/excel_enum.rs:17:24}}
 ```
 
 - variants must be unit variants;
 - names default to Rust variant identifiers;
 - `#[excel_value(name = "...")]` assigns the worksheet spelling;
-- `#[excel_enum(ascii_case_insensitive)]` enables ASCII case-insensitive matching (`case_insensitive` remains a compatibility alias);
+- `#[excel_enum(ascii_case_insensitive)]` enables ASCII case-insensitive matching;
 - effective names must be non-empty and unique under the selected comparison policy.
 
 The derive implements input conversion, scalar output conversion, and all execution-mode return markers.

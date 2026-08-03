@@ -66,7 +66,7 @@ impl ExcelReturn for Percentage {
 
     fn into_excel(
         self,
-        _: &mut ReturnContext<'_>,
+        _: &mut ReturnContext<'_, '_>,
     ) -> XllResult<Self::Output> {
         Ok(self)
     }
@@ -127,7 +127,7 @@ A production conversion should satisfy all of these:
 - **Bounded:** reject unreasonable strings, arrays, recursion, or allocation sizes.
 - **Strict:** do not perform surprising text, locale, or Boolean coercions.
 - **Deterministic:** the same cell value and configuration produce the same domain value.
-- **Context-light:** conversion should not perform network calls or long-running native work.
+- **Context-light:** conversion should not perform network calls or long-running external work.
 - **Diagnostic:** preserve the argument name and use a meaningful `InputError` or domain code.
 
 For a closed string vocabulary, prefer `ExcelEnum`. For a formula-owned object, use [handles](handles.md) rather than serializing an internal pointer into a string yourself.

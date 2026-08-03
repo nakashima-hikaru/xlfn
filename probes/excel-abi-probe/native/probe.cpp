@@ -10,52 +10,95 @@
 #include <XLCALL.H>
 
 #include <cstddef>
-#include <iostream>
 
-int main() {
-    std::cout << "XLOPER12.size=" << sizeof(XLOPER12) << '\n';
-    std::cout << "XLOPER12.align=" << alignof(XLOPER12) << '\n';
-    std::cout << "XLOPER12.xltype.offset=" << offsetof(XLOPER12, xltype) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_size() {
+    return sizeof(XLOPER12);
+}
 
-    std::cout << "XLOPER12Array.size=" << sizeof(((XLOPER12*)nullptr)->val.array) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_align() {
+    return alignof(XLOPER12);
+}
 
-    std::cout << "XLOPER12SRef.size=" << sizeof(((XLOPER12*)nullptr)->val.sref) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_xltype_offset() {
+    return offsetof(XLOPER12, xltype);
+}
 
-    std::cout << "IDSHEET.size=" << sizeof(IDSHEET) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_array_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.array);
+}
 
-    std::cout << "XLOPER12MRef.size=" << sizeof(((XLOPER12*)nullptr)->val.mref) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_sref_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.sref);
+}
 
-    std::cout << "XLOPER12MRef.idSheet.offset="
-              << offsetof(decltype(((XLOPER12*)nullptr)->val.mref), idSheet) << '\n';
+extern "C" std::size_t xlfn_probe_idsheet_size() {
+    return sizeof(IDSHEET);
+}
 
-    std::cout << "XLOPER12Flow.size=" << sizeof(((XLOPER12*)nullptr)->val.flow) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_mref_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.mref);
+}
 
-    std::cout << "XLOPER12FlowValue.size=" << sizeof(((XLOPER12*)nullptr)->val.flow.valflow)
-              << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_mref_idsheet_offset() {
+    return offsetof(decltype(((XLOPER12*)nullptr)->val.mref), idSheet);
+}
 
-    std::cout << "XLOPER12Flow.rw.offset=" << offsetof(decltype(((XLOPER12*)nullptr)->val.flow), rw)
-              << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.flow);
+}
 
-    std::cout << "XLOPER12Flow.col.offset="
-              << offsetof(decltype(((XLOPER12*)nullptr)->val.flow), col) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_value_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.flow.valflow);
+}
 
-    std::cout << "XLOPER12Flow.xlflow.offset="
-              << offsetof(decltype(((XLOPER12*)nullptr)->val.flow), xlflow) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_row_offset() {
+    return offsetof(decltype(((XLOPER12*)nullptr)->val.flow), rw);
+}
 
-    std::cout << "XLOPER12FlowValue.level.size="
-              << sizeof(((XLOPER12*)nullptr)->val.flow.valflow.level) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_column_offset() {
+    return offsetof(decltype(((XLOPER12*)nullptr)->val.flow), col);
+}
 
-    std::cout << "XLOPER12FlowValue.tbctrl.size="
-              << sizeof(((XLOPER12*)nullptr)->val.flow.valflow.tbctrl) << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_type_offset() {
+    return offsetof(decltype(((XLOPER12*)nullptr)->val.flow), xlflow);
+}
 
-    std::cout << "XLREF12.size=" << sizeof(XLREF12) << '\n';
-    std::cout << "xlAsyncReturn=" << xlAsyncReturn << '\n';
-    std::cout << "xlEventRegister=" << xlEventRegister << '\n';
-    std::cout << "xleventCalculationEnded=" << xleventCalculationEnded << '\n';
-    std::cout << "xleventCalculationCanceled=" << xleventCalculationCanceled << '\n';
-    std::cout << "xlfRegister=" << xlfRegister << '\n';
-    std::cout << "xlfUnregister=" << xlfUnregister << '\n';
-    std::cout << "xlbitDLLFree=" << xlbitDLLFree << '\n';
+extern "C" std::size_t xlfn_probe_xloper12_flow_level_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.flow.valflow.level);
+}
 
-    return 0;
+extern "C" std::size_t xlfn_probe_xloper12_flow_toolbar_control_size() {
+    return sizeof(((XLOPER12*)nullptr)->val.flow.valflow.tbctrl);
+}
+
+extern "C" std::size_t xlfn_probe_xlref12_size() {
+    return sizeof(XLREF12);
+}
+
+extern "C" int xlfn_probe_xl_async_return() {
+    return xlAsyncReturn;
+}
+
+extern "C" int xlfn_probe_xl_event_register() {
+    return xlEventRegister;
+}
+
+extern "C" int xlfn_probe_xlevent_calculation_ended() {
+    return xleventCalculationEnded;
+}
+
+extern "C" int xlfn_probe_xlevent_calculation_canceled() {
+    return xleventCalculationCanceled;
+}
+
+extern "C" int xlfn_probe_xlf_register() {
+    return xlfRegister;
+}
+
+extern "C" int xlfn_probe_xlf_unregister() {
+    return xlfUnregister;
+}
+
+extern "C" int xlfn_probe_xlbit_dll_free() {
+    return xlbitDLLFree;
 }

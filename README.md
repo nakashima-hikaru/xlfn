@@ -9,7 +9,7 @@
 It turns typed Rust functions into Excel worksheet functions while handling registration, value conversion, return-value ownership, panic containment, lifecycle coordination, formula-owned handles, native asynchronous UDFs, RTD, and distribution validation.
 
 > [!IMPORTANT]
-> xlfn is currently a **pre-release `0.1.0` project**. It is not yet published to crates.io, its API may change, and production deployments should qualify the exact Windows and Excel versions they support.
+> xlfn is currently at version `0.1.0`. Its API may change, and production deployments should qualify the exact Windows and Excel versions they support.
 
 ## Why xlfn?
 
@@ -65,9 +65,7 @@ Load the generated `.xll` from the matching `dist/win-x64` or `dist/win-x86` dir
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
-See the [quick-start guide](guide/src/quick-start.md) for creating a project, packaging native DLLs, and troubleshooting.
-xlfn
-
+See the [quick-start guide](guide/src/quick-start.md) for creating a project, packaging optional sidecars, and troubleshooting.
 ## Programming model
 
 Define one add-in and annotate exported worksheet functions:
@@ -114,7 +112,7 @@ Additional APIs cover:
 - [native asynchronous functions](guide/src/async-functions.md);
 - [streaming RTD](guide/src/rtd.md);
 - [custom value conversions](guide/src/custom-conversions.md);
-- [native DLL integration](guide/src/native-overview.md).
+- [application-owned external engine integration](guide/src/native-overview.md).
 
 ## How does it compare?
 
@@ -128,8 +126,6 @@ Additional APIs cover:
 This is a scope comparison, not a performance benchmark. Excel-DNA is an established project with a substantially broader ecosystem and production history. xlfn is intended for projects where Rust and native lifecycle control are primary requirements.
 
 References: [Excel-DNA](https://excel-dna.net/docs/introduction/), [Excel-DNA Native AOT](https://excel-dna.github.io/docs/guides-basic/dotnet-native-aot-support/), and [Microsoft XLL development documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/developing-excel-xlls).
-xlfn
-
 ## Lean 4 formalization
 
 The [`formal/`](formal) directory contains an executable Lean 4 transition-system model of the shutdown protocol. It proves properties of the abstract lifecycle model, including that successful shutdown reaches a quiescent state and that closed or fail-stopped states are terminal.
@@ -150,7 +146,7 @@ CI builds the Lean project, runs `leanchecker`, and rejects committed `sorry` or
 
 ## Project status
 
-Implemented areas include typed registration and conversion, lifecycle management, handles, async UDFs, RTD, diagnostics, caches, thread-bound worker support, package staging, PE validation, and the Lean shutdown model.
+Implemented areas include typed registration and conversion, lifecycle management, handles, async UDFs, RTD, diagnostics, caches, package staging, PE validation, and the Lean shutdown model. External-engine adapters, worker models, and runtime loading remain application responsibilities.
 
 The public API is not stable at `0.1.0`. Automated tests and artifact inspection also do not replace qualification in the exact Excel versions, channels, locales, and deployment environment used in production.
 

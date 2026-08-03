@@ -1,8 +1,8 @@
-import ExcelXllFormal.Shutdown.Model
+import XlFnFormal.Shutdown.Model
 
 set_option autoImplicit false
 
-namespace ExcelXllFormal.Shutdown
+namespace XlFnFormal.Shutdown
 
 inductive Completion where
   | completed
@@ -10,16 +10,18 @@ inductive Completion where
   | failed
   deriving DecidableEq, Repr
 
-/-- Observable labels for the abstract protocol. -/
 inductive Event where
   | registerFunction
   | unregisterFunction
   | registerEvent
   | unregisterEvent
+  | enterExternal
+  | leaveExternal
   | enterCall
   | leaveCall
   | createReturnBlock
   | beginReturnFree
+  | releaseReturnBlock
   | endReturnFree
   | startAsyncExecutor
   | startAsyncTask
@@ -41,52 +43,42 @@ inductive Event where
   | endHandleOperation
   | addHandle
   | removeHandle
-  | acquireStateLease
-  | releaseStateLease
-  | startWorker
-  | stopWorker
-  | submitWorkerJob
-  | endWorkerJob (completion : Completion)
-  | acquireAddinResource
-  | releaseAddinResource
   | startDiagnostics
   | enqueueDiagnostic
   | flushDiagnostic
+  | discardDiagnostic
   | stopDiagnostics
+  | recordCleanupIssue
   | beginClose
-  | hostDetached
   | callsDrained
   | returnsDrained
   | asyncDrained
-  | rtdDrained
-  | handlesDrained
+  | subscriptionsDrained
+  | closeCallbackGate
+  | hostDetached
+  | proveStateUnique
+  | proveAddinQuiesced
   | stateClosed
+  | handlesDrained
   | diagnosticsDrained
+  | rtdDrained
   | finishClose
   | failStop (reason : Failure)
   deriving DecidableEq, Repr
 
 namespace Event
 
-/-- Work admitted directly from the host (synchronous UDF, async UDF, calculation event callbacks,
-COM exports, diagnostics workers, custom exports, and both accepted/rejected ingress paths).
-All external entries are guarded by a unified ExportIngress protocol. Internal work spawned by an already
-admitted operation is tracked separately and is bounded by the stage gates. -/
 def IsExternalAdmission : Event → Prop
-  | .enterCall => True
+  | .enterExternal => True
   | .beginRtdOperation => True
   | _ => False
 
 end Event
 
-/-- Certified one-step transition relation.
-
-Every constructor is a refinement obligation for the Rust implementation.
-Notably, `finishClose` requires `Resources.Quiescent`; failures that cannot
-establish this condition must use `failStop`, never `finishClose`. -/
 inductive Step : State → Event → State → Prop where
   | registerFunction {s : State}
-      (hOpen : s.phase = .open) :
+      (hOpen : s.phase = .open)
+      (hIngress : s.resources.ingressOpen = true) :
       Step s .registerFunction
         { s with resources :=
             { s.resources with registrations := s.resources.registrations + 1 } }
@@ -98,7 +90,8 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with registrations := n } }
 
   | registerEvent {s : State}
-      (hOpen : s.phase = .open) :
+      (hOpen : s.phase = .open)
+      (hIngress : s.resources.ingressOpen = true) :
       Step s .registerEvent
         { s with resources :=
             { s.resources with eventRegistrations := s.resources.eventRegistrations + 1 } }
@@ -108,6 +101,19 @@ inductive Step : State → Event → State → Prop where
       (hCount : s.resources.eventRegistrations = n + 1) :
       Step s .unregisterEvent
         { s with resources := { s.resources with eventRegistrations := n } }
+
+  | enterExternal {s : State}
+      (hOpen : s.phase = .open)
+      (hIngress : s.resources.ingressOpen = true) :
+      Step s .enterExternal
+        { s with resources :=
+            { s.resources with externalEntries := s.resources.externalEntries + 1 } }
+
+  | leaveExternal {s : State} {n : Nat}
+      (hLive : s.phase.IsLive)
+      (hCount : s.resources.externalEntries = n + 1) :
+      Step s .leaveExternal
+        { s with resources := { s.resources with externalEntries := n } }
 
   | enterCall {s : State}
       (hOpen : s.phase = .open) :
@@ -130,22 +136,26 @@ inductive Step : State → Event → State → Prop where
 
   | beginReturnFree {s : State}
       (hAllowed : s.phase.AllowsReturnFree)
-      (hAvailable :
-        s.resources.returnFreeOperations < s.resources.returnBlocks) :
+      (hAvailable : s.resources.returnFreeOperations < s.resources.returnBlocks) :
       Step s .beginReturnFree
         { s with resources :=
             { s.resources with
               returnFreeOperations := s.resources.returnFreeOperations + 1 } }
 
-  | endReturnFree {s : State} {blocks freeOperations : Nat}
+  | releaseReturnBlock {s : State} {blocks : Nat}
       (hLive : s.phase.IsLive)
       (hBlocks : s.resources.returnBlocks = blocks + 1)
-      (hOperations :
-        s.resources.returnFreeOperations = freeOperations + 1) :
+      : Step s .releaseReturnBlock
+        { s with resources :=
+            { s.resources with
+              returnBlocks := blocks } }
+
+  | endReturnFree {s : State} {freeOperations : Nat}
+      (hLive : s.phase.IsLive)
+      (hOperations : s.resources.returnFreeOperations = freeOperations + 1) :
       Step s .endReturnFree
         { s with resources :=
             { s.resources with
-              returnBlocks := blocks,
               returnFreeOperations := freeOperations } }
 
   | startAsyncExecutor {s : State}
@@ -176,7 +186,8 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with asyncExecutorRunning := false } }
 
   | beginRtdOperation {s : State}
-      (hOpen : s.phase = .open) :
+      (hOpen : s.phase = .open)
+      (hIngress : s.resources.ingressOpen = true) :
       Step s .beginRtdOperation
         { s with resources :=
             { s.resources with rtdOperations := s.resources.rtdOperations + 1 } }
@@ -188,7 +199,7 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with rtdOperations := n } }
 
   | addSubscription {s : State}
-      (hAllowed : s.phase.AllowsRtdCreation)
+      (hAllowed : s.phase.AllowsSubscriptionCreation)
       (hOperation : s.resources.rtdOperations > 0) :
       Step s .addSubscription
         { s with resources :=
@@ -201,7 +212,7 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with subscriptions := n } }
 
   | beginCallback {s : State}
-      (hAllowed : s.phase.AllowsRtdCreation)
+      (hAllowed : s.phase.AllowsSubscriptionCreation)
       (hSubscription : s.resources.subscriptions > 0) :
       Step s .beginCallback
         { s with resources :=
@@ -254,8 +265,7 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with rtdServerLocks := n } }
 
   | beginHandleOperation {s : State}
-      (hAllowed : s.phase.AllowsHandleCreation)
-      (hProducer : s.resources.ProducerAlive) :
+      (hAllowed : s.phase.AllowsHandleCreation) :
       Step s .beginHandleOperation
         { s with resources :=
             { s.resources with handleOperations := s.resources.handleOperations + 1 } }
@@ -270,72 +280,13 @@ inductive Step : State → Event → State → Prop where
       (hAllowed : s.phase.AllowsHandleCreation)
       (hOperation : s.resources.handleOperations > 0) :
       Step s .addHandle
-        { s with resources :=
-            { s.resources with handles := s.resources.handles + 1 } }
+        { s with resources := { s.resources with handles := s.resources.handles + 1 } }
 
   | removeHandle {s : State} {n : Nat}
       (hLive : s.phase.IsLive)
       (hCount : s.resources.handles = n + 1) :
       Step s .removeHandle
         { s with resources := { s.resources with handles := n } }
-
-  | acquireStateLease {s : State}
-      (hAllowed : s.phase.AllowsStateResourceCreation)
-      (hState : s.resources.stateOwnedByRuntime = true)
-      (hProducer : s.resources.ProducerAlive) :
-      Step s .acquireStateLease
-        { s with resources :=
-            { s.resources with
-              externalStateLeases := s.resources.externalStateLeases + 1 } }
-
-  | releaseStateLease {s : State} {n : Nat}
-      (hLive : s.phase.IsLive)
-      (hCount : s.resources.externalStateLeases = n + 1) :
-      Step s .releaseStateLease
-        { s with resources := { s.resources with externalStateLeases := n } }
-
-  | startWorker {s : State}
-      (hAllowed : s.phase.AllowsStateResourceCreation)
-      (hState : s.resources.stateOwnedByRuntime = true)
-      (hProducer : s.resources.ProducerAlive) :
-      Step s .startWorker
-        { s with resources :=
-            { s.resources with workers := s.resources.workers + 1 } }
-
-  | stopWorker {s : State} {n : Nat}
-      (hLive : s.phase.IsLive)
-      (hNoJobs : s.resources.workerJobs = 0)
-      (hCount : s.resources.workers = n + 1) :
-      Step s .stopWorker
-        { s with resources := { s.resources with workers := n } }
-
-  | submitWorkerJob {s : State}
-      (hAllowed : s.phase.AllowsStateResourceCreation)
-      (hWorker : s.resources.workers > 0)
-      (hProducer : s.resources.ProducerAlive) :
-      Step s .submitWorkerJob
-        { s with resources :=
-            { s.resources with workerJobs := s.resources.workerJobs + 1 } }
-
-  | endWorkerJob {s : State} {n : Nat} {completion : Completion}
-      (hLive : s.phase.IsLive)
-      (hCount : s.resources.workerJobs = n + 1) :
-      Step s (.endWorkerJob completion)
-        { s with resources := { s.resources with workerJobs := n } }
-
-  | acquireAddinResource {s : State}
-      (hAllowed : s.phase.AllowsStateResourceCreation)
-      (hState : s.resources.stateOwnedByRuntime = true)
-      (hProducer : s.resources.ProducerAlive) :
-      Step s .acquireAddinResource
-        { s with resources :=
-            { s.resources with addinResources := s.resources.addinResources + 1 } }
-
-  | releaseAddinResource {s : State} {n : Nat}
-      (hLive : s.phase.IsLive)
-      (hCount : s.resources.addinResources = n + 1) :
-      Step s .releaseAddinResource
-        { s with resources := { s.resources with addinResources := n } }
 
   | startDiagnostics {s : State}
       (hOpen : s.phase = .open)
@@ -344,7 +295,7 @@ inductive Step : State → Event → State → Prop where
         { s with resources := { s.resources with diagnosticsRunning := true } }
 
   | enqueueDiagnostic {s : State}
-      (hLive : s.phase.IsLive)
+      (hAllowed : s.phase.AllowsDiagnosticCreation)
       (hRunning : s.resources.diagnosticsRunning = true) :
       Step s .enqueueDiagnostic
         { s with resources :=
@@ -356,6 +307,12 @@ inductive Step : State → Event → State → Prop where
       Step s .flushDiagnostic
         { s with resources := { s.resources with diagnosticsPending := n } }
 
+  | discardDiagnostic {s : State} {n : Nat}
+      (hLive : s.phase.IsLive)
+      (hCount : s.resources.diagnosticsPending = n + 1) :
+      Step s .discardDiagnostic
+        { s with resources := { s.resources with diagnosticsPending := n } }
+
   | stopDiagnostics {s : State}
       (hLive : s.phase.IsLive)
       (hEmpty : s.resources.diagnosticsPending = 0)
@@ -363,17 +320,18 @@ inductive Step : State → Event → State → Prop where
       Step s .stopDiagnostics
         { s with resources := { s.resources with diagnosticsRunning := false } }
 
-  /- Shutdown protocol.  The stage order mirrors `close_addin_inner` but makes
-     every successful stage transition conditional on a checked postcondition. -/
+  | recordCleanupIssue {s : State}
+      (hLive : s.phase.IsLive) :
+      Step s .recordCleanupIssue
+        { s with resources :=
+            { s.resources with cleanupIssues := s.resources.cleanupIssues + 1 } }
 
   | beginClose {s : State}
-      (hOpen : s.phase = .open) :
-      Step s .beginClose { s with phase := .closing .detachHost }
-
-  | hostDetached {s : State}
-      (hStage : s.phase = .closing .detachHost)
-      (hDetached : s.resources.HostDetached) :
-      Step s .hostDetached { s with phase := .closing .drainCalls }
+      (hOpen : s.phase = .open)
+      (hIngress : s.resources.ingressOpen = true) :
+      Step s .beginClose
+        { phase := .closing .drainCalls,
+          resources := { s.resources with ingressOpen := false } }
 
   | callsDrained {s : State}
       (hStage : s.phase = .closing .drainCalls)
@@ -388,33 +346,59 @@ inductive Step : State → Event → State → Prop where
   | asyncDrained {s : State}
       (hStage : s.phase = .closing .drainAsync)
       (hDrained : s.resources.AsyncDrained) :
-      Step s .asyncDrained { s with phase := .closing .drainRtd }
+      Step s .asyncDrained { s with phase := .closing .stopSubscriptions }
 
-  | rtdDrained {s : State}
-      (hStage : s.phase = .closing .drainRtd)
-      (hDrained : s.resources.RtdDrained) :
-      Step s .rtdDrained { s with phase := .closing .drainHandles }
+  | subscriptionsDrained {s : State}
+      (hStage : s.phase = .closing .stopSubscriptions)
+      (hDrained : s.resources.SubscriptionsDrained) :
+      Step s .subscriptionsDrained { s with phase := .closing .detachHost }
+
+  | closeCallbackGate {s : State}
+      (hStage : s.phase = .closing .detachHost)
+      (hOpen : s.resources.callbackGateOpen = true) :
+      Step s .closeCallbackGate
+        { s with resources := { s.resources with callbackGateOpen := false } }
+
+  | hostDetached {s : State}
+      (hStage : s.phase = .closing .detachHost)
+      (hDetached : s.resources.HostDetached) :
+      Step s .hostDetached { s with phase := .closing .closeState }
+
+  | proveStateUnique {s : State}
+      (hStage : s.phase = .closing .closeState)
+      (hNotProven : s.resources.stateUnique = false) :
+      Step s .proveStateUnique
+        { s with resources := { s.resources with stateUnique := true } }
+
+  | proveAddinQuiesced {s : State}
+      (hStage : s.phase = .closing .closeState)
+      (hNotProven : s.resources.addinQuiesced = false) :
+      Step s .proveAddinQuiesced
+        { s with resources := { s.resources with addinQuiesced := true } }
+
+  | stateClosed {s : State}
+      (hStage : s.phase = .closing .closeState)
+      (hUnique : s.resources.stateUnique = true)
+      (hQuiesced : s.resources.addinQuiesced = true)
+      (hOwned : s.resources.stateOwnedByRuntime = true) :
+      Step s .stateClosed
+        { phase := .closing .drainHandles,
+          resources := { s.resources with stateOwnedByRuntime := false } }
 
   | handlesDrained {s : State}
       (hStage : s.phase = .closing .drainHandles)
       (hDrained : s.resources.HandlesDrained) :
-      Step s .handlesDrained { s with phase := .closing .closeState }
-
-  | stateClosed {s : State}
-      (hStage : s.phase = .closing .closeState)
-      (hNoEscapes : s.resources.externalStateLeases = 0)
-      (hNoWorkers : s.resources.workers = 0)
-      (hNoWorkerJobs : s.resources.workerJobs = 0)
-      (hNoResources : s.resources.addinResources = 0)
-      (hOwned : s.resources.stateOwnedByRuntime = true) :
-      Step s .stateClosed
-        { phase := .closing .stopDiagnostics,
-          resources := { s.resources with stateOwnedByRuntime := false } }
+      Step s .handlesDrained { s with phase := .closing .stopDiagnostics }
 
   | diagnosticsDrained {s : State}
       (hStage : s.phase = .closing .stopDiagnostics)
       (hDrained : s.resources.DiagnosticsDrained) :
-      Step s .diagnosticsDrained { s with phase := .closing .finalize }
+      Step s .diagnosticsDrained { s with phase := .closing .drainRtd }
+
+  | rtdDrained {s : State}
+      (hStage : s.phase = .closing .drainRtd)
+      (hDrained : s.resources.RtdDrained) :
+      Step s .rtdDrained { s with phase := .closing .finalize }
 
   | finishClose {s : State}
       (hStage : s.phase = .closing .finalize)
@@ -425,4 +409,4 @@ inductive Step : State → Event → State → Prop where
       (hLive : s.phase.IsLive) :
       Step s (.failStop reason) { s with phase := .failStopped reason }
 
-end ExcelXllFormal.Shutdown
+end XlFnFormal.Shutdown

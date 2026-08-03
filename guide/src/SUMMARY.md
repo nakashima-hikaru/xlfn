@@ -27,11 +27,11 @@
 - [Asynchronous functions](async-functions.md)
 - [Streaming RTD](rtd.md)
 
-# Native DLL integration
+# External engines and application adapters
 
-- [Native integration overview](native-overview.md)
-- [Thread-affine native state](native-threading.md)
-- [Native objects as handles](native-objects.md)
+- [External engine integration](native-overview.md)
+- [Thread-affine application adapters](native-threading.md)
+- [External objects as formula handles](native-objects.md)
 
 # Advanced runtime facilities
 

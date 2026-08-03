@@ -23,7 +23,7 @@ help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
 note: required by a bound in `xlfn::__private::assert_excel_parameter`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |
-  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: CallScope<'call>) {}
+  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
   |                                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
 
 error[E0277]: the trait bound `NotAnArgument: FromExcel<'_>` is not satisfied

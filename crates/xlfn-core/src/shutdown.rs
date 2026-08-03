@@ -68,10 +68,10 @@ impl<'a> CleanupReporter<'a> {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnloadHazard {
     HostCallbackStillRegistered,
+    #[allow(dead_code)]
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
     HandleRuntimeNotQuiescent,
@@ -84,6 +84,39 @@ pub(crate) enum UnloadHazard {
     CloseInvariantViolation,
     RtdGitCallbackStillRegistered,
     RtdGitRevocationDebt,
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+impl UnloadHazard {
+    pub(crate) fn ghost_failure(self) -> crate::shutdown_refinement::GhostFailure {
+        match self {
+            Self::HostCallbackStillRegistered | Self::RegistrationStateUnknown => {
+                crate::shutdown_refinement::GhostFailure::UnregisterFailed
+            }
+            Self::AsyncExecutorStillRunning => {
+                crate::shutdown_refinement::GhostFailure::AsyncShutdownFailed
+            }
+            Self::SubscriptionProducerStillRunning
+            | Self::RtdGitCallbackStillRegistered
+            | Self::RtdGitRevocationDebt => {
+                crate::shutdown_refinement::GhostFailure::RtdShutdownFailed
+            }
+            Self::HandleRuntimeNotQuiescent => {
+                crate::shutdown_refinement::GhostFailure::HandleShutdownFailed
+            }
+            Self::AddinStateEscaped => crate::shutdown_refinement::GhostFailure::StateEscaped,
+            Self::AddinQuiesceFailed => {
+                crate::shutdown_refinement::GhostFailure::AddinShutdownFailed
+            }
+            Self::DiagnosticWorkerStillRunning => {
+                crate::shutdown_refinement::GhostFailure::DiagnosticsShutdownFailed
+            }
+            Self::UnhandledClosePanic => crate::shutdown_refinement::GhostFailure::BoundaryPanic,
+            Self::CloseInvariantViolation | Self::OpenRollbackFailed => {
+                crate::shutdown_refinement::GhostFailure::InvariantViolation
+            }
+        }
+    }
 }
 
 pub(crate) struct StopOutcome<T> {

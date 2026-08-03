@@ -9,7 +9,7 @@ For ordinary arguments, `Option<T>` maps both missing and blank to `None`:
 ```rust
 #[excel_function(name = "DATA.TRANSFORM", thread_safe)]
 fn scaled(value: f64, factor: Option<f64>) -> f64 {
-    value / (1.0 + rate.unwrap_or(0.0))
+    value / (1.0 + factor.unwrap_or(0.0))
 }
 ```
 
@@ -81,22 +81,7 @@ Reference arguments cannot use blank, missing, or default policies because they 
 Derive `ExcelEnum` for a small, closed string vocabulary:
 
 ```rust
-#[derive(Clone, Copy, ExcelEnum)]
-#[excel_enum(ascii_case_insensitive)]
-enum Direction {
-    #[excel_value(name = "Forward")]
-    Forward,
-    #[excel_value(name = "Reverse")]
-    Reverse,
-}
-
-#[excel_function(name = "DIRECTION.SIGN", thread_safe)]
-fn sign(direction: Direction) -> f64 {
-    match direction {
-        Direction::Forward => 1.0,
-        Direction::Reverse => -1.0,
-    }
-}
+{{#include ../../crates/xlfn/tests/ui/pass/excel_enum.rs:17:32}}
 ```
 
 The derive implements input conversion, output conversion, and all normal return-mode marker traits. Requirements:
@@ -106,7 +91,7 @@ The derive implements input conversion, output conversion, and all normal return
 - each Excel text value is non-empty;
 - text values are unique under the selected comparison policy.
 
-Without `ascii_case_insensitive`, matching is exact. With it, comparison is ASCII case-insensitive; it is not locale-sensitive Unicode case folding. The older `case_insensitive` spelling remains a compatibility alias.
+Without `ascii_case_insensitive`, matching is exact. With it, comparison is ASCII case-insensitive; it is not locale-sensitive Unicode case folding.
 
 Use `#[excel_value(name = "...")]` to make worksheet text independent of Rust naming. Once workbooks depend on those strings, treat them as versioned public API.
 

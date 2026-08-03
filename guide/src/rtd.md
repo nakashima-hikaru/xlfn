@@ -33,6 +33,8 @@ let topic = RtdTopic::single("service-health")?;
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 
+The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `Runtime::new_with_rtd_limits` can choose lower limits for a deployment; exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
+
 ## Implement a source
 
 ```rust
@@ -83,7 +85,7 @@ RTD does not transport arrays. Publish a handle or another scalar identity and e
 
 ## Backpressure and errors
 
-`RtdSink::publish` can fail when the runtime is closing, the subscription is no longer active, the value is invalid, or internal capacity is unavailable. A producer must handle the error and stop or retry with a bounded policy. Do not loop tightly on a permanent error.
+`RtdSink::publish` can fail when the runtime is closing, the subscription is no longer active, the value is invalid, or the queued-update limit is exhausted. A producer must handle the error and stop or retry with a bounded policy. Do not loop tightly on a permanent error.
 
 Publishing validates and queues a value; notification and `RefreshData` happen through the framework. User code must never call the COM update event directly.
 

@@ -39,7 +39,7 @@ pub fn one() -> i32 {
 
 #[excel_function(name = "EXAMPLE.REF.AREAS")]
 pub fn reference_area_count(
-    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, ExampleState>,
+    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, '_, ExampleState>,
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
     i32::try_from(reference.areas().count()).map_err(|_| XllError::Domain {

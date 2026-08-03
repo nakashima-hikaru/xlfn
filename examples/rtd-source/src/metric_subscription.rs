@@ -15,7 +15,7 @@ pub(crate) struct MetricSubscription {
 // joins that producer before returning.
 unsafe impl RtdSubscription for MetricSubscription {
     fn request_cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 
     fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
