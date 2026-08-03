@@ -430,7 +430,7 @@ where
         if fs::symlink_metadata(&destination).is_ok() {
             bail!("{} already exists", root.display());
         }
-        fs::rename(&staging, &destination)?;
+        rename_path(&staging, &destination)?;
     }
     println!("created {}", root.display());
     Ok(())
@@ -445,6 +445,39 @@ fn sync_scaffold_files(staging: &Path) -> io::Result<()> {
         std::fs::File::open(path)?.sync_all()?;
     }
     Ok(())
+}
+
+fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        const ATTEMPTS: usize = 8;
+        let mut delay = std::time::Duration::from_millis(10);
+        for attempt in 0..ATTEMPTS {
+            match fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if attempt + 1 < ATTEMPTS
+                        && (matches!(
+                            error.kind(),
+                            io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
+                        ) || matches!(error.raw_os_error(), Some(5) | Some(32))) =>
+                {
+                    // Windows hosted runners may briefly hold newly written
+                    // files for scanning. Bound the retry so real ACL failures
+                    // remain visible rather than being hidden indefinitely.
+                    std::thread::sleep(delay);
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_millis(160));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("bounded rename loop always returns")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fs::rename(from, to)
 }
 
 fn commit_scaffold_into_existing_directory(
@@ -470,9 +503,9 @@ fn commit_scaffold_into_existing_directory(
     for entry in entries {
         let source = staging.join(entry);
         let target = destination.join(entry);
-        if let Err(error) = fs::rename(&source, &target) {
+        if let Err(error) = rename_path(&source, &target) {
             let rollback = committed.iter().rev().try_for_each(|entry: &&str| {
-                fs::rename(destination.join(entry), staging.join(entry))
+                rename_path(&destination.join(entry), &staging.join(entry))
             });
             return match rollback {
                 Ok(()) => Err(error),
@@ -1024,7 +1057,7 @@ struct SystemDistributionFileOps;
 
 impl DistributionFileOps for SystemDistributionFileOps {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
+        rename_path(from, to)
     }
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
@@ -1368,7 +1401,7 @@ impl DistributionTransactionDirectory {
             }
             capability.verify()?;
             drop(capability);
-            fs::rename(&private_path, &final_path)?;
+            rename_path(&private_path, &final_path)?;
             sync_rename_parents(&private_path, &final_path, file_ops)?;
             let capability = xlfn_package::PrivateStagingDirectory::open(&final_path)?;
             return Ok((

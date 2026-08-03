@@ -170,10 +170,10 @@ jobs:
             - name: Download and extract the pinned Excel SDK
               shell: pwsh
               run: |
-                  $sdkUrl = "https://download.microsoft.com/download/d/a/c/dac9c321-279c-4625-b381-bcb044eef7b2/xlfnsdk.msi"
+                  $sdkUrl = "https://download.microsoft.com/download/d/a/c/dac9c321-279c-4625-b381-bcb044eef7b2/excelxllsdk.msi"
                   $sdkSha256 = "1a59a4877f80881d0e8e931f39d5507b3a4eea97fa18008554c425d7df013930"
                   $sdkRoot = Join-Path $env:RUNNER_TEMP "excel-xll-sdk"
-                  $msi = Join-Path $env:RUNNER_TEMP "xlfnsdk.msi"
+                  $msi = Join-Path $env:RUNNER_TEMP "excelxllsdk.msi"
                   New-Item -ItemType Directory -Force -Path $sdkRoot | Out-Null
                   Invoke-WebRequest -Uri $sdkUrl -OutFile $msi
                   $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $msi).Hash.ToLowerInvariant()

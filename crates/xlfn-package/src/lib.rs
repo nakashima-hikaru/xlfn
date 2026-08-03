@@ -2518,6 +2518,131 @@ fn validate_private_directory(path: &Path, metadata: &std::fs::Metadata) -> Pack
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
+fn current_windows_user_sid_string() -> PackageResult<String> {
+    use crate::win32::{
+        CloseHandle, GetCurrentProcess, GetLengthSid, GetTokenInformation, IsValidSid,
+        OpenProcessToken, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use std::fmt::Write as _;
+    use std::mem::{MaybeUninit, align_of, size_of};
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle and
+    // `token` points to writable storage for the returned token handle.
+    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if opened == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+
+    let result = (|| -> PackageResult<String> {
+        let mut required = 0_u32;
+        // SAFETY: the null buffer intentionally performs the documented size
+        // query; `required` is writable output storage.
+        let _ = unsafe {
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required)
+        };
+        if required == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let required_size = required as usize;
+        if required_size < size_of::<TOKEN_USER>() {
+            return Err("token information is shorter than TOKEN_USER".into());
+        }
+        let word_size = size_of::<usize>();
+        let words = required_size
+            .checked_add(word_size - 1)
+            .ok_or_else(|| "token information size overflow".to_owned())?
+            / word_size;
+        if align_of::<usize>() < align_of::<TOKEN_USER>() {
+            return Err("token information alignment is unsupported".into());
+        }
+        let mut token_buffer = vec![MaybeUninit::<usize>::uninit(); words];
+        // SAFETY: the storage is aligned at least to `TOKEN_USER`, has at
+        // least the requested byte length, and remains alive for the call.
+        let queried = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        };
+        if queried == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let returned_size = required as usize;
+        if returned_size < size_of::<TOKEN_USER>()
+            || returned_size > token_buffer.len().saturating_mul(word_size)
+        {
+            return Err("token information exceeds its storage".into());
+        }
+        // SAFETY: the successful query populated a complete TOKEN_USER at the
+        // aligned beginning of the storage, and the storage remains alive.
+        let token_user = unsafe {
+            token_buffer
+                .as_ptr()
+                .cast::<TOKEN_USER>()
+                .as_ref()
+                .ok_or_else(|| "token information buffer is null".to_owned())?
+        };
+        if token_user.User.Sid.is_null()
+            // SAFETY: the SID pointer came from the successful token query and
+            // is non-null before it is validated here.
+            || unsafe { IsValidSid(token_user.User.Sid) == 0 }
+        {
+            return Err("current user token has an invalid SID".into());
+        }
+        // SAFETY: the SID has been validated and remains backed by the live
+        // token information buffer for the duration of this read.
+        let sid_length = unsafe { GetLengthSid(token_user.User.Sid) } as usize;
+        if sid_length < 8 {
+            return Err("current user SID is shorter than the fixed SID header".into());
+        }
+        // SAFETY: GetLengthSid returned the complete size of the validated SID,
+        // which remains live in `token_buffer`.
+        let sid = unsafe {
+            std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_length)
+        };
+        let subauthority_count = sid[1] as usize;
+        let expected_length = 8_usize
+            .checked_add(
+                subauthority_count
+                    .checked_mul(4)
+                    .ok_or_else(|| "current user SID length overflow".to_owned())?,
+            )
+            .ok_or_else(|| "current user SID length overflow".to_owned())?;
+        if sid_length != expected_length {
+            return Err("current user SID has an inconsistent length".into());
+        }
+        let identifier_authority = u64::from_be_bytes([
+            0, 0, sid[2], sid[3], sid[4], sid[5], sid[6], sid[7],
+        ]);
+        let mut value = format!("S-{}-{identifier_authority}", sid[0]);
+        for index in 0..subauthority_count {
+            let offset = 8 + index * 4;
+            let subauthority = u32::from_le_bytes([
+                sid[offset],
+                sid[offset + 1],
+                sid[offset + 2],
+                sid[offset + 3],
+            ]);
+            write!(&mut value, "-{subauthority}")
+                .map_err(|error| format!("failed to format current user SID: {error}"))?;
+        }
+        Ok(value)
+    })();
+
+    // SAFETY: `token` was returned by OpenProcessToken and is closed exactly
+    // once after all token-backed pointers are no longer used.
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
 fn create_private_windows_directory(path: &Path) -> PackageResult {
     use crate::win32::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateDirectoryW, HLOCAL, LocalFree,
@@ -2525,10 +2650,14 @@ fn create_private_windows_directory(path: &Path) -> PackageResult {
     };
     use std::os::windows::ffi::OsStrExt;
 
-    // Do not inherit permissions from the temporary directory. SYSTEM and the
-    // creating user's owner SID may access the directory; ordinary peer
-    // processes cannot replace staged entries during creation.
-    let descriptor_string = wide_nul("D:P(A;;FA;;;SY)(A;;FA;;;OW)");
+    // Do not inherit permissions from the temporary directory. Explicitly set
+    // the current user as owner and grant access only to that SID and SYSTEM;
+    // relying on the token's default owner can select the Administrators group
+    // on hosted runners and make the private-directory invariant fail.
+    let user_sid = current_windows_user_sid_string()?;
+    let descriptor_string = wide_nul(&format!(
+        "O:{user_sid}D:P(A;;FA;;;SY)(A;;FA;;;{user_sid})"
+    ));
     let mut descriptor = std::ptr::null_mut::<std::ffi::c_void>();
     // SAFETY: the SDDL literal is NUL-terminated and `descriptor` points to
     // writable storage for the API-owned security descriptor pointer.

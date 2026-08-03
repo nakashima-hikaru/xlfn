@@ -17,6 +17,7 @@
     Windows.Win32.Security.EqualSid
     Windows.Win32.Security.GetAce
     Windows.Win32.Security.GetAclInformation
+    Windows.Win32.Security.GetLengthSid
     Windows.Win32.Security.GetSecurityDescriptorControl
     Windows.Win32.Security.GetSecurityDescriptorDacl
     Windows.Win32.Security.GetTokenInformation
