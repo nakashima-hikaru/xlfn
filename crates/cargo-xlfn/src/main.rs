@@ -456,6 +456,28 @@ fn retryable_windows_path_error(error: &io::Error) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn retry_windows_path_operation(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    const ATTEMPTS: usize = 24;
+    let mut delay = std::time::Duration::from_millis(10);
+    for attempt in 0..ATTEMPTS {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt + 1 < ATTEMPTS && retryable_windows_path_error(&error) => {
+                // Virus scanners and indexing services on hosted Windows runners can
+                // briefly retain a handle after the writer closes it. Keep retries
+                // bounded so persistent ACL failures remain visible.
+                std::thread::sleep(delay);
+                delay = delay
+                    .saturating_mul(2)
+                    .min(std::time::Duration::from_millis(500));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded path-operation loop always returns")
+}
+
+#[cfg(target_os = "windows")]
 fn move_file_ex_with_retry(
     from: &Path,
     to: &Path,
@@ -464,7 +486,6 @@ fn move_file_ex_with_retry(
     use crate::win32::MoveFileExW;
     use std::os::windows::ffi::OsStrExt;
 
-    const ATTEMPTS: usize = 24;
     let from_wide = from
         .as_os_str()
         .encode_wide()
@@ -475,33 +496,23 @@ fn move_file_ex_with_retry(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let mut delay = std::time::Duration::from_millis(10);
-    for attempt in 0..ATTEMPTS {
+    retry_windows_path_operation(|| {
         // SAFETY: both paths are live, NUL-terminated buffers for this call.
         if unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) } != 0 {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-        let error = io::Error::last_os_error();
-        if attempt + 1 == ATTEMPTS || !retryable_windows_path_error(&error) {
-            return Err(error);
-        }
-        // Virus scanners and indexing services on hosted Windows runners can
-        // briefly retain a handle after the writer closes it. Keep retries
-        // bounded so persistent ACL failures remain visible.
-        std::thread::sleep(delay);
-        delay = delay
-            .saturating_mul(2)
-            .min(std::time::Duration::from_millis(500));
-    }
-    unreachable!("bounded move loop always returns")
+    })
 }
 
 fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use crate::win32::MOVEFILE_WRITE_THROUGH;
-
-        move_file_ex_with_retry(from, to, MOVEFILE_WRITE_THROUGH)
+        // std::fs::rename can use the newer Windows rename-by-handle path when
+        // MoveFileExW alone is rejected, while preserving same-volume rename
+        // semantics. The bounded retry still covers transient scanner locks.
+        retry_windows_path_operation(|| fs::rename(from, to))
     }
 
     #[cfg(not(target_os = "windows"))]

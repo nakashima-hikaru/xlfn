@@ -1,5 +1,7 @@
 # xlfn
 
+[![Crates.io](https://img.shields.io/crates/v/xlfn.svg)](https://crates.io/crates/xlfn)
+[![docs.rs](https://docs.rs/xlfn/badge.svg)](https://docs.rs/xlfn)
 [![CI](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml/badge.svg)](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml)
 [![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -38,27 +40,32 @@ xlfn deliberately does not provide a Ribbon, task-pane, IntelliSense, or general
 
 Choose the target from the **Excel process bitness**, not the Windows bitness. A 64-bit Windows installation can still run 32-bit Excel.
 
-### Build the included example
+### Quick Start
+
+1. Install `cargo-xlfn` from crates.io and add the compilation targets:
 
 ```powershell
-git clone https://github.com/nakashima-hikaru/xlfn.git
-cd xlfn
+cargo install cargo-xlfn --locked
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+```
 
-cargo install --path crates/cargo-xlfn --locked --force
+2. Create a new add-in project:
 
-cargo xlfn dist `
-    --manifest-path examples/basic-xll/Cargo.toml `
-    --target x86_64-pc-windows-msvc `
-    --locked
+```powershell
+cargo xlfn new my-xll
+cd my-xll
+```
+
+3. Build and package the add-in:
+
+```powershell
+cargo xlfn dist --target x86_64-pc-windows-msvc
 ```
 
 For 32-bit Excel, use `i686-pc-windows-msvc`. To build both architectures:
 
 ```powershell
-cargo xlfn dist `
-    --manifest-path examples/basic-xll/Cargo.toml `
-    --all `
-    --locked
+cargo xlfn dist --all
 ```
 
 Load the generated `.xll` from the matching `dist/win-x64` or `dist/win-x86` directory through:
@@ -123,9 +130,6 @@ Additional APIs cover:
 | **Excel-DNA Native AOT** | Self-contained .NET Native AOT add-ins without a separately installed .NET runtime                                        | Currently 64-bit only                                 |
 | **Direct C/C++ XLL SDK** | Teams that require complete low-level control and are prepared to own the ABI, conversion, lifetime, and packaging layers | 32-bit and 64-bit                                     |
 
-This is a scope comparison, not a performance benchmark. Excel-DNA is an established project with a substantially broader ecosystem and production history. xlfn is intended for projects where Rust and native lifecycle control are primary requirements.
-
-References: [Excel-DNA](https://excel-dna.net/docs/introduction/), [Excel-DNA Native AOT](https://excel-dna.github.io/docs/guides-basic/dotnet-native-aot-support/), and [Microsoft XLL development documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/developing-excel-xlls).
 ## Lean 4 formalization
 
 The [`formal/`](formal) directory contains an executable Lean 4 transition-system model of the shutdown protocol. It proves properties of the abstract lifecycle model, including that successful shutdown reaches a quiescent state and that closed or fail-stopped states are terminal.
