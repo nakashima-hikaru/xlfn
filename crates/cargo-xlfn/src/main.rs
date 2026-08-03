@@ -509,10 +509,9 @@ fn move_file_ex_with_retry(
 fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        // std::fs::rename can use the newer Windows rename-by-handle path when
-        // MoveFileExW alone is rejected, while preserving same-volume rename
-        // semantics. The bounded retry still covers transient scanner locks.
-        retry_windows_path_operation(|| fs::rename(from, to))
+        use crate::win32::MOVEFILE_WRITE_THROUGH;
+
+        move_file_ex_with_retry(from, to, MOVEFILE_WRITE_THROUGH)
     }
 
     #[cfg(not(target_os = "windows"))]

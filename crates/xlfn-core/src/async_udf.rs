@@ -2337,9 +2337,9 @@ mod tests {
 
     #[test]
     fn cancellation_after_evaluation_does_not_leak_the_return_block() {
-        let before = crate::return_value::live_return_blocks();
         let runtime = Box::leak(Box::new(Runtime::new()));
         let _guard = test_lock_for_runtime(runtime);
+        let before = crate::return_value::live_return_blocks();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();

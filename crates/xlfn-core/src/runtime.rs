@@ -1222,8 +1222,11 @@ mod tests {
         runtime.finish_open_rollback(certificate).unwrap();
     }
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn runtime_can_open_close_and_reopen() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct TestHandle(u32);
         impl crate::ExcelHandleObject for TestHandle {}
 
@@ -1261,6 +1264,7 @@ mod tests {
 
     #[test]
     fn close_on_closed_runtime_invalidates_an_older_open_epoch() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
         let stale_epoch = runtime.close_epoch();
 
@@ -1275,6 +1279,7 @@ mod tests {
 
     #[test]
     fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::new();
         let mut first = runtime.begin_open().unwrap();
 
@@ -1289,6 +1294,7 @@ mod tests {
 
     #[test]
     fn final_close_cancels_an_in_flight_open_commit() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::new());
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish(17_u32, Vec::new());
@@ -1323,6 +1329,7 @@ mod tests {
 
     #[test]
     fn close_waiter_is_not_lost_when_open_rollback_finishes() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let mut opening = runtime.begin_open().unwrap();
         assert!(opening.fail());
