@@ -1,7 +1,7 @@
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use crate::{ExcelErrorValue, XllError, XllResult};
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Condvar, Mutex};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::marker::PhantomData;
@@ -554,7 +554,6 @@ struct QueuedUpdate {
 }
 
 pub(crate) struct RtdUpdate {
-    owner: TopicOwner,
     sequence: u64,
     pub(crate) topic_id: i32,
     pub(crate) value: RtdValue,
@@ -564,10 +563,6 @@ pub(crate) struct RtdUpdate {
 impl RtdUpdate {
     pub(crate) fn for_test(topic_id: i32, value: RtdValue) -> Self {
         Self {
-            owner: TopicOwner {
-                server_generation: 0,
-                topic_id,
-            },
             sequence: 0,
             topic_id,
             value,
@@ -575,8 +570,147 @@ impl RtdUpdate {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RefreshOutcome {
+    Delivered,
+    Failed,
+}
+
+#[must_use]
 pub(crate) struct RtdUpdateBatch {
+    pub(crate) server_generation: u64,
+    pub(crate) refresh_id: u64,
     pub(crate) updates: Vec<RtdUpdate>,
+}
+
+type NotificationCallback = Arc<dyn Fn() -> XllResult<()> + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignalState {
+    Dormant,
+    Calling { ticket: u64, attempt: u8 },
+    Signaled { ticket: u64 },
+}
+
+#[derive(Debug)]
+enum DeliveryPhase {
+    BetweenRefreshes {
+        signal: SignalState,
+    },
+    Refreshing {
+        refresh_id: u64,
+        snapshot_max_sequence: u64,
+        consumed_signal: SignalState,
+        next_signal: SignalState,
+    },
+}
+
+impl Default for DeliveryPhase {
+    fn default() -> Self {
+        Self::BetweenRefreshes {
+            signal: SignalState::Dormant,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ServerDeliveryState {
+    callback: Option<NotificationCallback>,
+    updates: BTreeMap<i32, QueuedUpdate>,
+    next_update_sequence: u64,
+    next_notification_ticket: u64,
+    next_refresh_id: u64,
+    phase: DeliveryPhase,
+}
+
+#[derive(Clone)]
+struct NotificationAttempt {
+    server_generation: u64,
+    ticket: u64,
+    attempt: u8,
+    callback: NotificationCallback,
+}
+
+enum NotificationCompletion {
+    Finished,
+    Retry(NotificationAttempt),
+    Failed(XllError),
+}
+
+impl ServerDeliveryState {
+    fn allocate_update_sequence(&mut self) -> XllResult<u64> {
+        let seq = self.next_update_sequence;
+        self.next_update_sequence = seq.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5345_514f_5646_4c57,
+        })?;
+        Ok(seq)
+    }
+
+    fn allocate_refresh_id(&mut self) -> XllResult<u64> {
+        let id = self.next_refresh_id;
+        self.next_refresh_id = id.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5245_464f_5646_4c57,
+        })?;
+        Ok(id)
+    }
+
+    fn arm_notification_if_needed(
+        &mut self,
+        server_generation: u64,
+    ) -> XllResult<Option<NotificationAttempt>> {
+        if self.updates.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(callback) = self.callback.as_ref().cloned() else {
+            return Ok(None);
+        };
+
+        let ticket = self.next_notification_ticket;
+        self.next_notification_ticket = ticket.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5449_434b_4f56_464c,
+        })?;
+
+        let attempt = match &mut self.phase {
+            DeliveryPhase::BetweenRefreshes { signal } => {
+                if !matches!(signal, SignalState::Dormant) {
+                    return Ok(None);
+                }
+                *signal = SignalState::Calling { ticket, attempt: 0 };
+                Some(NotificationAttempt {
+                    server_generation,
+                    ticket,
+                    attempt: 0,
+                    callback,
+                })
+            }
+            DeliveryPhase::Refreshing { next_signal, .. } => {
+                if !matches!(next_signal, SignalState::Dormant) {
+                    return Ok(None);
+                }
+                *next_signal = SignalState::Calling { ticket, attempt: 0 };
+                None
+            }
+        };
+
+        Ok(attempt)
+    }
+
+    fn signal_for_ticket_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
+        let signal = match &mut self.phase {
+            DeliveryPhase::BetweenRefreshes { signal } => signal,
+            DeliveryPhase::Refreshing { next_signal, .. } => next_signal,
+        };
+
+        match signal {
+            SignalState::Calling { ticket: t, .. } | SignalState::Signaled { ticket: t }
+                if *t == ticket =>
+            {
+                Some(signal)
+            }
+            _ => None,
+        }
+    }
 }
 
 struct SourceIdentity {
@@ -594,8 +728,8 @@ struct SubscriptionState {
     pending_topic_bytes: usize,
     active: HashMap<TopicOwner, ActiveSubscription>,
     topic_ids: HashMap<String, TopicOwner>,
-    updates: BTreeMap<TopicOwner, QueuedUpdate>,
-    next_update_sequence: u64,
+    deliveries: HashMap<u64, ServerDeliveryState>,
+    queued_update_count: usize,
     source_ids: HashMap<usize, SourceIdentity>,
 }
 
@@ -615,14 +749,12 @@ fn restore_source_identity(
     }
 }
 
-#[allow(clippy::type_complexity)]
 pub(crate) struct SubscriptionRuntime {
     limits: RtdLimits,
     module_ingress: Option<&'static crate::ingress::ExportIngress>,
     state: Mutex<SubscriptionState>,
     idle: Condvar,
     cleanup_failure: Mutex<Option<XllError>>,
-    notifications: RwLock<HashMap<u64, Arc<dyn Fn() -> XllResult<()> + Send + Sync>>>,
     next_preparation_id: AtomicU64,
     next_generation: AtomicU64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -697,13 +829,12 @@ impl SubscriptionRuntime {
                 pending_topic_bytes: 0,
                 active: HashMap::new(),
                 topic_ids: HashMap::new(),
-                updates: BTreeMap::new(),
-                next_update_sequence: 1,
+                deliveries: HashMap::new(),
+                queued_update_count: 0,
                 source_ids: HashMap::new(),
             }),
             idle: Condvar::new(),
             cleanup_failure: Mutex::new(None),
-            notifications: RwLock::new(HashMap::new()),
             next_preparation_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1101,7 +1232,11 @@ impl SubscriptionRuntime {
                     .expect("the active RTD connection was installed above");
                 Some((
                     active.latest.clone(),
-                    state.updates.get(&owner).map(|queued| queued.sequence),
+                    state
+                        .deliveries
+                        .get(&owner.server_generation)
+                        .and_then(|d| d.updates.get(&owner.topic_id))
+                        .map(|queued| queued.sequence),
                 ))
             } else {
                 None
@@ -1149,7 +1284,7 @@ impl SubscriptionRuntime {
         observed_sequence: Option<u64>,
     ) -> XllResult<()> {
         let _operation = self.enter_operation(Some(owner.server_generation))?;
-        let (retired_pending, should_notify) = {
+        let (retired_pending, attempt) = {
             let mut state = self.state.lock();
             if state.closed
                 || state.terminating_servers.contains(&owner.server_generation)
@@ -1176,15 +1311,27 @@ impl SubscriptionRuntime {
                 });
             }
             active.committed = true;
-            let should_notify = match state.updates.get(&owner) {
+            let delivery = state.deliveries.entry(owner.server_generation).or_default();
+            let mut removed_update = false;
+            let should_keep = match delivery.updates.get(&owner.topic_id) {
                 Some(queued) if observed_sequence == Some(queued.sequence) => {
-                    state.updates.remove(&owner);
+                    delivery.updates.remove(&owner.topic_id);
+                    removed_update = true;
                     false
                 }
                 Some(_) => true,
                 None => false,
             };
-            (Self::remove_pending(&mut state, key), should_notify)
+            let attempt = if should_keep {
+                delivery.arm_notification_if_needed(owner.server_generation)?
+            } else {
+                None
+            };
+            drop(delivery);
+            if removed_update {
+                state.queued_update_count = state.queued_update_count.saturating_sub(1);
+            }
+            (Self::remove_pending(&mut state, key), attempt)
         };
         self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
             retired_pending,
@@ -1192,8 +1339,8 @@ impl SubscriptionRuntime {
         ));
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
-        if should_notify {
-            self.notify_with_retry_inner(owner.server_generation);
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
         }
         Ok(())
     }
@@ -1214,7 +1361,11 @@ impl SubscriptionRuntime {
                 if state.topic_ids.get(key) == Some(&owner) {
                     state.topic_ids.remove(key);
                 }
-                state.updates.remove(&owner);
+                if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
+                    if delivery.updates.remove(&owner.topic_id).is_some() {
+                        state.queued_update_count = state.queued_update_count.saturating_sub(1);
+                    }
+                }
                 active.subscription
             } else {
                 None
@@ -1321,7 +1472,11 @@ impl SubscriptionRuntime {
             if state.topic_ids.get(key) == Some(&owner) {
                 state.topic_ids.remove(key);
             }
-            state.updates.remove(&owner);
+            if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
+                if delivery.updates.remove(&owner.topic_id).is_some() {
+                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
+                }
+            }
         }
     }
 
@@ -1371,7 +1526,11 @@ impl SubscriptionRuntime {
                 return;
             };
             state.topic_ids.remove(&active.key);
-            state.updates.remove(&owner);
+            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
+                if delivery.updates.remove(&topic_id).is_some() {
+                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
+                }
+            }
             active
                 .subscription
                 .map(|subscription| (active.key, subscription))
@@ -1381,90 +1540,220 @@ impl SubscriptionRuntime {
         }
     }
 
-    pub(crate) fn snapshot_updates(&self, server_generation: u64) -> RtdUpdateBatch {
-        let state = self.state.lock();
-        RtdUpdateBatch {
-            updates: state
-                .updates
-                .iter()
-                .filter(|&(owner, _queued)| {
-                    owner.server_generation == server_generation
-                        && state
-                            .active
-                            .get(owner)
-                            .is_some_and(|active| active.committed)
-                })
-                .map(|(owner, queued)| RtdUpdate {
-                    owner: *owner,
-                    sequence: queued.sequence,
-                    topic_id: owner.topic_id,
-                    value: queued.value.clone(),
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn commit_updates(&self, batch: &RtdUpdateBatch) {
+    pub(crate) fn begin_refresh(&self, server_generation: u64) -> XllResult<RtdUpdateBatch> {
         let mut state = self.state.lock();
-        for update in &batch.updates {
-            if state
-                .updates
-                .get(&update.owner)
-                .is_some_and(|queued| queued.sequence == update.sequence)
-            {
-                state.updates.remove(&update.owner);
-            }
-        }
-    }
 
-    pub(crate) fn has_pending_updates(&self, server_generation: u64) -> bool {
-        let state = self.state.lock();
-        state.updates.keys().any(|owner| {
-            owner.server_generation == server_generation
-                && state
-                    .active
-                    .get(owner)
-                    .is_some_and(|active| active.committed)
+        if state.closed
+            || state.terminating_servers.contains(&server_generation)
+            || state.terminated_servers.contains(&server_generation)
+        {
+            return Err(XllError::Closing);
+        }
+
+        let committed_topics: std::collections::HashSet<i32> = state
+            .active
+            .iter()
+            .filter(|(owner, active)| {
+                owner.server_generation == server_generation && active.committed
+            })
+            .map(|(owner, _)| owner.topic_id)
+            .collect();
+
+        let delivery = state
+            .deliveries
+            .get_mut(&server_generation)
+            .ok_or(XllError::Closing)?;
+
+        let refresh_id = delivery.allocate_refresh_id()?;
+
+        let updates: Vec<RtdUpdate> = delivery
+            .updates
+            .iter()
+            .filter(|(topic_id, _)| committed_topics.contains(topic_id))
+            .map(|(&topic_id, queued)| RtdUpdate {
+                sequence: queued.sequence,
+                topic_id,
+                value: queued.value.clone(),
+            })
+            .collect();
+
+        let snapshot_max_sequence = updates.iter().map(|u| u.sequence).max().unwrap_or(0);
+
+        let previous_phase = std::mem::replace(
+            &mut delivery.phase,
+            DeliveryPhase::BetweenRefreshes {
+                signal: SignalState::Dormant,
+            },
+        );
+
+        let consumed_signal = match previous_phase {
+            DeliveryPhase::BetweenRefreshes { signal } => signal,
+            DeliveryPhase::Refreshing { .. } => {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4f56_4c50_5245_4652,
+                });
+            }
+        };
+
+        delivery.phase = DeliveryPhase::Refreshing {
+            refresh_id,
+            snapshot_max_sequence,
+            consumed_signal,
+            next_signal: SignalState::Dormant,
+        };
+
+        Ok(RtdUpdateBatch {
+            server_generation,
+            refresh_id,
+            updates,
         })
     }
 
-    pub(crate) fn retry_updates(&self, server_generation: u64) {
-        let Ok(_operation) = self.enter_operation(Some(server_generation)) else {
-            return;
+    pub(crate) fn complete_refresh(&self, batch: RtdUpdateBatch, outcome: RefreshOutcome) {
+        let attempt = {
+            let mut state = self.state.lock();
+
+            let Some(delivery) = state.deliveries.get_mut(&batch.server_generation) else {
+                return;
+            };
+
+            let DeliveryPhase::Refreshing {
+                refresh_id,
+                next_signal: _,
+                ..
+            } = &mut delivery.phase
+            else {
+                return;
+            };
+
+            if *refresh_id != batch.refresh_id {
+                return;
+            }
+
+            let mut removed_count = 0_usize;
+            if outcome == RefreshOutcome::Delivered {
+                for update in &batch.updates {
+                    if delivery
+                        .updates
+                        .get(&update.topic_id)
+                        .is_some_and(|queued| queued.sequence == update.sequence)
+                    {
+                        delivery.updates.remove(&update.topic_id);
+                        removed_count += 1;
+                    }
+                }
+            }
+
+            delivery.phase = DeliveryPhase::BetweenRefreshes {
+                signal: SignalState::Dormant,
+            };
+
+            let attempt = if !delivery.updates.is_empty() {
+                delivery
+                    .arm_notification_if_needed(batch.server_generation)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            drop(delivery);
+            state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
+
+            attempt
         };
-        if self.has_pending_updates(server_generation) {
-            self.notify_with_retry_inner(server_generation);
+
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
         }
     }
 
-    pub(crate) fn set_notification(
+    pub(crate) fn attach_update_callback(
         &self,
         server_generation: u64,
-        notification: Option<Arc<dyn Fn() -> XllResult<()> + Send + Sync>>,
-    ) {
-        let retired = {
-            let state = self.state.lock();
+        callback: NotificationCallback,
+    ) -> XllResult<()> {
+        let _operation = self.enter_operation(Some(server_generation))?;
+        let (retired, attempt) = {
+            let mut state = self.state.lock();
+
             if state.closed
                 || state.terminating_servers.contains(&server_generation)
                 || state.terminated_servers.contains(&server_generation)
             {
-                drop(state);
-                drop(notification);
-                return;
+                return Err(XllError::Closing);
             }
-            let mut notifications = self.notifications.write();
-            let retired = if let Some(notification) = notification {
-                notifications.insert(server_generation, notification)
+
+            let delivery = state.deliveries.entry(server_generation).or_default();
+
+            let retired = delivery.callback.replace(callback);
+            let attempt = delivery.arm_notification_if_needed(server_generation)?;
+            (retired, attempt)
+        };
+
+        drop(retired);
+
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn detach_update_callback(&self, server_generation: u64) {
+        let retired = {
+            let mut state = self.state.lock();
+            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
+                delivery.callback.take()
             } else {
-                notifications.remove(&server_generation)
-            };
-            // Preserve the state -> notifications lock order while making
-            // callback destruction fully lock-free.
-            drop(notifications);
-            drop(state);
-            retired
+                None
+            }
         };
         drop(retired);
+    }
+
+    pub(crate) fn pulse_notification(&self, server_generation: u64) {
+        let Ok(_operation) = self.enter_operation(Some(server_generation)) else {
+            return;
+        };
+        let attempt = {
+            let mut state = self.state.lock();
+            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
+                delivery
+                    .arm_notification_if_needed(server_generation)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        };
+
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_update_count(&self, server_generation: u64) -> usize {
+        let state = self.state.lock();
+        let state_ref = &*state;
+        if let Some(delivery) = state_ref.deliveries.get(&server_generation) {
+            delivery
+                .updates
+                .iter()
+                .filter(|(topic_id, _)| {
+                    state_ref
+                        .active
+                        .get(&TopicOwner {
+                            server_generation,
+                            topic_id: **topic_id,
+                        })
+                        .is_some_and(|active| active.committed)
+                })
+                .count()
+        } else {
+            0
+        }
     }
 
     pub(crate) fn terminate_server(
@@ -1480,20 +1769,22 @@ impl SubscriptionRuntime {
                 return Ok(operation);
             }
             if state.terminating_servers.contains(&server_generation) {
-                // Waiting here can self-deadlock when external callback or
-                // subscription teardown code re-enters termination. The first
-                // caller owns the transition; concurrent attempts retry only
-                // after it has reached the idempotent terminated state.
                 return Err(XllError::Closing);
             }
             state.terminating_servers.insert(server_generation);
         }
 
-        let retired_notification = {
-            let mut notifications = self.notifications.write();
-            notifications.remove(&server_generation)
+        let retired_delivery = {
+            let mut state = self.state.lock();
+            state.deliveries.remove(&server_generation)
         };
-        drop(retired_notification);
+        if let Some(delivery) = retired_delivery {
+            let removed_count = delivery.updates.len();
+            let mut state = self.state.lock();
+            state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
+            drop(state);
+            drop(delivery.callback);
+        }
 
         let (mut subscriptions, _removed_subscriptions) = {
             let mut state = self.state.lock();
@@ -1555,7 +1846,11 @@ impl SubscriptionRuntime {
             let late_subscriptions = owners
                 .into_iter()
                 .filter_map(|owner| {
-                    state.updates.remove(&owner);
+                    if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
+                        if delivery.updates.remove(&owner.topic_id).is_some() {
+                            state.queued_update_count = state.queued_update_count.saturating_sub(1);
+                        }
+                    }
                     let active = state.active.remove(&owner)?;
                     state.topic_ids.remove(&active.key);
                     active
@@ -1573,8 +1868,6 @@ impl SubscriptionRuntime {
                 .collect::<Vec<_>>();
             (late_subscriptions, removed_pending, late_removed)
         };
-        // Pending sources are user-owned and may re-enter runtime services in
-        // Drop. Never release them while the subscription state lock is held.
         self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
             removed_pending,
             "rtd_termination_pending_source_drop",
@@ -1621,11 +1914,13 @@ impl SubscriptionRuntime {
                 .collect::<Vec<_>>();
             (subscriptions, removed)
         };
-        let retired_notifications = {
-            let mut notifications = self.notifications.write();
-            std::mem::take(&mut *notifications)
+        let retired_deliveries = {
+            let mut state = self.state.lock();
+            let deliveries = std::mem::take(&mut state.deliveries);
+            state.queued_update_count = 0;
+            deliveries
         };
-        drop(retired_notifications);
+        drop(retired_deliveries);
         self.record_cleanup_result(request_cancel_all_no_unwind(&subscriptions));
 
         let (late_subscriptions, removed_pending, _late_removed_subscriptions) = {
@@ -1636,7 +1931,8 @@ impl SubscriptionRuntime {
             let removed_pending = std::mem::take(&mut state.pending);
             state.pending_topic_bytes = 0;
             state.topic_ids.clear();
-            state.updates.clear();
+            state.deliveries.clear();
+            state.queued_update_count = 0;
             state.source_ids.clear();
             state.in_flight_by_server.clear();
             state.terminating_servers.clear();
@@ -1660,7 +1956,6 @@ impl SubscriptionRuntime {
                 .collect::<Vec<_>>();
             (late_subscriptions, removed_pending, late_removed)
         };
-        // See terminate_server: source Drop is outside every runtime lock.
         self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
             removed_pending.into_values(),
             "rtd_close_pending_source_drop",
@@ -1672,82 +1967,137 @@ impl SubscriptionRuntime {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
         }
         self.record_cleanup_result(disconnect_all_no_unwind(subscriptions));
+
         self.cleanup_result()
     }
 
     fn publish(&self, owner: TopicOwner, generation: u64, value: RtdValue) -> XllResult<()> {
         let _operation = self.enter_operation(Some(owner.server_generation))?;
-        let should_notify = {
+        let attempt = {
             let mut state = self.state.lock();
-            if state.closed {
+            if state.closed
+                || state.terminating_servers.contains(&owner.server_generation)
+                || state.terminated_servers.contains(&owner.server_generation)
+            {
                 return Err(XllError::Closing);
             }
-            if state
+            let active = state
                 .active
-                .get(&owner)
+                .get_mut(&owner)
                 .filter(|active| active.generation == generation)
-                .is_none()
-            {
-                return Err(XllError::Closing);
-            }
-            if !state.updates.contains_key(&owner)
-                && state.updates.len() >= self.limits.max_queued_updates
-            {
+                .ok_or(XllError::Closing)?;
+            active.latest = value.clone();
+            let is_committed = active.committed;
+
+            let is_new_topic = !state
+                .deliveries
+                .get(&owner.server_generation)
+                .map_or(false, |d| d.updates.contains_key(&owner.topic_id));
+
+            if is_new_topic && state.queued_update_count >= self.limits.max_queued_updates {
                 return Err(XllError::Overloaded);
             }
-            let sequence = state.next_update_sequence;
-            state.next_update_sequence = sequence.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: 0x5254_4455_5044_4154,
-            })?;
-            let active = state.active.get_mut(&owner).expect("active checked above");
-            active.latest = value.clone();
-            let should_notify = active.committed;
-            state
+
+            let delivery = state.deliveries.entry(owner.server_generation).or_default();
+
+            let sequence = delivery.allocate_update_sequence()?;
+            delivery
                 .updates
-                .insert(owner, QueuedUpdate { sequence, value });
-            should_notify
+                .insert(owner.topic_id, QueuedUpdate { sequence, value });
+            let attempt = if is_committed {
+                delivery.arm_notification_if_needed(owner.server_generation)?
+            } else {
+                None
+            };
+            drop(delivery);
+
+            if is_new_topic {
+                state.queued_update_count += 1;
+            }
+
+            attempt
         };
-        if should_notify {
-            self.notify_with_retry_inner(owner.server_generation);
+
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
         }
         Ok(())
     }
 
-    fn notify(&self, server_generation: u64) -> XllResult<()> {
-        let notification = self.notifications.read().get(&server_generation).cloned();
-        if let Some(notification) = notification {
+    fn drive_notification(&self, mut attempt: NotificationAttempt) {
+        const MAX_ATTEMPTS: u8 = 3;
+        loop {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
-            let result = match catch_unwind(AssertUnwindSafe(|| notification())) {
-                Ok(result) => result,
+
+            let callback = Arc::clone(&attempt.callback);
+            let result = match catch_unwind(AssertUnwindSafe(|| callback())) {
+                Ok(res) => res,
                 Err(_) => Err(XllError::Panic),
             };
+
             #[cfg(any(test, feature = "shutdown-refinement"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
-            result
-        } else {
-            Ok(())
-        }
-    }
 
-    fn notify_with_retry_inner(&self, server_generation: u64) {
-        const MAX_RETRIES: usize = 3;
-        let mut last_error = None;
-
-        for attempt in 0..MAX_RETRIES {
-            match self.notify(server_generation) {
-                Ok(()) => return,
-                Err(err) => {
-                    last_error = Some(err);
-                    if attempt + 1 < MAX_RETRIES {
-                        std::thread::yield_now();
-                    }
+            match self.finish_notification_attempt(&attempt, result, MAX_ATTEMPTS) {
+                NotificationCompletion::Finished => return,
+                NotificationCompletion::Retry(next) => {
+                    std::thread::yield_now();
+                    attempt = next;
+                }
+                NotificationCompletion::Failed(error) => {
+                    crate::diagnostics::report_no_unwind("rtd_update_notify", &error);
+                    return;
                 }
             }
         }
+    }
 
-        if let Some(err) = last_error {
-            crate::diagnostics::report_no_unwind("rtd_update_notify", &err);
+    fn finish_notification_attempt(
+        &self,
+        attempt: &NotificationAttempt,
+        result: XllResult<()>,
+        max_attempts: u8,
+    ) -> NotificationCompletion {
+        let mut state = self.state.lock();
+
+        let Some(delivery) = state.deliveries.get_mut(&attempt.server_generation) else {
+            return NotificationCompletion::Finished;
+        };
+
+        let callback = delivery.callback.clone();
+        let Some(signal) = delivery.signal_for_ticket_mut(attempt.ticket) else {
+            return NotificationCompletion::Finished;
+        };
+
+        match result {
+            Ok(()) => {
+                *signal = SignalState::Signaled {
+                    ticket: attempt.ticket,
+                };
+                NotificationCompletion::Finished
+            }
+            Err(_error) if attempt.attempt + 1 < max_attempts => {
+                let next_attempt = attempt.attempt + 1;
+                *signal = SignalState::Calling {
+                    ticket: attempt.ticket,
+                    attempt: next_attempt,
+                };
+                let Some(callback) = callback else {
+                    *signal = SignalState::Dormant;
+                    return NotificationCompletion::Finished;
+                };
+                NotificationCompletion::Retry(NotificationAttempt {
+                    server_generation: attempt.server_generation,
+                    ticket: attempt.ticket,
+                    attempt: next_attempt,
+                    callback,
+                })
+            }
+            Err(error) => {
+                *signal = SignalState::Dormant;
+                NotificationCompletion::Failed(error)
+            }
         }
     }
 }
@@ -2026,16 +2376,15 @@ mod tests {
     fn synchronous_initial_publish_is_isolated_until_connection_commit() {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let notifications = Arc::new(AtomicUsize::new(0));
-        runtime.set_notification(
-            1,
-            Some({
+        runtime
+            .attach_update_callback(1, {
                 let notifications = Arc::clone(&notifications);
                 Arc::new(move || {
                     notifications.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
-            }),
-        );
+            })
+            .unwrap();
         let (source, _sink, _disconnected) = publishing_source(Some(12.5));
         let prepared = runtime
             .prepare(source, RtdTopic::single("initial-isolation").unwrap())
@@ -2046,11 +2395,11 @@ mod tests {
         let connection = runtime.connect_transaction(1, 1, &key).unwrap();
         assert_eq!(connection.value(), &RtdValue::Number(12.5));
         assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert!(runtime.snapshot_updates(1).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(1), 0);
 
         connection.commit().unwrap();
         assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert!(runtime.snapshot_updates(1).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(1), 0);
     }
 
     #[test]
@@ -2064,25 +2413,24 @@ mod tests {
         prepared.commit();
 
         let connection = runtime.connect_transaction(2, 2, &key).unwrap();
-        assert!(runtime.snapshot_updates(2).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(2), 0);
         drop(connection);
-        assert!(runtime.snapshot_updates(2).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(2), 0);
     }
 
     #[test]
     fn failed_initial_value_write_leaves_no_notification_history() {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let notifications = Arc::new(AtomicUsize::new(0));
-        runtime.set_notification(
-            3,
-            Some({
+        runtime
+            .attach_update_callback(3, {
                 let notifications = Arc::clone(&notifications);
                 Arc::new(move || {
                     notifications.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
-            }),
-        );
+            })
+            .unwrap();
         let (source, _sink, _disconnected) = publishing_source(Some(12.5));
         let prepared = runtime
             .prepare(source, RtdTopic::single("failed-write").unwrap())
@@ -2097,7 +2445,7 @@ mod tests {
         drop(connection);
 
         assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert!(runtime.snapshot_updates(3).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(3), 0);
         assert!(runtime.state.lock().active.is_empty());
     }
 
@@ -2105,16 +2453,15 @@ mod tests {
     fn publish_before_commit_notifies_once_after_commit() {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let notifications = Arc::new(AtomicUsize::new(0));
-        runtime.set_notification(
-            4,
-            Some({
+        runtime
+            .attach_update_callback(4, {
                 let notifications = Arc::clone(&notifications);
                 Arc::new(move || {
                     notifications.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
-            }),
-        );
+            })
+            .unwrap();
         let (source, sink, _disconnected) = publishing_source(Some(12.5));
         let prepared = runtime
             .prepare(source, RtdTopic::single("publish-before-commit").unwrap())
@@ -2129,14 +2476,15 @@ mod tests {
             .publish(13.5)
             .unwrap();
         assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert!(runtime.snapshot_updates(4).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(4), 0);
 
         connection.commit().unwrap();
 
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        let updates = runtime.snapshot_updates(4);
-        assert_eq!(updates.updates.len(), 1);
-        assert_eq!(updates.updates[0].value, RtdValue::Number(13.5));
+        let batch = runtime.begin_refresh(4).unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, RtdValue::Number(13.5));
+        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
     }
 
     #[test]
@@ -2258,7 +2606,7 @@ mod tests {
     impl Drop for ReentrantDropSource {
         fn drop(&mut self) {
             if let Some(runtime) = self.runtime.upgrade() {
-                runtime.set_notification(9_999, None);
+                runtime.detach_update_callback(9_999);
             }
             self.dropped.send(()).unwrap();
         }
@@ -2355,9 +2703,7 @@ mod tests {
             .unwrap();
         let initial = runtime.connect(1, 7, key.key()).unwrap();
         assert_eq!(initial, RtdValue::Number(12.5));
-        let batch = runtime.snapshot_updates(1);
-        assert!(batch.updates.is_empty());
-        assert!(runtime.snapshot_updates(1).updates.is_empty());
+        assert_eq!(runtime.pending_update_count(1), 0);
         runtime.disconnect(1, 7);
         assert!(disconnected.load(Ordering::Acquire));
     }
@@ -2379,7 +2725,7 @@ mod tests {
 
         let state = runtime.state.lock();
         assert_eq!(state.active.len(), 1);
-        assert!(state.updates.is_empty());
+        assert_eq!(state.queued_update_count, 0);
         assert!(state.topic_ids.contains_key(created.key()));
         drop(state);
         assert!(!disconnected.load(Ordering::Acquire));
@@ -2853,7 +3199,7 @@ mod tests {
         let state = runtime.state.lock();
         assert!(state.pending.is_empty());
         assert_eq!(state.active.len(), 1);
-        assert!(state.updates.is_empty());
+        assert_eq!(state.queued_update_count, 0);
         assert_eq!(state.topic_ids.len(), 1);
         drop(state);
         assert!(!disconnected.load(Ordering::Acquire));
@@ -2930,7 +3276,7 @@ mod tests {
         assert!(runtime.connect(1, 5, key.key()).is_err());
         let state = runtime.state.lock();
         assert!(state.active.is_empty());
-        assert!(state.updates.is_empty());
+        assert!(state.deliveries.is_empty());
         assert!(state.pending.contains_key(key.key()));
     }
 
@@ -2966,14 +3312,15 @@ mod tests {
         runtime.connect(1, 11, key.key()).unwrap();
         let sink = sink.lock().clone().unwrap();
         sink.publish(1.0).unwrap();
-        let first = runtime.snapshot_updates(1);
+        let first = runtime.begin_refresh(1).unwrap();
         sink.publish(2.0).unwrap();
 
-        runtime.commit_updates(&first);
+        runtime.complete_refresh(first, RefreshOutcome::Delivered);
 
-        let remaining = runtime.snapshot_updates(1);
+        let remaining = runtime.begin_refresh(1).unwrap();
         assert_eq!(remaining.updates.len(), 1);
         assert_eq!(remaining.updates[0].value, RtdValue::Number(2.0));
+        runtime.complete_refresh(remaining, RefreshOutcome::Delivered);
     }
 
     #[test]
@@ -2982,9 +3329,8 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let succeed = Arc::new(AtomicBool::new(false));
 
-        runtime.set_notification(
-            1,
-            Some({
+        runtime
+            .attach_update_callback(1, {
                 let attempts = Arc::clone(&attempts);
                 let succeed = Arc::clone(&succeed);
                 Arc::new(move || {
@@ -2998,8 +3344,8 @@ mod tests {
                         })
                     }
                 })
-            }),
-        );
+            })
+            .unwrap();
 
         let (source, sink, _disconnected) = publishing_source(None);
         let key = runtime
@@ -3016,11 +3362,11 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
         // Verify pending updates remain in the queue
-        assert!(runtime.has_pending_updates(1));
+        assert_eq!(runtime.pending_update_count(1), 1);
 
-        // Enable success and trigger retry via heartbeat / retry_updates
+        // Enable success and trigger retry via heartbeat / pulse_notification
         succeed.store(true, Ordering::SeqCst);
-        runtime.retry_updates(1);
+        runtime.pulse_notification(1);
 
         // Succeeded on the 4th attempt
         assert_eq!(attempts.load(Ordering::SeqCst), 4);
@@ -3037,7 +3383,7 @@ mod tests {
         impl Drop for ReentrantDrop {
             fn drop(&mut self) {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.set_notification(self.server_generation, None);
+                    runtime.detach_update_callback(self.server_generation);
                 }
                 self.dropped.send(()).unwrap();
             }
@@ -3050,18 +3396,21 @@ mod tests {
             server_generation: 41,
             dropped: dropped_tx,
         };
-        runtime.set_notification(
-            41,
-            Some(Arc::new(move || {
-                let _keep_drop_live = &reentrant;
-                Ok(())
-            })),
-        );
+        runtime
+            .attach_update_callback(
+                41,
+                Arc::new(move || {
+                    let _keep_drop_live = &reentrant;
+                    Ok(())
+                }),
+            )
+            .unwrap();
 
-        runtime.set_notification(41, Some(Arc::new(|| Ok(()))));
+        runtime
+            .attach_update_callback(41, Arc::new(|| Ok(())))
+            .unwrap();
 
         dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(!runtime.notifications.read().contains_key(&41));
     }
 
     #[test]
@@ -3074,7 +3423,7 @@ mod tests {
         impl Drop for ReentrantDrop {
             fn drop(&mut self) {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.set_notification(42, None);
+                    runtime.detach_update_callback(42);
                     assert!(runtime.state.lock().closed);
                 }
                 self.dropped.send(()).unwrap();
@@ -3087,13 +3436,15 @@ mod tests {
             runtime: Arc::downgrade(&runtime),
             dropped: dropped_tx,
         };
-        runtime.set_notification(
-            42,
-            Some(Arc::new(move || {
-                let _keep_drop_live = &reentrant;
-                Ok(())
-            })),
-        );
+        runtime
+            .attach_update_callback(
+                42,
+                Arc::new(move || {
+                    let _keep_drop_live = &reentrant;
+                    Ok(())
+                }),
+            )
+            .unwrap();
 
         runtime.close().unwrap();
 
@@ -3110,7 +3461,7 @@ mod tests {
         impl Drop for ReentrantDrop {
             fn drop(&mut self) {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.set_notification(43, None);
+                    runtime.detach_update_callback(43);
                 }
                 self.dropped.send(()).unwrap();
             }
@@ -3122,13 +3473,15 @@ mod tests {
             runtime: Arc::downgrade(&runtime),
             dropped: dropped_tx,
         };
-        runtime.set_notification(
-            43,
-            Some(Arc::new(move || {
-                let _keep_drop_live = &reentrant;
-                Ok(())
-            })),
-        );
+        runtime
+            .attach_update_callback(
+                43,
+                Arc::new(move || {
+                    let _keep_drop_live = &reentrant;
+                    Ok(())
+                }),
+            )
+            .unwrap();
 
         drop(runtime.terminate_server(43).unwrap());
 
@@ -3140,16 +3493,15 @@ mod tests {
     fn failed_refresh_can_renotify_without_consuming_the_batch() {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let notifications = Arc::new(AtomicUsize::new(0));
-        runtime.set_notification(
-            1,
-            Some({
+        runtime
+            .attach_update_callback(1, {
                 let notifications = Arc::clone(&notifications);
                 Arc::new(move || {
                     notifications.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
-            }),
-        );
+            })
+            .unwrap();
         let (source, sink, _disconnected) = publishing_source(None);
         let key = runtime
             .prepare(source, RtdTopic::single("retry-refresh").unwrap())
@@ -3160,15 +3512,12 @@ mod tests {
             .expect("source captured the RTD sink")
             .publish(12.5)
             .unwrap();
-        let batch = runtime.snapshot_updates(1);
+        let batch = runtime.begin_refresh(1).unwrap();
 
-        runtime.retry_updates(1);
+        runtime.complete_refresh(batch, RefreshOutcome::Failed);
 
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            runtime.snapshot_updates(1).updates.len(),
-            batch.updates.len()
-        );
+        assert_eq!(runtime.pending_update_count(1), 1);
     }
 
     #[test]
@@ -3717,17 +4066,19 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release_rx = Arc::new(Mutex::new(release_rx));
-        runtime.set_notification(
-            2,
-            Some(Arc::new(move || {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
-                Ok(())
-            })),
-        );
+        runtime
+            .attach_update_callback(
+                2,
+                Arc::new(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    Ok(())
+                }),
+            )
+            .unwrap();
 
         let publishing_sink = sink.clone();
         let publishing = std::thread::spawn(move || publishing_sink.publish(42.0));
@@ -3789,17 +4140,19 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release_rx = Arc::new(Mutex::new(release_rx));
-        runtime.set_notification(
-            3,
-            Some(Arc::new(move || {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
-                Ok(())
-            })),
-        );
+        runtime
+            .attach_update_callback(
+                3,
+                Arc::new(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    Ok(())
+                }),
+            )
+            .unwrap();
 
         let publishing_sink = sink.clone();
         let publishing = std::thread::spawn(move || publishing_sink.publish(7.0));
@@ -3826,5 +4179,338 @@ mod tests {
         assert!(disconnected.load(Ordering::Acquire));
         assert!(runtime.state.lock().terminated_servers.contains(&3));
         assert!(matches!(sink.publish(8.0), Err(XllError::Closing)));
+    }
+
+    #[test]
+    fn same_topic_burst_coalesces_to_single_notification() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(100, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("burst-same").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(100, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        for i in 0..1000 {
+            sink.publish(i as f64).unwrap();
+        }
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.pending_update_count(100), 1);
+
+        let batch = runtime.begin_refresh(100).unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, RtdValue::Number(999.0));
+        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        assert_eq!(runtime.pending_update_count(100), 0);
+    }
+
+    #[test]
+    fn distinct_topics_burst_coalesces_to_single_notification() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(101, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let mut sinks = Vec::new();
+        for i in 0..10 {
+            let (source, sink, _) = publishing_source(None);
+            let prepared = runtime
+                .prepare(source, RtdTopic::single(&format!("topic-{}", i)).unwrap())
+                .unwrap();
+            let key = prepared.key().to_owned();
+            prepared.commit();
+            runtime.connect(101, i as i32, &key).unwrap();
+            sinks.push(sink.lock().clone().unwrap());
+        }
+
+        for sink in &sinks {
+            for v in 0..100 {
+                sink.publish(v as f64).unwrap();
+            }
+        }
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.pending_update_count(101), 10);
+
+        let batch = runtime.begin_refresh(101).unwrap();
+        assert_eq!(batch.updates.len(), 10);
+        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        assert_eq!(runtime.pending_update_count(101), 0);
+    }
+
+    #[test]
+    fn publish_during_notify_coalesces_next_signal() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+
+        let (source, sink_slot, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("reentrant-pub").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(102, 1, &key).unwrap();
+
+        let sink = sink_slot.lock().clone().unwrap();
+
+        let sink_clone = sink.clone();
+        let notifications_clone = Arc::clone(&notifications);
+        runtime
+            .attach_update_callback(
+                102,
+                Arc::new(move || {
+                    let count = notifications_clone.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        sink_clone.publish(200.0).unwrap();
+                    }
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        sink.publish(100.0).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        let batch = runtime.begin_refresh(102).unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, RtdValue::Number(200.0));
+
+        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn publish_during_refresh_arms_next_signal() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(103, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("during-refresh").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(103, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        let batch = runtime.begin_refresh(103).unwrap();
+        assert_eq!(batch.updates.len(), 1);
+
+        sink.publish(2.0).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        assert_eq!(notifications.load(Ordering::SeqCst), 2);
+
+        let second_batch = runtime.begin_refresh(103).unwrap();
+        assert_eq!(second_batch.updates.len(), 1);
+        assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
+        runtime.complete_refresh(second_batch, RefreshOutcome::Delivered);
+    }
+
+    #[test]
+    fn same_topic_overwrite_during_refresh_retains_newer_sequence() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        runtime
+            .attach_update_callback(104, Arc::new(|| Ok(())))
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("overwrite-refresh").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(104, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+
+        let first_batch = runtime.begin_refresh(104).unwrap();
+        assert_eq!(first_batch.updates[0].value, RtdValue::Number(1.0));
+
+        sink.publish(2.0).unwrap();
+
+        runtime.complete_refresh(first_batch, RefreshOutcome::Delivered);
+
+        assert_eq!(runtime.pending_update_count(104), 1);
+        let second_batch = runtime.begin_refresh(104).unwrap();
+        assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
+        runtime.complete_refresh(second_batch, RefreshOutcome::Delivered);
+    }
+
+    #[test]
+    fn failed_refresh_data_does_not_consume_queue_and_retries() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(105, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("fail-refresh").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(105, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(10.0).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        let batch = runtime.begin_refresh(105).unwrap();
+        runtime.complete_refresh(batch, RefreshOutcome::Failed);
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.pending_update_count(105), 1);
+
+        let retry_batch = runtime.begin_refresh(105).unwrap();
+        assert_eq!(retry_batch.updates.len(), 1);
+        runtime.complete_refresh(retry_batch, RefreshOutcome::Delivered);
+        assert_eq!(runtime.pending_update_count(105), 0);
+    }
+
+    #[test]
+    fn notify_failure_retries_up_to_max_attempts() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(106, {
+                let attempts = Arc::clone(&attempts);
+                Arc::new(move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(XllError::Panic)
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("notify-fail-max").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(106, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(55.0).unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(runtime.pending_update_count(106), 1);
+    }
+
+    #[test]
+    fn publish_without_callback_arms_notification_on_attach() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("no-callback").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(107, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+        assert_eq!(runtime.pending_update_count(107), 1);
+
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(107, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn benchmark_rtd_burst() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        runtime
+            .attach_update_callback(200, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let mut sinks = Vec::new();
+        for i in 0..100 {
+            let (source, sink, _) = publishing_source(None);
+            let prepared = runtime
+                .prepare(
+                    source,
+                    RtdTopic::single(&format!("bench-topic-{}", i)).unwrap(),
+                )
+                .unwrap();
+            let key = prepared.key().to_owned();
+            prepared.commit();
+            runtime.connect(200, i as i32, &key).unwrap();
+            sinks.push(sink.lock().clone().unwrap());
+        }
+
+        let start = std::time::Instant::now();
+        const PUBLISH_COUNT: usize = 100_000;
+        for i in 0..PUBLISH_COUNT {
+            sinks[i % 100].publish(i as f64).unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.pending_update_count(200), 100);
+
+        let ops_per_sec = (PUBLISH_COUNT as f64) / elapsed.as_secs_f64();
+        println!(
+            "RTD Coalesced Burst Publish Throughput: {:.2} ops/sec ({:?})",
+            ops_per_sec, elapsed
+        );
     }
 }

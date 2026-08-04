@@ -1498,16 +1498,15 @@ mod tests {
 
         let callback_count = std::sync::Arc::new(AtomicUsize::new(0));
         let subscriptions = runtime.subscriptions();
-        subscriptions.set_notification(
-            1,
-            Some({
+        subscriptions
+            .attach_update_callback(1, {
                 let callback_count = std::sync::Arc::clone(&callback_count);
                 std::sync::Arc::new(move || {
                     callback_count.fetch_add(1, Ordering::AcqRel);
                     Ok(())
                 })
-            }),
-        );
+            })
+            .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let prepared = subscriptions
             .prepare(

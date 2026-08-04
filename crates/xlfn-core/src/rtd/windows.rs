@@ -1416,11 +1416,10 @@ fn synchronize_callback_notification(
         return Ok(());
     };
 
-    let _operation = subscriptions.enter_server_operation(generation)?;
-    subscriptions.set_notification(
+    subscriptions.attach_update_callback(
         generation,
-        Some(notification_for(callback, Arc::clone(&server.operations))),
-    );
+        notification_for(callback, Arc::clone(&server.operations)),
+    )?;
     Ok(())
 }
 
@@ -1448,7 +1447,7 @@ impl Drop for RtdServer {
         }
         let subscriptions = self.backends.lock().subscriptions.clone();
         if let Some(subscriptions) = subscriptions {
-            subscriptions.set_notification(self.generation, None);
+            subscriptions.detach_update_callback(self.generation);
         }
 
         drain_callbacks(&self.callbacks);
@@ -2093,11 +2092,10 @@ fn ensure_server(
                     subscriptions.enter_server_operation(existing.generation)?;
                 // SAFETY: ACTIVE_SERVER owns the server while its global mutex
                 // remains held, so cloning the Arc-backed barrier is valid.
-                let operations = unsafe { Arc::clone(&(*server).operations) };
-                subscriptions.set_notification(
+                subscriptions.attach_update_callback(
                     existing.generation,
-                    Some(notification_for(callback, operations)),
-                );
+                    notification_for(callback, operations),
+                )?;
             }
         }
 
@@ -3378,17 +3376,25 @@ unsafe fn refresh_data_inner(
         Err(_) => return E_FAIL,
     };
 
-    let batch = subscriptions.snapshot_updates(generation);
+    let batch = match subscriptions.begin_refresh(generation) {
+        Ok(batch) => batch,
+        Err(error) => {
+            report_no_unwind("IRtdServer::RefreshData begin", &error);
+            return E_FAIL;
+        }
+    };
 
     // SAFETY: both output pointers were validated as non-null and
     // `batch.updates` owns all values read during SAFEARRAY construction.
     let status = unsafe { write_refresh_data(topic_count, result, &batch.updates) };
 
-    if status == S_OK {
-        subscriptions.commit_updates(&batch);
+    let outcome = if status == S_OK {
+        crate::subscription::RefreshOutcome::Delivered
     } else {
-        subscriptions.retry_updates(generation);
-    }
+        crate::subscription::RefreshOutcome::Failed
+    };
+
+    subscriptions.complete_refresh(batch, outcome);
 
     status
 }
@@ -3477,7 +3483,7 @@ unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mut i32) -> i
                     Ok(operation) => operation,
                     Err(_) => return E_FAIL,
                 };
-                subscriptions.retry_updates(generation);
+                subscriptions.pulse_notification(generation);
             }
         }
 
@@ -6778,7 +6784,7 @@ mod tests {
             RtdValue::Number(12.5)
         );
         drop(prepared);
-        assert!(!subscriptions.has_pending_updates(generation));
+        assert_eq!(subscriptions.pending_update_count(generation), 0);
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
         // factory and dispatch interface are used.
@@ -6877,10 +6883,10 @@ mod tests {
             // This is the sole owner of the transferred SAFEARRAY.
             VariantClear(&mut result);
         }
-        assert!(!subscriptions.has_pending_updates(generation));
+        assert_eq!(subscriptions.pending_update_count(generation), 0);
 
         source.publish(13.5).unwrap();
-        assert!(subscriptions.has_pending_updates(generation));
+        assert!(subscriptions.pending_update_count(generation) > 0);
         topic_count = -1;
         assert_eq!(
             // SAFETY: all inputs remain live. A null pVarResult asks Invoke to
@@ -6901,7 +6907,7 @@ mod tests {
             S_OK
         );
         assert_eq!(topic_count, 1);
-        assert!(!subscriptions.has_pending_updates(generation));
+        assert_eq!(subscriptions.pending_update_count(generation), 0);
 
         parameters = DISPPARAMS::default();
         result.Anonymous.Anonymous.vt = VT_I4;
