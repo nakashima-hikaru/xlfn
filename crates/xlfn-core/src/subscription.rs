@@ -590,21 +590,13 @@ enum SignalState {
     Dormant,
     Calling { ticket: u64, attempt: u8 },
     Signaled { ticket: u64 },
+    Suppressed { ticket: u64 },
 }
 
 #[derive(Debug)]
 enum DeliveryPhase {
-    BetweenRefreshes {
-        signal: SignalState,
-    },
-    Refreshing {
-        refresh_id: u64,
-        #[allow(dead_code)]
-        snapshot_max_sequence: u64,
-        #[allow(dead_code)]
-        consumed_signal: SignalState,
-        next_signal: SignalState,
-    },
+    BetweenRefreshes { signal: SignalState },
+    Refreshing { refresh_id: u64 },
 }
 
 impl Default for DeliveryPhase {
@@ -656,11 +648,44 @@ impl ServerDeliveryState {
         Ok(id)
     }
 
+    fn reset_suppressed_signal(&mut self) {
+        if let DeliveryPhase::BetweenRefreshes {
+            signal: signal @ SignalState::Suppressed { .. },
+        } = &mut self.phase
+        {
+            *signal = SignalState::Dormant;
+        }
+    }
+
+    fn attach_callback(&mut self, callback: NotificationCallback) -> Option<NotificationCallback> {
+        let retired = self.callback.replace(callback);
+        if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
+            *signal = SignalState::Dormant;
+        }
+        retired
+    }
+
+    fn detach_callback(&mut self) -> Option<NotificationCallback> {
+        let retired = self.callback.take();
+        if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
+            *signal = SignalState::Dormant;
+        }
+        retired
+    }
+
     fn arm_notification_if_needed(
         &mut self,
         server_generation: u64,
     ) -> XllResult<Option<NotificationAttempt>> {
         if self.updates.is_empty() {
+            return Ok(None);
+        }
+
+        let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
+            return Ok(None);
+        };
+
+        if !matches!(signal, SignalState::Dormant) {
             return Ok(None);
         }
 
@@ -673,35 +698,19 @@ impl ServerDeliveryState {
             diagnostic_id: 0x5449_434b_4f56_464c,
         })?;
 
-        let attempt = match &mut self.phase {
-            DeliveryPhase::BetweenRefreshes { signal } => {
-                if !matches!(signal, SignalState::Dormant) {
-                    return Ok(None);
-                }
-                *signal = SignalState::Calling { ticket, attempt: 0 };
-                Some(NotificationAttempt {
-                    server_generation,
-                    ticket,
-                    attempt: 0,
-                    callback,
-                })
-            }
-            DeliveryPhase::Refreshing { next_signal, .. } => {
-                if !matches!(next_signal, SignalState::Dormant) {
-                    return Ok(None);
-                }
-                *next_signal = SignalState::Calling { ticket, attempt: 0 };
-                None
-            }
-        };
+        *signal = SignalState::Calling { ticket, attempt: 0 };
 
-        Ok(attempt)
+        Ok(Some(NotificationAttempt {
+            server_generation,
+            ticket,
+            attempt: 0,
+            callback,
+        }))
     }
 
     fn signal_for_ticket_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
-        let signal = match &mut self.phase {
-            DeliveryPhase::BetweenRefreshes { signal } => signal,
-            DeliveryPhase::Refreshing { next_signal, .. } => next_signal,
+        let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
+            return None;
         };
 
         match signal {
@@ -1584,30 +1593,16 @@ impl SubscriptionRuntime {
             })
             .collect();
 
-        let snapshot_max_sequence = updates.iter().map(|u| u.sequence).max().unwrap_or(0);
-
         let previous_phase = std::mem::replace(
             &mut delivery.phase,
-            DeliveryPhase::BetweenRefreshes {
-                signal: SignalState::Dormant,
-            },
+            DeliveryPhase::Refreshing { refresh_id },
         );
 
-        let consumed_signal = match previous_phase {
-            DeliveryPhase::BetweenRefreshes { signal } => signal,
-            DeliveryPhase::Refreshing { .. } => {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x4f56_4c50_5245_4652,
-                });
-            }
-        };
-
-        delivery.phase = DeliveryPhase::Refreshing {
-            refresh_id,
-            snapshot_max_sequence,
-            consumed_signal,
-            next_signal: SignalState::Dormant,
-        };
+        if matches!(previous_phase, DeliveryPhase::Refreshing { .. }) {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x4f56_4c50_5245_4652,
+            });
+        }
 
         Ok(RtdUpdateBatch {
             server_generation,
@@ -1687,7 +1682,7 @@ impl SubscriptionRuntime {
 
             let delivery = state.deliveries.entry(server_generation).or_default();
 
-            let retired = delivery.callback.replace(callback);
+            let retired = delivery.attach_callback(callback);
             let attempt = delivery.arm_notification_if_needed(server_generation)?;
             (retired, attempt)
         };
@@ -1704,11 +1699,10 @@ impl SubscriptionRuntime {
     pub(crate) fn detach_update_callback(&self, server_generation: u64) {
         let retired = {
             let mut state = self.state.lock();
-            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
-                delivery.callback.take()
-            } else {
-                None
-            }
+            state
+                .deliveries
+                .get_mut(&server_generation)
+                .and_then(ServerDeliveryState::detach_callback)
         };
         drop(retired);
     }
@@ -1720,6 +1714,7 @@ impl SubscriptionRuntime {
         let attempt = {
             let mut state = self.state.lock();
             state.deliveries.get_mut(&server_generation).and_then(|d| {
+                d.reset_suppressed_signal();
                 d.arm_notification_if_needed(server_generation)
                     .ok()
                     .flatten()
@@ -2094,7 +2089,9 @@ impl SubscriptionRuntime {
                 })
             }
             Err(error) => {
-                *signal = SignalState::Dormant;
+                *signal = SignalState::Suppressed {
+                    ticket: attempt.ticket,
+                };
                 NotificationCompletion::Failed(error)
             }
         }
@@ -4508,8 +4505,95 @@ mod tests {
 
         let ops_per_sec = (PUBLISH_COUNT as f64) / elapsed.as_secs_f64();
         println!(
-            "RTD Coalesced Burst Publish Throughput: {:.2} ops/sec ({:?})",
+            "SubscriptionRuntime coalesced publish throughput: {:.2} ops/sec ({:?})",
             ops_per_sec, elapsed
         );
+    }
+
+    #[test]
+    fn failed_notification_is_not_retried_by_subsequent_publishes() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        runtime
+            .attach_update_callback(1, {
+                let attempts = Arc::clone(&attempts);
+                Arc::new(move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(XllError::Panic)
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("suppress-test").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(1, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(0.0).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        for value in 1..100_000 {
+            sink.publish(value as f64).unwrap();
+        }
+
+        // Publish burst must NOT re-arm a suppressed notification signal
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(runtime.pending_update_count(1), 1);
+
+        runtime.pulse_notification(1);
+
+        // Heartbeat explicitly resets suppressed signal and re-arms retries
+        assert_eq!(attempts.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn detached_callback_invalidates_in_flight_ticket_and_resets_signal() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let callback_a_calls = Arc::new(AtomicUsize::new(0));
+        let callback_b_calls = Arc::new(AtomicUsize::new(0));
+
+        runtime
+            .attach_update_callback(10, {
+                let calls = Arc::clone(&callback_a_calls);
+                Arc::new(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("detach-race").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(10, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+        assert_eq!(callback_a_calls.load(Ordering::SeqCst), 1);
+
+        // Detach callback A -> signal resets to Dormant
+        runtime.detach_update_callback(10);
+
+        // Attach callback B
+        runtime
+            .attach_update_callback(10, {
+                let calls = Arc::clone(&callback_b_calls);
+                Arc::new(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        // B should be notified because updates exist and signal was reset to Dormant
+        assert_eq!(callback_b_calls.load(Ordering::SeqCst), 1);
     }
 }

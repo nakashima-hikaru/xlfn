@@ -2592,14 +2592,31 @@ mod tests {
             let current_gen = manager.current_generation();
             let start = Instant::now();
 
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let overloaded = Arc::new(AtomicUsize::new(0));
+            let other_errors = Arc::new(AtomicUsize::new(0));
+
             let handles: Vec<_> = (0..threads)
                 .map(|_| {
                     let mgr = Arc::clone(&manager);
+                    let accepted = Arc::clone(&accepted);
+                    let overloaded = Arc::clone(&overloaded);
+                    let other_errors = Arc::clone(&other_errors);
                     std::thread::spawn(move || {
                         for _ in 0..iterations_per_thread {
                             let (source, _token) =
                                 CancellationSource::new(CancellationGuarantee::BestEffort);
-                            let _ = mgr.spawn(current_gen, async {}, source);
+                            match mgr.spawn(current_gen, async {}, source) {
+                                Ok(()) => {
+                                    accepted.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(XllError::Overloaded) => {
+                                    overloaded.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    other_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
                     })
                 })
@@ -2611,10 +2628,17 @@ mod tests {
 
             let elapsed = start.elapsed();
             let total_ops = threads * iterations_per_thread;
-            let ops_per_sec = total_ops as f64 / elapsed.as_secs_f64();
+            let acc = accepted.load(Ordering::SeqCst);
+            let ov = overloaded.load(Ordering::SeqCst);
+            let err = other_errors.load(Ordering::SeqCst);
+            let ratio = if total_ops > 0 {
+                (acc as f64 / total_ops as f64) * 100.0
+            } else {
+                0.0
+            };
+            let accepted_ops_per_sec = acc as f64 / elapsed.as_secs_f64();
             println!(
-                "Concurrent spawn bench: {threads} threads, {total_ops} total ops, elapsed: {:?}, throughput: {:.2} ops/sec",
-                elapsed, ops_per_sec
+                "Async spawn bench: {threads} threads, {total_ops} attempts, accepted: {acc}, overloaded: {ov}, errors: {err}, ratio: {ratio:.1}%, accepted_throughput: {accepted_ops_per_sec:.2} accepted_ops/sec",
             );
 
             assert!(manager.close().issues.is_empty());
