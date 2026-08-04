@@ -4971,7 +4971,37 @@ mod tests {
         assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
     }
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // These tests mutate process-global RTD, COM-module, and ingress state.
+    // Serialize them with Runtime/async tests and retain the module lease for
+    // the complete test so another lifecycle test cannot open or close the
+    // process-global module concurrently.
+    struct RtdTestLock;
+
+    struct RtdTestGuard {
+        // Fields are dropped in declaration order: release the module lease
+        // while the shared Runtime test lock is still held.
+        _module_lease: crate::ingress::TestModuleLease,
+        _runtime_lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl RtdTestLock {
+        fn lock(&self) -> Result<RtdTestGuard, std::convert::Infallible> {
+            // Runtime and async tests already use this lock around operations
+            // that mutate the same process-global state. Recover poisoning so
+            // one genuine RTD assertion failure does not turn every later
+            // test into an unrelated PoisonError failure.
+            let runtime_lock = crate::runtime::tests::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let module_lease = crate::ingress::acquire_test_module_lease();
+            Ok(RtdTestGuard {
+                _module_lease: module_lease,
+                _runtime_lock: runtime_lock,
+            })
+        }
+    }
+
+    static TEST_LOCK: RtdTestLock = RtdTestLock;
 
     #[test]
     fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
