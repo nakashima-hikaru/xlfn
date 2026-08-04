@@ -5092,11 +5092,19 @@ mod tests {
         }
     }
 
+    fn clear_test_shutdown_ghost() {
+        // Runtime/lifecycle tests install a process-global shutdown ghost.
+        // An RTD unit test owns a synthetic module epoch and must not append
+        // resource events to a previous runtime generation.
+        *COM_MODULE_LIFETIME.ghost.lock() = None;
+    }
+
     impl Drop for RtdTestGuard {
         fn drop(&mut self) {
             // Test assertions may unwind before their explicit shutdown path.
             // Remove the process-global server before releasing serialization,
             // otherwise Runtime close can wait forever for RTD quiescence.
+            clear_test_shutdown_ghost();
             cleanup_test_active_server();
             close_test_ingress();
             crate::rtd::certify_module_unload();
@@ -5113,6 +5121,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let module_lease = crate::ingress::acquire_test_module_lease();
+
+            // The module lease proves that no lifecycle test can install a new
+            // ghost concurrently. Clear the completed or abandoned generation
+            // before cleanup, because releasing an old server also emits RTD
+            // resource events.
+            clear_test_shutdown_ghost();
 
             // COM entry points reject calls unless the global ingress is OPEN.
             // Establish that precondition explicitly rather than depending on
