@@ -4984,6 +4984,37 @@ mod tests {
         _runtime_lock: std::sync::MutexGuard<'static, ()>,
     }
 
+    fn close_test_ingress() {
+        let ingress = crate::ingress::global_ingress();
+        if matches!(
+            ingress.phase(),
+            crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
+        ) {
+            ingress.begin_close_with(|| {});
+        }
+        if ingress.phase() == crate::ingress::PHASE_CLOSING {
+            let _ = ingress.seal_and_drain();
+        }
+    }
+
+    fn cleanup_test_active_server() {
+        let pointer = ACTIVE_SERVER.lock().as_ref().map(|active| active.pointer);
+        if let Some(pointer) = pointer {
+            discard_unpublished_server(pointer, true);
+        }
+    }
+
+    impl Drop for RtdTestGuard {
+        fn drop(&mut self) {
+            // Test assertions may unwind before their explicit shutdown path.
+            // Remove the process-global server before releasing serialization,
+            // otherwise Runtime close can wait forever for RTD quiescence.
+            cleanup_test_active_server();
+            close_test_ingress();
+            crate::rtd::certify_module_unload();
+        }
+    }
+
     impl RtdTestLock {
         fn lock(&self) -> Result<RtdTestGuard, std::convert::Infallible> {
             // Runtime and async tests already use this lock around operations
@@ -4994,6 +5025,17 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let module_lease = crate::ingress::acquire_test_module_lease();
+
+            // COM entry points reject calls unless the global ingress is OPEN.
+            // Establish that precondition explicitly rather than depending on
+            // another concurrently running lifecycle test.
+            cleanup_test_active_server();
+            close_test_ingress();
+            let ingress = crate::ingress::global_ingress();
+            ingress.begin_opening();
+            ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+            crate::rtd::begin_module_open();
+
             Ok(RtdTestGuard {
                 _module_lease: module_lease,
                 _runtime_lock: runtime_lock,
@@ -5730,6 +5772,7 @@ mod tests {
 
     #[test]
     fn com_boundary_converts_panics_to_e_unexpected() {
+        let _guard = TEST_LOCK.lock().unwrap();
         assert_eq!(com_boundary("test COM boundary", || S_OK), S_OK);
         assert_eq!(
             com_boundary("test COM boundary", || panic!("injected COM panic")),
@@ -5739,6 +5782,7 @@ mod tests {
 
     #[test]
     fn refresh_data_converts_panics_to_e_unexpected() {
+        let _guard = TEST_LOCK.lock().unwrap();
         PANIC_IN_REFRESH_DATA.store(true, Ordering::Release);
         let mut topic_count = 0;
         let mut result = ptr::null_mut();
