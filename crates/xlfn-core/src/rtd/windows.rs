@@ -295,6 +295,9 @@ impl ComModuleLifetime {
     }
 
     fn wait_for_quiescence(&self) -> Result<(), ComModuleQuiescenceError> {
+        #[cfg(test)]
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
         loop {
             retry_git_revocation_debt();
 
@@ -305,6 +308,19 @@ impl ComModuleLifetime {
             if inner.state.has_only_git_blockers() {
                 return Err(ComModuleQuiescenceError { state: inner.state });
             }
+
+            #[cfg(test)]
+            {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(ComModuleQuiescenceError { state: inner.state });
+                }
+                if self.quiescent.wait_for(&mut inner, remaining).timed_out() {
+                    return Err(ComModuleQuiescenceError { state: inner.state });
+                }
+            }
+
+            #[cfg(not(test))]
             self.quiescent.wait(&mut inner);
         }
     }
@@ -2354,7 +2370,7 @@ unsafe fn factory_create_instance_inner(
 }
 
 unsafe extern "system" fn factory_lock_server(this: *mut ClassFactory, lock: i32) -> i32 {
-    com_boundary("IClassFactory::LockServer", || {
+    let operation = || {
         if this.is_null() {
             return E_POINTER;
         }
@@ -2363,7 +2379,24 @@ unsafe extern "system" fn factory_lock_server(this: *mut ClassFactory, lock: i32
         } else {
             E_UNEXPECTED
         }
-    })
+    };
+
+    if lock == 0 {
+        // Unlocking releases an existing module hold rather than admitting new
+        // work. It must remain available after ingress enters CLOSING.
+        let (_module_call, _accepted) = COM_MODULE_LIFETIME.enter_call();
+        match catch_unwind(AssertUnwindSafe(operation)) {
+            Ok(status) => status,
+            Err(_) => {
+                crate::diagnostics::report_no_unwind("IClassFactory::LockServer", &XllError::Panic);
+                E_UNEXPECTED
+            }
+        }
+    } else {
+        // Acquiring another server lock is new work and remains subject to
+        // normal ingress admission.
+        com_boundary("IClassFactory::LockServer", operation)
+    }
 }
 
 unsafe extern "system" fn server_query_interface(
@@ -4984,6 +5017,61 @@ mod tests {
         _runtime_lock: std::sync::MutexGuard<'static, ()>,
     }
 
+    struct TestBoxedFactory(*mut ClassFactory);
+
+    impl TestBoxedFactory {
+        fn as_ptr(&self) -> *mut ClassFactory {
+            self.0
+        }
+    }
+
+    impl Drop for TestBoxedFactory {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: this guard uniquely owns the Box allocation created
+                // by the COM-module lifetime test.
+                unsafe { drop(Box::from_raw(self.0)) };
+                self.0 = ptr::null_mut();
+            }
+        }
+    }
+
+    struct TestServerLock(*mut ClassFactory);
+
+    impl Drop for TestServerLock {
+        fn drop(&mut self) {
+            if self.0.is_null() {
+                return;
+            }
+            // SAFETY: the paired TestBoxedFactory remains alive until after
+            // this guard and this releases exactly one successful test lock.
+            if unsafe { factory_lock_server(self.0, 0) } != S_OK {
+                std::process::abort();
+            }
+            self.0 = ptr::null_mut();
+        }
+    }
+
+    struct TestUnknownReference(*mut c_void);
+
+    impl TestUnknownReference {
+        fn new(pointer: *mut c_void) -> Self {
+            assert!(!pointer.is_null());
+            Self(pointer)
+        }
+
+        fn as_ptr(&self) -> *mut c_void {
+            self.0
+        }
+    }
+
+    impl Drop for TestUnknownReference {
+        fn drop(&mut self) {
+            // SAFETY: this guard owns exactly one COM interface reference.
+            unsafe { release_unknown(self.0) };
+        }
+    }
+
     fn close_test_ingress() {
         let ingress = crate::ingress::global_ingress();
         if matches!(
@@ -5067,38 +5155,46 @@ mod tests {
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
         crate::rtd::begin_module_open();
-        ingress.begin_close_with(|| {});
-        crate::rtd::begin_module_close();
-        assert_eq!(dll_can_unload_now(), S_FALSE);
 
-        let factory = Box::into_raw(Box::new(ClassFactory {
+        let factory = TestBoxedFactory(Box::into_raw(Box::new(ClassFactory {
             vtable: &CLASS_FACTORY_VTABLE,
             references: AtomicU32::new(1),
             server: ptr::null_mut(),
             _module_lease: ComObjectLease::new(ComObjectKind::Factory),
-        }));
+        })));
         assert_eq!(
             COM_MODULE_LIFETIME.snapshot().live_factories,
             baseline.live_factories + 1
         );
         assert_eq!(dll_can_unload_now(), S_FALSE);
 
-        // SAFETY: `factory` points to the live test allocation above. LockServer
-        // validates no other object fields and each successful lock is balanced.
-        unsafe {
-            assert_eq!(factory_lock_server(factory, 1), S_OK);
-            assert_eq!(
-                COM_MODULE_LIFETIME.snapshot().server_locks,
-                baseline.server_locks + 1
-            );
-            assert_eq!(factory_lock_server(factory, 0), S_OK);
-            assert_eq!(
-                COM_MODULE_LIFETIME.snapshot().server_locks,
-                baseline.server_locks
-            );
-            assert_eq!(factory_lock_server(factory, 0), E_UNEXPECTED);
-            drop(Box::from_raw(factory));
-        }
+        let pointer = factory.as_ptr();
+        // SAFETY: `pointer` is retained by TestBoxedFactory and LockServer does
+        // not inspect the null server field in this lifetime-only test.
+        assert_eq!(unsafe { factory_lock_server(pointer, 1) }, S_OK);
+        let server_lock = TestServerLock(pointer);
+        assert_eq!(
+            COM_MODULE_LIFETIME.snapshot().server_locks,
+            baseline.server_locks + 1
+        );
+
+        ingress.begin_close_with(|| {});
+        crate::rtd::begin_module_close();
+        assert_eq!(dll_can_unload_now(), S_FALSE);
+
+        // New locks are rejected after close admission stops, while releasing
+        // an existing module hold remains available.
+        assert_eq!(
+            unsafe { factory_lock_server(pointer, 1) },
+            CO_E_SERVER_STOPPING
+        );
+        drop(server_lock);
+        assert_eq!(
+            COM_MODULE_LIFETIME.snapshot().server_locks,
+            baseline.server_locks
+        );
+        assert_eq!(unsafe { factory_lock_server(pointer, 0) }, E_UNEXPECTED);
+        drop(factory);
 
         assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
         let _ = ingress.seal_and_drain();
@@ -6862,14 +6958,16 @@ mod tests {
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
         // factory and dispatch interface are used.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory =
+            TestUnknownReference::new(unsafe { get_test_class_factory(&ensured.active) }.cast());
         let dispatch_iid = iid_idispatch_from_fields();
         let mut dispatch = ptr::null_mut();
         assert_eq!(
             // SAFETY: `factory`, the IID, and output slot remain live.
             unsafe {
-                ((*(*factory).vtable).create_instance)(
-                    factory,
+                let factory_pointer = factory.as_ptr().cast::<ClassFactory>();
+                ((*(*factory_pointer).vtable).create_instance)(
+                    factory_pointer,
                     ptr::null_mut(),
                     &dispatch_iid,
                     &mut dispatch,
@@ -6877,7 +6975,8 @@ mod tests {
             },
             S_OK
         );
-        let server = dispatch.cast::<RtdServer>();
+        let dispatch = TestUnknownReference::new(dispatch);
+        let server = dispatch.as_ptr().cast::<RtdServer>();
         // SAFETY: CreateInstance returned the RtdServer identity pointer.
         let vtable = unsafe { (*server).vtable };
         let null_iid = iid_null_from_fields();
@@ -6893,6 +6992,11 @@ mod tests {
             cNamedArgs: 0,
         };
         let mut result = VARIANT::default();
+
+        // The synchronous initial publish is acknowledged by connection commit
+        // and therefore is not a pending RefreshData row.
+        source.publish(13.5).unwrap();
+        assert!(subscriptions.pending_update_count(generation) > 0);
 
         assert_eq!(
             // SAFETY: the server, IID, one-element argument array, and result
@@ -6951,7 +7055,7 @@ mod tests {
             assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
             assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, 77);
             assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
-            assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, 12.5);
+            assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, 13.5);
             VariantClear(&mut topic);
             VariantClear(&mut value);
             // This is the sole owner of the transferred SAFEARRAY.
@@ -6959,7 +7063,7 @@ mod tests {
         }
         assert_eq!(subscriptions.pending_update_count(generation), 0);
 
-        source.publish(13.5).unwrap();
+        source.publish(14.5).unwrap();
         assert!(subscriptions.pending_update_count(generation) > 0);
         topic_count = -1;
         assert_eq!(
@@ -7010,12 +7114,6 @@ mod tests {
         assert!(disconnected.load(Ordering::Acquire));
 
         subscriptions.close().unwrap();
-        // SAFETY: CreateInstance and DllGetClassObject returned these owned
-        // references. ServerTerminate removed only ACTIVE_SERVER's reference.
-        unsafe {
-            release_unknown(dispatch);
-            factory_release(factory);
-        }
     }
 
     #[test]
