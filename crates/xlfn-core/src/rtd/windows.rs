@@ -392,6 +392,7 @@ static PANIC_DEFERRED_TERMINATION_CLEANUP: AtomicBool = AtomicBool::new(false);
 struct EnsuredServer {
     active: ActiveServer,
     newly_created: bool,
+    subscription_server: Option<crate::subscription::RtdServerHandle>,
 }
 
 impl Drop for EnsuredServer {
@@ -1187,6 +1188,7 @@ impl Drop for OwnedServerReference {
 struct ServerBackends {
     handles: Option<Arc<HandleRuntime>>,
     subscriptions: Option<Arc<SubscriptionRuntime>>,
+    subscription_server: Option<crate::subscription::RtdServerHandle>,
 }
 
 struct ComApartmentGuard {
@@ -1421,21 +1423,15 @@ fn active_callback(callbacks: &Mutex<ServerCallbacks>) -> Option<Arc<RetainedUpd
 
 fn synchronize_callback_notification(
     server: &RtdServer,
-    generation: u64,
     callback: Arc<RetainedUpdateCallback>,
 ) -> XllResult<()> {
-    // Re-read after callback publication. This forms the other half of the
-    // attach handshake in ensure_server: whichever side publishes second sees
-    // the first side's state and installs the notification.
-    let subscriptions = server.backends.lock().subscriptions.clone();
-    let Some(subscriptions) = subscriptions else {
+    let subscription_server = server.backends.lock().subscription_server.clone();
+    let Some(subscription_server) = subscription_server else {
         return Ok(());
     };
 
-    subscriptions.attach_update_callback(
-        generation,
-        notification_for(callback, Arc::clone(&server.operations)),
-    )?;
+    subscription_server
+        .attach_update_callback(notification_for(callback, Arc::clone(&server.operations)))?;
     Ok(())
 }
 
@@ -1461,9 +1457,9 @@ impl Drop for RtdServer {
             // ACTIVE_SERVER reference.
             std::process::abort();
         }
-        let subscriptions = self.backends.lock().subscriptions.clone();
-        if let Some(subscriptions) = subscriptions {
-            subscriptions.detach_update_callback(self.generation);
+        let subscription_server = self.backends.lock().subscription_server.clone();
+        if let Some(subscription_server) = subscription_server {
+            subscription_server.detach_update_callback();
         }
 
         drain_callbacks(&self.callbacks);
@@ -1721,9 +1717,12 @@ pub(super) fn observe_subscription(
         }
     };
 
-    if let Err(error) = subscriptions.claim_server(key, active.generation) {
-        discard_unpublished_server(active.pointer, ensured.newly_created);
-        return Err(error);
+    if let Some(subscription_server) = &ensured.subscription_server {
+        let key_obj = crate::subscription::SubscriptionKey::new(key);
+        if let Err(error) = subscription_server.claim(&key_obj) {
+            discard_unpublished_server(active.pointer, ensured.newly_created);
+            return Err(error);
+        }
     }
 
     let mut server_name = XLOPER12::missing();
@@ -2076,40 +2075,37 @@ fn ensure_server(
             }
         }
 
-        let newly_attached_subscriptions = if let Some(subscriptions) = subscriptions {
-            match backends.subscriptions.as_ref() {
-                Some(active) if Arc::ptr_eq(active, &subscriptions) => None,
-                Some(_) => {
-                    return Err(XllError::Internal {
-                        diagnostic_id: 0x5254_444d_554c_5449,
-                    });
+        let (newly_attached_subscriptions, subscription_handle) =
+            if let Some(subscriptions) = subscriptions {
+                match backends.subscriptions.as_ref() {
+                    Some(active) if Arc::ptr_eq(active, &subscriptions) => {
+                        (None, backends.subscription_server.clone())
+                    }
+                    Some(_) => {
+                        return Err(XllError::Internal {
+                            diagnostic_id: 0x5254_444d_554c_5449,
+                        });
+                    }
+                    None => {
+                        let handle = subscriptions.register_server(
+                            crate::subscription::ServerGeneration(existing.generation),
+                        )?;
+                        backends.subscriptions = Some(Arc::clone(&subscriptions));
+                        backends.subscription_server = Some(handle.clone());
+                        (Some(handle.clone()), Some(handle))
+                    }
                 }
-                None => {
-                    backends.subscriptions = Some(Arc::clone(&subscriptions));
-                    Some(subscriptions)
-                }
-            }
-        } else {
-            None
-        };
+            } else {
+                (None, backends.subscription_server.clone())
+            };
 
         drop(backends);
 
-        if let Some(subscriptions) = newly_attached_subscriptions {
-            // SAFETY: ACTIVE_SERVER still owns a live reference, so the callback
-            // mutex can be accessed while the global server lock is held.
-            // Clone in a separate block so set_notification never runs while
-            // the callback mutex guard is alive.
+        if let Some(handle) = newly_attached_subscriptions {
+            // SAFETY: `server` was validated as non-null and COM keeps the server alive.
             let callback = unsafe { active_callback(&(*server).callbacks) };
             if let Some(callback) = callback {
-                let _notification_operation =
-                    subscriptions.enter_server_operation(existing.generation)?;
-                // SAFETY: ACTIVE_SERVER owns the server while its global mutex
-                // remains held, so cloning the Arc-backed barrier is valid.
-                subscriptions.attach_update_callback(
-                    existing.generation,
-                    notification_for(callback, operations.clone()),
-                )?;
+                handle.attach_update_callback(notification_for(callback, operations.clone()))?;
             }
         }
 
@@ -2120,6 +2116,7 @@ fn ensure_server(
         return Ok(EnsuredServer {
             active: existing.clone(),
             newly_created: false,
+            subscription_server: subscription_handle,
         });
     }
 
@@ -2140,6 +2137,13 @@ fn ensure_server(
         function: error.operation,
         code: error.code as i32,
     })?;
+
+    let subscription_handle = if let Some(subscriptions) = subscriptions.as_ref() {
+        Some(subscriptions.register_server(crate::subscription::ServerGeneration(generation))?)
+    } else {
+        None
+    };
+
     let server = Box::new(RtdServer {
         vtable: &RTD_SERVER_VTABLE,
         references: AtomicU32::new(1),
@@ -2150,6 +2154,7 @@ fn ensure_server(
         backends: Mutex::new(ServerBackends {
             handles,
             subscriptions,
+            subscription_server: subscription_handle.clone(),
         }),
         callbacks: Mutex::new(ServerCallbacks::default()),
         _module_lease: ComObjectLease::new(ComObjectKind::Server),
@@ -2172,6 +2177,7 @@ fn ensure_server(
     Ok(EnsuredServer {
         active: entry,
         newly_created: true,
+        subscription_server: subscription_handle,
     })
 }
 
@@ -2588,7 +2594,7 @@ unsafe extern "system" fn server_invoke(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "COM IDispatch::Invoke ABI signature")]
 unsafe fn server_invoke_inner(
     this: *mut RtdServer,
     id: i32,
@@ -3110,19 +3116,7 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
 
     // SAFETY: `this` was validated as non-null and COM keeps the server alive
     // for the duration of ServerStart.
-    let subscriptions = unsafe { (*this).backends.lock().subscriptions.clone() };
-
-    // SAFETY: `this` was validated as non-null and remains live for this COM
-    // method invocation.
-    let generation = unsafe { (*this).generation };
-
-    let _subscription_operation = match subscriptions.as_ref() {
-        Some(subscriptions) => match subscriptions.enter_server_operation(generation) {
-            Ok(operation) => Some(operation),
-            Err(_) => return E_FAIL,
-        },
-        None => None,
-    };
+    let _subscription_server = unsafe { (*this).backends.lock().subscription_server.clone() };
 
     let callback_ptr = callback.cast::<RtdUpdateEvent>();
     let mut cookie = 0u32;
@@ -3171,7 +3165,7 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     // SAFETY: `this` remains live through the COM call. Re-reading backends
     // after installing the callback closes the race with a concurrently
     // attached subscription runtime.
-    if unsafe { synchronize_callback_notification(&*this, generation, callback) }.is_err() {
+    if unsafe { synchronize_callback_notification(&*this, callback) }.is_err() {
         return E_FAIL;
     }
 
@@ -3279,26 +3273,17 @@ unsafe fn connect_data_inner(
         return E_INVALIDARG;
     };
 
-    let (handles, subscriptions) = {
-        // SAFETY: `this` was validated as non-null and COM retains the server
-        // object throughout ConnectData.
+    let (handles, subscription_server) = {
+        // SAFETY: `this` was validated as non-null and COM retains the server during ConnectData.
         let backends = unsafe { (*this).backends.lock() };
-        (backends.handles.clone(), backends.subscriptions.clone())
+        (
+            backends.handles.clone(),
+            backends.subscription_server.clone(),
+        )
     };
 
-    // SAFETY: `this` was validated as non-null and COM retains the server
-    // object throughout ConnectData.
+    // SAFETY: `this` remains valid for the duration of ConnectData.
     let generation = unsafe { (*this).generation };
-
-    // Keep the whole COM operation inside the subscription shutdown barrier,
-    // including handle-only topics when both backends share this RTD server.
-    let _subscription_operation = match subscriptions.as_ref() {
-        Some(subscriptions) => match subscriptions.enter_server_operation(generation) {
-            Ok(operation) => Some(operation),
-            Err(_) => return E_FAIL,
-        },
-        None => None,
-    };
 
     let connection = if let Some(handle_key) = key.strip_prefix("handle:") {
         let Some(handles) = handles.as_ref() else {
@@ -3313,11 +3298,14 @@ unsafe fn connect_data_inner(
             }
         }
     } else if key.starts_with("stream:") {
-        let Some(subscriptions) = subscriptions.as_ref() else {
+        let Some(subscription_server) = subscription_server.as_ref() else {
             return E_FAIL;
         };
 
-        match subscriptions.connect_transaction(generation, topic_id, &key) {
+        match subscription_server.connect_transaction(
+            crate::subscription::TopicId(topic_id),
+            &crate::subscription::SubscriptionKey::new(&*key),
+        ) {
             Ok(connection) => ConnectDataTransaction::Subscription(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
@@ -3390,24 +3378,14 @@ unsafe fn refresh_data_inner(
 
     // SAFETY: `this` was validated as non-null and COM retains the server for
     // the duration of RefreshData.
-    let subscriptions = unsafe { (*this).backends.lock().subscriptions.clone() };
+    let subscription_server = unsafe { (*this).backends.lock().subscription_server.clone() };
 
-    // SAFETY: `this` was validated as non-null and COM retains the server for
-    // the duration of RefreshData.
-    let generation = unsafe { (*this).generation };
-
-    let Some(subscriptions) = subscriptions else {
-        // SAFETY: both output pointers were validated as non-null and the empty
-        // update slice is valid for the duration of the call.
+    let Some(subscription_server) = subscription_server else {
+        // SAFETY: `topic_count` and `result` are valid COM output parameters.
         return unsafe { write_refresh_data(topic_count, result, &[]) };
     };
 
-    let _subscription_operation = match subscriptions.enter_server_operation(generation) {
-        Ok(operation) => operation,
-        Err(_) => return E_FAIL,
-    };
-
-    let batch = match subscriptions.begin_refresh(generation) {
+    let batch = match subscription_server.begin_refresh() {
         Ok(batch) => batch,
         Err(error) => {
             crate::diagnostics::report_no_unwind("IRtdServer::RefreshData begin", &error);
@@ -3415,8 +3393,7 @@ unsafe fn refresh_data_inner(
         }
     };
 
-    // SAFETY: both output pointers were validated as non-null and
-    // `batch.updates` owns all values read during SAFEARRAY construction.
+    // SAFETY: `topic_count` and `result` are valid COM output parameters.
     let status = unsafe { write_refresh_data(topic_count, result, &batch.updates) };
 
     let outcome = if status == S_OK {
@@ -3425,7 +3402,7 @@ unsafe fn refresh_data_inner(
         crate::subscription::RefreshOutcome::Failed
     };
 
-    if let Err(error) = subscriptions.complete_refresh(batch, outcome) {
+    if let Err(error) = batch.complete(outcome) {
         crate::diagnostics::report_no_unwind("IRtdServer::RefreshData rearm", &error);
     }
 
@@ -3452,33 +3429,24 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
         None => return E_FAIL,
     };
 
-    let (handles, subscriptions) = {
-        // SAFETY: `this` was validated as non-null and COM retains the server
-        // throughout DisconnectData.
+    let (handles, subscription_server) = {
+        // SAFETY: `this` was validated as non-null and COM retains the server during DisconnectData.
         let backends = unsafe { (*this).backends.lock() };
-        (backends.handles.clone(), backends.subscriptions.clone())
+        (
+            backends.handles.clone(),
+            backends.subscription_server.clone(),
+        )
     };
 
-    // SAFETY: `this` was validated as non-null and COM retains the server
-    // throughout DisconnectData.
+    // SAFETY: `this` remains valid for the duration of DisconnectData.
     let generation = unsafe { (*this).generation };
-
-    // As with ConnectData, a shared server must remain quiescent through the
-    // complete COM method even when this particular topic belongs to handles.
-    let _subscription_operation = match subscriptions.as_ref() {
-        Some(subscriptions) => match subscriptions.enter_server_operation(generation) {
-            Ok(operation) => Some(operation),
-            Err(_) => return E_FAIL,
-        },
-        None => None,
-    };
 
     if let Some(handles) = handles {
         handles.disconnect(generation, topic_id);
     }
 
-    if let Some(subscriptions) = subscriptions.as_ref() {
-        subscriptions.disconnect(generation, topic_id);
+    if let Some(subscription_server) = subscription_server.as_ref() {
+        subscription_server.disconnect(crate::subscription::TopicId(topic_id));
     }
 
     S_OK
@@ -3493,8 +3461,7 @@ unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mut i32) -> i
         let _server_operation = if this.is_null() {
             None
         } else {
-            // SAFETY: this branch establishes that `this` is non-null and COM
-            // owns a live reference throughout this method.
+            // SAFETY: `this` was checked as non-null.
             match unsafe { (*this).operations.enter() } {
                 Some(operation) => Some(operation),
                 None => return E_FAIL,
@@ -3502,21 +3469,11 @@ unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mut i32) -> i
         };
 
         if !this.is_null() {
-            // SAFETY: this branch establishes that `this` is non-null and COM
-            // retains the server for the duration of Heartbeat.
-            let subscriptions = unsafe { (*this).backends.lock().subscriptions.clone() };
-
-            // SAFETY: this branch establishes that `this` is non-null and COM
-            // retains the server for the duration of Heartbeat.
-            let generation = unsafe { (*this).generation };
-
-            if let Some(subscriptions) = subscriptions {
-                let _subscription_operation = match subscriptions.enter_server_operation(generation)
-                {
-                    Ok(operation) => operation,
-                    Err(_) => return E_FAIL,
-                };
-                subscriptions.pulse_notification(generation);
+            // SAFETY: `this` was checked as non-null.
+            let subscription_server =
+                unsafe { (*this).backends.lock().subscription_server.clone() };
+            if let Some(subscription_server) = subscription_server {
+                let _ = subscription_server.pulse_notification();
             }
         }
 
@@ -3659,24 +3616,24 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
 }
 
 unsafe fn teardown_server_resources(this: *mut RtdServer, remove_active: bool) -> i32 {
-    let (handles, subscriptions) = {
-        // SAFETY: the caller retains the server and owns its termination phase.
+    let (handles, subscription_server) = {
+        // SAFETY: `this` is non-null when entering server teardown.
         let backends = unsafe { (*this).backends.lock() };
-        (backends.handles.clone(), backends.subscriptions.clone())
+        (
+            backends.handles.clone(),
+            backends.subscription_server.clone(),
+        )
     };
 
-    // SAFETY: the caller retains the server for this complete helper.
+    // SAFETY: `this` is non-null when entering server teardown.
     let generation = unsafe { (*this).generation };
 
-    let (_subscription_termination, termination_status) = match subscriptions.as_ref() {
-        Some(subscriptions) => match subscriptions.terminate_server(generation) {
-            Ok(operation) => (Some(operation), S_OK),
-            // Once the server phase is reserved, teardown must still release
-            // handles, callbacks, and ACTIVE_SERVER. Returning here would mark
-            // the server terminated while leaving those resources installed.
-            Err(_) => (None, E_FAIL),
+    let termination_status = match subscription_server.as_ref() {
+        Some(subscription_server) => match subscription_server.terminate() {
+            Ok(()) => S_OK,
+            Err(_) => E_FAIL,
         },
-        None => (None, S_OK),
+        None => S_OK,
     };
 
     if let Some(handles) = handles {
@@ -3705,7 +3662,6 @@ unsafe fn teardown_server_resources(this: *mut RtdServer, remove_active: bool) -
         }
     }
 
-    drop(_subscription_termination);
     termination_status
 }
 
@@ -4546,11 +4502,6 @@ fn is_braced_guid(value: &str) -> bool {
 }
 
 impl TemporaryRegistration {
-    #[allow(dead_code)]
-    fn close(mut self) -> XllResult<()> {
-        self.close_internal()
-    }
-
     fn close_internal(&mut self) -> XllResult<()> {
         let mut first_error = None;
         // SAFETY: both paths are valid NUL-terminated HKCU subkeys created and
@@ -5718,7 +5669,7 @@ mod tests {
         let handles = Arc::new(HandleRuntime::new(4));
         let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
         let server = ensured.active.pointer as *mut RtdServer;
-        let generation = ensured.active.generation;
+        let _generation = ensured.active.generation;
 
         // Model ServerStart's early backend snapshot before another thread
         // attaches subscriptions.
@@ -5753,7 +5704,7 @@ mod tests {
             // SAFETY: the same retained server remains live. This post-install
             // re-read must observe the attachment made before the barrier.
             unsafe {
-                synchronize_callback_notification(&*server, generation, Arc::clone(&callback))
+                synchronize_callback_notification(&*server, Arc::clone(&callback))
             }
             .unwrap();
 
@@ -6962,7 +6913,8 @@ mod tests {
             disconnected: Arc::clone(&disconnected),
         });
         let ensured = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
-        let generation = ensured.active.generation;
+        let _generation = ensured.active.generation;
+        let handle = ensured.subscription_server.as_ref().unwrap().clone();
 
         let prepared = subscriptions
             .prepare(
@@ -6971,12 +6923,14 @@ mod tests {
             )
             .unwrap();
         let key = prepared.key().to_owned();
-        assert_eq!(
-            subscriptions.connect(generation, 77, &key).unwrap(),
-            RtdValue::Number(12.5)
-        );
+        let key_obj = crate::subscription::SubscriptionKey::new(key);
+        let conn = subscriptions
+            .connect_transaction(&handle, crate::subscription::TopicId(77), &key_obj)
+            .unwrap();
+        assert_eq!(conn.value(), &RtdValue::Number(12.5));
+        conn.commit().unwrap();
         drop(prepared);
-        assert_eq!(subscriptions.pending_update_count(generation), 0);
+        assert_eq!(handle.pending_update_count(), 0);
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
         // factory and dispatch interface are used.
@@ -7018,7 +6972,7 @@ mod tests {
         // The synchronous initial publish is acknowledged by connection commit
         // and therefore is not a pending RefreshData row.
         source.publish(13.5).unwrap();
-        assert!(subscriptions.pending_update_count(generation) > 0);
+        assert!(handle.pending_update_count() > 0);
 
         assert_eq!(
             // SAFETY: the server, IID, one-element argument array, and result
@@ -7083,10 +7037,10 @@ mod tests {
             // This is the sole owner of the transferred SAFEARRAY.
             VariantClear(&mut result);
         }
-        assert_eq!(subscriptions.pending_update_count(generation), 0);
+        assert_eq!(handle.pending_update_count(), 0);
 
         source.publish(14.5).unwrap();
-        assert!(subscriptions.pending_update_count(generation) > 0);
+        assert!(handle.pending_update_count() > 0);
         topic_count = -1;
         assert_eq!(
             // SAFETY: all inputs remain live. A null pVarResult asks Invoke to
@@ -7107,7 +7061,7 @@ mod tests {
             S_OK
         );
         assert_eq!(topic_count, 1);
-        assert_eq!(subscriptions.pending_update_count(generation), 0);
+        assert_eq!(handle.pending_update_count(), 0);
 
         parameters = DISPPARAMS::default();
         result.Anonymous.Anonymous.vt = VT_I4;
@@ -7216,8 +7170,9 @@ mod tests {
             install_callback(&(*server).callbacks, callback);
         }
 
-        subscriptions
-            .attach_update_callback(ensured.active.generation, {
+        let handle = ensured.subscription_server.as_ref().unwrap();
+        handle
+            .attach_update_callback({
                 let notifications = Arc::clone(&notifications);
                 Arc::new(move || {
                     notifications.fetch_add(1, Ordering::SeqCst);
@@ -7231,10 +7186,12 @@ mod tests {
             .prepare(source, RtdTopic::single("ensure-test").unwrap())
             .unwrap();
         let key = prepared.key().to_owned();
+        let key_obj = crate::subscription::SubscriptionKey::new(key);
         prepared.commit();
-        subscriptions
-            .connect(ensured.active.generation, 1, &key)
+        let conn = subscriptions
+            .connect_transaction(handle, crate::subscription::TopicId(1), &key_obj)
             .unwrap();
+        conn.commit().unwrap();
 
         let sink = sink.lock().clone().unwrap();
         sink.publish(1.0).unwrap();

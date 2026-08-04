@@ -265,7 +265,7 @@ fn retain_transaction_error<S>(
 struct OpenRollbackOutcome {
     local_quiescent: bool,
     host_callbacks_detached: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Host callback session token retained for rollback outcome verification")]
     host_callback_state: HostCallbackState,
     registration_state_known: bool,
     finalized: bool,
@@ -1498,8 +1498,11 @@ mod tests {
 
         let callback_count = std::sync::Arc::new(AtomicUsize::new(0));
         let subscriptions = runtime.subscriptions();
-        subscriptions
-            .attach_update_callback(1, {
+        let server = subscriptions
+            .register_server(crate::subscription::ServerGeneration(1))
+            .unwrap();
+        server
+            .attach_update_callback({
                 let callback_count = std::sync::Arc::clone(&callback_count);
                 std::sync::Arc::new(move || {
                     callback_count.fetch_add(1, Ordering::AcqRel);
@@ -1510,15 +1513,18 @@ mod tests {
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let prepared = subscriptions
             .prepare(
-                std::sync::Arc::new(TraceSource {
+                TraceSource {
                     sink: std::sync::Arc::clone(&trace_sink),
-                }),
+                },
                 crate::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
-        let key = prepared.key().to_owned();
+        let key = crate::subscription::SubscriptionKey::new(prepared.key());
         prepared.commit();
-        subscriptions.connect(1, 1, &key).unwrap();
+        let conn = subscriptions
+            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+            .unwrap();
+        conn.commit().unwrap();
         trace_sink
             .lock()
             .unwrap()
@@ -1928,15 +1934,24 @@ mod tests {
             })
             .unwrap();
         let subscriptions = runtime.subscriptions();
-        let key = subscriptions
+        let server = subscriptions
+            .register_server(crate::subscription::ServerGeneration(1))
+            .unwrap();
+        let prepared = subscriptions
             .prepare(
-                std::sync::Arc::new(OrderedSource {
+                OrderedSource {
                     events: std::sync::Arc::clone(&events),
-                }),
+                },
                 crate::RtdTopic::single("ordered").unwrap(),
             )
             .unwrap();
-        subscriptions.connect(1, 1, key.key()).unwrap();
+        let key = crate::subscription::SubscriptionKey::new(prepared.key());
+        prepared.commit();
+        let conn = subscriptions
+            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+            .unwrap();
+        conn.commit().unwrap();
+        drop(server);
 
         assert_eq!(close_addin::<OrderedClose>(&runtime), 1);
         assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);

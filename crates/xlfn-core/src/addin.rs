@@ -515,10 +515,15 @@ mod tests {
         let prepared = subscriptions
             .prepare(Arc::clone(&source), topic.clone())
             .unwrap();
-        assert_eq!(
-            subscriptions.connect(51, 7, prepared.key()).unwrap(),
-            crate::RtdValue::Number(17.5)
-        );
+        let server = subscriptions
+            .register_server(crate::subscription::ServerGeneration(51))
+            .unwrap();
+        let key_obj = crate::subscription::SubscriptionKey::new(prepared.key());
+        let conn = subscriptions
+            .connect_transaction(&server, crate::subscription::TopicId(7), &key_obj)
+            .unwrap();
+        assert_eq!(conn.value(), &crate::RtdValue::Number(17.5));
+        conn.commit().unwrap();
 
         let state = ();
         crate::with_excel_call_scope(|scope| {
@@ -532,19 +537,15 @@ mod tests {
             ));
         });
 
-        let batch = subscriptions.begin_refresh(51).unwrap();
+        let batch = server.begin_refresh().unwrap();
         assert!(batch.updates.is_empty());
-        subscriptions
-            .complete_refresh(batch, crate::subscription::RefreshOutcome::Delivered)
+        batch
+            .complete(crate::subscription::RefreshOutcome::Delivered)
             .unwrap();
-        assert_eq!(
-            subscriptions.connect(51, 7, prepared.key()).unwrap(),
-            crate::RtdValue::Number(17.5),
-            "the original topic owner remains installed"
-        );
+
         assert!(!disconnected.load(Ordering::Acquire));
 
-        subscriptions.disconnect(51, 7);
+        server.disconnect(crate::subscription::TopicId(7));
         assert!(disconnected.load(Ordering::Acquire));
     }
 

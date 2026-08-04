@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+#![allow(unsafe_code, reason = "Low-level FFI interaction for async UDF tasks")]
 #![cfg(feature = "async")]
 
 use crate::cancellation::CancellationSource;

@@ -7,6 +7,9 @@ error[E0277]: `Rc<()>` cannot be sent between threads safely
    = help: within `xlfn::convert::XlArrayRef<'_>`, the trait `Send` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
   --> $RUST/core/src/marker.rs
+   |
+   | pub struct PhantomData<T: PointeeSized>;
+   |            ^^^^^^^^^^^
 note: required because it appears within the type `xlfn::convert::XlArrayRef<'_>`
   --> $WORKSPACE/crates/xlfn-core/src/value.rs
    |

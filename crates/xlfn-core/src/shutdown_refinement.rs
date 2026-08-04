@@ -1,4 +1,8 @@
-#![allow(dead_code)]
+
+#![cfg_attr(
+    not(feature = "shutdown-refinement"),
+    allow(dead_code, reason = "Ghost trace types for shutdown refinement feature")
+)]
 
 use parking_lot::Mutex;
 use serde::Serialize;

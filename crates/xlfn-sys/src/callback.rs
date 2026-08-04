@@ -122,7 +122,7 @@ unsafe fn excel12v(
 /// `address` must point to a live function with Excel's exact
 /// `(xlfn, count, args, result)` `MdCallBack12` ABI.
 #[cfg(feature = "abi-probe")]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "Exported for ABI probe testing")]
 pub unsafe fn install_callback_for_abi_probe(address: *mut c_void) {
     CALLBACK_OVERRIDE.store(address, Ordering::Release);
 }

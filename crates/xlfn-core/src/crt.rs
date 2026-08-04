@@ -1,8 +1,8 @@
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum EmbeddedCrtPolicy {
     Dynamic = 0,
+    #[allow(dead_code, reason = "Static CRT policy variant used in CRT-static builds")]
     Static = 1,
 }
 

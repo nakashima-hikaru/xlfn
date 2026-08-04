@@ -946,7 +946,7 @@ fn expand_excel_function(
 
         #gating
         #[doc(hidden)]
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
         static #descriptor_ident: ::xlfn::__private::RegistrationDescriptor =
             ::xlfn::__private::RegistrationDescriptor {
                 export_name: stringify!(#export_ident),
@@ -986,7 +986,7 @@ fn expand_excel_function(
         #gating
         #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
         #[doc(hidden)]
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, reason = "Generated export directive identifier")]
         #[used]
         #[unsafe(link_section = ".drectve")]
         static #export_directive_ident: [u8; #x86_export_directive.len()] =
@@ -994,7 +994,7 @@ fn expand_excel_function(
 
         #gating
         #[doc(hidden)]
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]

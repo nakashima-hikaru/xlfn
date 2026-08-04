@@ -28,7 +28,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
+#[allow(unsafe_code, clippy::undocumented_unsafe_blocks, reason = "Windows Win32 FFI bindings")]
 mod win32;
 
 #[cfg(target_os = "windows")]
@@ -2478,7 +2478,7 @@ fn create_private_directory(path: &Path) -> PackageResult {
     Ok(())
 }
 
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Low-level staging directory validation")]
 fn validate_private_directory(path: &Path, metadata: &std::fs::Metadata) -> PackageResult {
     if !metadata.is_dir() || is_reparse_point(metadata) {
         return Err(format!(
@@ -2518,7 +2518,7 @@ fn validate_private_directory(path: &Path, metadata: &std::fs::Metadata) -> Pack
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Windows security API access for process token SID")]
 fn current_windows_user_sid_string() -> PackageResult<String> {
     use crate::win32::{
         CloseHandle, GetCurrentProcess, GetLengthSid, GetTokenInformation, IsValidSid,
@@ -2641,7 +2641,7 @@ fn current_windows_user_sid_string() -> PackageResult<String> {
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Windows security API for ACL directory creation")]
 fn create_private_windows_directory(path: &Path) -> PackageResult {
     use crate::win32::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateDirectoryW, HLOCAL, LocalFree,
@@ -2703,7 +2703,7 @@ fn create_private_windows_directory(path: &Path) -> PackageResult {
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Windows security API for ACL validation")]
 fn validate_private_windows_directory(path: &Path) -> PackageResult {
     // PrivateStagingDirectory::create supplies a protected DACL atomically.
     // Existing directories are accepted only through the explicit `open`
@@ -2966,7 +2966,7 @@ fn validate_private_windows_directory(path: &Path) -> PackageResult {
     result
 }
 
-#[allow(clippy::permissions_set_readonly_false)]
+#[allow(clippy::permissions_set_readonly_false, reason = "Explicit non-readonly permission specification")]
 fn manifest_permissions() -> PackageResult<std::fs::Permissions> {
     #[cfg(unix)]
     {
@@ -3171,7 +3171,7 @@ fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapshotState> {
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Windows file handle information queries")]
 fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapshotState> {
     use crate::win32::{
         BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,

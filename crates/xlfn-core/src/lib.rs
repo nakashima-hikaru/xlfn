@@ -16,48 +16,48 @@
 #![deny(unsafe_code)]
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
+#[allow(unsafe_code, clippy::undocumented_unsafe_blocks, reason = "Windows C-ABI integration")]
 pub(crate) mod win32;
 
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
 mod cache;
 mod callback_gate;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod crt;
 mod diagnostics;
 mod error;
 mod execution;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod formula_fingerprint;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod handle;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod host_callback;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod lifecycle;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod reference;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod registration;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod return_value;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod rtd;
 mod runtime;
 mod shutdown;
 #[cfg(any(test, feature = "shutdown-refinement"))]
 mod shutdown_refinement;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod subscription;
 mod utf16;
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod value;
 
 #[cfg(feature = "async")]
@@ -132,7 +132,7 @@ pub use value::{
 };
 
 #[cfg(test)]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access for testing")]
 pub(crate) mod test_callback {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};

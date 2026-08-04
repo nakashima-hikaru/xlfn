@@ -712,7 +712,6 @@ where
 /// wrappers, async calculation lifecycle exports, and similar void-returning
 /// Excel callbacks.
 #[doc(hidden)]
-#[allow(dead_code)]
 pub fn ffi_boundary_void<S>(runtime: &Runtime<S>, operation: impl FnOnce()) {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]

@@ -1,12 +1,14 @@
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#![cfg_attr(
+    not(target_os = "windows"),
+    allow(dead_code, reason = "Internal helpers for Windows COM integration")
+)]
 
 use crate::{ExcelErrorValue, XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
-use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 const DEFAULT_MAX_RTD_TOPIC_PARTS: usize = 253;
@@ -49,6 +51,43 @@ impl Default for RtdLimits {
         Self::standard()
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ServerGeneration(pub(crate) u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TopicId(pub(crate) i32);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SubscriptionKey(pub(crate) Arc<str>);
+
+impl SubscriptionKey {
+    pub(crate) fn new(s: impl Into<Arc<str>>) -> Self {
+        Self(s.into())
+    }
+}
+
+impl std::ops::Deref for SubscriptionKey {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<&str> for SubscriptionKey {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for SubscriptionKey {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ConnectionGeneration(pub(crate) u64);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RtdTopic {
@@ -187,30 +226,13 @@ fn validate_topic_parts(parts: &[String], limits: &RtdLimits) -> XllResult<()> {
     Ok(())
 }
 
-/// Defines the contract for an active RTD subscription.
-///
 /// # Safety
-/// Implementations MUST guarantee that after `disconnect_and_wait` returns,
-/// no background thread, worker, or native callback retains any reference to
-/// or can execute any code within the module.
+/// Implementors must ensure that cancellation or disconnection can be safely initiated from any thread.
 pub unsafe trait RtdSubscription: Send + 'static {
-    /// Requests cooperative cancellation without waiting for background work.
-    ///
-    /// This method must be non-blocking, idempotent, must not panic, and must
-    /// not call Excel or re-enter RTD lifecycle operations.
     fn request_cancel(&self);
-
-    /// Releases the subscription and waits until its callbacks and native work
-    /// can no longer execute add-in code.
-    ///
-    /// Implementations must honor [`Self::request_cancel`], avoid Excel/RTD
-    /// lifecycle reentry, and return only after quiescence. A vendor operation
-    /// that cannot be interrupted should be isolated out of process rather
-    /// than allowed to block XLL unload.
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
 }
 
-/// A scalar value supported by Excel's RTD COM transport.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
     Number(f64),
@@ -281,7 +303,6 @@ impl crate::ExcelReturn for RtdValue {
     }
 }
 
-/// Converts a value into the scalar representation accepted by Excel RTD.
 pub trait IntoRtdValue {
     fn into_rtd_value(self) -> XllResult<RtdValue>;
 }
@@ -361,17 +382,23 @@ impl IntoRtdValue for () {
 
 pub trait RtdSource: Send + Sync + 'static {
     type Value: IntoRtdValue + Send + 'static;
-
-    /// Creates a subscription without performing unbounded blocking work.
-    ///
-    /// Long-running work should begin asynchronously and be owned by the
-    /// returned [`RtdSubscription`], whose cancellation contract makes XLL
-    /// shutdown deterministic.
     fn subscribe(
         &self,
         topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
     ) -> XllResult<Box<dyn RtdSubscription>>;
+}
+
+impl<S: RtdSource + ?Sized> RtdSource for Arc<S> {
+    type Value = S::Value;
+
+    fn subscribe(
+        &self,
+        topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Box<dyn RtdSubscription>> {
+        (**self).subscribe(topic, sink)
+    }
 }
 
 pub struct RtdSink<T> {
@@ -420,137 +447,184 @@ where
     }
 }
 
+pub(crate) struct Quota {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+impl Quota {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> XllResult<QuotaPermit> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < self.limit).then_some(used + 1)
+            })
+            .map_err(|_| XllError::Overloaded)?;
+
+        Ok(QuotaPermit {
+            quota: Arc::clone(self),
+        })
+    }
+}
+
+pub(crate) struct QuotaPermit {
+    quota: Arc<Quota>,
+}
+
+impl Drop for QuotaPermit {
+    fn drop(&mut self) {
+        let previous = self.quota.used.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous != 0, "quota permit drop underflow");
+    }
+}
+
+pub(crate) struct OperationGate {
+    state: AtomicUsize,
+    wait_lock: Mutex<()>,
+    idle: Condvar,
+}
+
+const CLOSING_BIT: usize = usize::MAX / 2 + 1;
+
+impl OperationGate {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
+            idle: Condvar::new(),
+        })
+    }
+
+    pub(crate) fn enter(self: &Arc<Self>) -> XllResult<OperationGuard> {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
+                if (val & CLOSING_BIT) != 0 {
+                    None
+                } else {
+                    Some(val + 1)
+                }
+            })
+            .map_err(|_| XllError::Closing)?;
+
+        Ok(OperationGuard {
+            gate: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn close_and_wait(&self) -> XllResult<()> {
+        let prev = self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+        if (prev & CLOSING_BIT) != 0 {
+            return Ok(());
+        }
+        let mut guard = self.wait_lock.lock();
+        while (self.state.load(Ordering::Acquire) & !CLOSING_BIT) > 0 {
+            self.idle.wait(&mut guard);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn close_and_wait_begin(&self) -> XllResult<TerminationWaitGuard<'_>> {
+        let prev = self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+        if (prev & CLOSING_BIT) != 0 {
+            return Err(XllError::Closing);
+        }
+        Ok(TerminationWaitGuard { gate: self })
+    }
+
+    fn leave(&self) {
+        let prev = self.state.fetch_sub(1, Ordering::AcqRel);
+        let active_count = (prev & !CLOSING_BIT) - 1;
+        if active_count == 0 && (prev & CLOSING_BIT) != 0 {
+            let _guard = self.wait_lock.lock();
+            self.idle.notify_all();
+        }
+    }
+}
+
+pub(crate) struct OperationGuard {
+    gate: Arc<OperationGate>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.gate.leave();
+    }
+}
+
+pub(crate) struct TerminationWaitGuard<'a> {
+    gate: &'a OperationGate,
+}
+
+impl TerminationWaitGuard<'_> {
+    pub(crate) fn wait(self) {
+        let mut guard = self.gate.wait_lock.lock();
+        while (self.gate.state.load(Ordering::Acquire) & !CLOSING_BIT) > 0 {
+            self.gate.idle.wait(&mut guard);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BindingStage {
+    Connecting,
+    Active,
+}
+
+struct ActiveKeyBinding {
+    server: Weak<ServerRuntime>,
+    connection_generation: ConnectionGeneration,
+    stage: BindingStage,
+}
+
 struct PendingSubscription {
-    preparation_id: u64,
     live_reservations: usize,
     committed: bool,
     source: Arc<dyn ErasedRtdSource>,
     topic: RtdTopic,
-    server_generation: Option<u64>,
-    connecting_generation: Option<u64>,
+    server_generation: Option<ServerGeneration>,
+    connecting_generation: Option<ConnectionGeneration>,
+}
+
+struct SubscriptionCatalog {
+    pending: HashMap<SubscriptionKey, PendingSubscription>,
+    pending_topic_bytes: usize,
+    source_ids: HashMap<usize, u64>,
+    active_keys: HashMap<SubscriptionKey, ActiveKeyBinding>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ErasedSink {
+    server: Weak<ServerRuntime>,
+    topic_id: TopicId,
+    connection_generation: ConnectionGeneration,
+}
+
+impl ErasedSink {
+    fn publish(&self, value: RtdValue) -> XllResult<()> {
+        let server = self.server.upgrade().ok_or(XllError::Closing)?;
+        server.publish(self.topic_id, self.connection_generation, value)
+    }
 }
 
 struct ActiveSubscription {
-    key: String,
-    generation: u64,
+    key: SubscriptionKey,
+    generation: ConnectionGeneration,
     subscription: Option<Box<dyn RtdSubscription>>,
     committed: bool,
     latest: RtdValue,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PreparationOwnership {
-    CreatedPending,
-    ExistingPending,
-    ExistingActive,
-}
-
-pub(crate) struct PreparedSubscription {
-    runtime: Weak<SubscriptionRuntime>,
-    key: String,
-    reservation_id: Option<u64>,
-    ownership: PreparationOwnership,
-}
-
-impl PreparedSubscription {
-    pub(crate) fn key(&self) -> &str {
-        &self.key
-    }
-
-    #[cfg(test)]
-    fn ownership(&self) -> PreparationOwnership {
-        self.ownership
-    }
-
-    pub(crate) fn commit(mut self) {
-        self.finish(true);
-    }
-
-    pub(crate) fn rollback(mut self) {
-        self.finish(false);
-    }
-
-    fn finish(&mut self, committed: bool) {
-        if self.ownership == PreparationOwnership::ExistingActive {
-            debug_assert!(self.reservation_id.is_none());
-            return;
-        }
-        let Some(reservation_id) = self.reservation_id.take() else {
-            return;
-        };
-        if let Some(runtime) = self.runtime.upgrade() {
-            runtime.finish_preparation(&self.key, reservation_id, committed);
-        }
-    }
-}
-
-impl Drop for PreparedSubscription {
-    fn drop(&mut self) {
-        self.finish(false);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct TopicOwner {
-    server_generation: u64,
-    topic_id: i32,
-}
-
-pub(crate) struct SubscriptionConnection {
-    runtime: Weak<SubscriptionRuntime>,
-    owner: TopicOwner,
-    generation: u64,
-    key: String,
-    value: RtdValue,
-    observed_sequence: Option<u64>,
-    created: bool,
-    finished: bool,
-}
-
-impl SubscriptionConnection {
-    pub(crate) fn value(&self) -> &RtdValue {
-        &self.value
-    }
-
-    pub(crate) fn commit(mut self) -> XllResult<()> {
-        if self.finished {
-            return Ok(());
-        }
-        if self.created {
-            let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
-            runtime.commit_connection(
-                self.owner,
-                self.generation,
-                &self.key,
-                self.observed_sequence,
-            )?;
-        }
-        self.finished = true;
-        Ok(())
-    }
-
-    fn rollback(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.finished = true;
-        if self.created
-            && let Some(runtime) = self.runtime.upgrade()
-        {
-            runtime.rollback_connection(self.owner, self.generation, &self.key);
-        }
-    }
-}
-
-impl Drop for SubscriptionConnection {
-    fn drop(&mut self) {
-        self.rollback();
-    }
+    _permit: QuotaPermit,
 }
 
 struct QueuedUpdate {
     sequence: u64,
     value: RtdValue,
+    _permit: QuotaPermit,
 }
 
 pub(crate) struct RtdUpdate {
@@ -574,13 +648,6 @@ impl RtdUpdate {
 pub(crate) enum RefreshOutcome {
     Delivered,
     Failed,
-}
-
-#[must_use]
-pub(crate) struct RtdUpdateBatch {
-    pub(crate) server_generation: u64,
-    pub(crate) refresh_id: u64,
-    pub(crate) updates: Vec<RtdUpdate>,
 }
 
 type NotificationCallback = Arc<dyn Fn() -> XllResult<()> + Send + Sync>;
@@ -610,7 +677,7 @@ impl Default for DeliveryPhase {
 #[derive(Default)]
 struct ServerDeliveryState {
     callback: Option<NotificationCallback>,
-    updates: BTreeMap<i32, QueuedUpdate>,
+    updates: BTreeMap<TopicId, QueuedUpdate>,
     next_update_sequence: u64,
     next_notification_ticket: u64,
     next_refresh_id: u64,
@@ -619,14 +686,11 @@ struct ServerDeliveryState {
 
 #[derive(Clone)]
 struct NotificationAttempt {
-    server_generation: u64,
     ticket: u64,
-    attempt: u8,
     callback: NotificationCallback,
 }
 
 struct PreparedNotification {
-    server_generation: u64,
     ticket: u64,
     callback: NotificationCallback,
 }
@@ -679,69 +743,51 @@ impl ServerDeliveryState {
         retired
     }
 
-    /// Checks whether a notification should be armed and, if so, reserves a
-    /// ticket and clones the callback. This method is **fallible** but does
-    /// **not** mutate `SignalState`, so callers can invoke it before any
-    /// side-effecting state changes. On success the caller must pass the
-    /// returned [`PreparedNotification`] to [`commit_notification`] to
-    /// transition the signal to `Calling`.
-    ///
-    /// `has_pending_updates` indicates whether the delivery has (or will have)
-    /// pending updates. Callers that are about to insert an update should pass
-    /// `true` even before the insert so the notification is prepared ahead of
-    /// the state mutation.
     fn prepare_notification(
         &self,
-        server_generation: u64,
         has_pending_updates: bool,
     ) -> XllResult<Option<PreparedNotification>> {
         if !has_pending_updates {
             return Ok(None);
         }
-
         let DeliveryPhase::BetweenRefreshes { signal } = &self.phase else {
             return Ok(None);
         };
-
         if !matches!(signal, SignalState::Dormant) {
             return Ok(None);
         }
-
         let Some(callback) = self.callback.as_ref().cloned() else {
             return Ok(None);
         };
-
         let ticket = self.next_notification_ticket;
         let _next = ticket.checked_add(1).ok_or(XllError::Internal {
             diagnostic_id: 0x5449_434b_4f56_464c,
         })?;
-
-        Ok(Some(PreparedNotification {
-            server_generation,
-            ticket,
-            callback,
-        }))
+        Ok(Some(PreparedNotification { ticket, callback }))
     }
 
-    /// Commits a previously prepared notification by advancing the ticket
-    /// counter and transitioning the signal to `Calling`. This method is
-    /// **infallible** — all validation was performed in [`prepare_notification`].
     fn commit_notification(&mut self, prepared: PreparedNotification) -> NotificationAttempt {
-        // The ticket was validated in prepare_notification; this cannot overflow.
         self.next_notification_ticket = prepared.ticket + 1;
-
         if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
             *signal = SignalState::Calling {
                 ticket: prepared.ticket,
                 attempt: 0,
             };
         }
-
         NotificationAttempt {
-            server_generation: prepared.server_generation,
             ticket: prepared.ticket,
-            attempt: 0,
             callback: prepared.callback,
+        }
+    }
+
+    fn signal_calling_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
+        let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
+            return None;
+        };
+        if matches!(signal, SignalState::Calling { ticket: t, .. } if *t == ticket) {
+            Some(signal)
+        } else {
+            None
         }
     }
 
@@ -749,7 +795,6 @@ impl ServerDeliveryState {
         let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
             return None;
         };
-
         match signal {
             SignalState::Calling { ticket: t, .. } | SignalState::Signaled { ticket: t }
                 if *t == ticket =>
@@ -761,88 +806,582 @@ impl ServerDeliveryState {
     }
 }
 
-struct SourceIdentity {
-    id: u64,
-    source: Weak<dyn Any + Send + Sync>,
+struct ServerState {
+    active_by_topic: HashMap<TopicId, ActiveSubscription>,
+    topic_by_key: HashMap<SubscriptionKey, TopicId>,
+    delivery: ServerDeliveryState,
 }
 
-struct SubscriptionState {
-    closed: bool,
-    in_flight: usize,
-    in_flight_by_server: HashMap<u64, usize>,
-    terminating_servers: HashSet<u64>,
-    terminated_servers: HashSet<u64>,
-    pending: HashMap<String, PendingSubscription>,
-    pending_topic_bytes: usize,
-    active: HashMap<TopicOwner, ActiveSubscription>,
-    topic_ids: HashMap<String, TopicOwner>,
-    deliveries: HashMap<u64, ServerDeliveryState>,
-    queued_update_count: usize,
-    source_ids: HashMap<usize, SourceIdentity>,
+#[derive(Clone)]
+pub(crate) struct RtdServerHandle {
+    inner: Arc<ServerRuntime>,
 }
 
-fn restore_source_identity(
-    state: &mut SubscriptionState,
-    ptr_key: usize,
-    inserted: bool,
-    previous: Option<SourceIdentity>,
-) {
-    if !inserted {
-        return;
+impl RtdServerHandle {
+    pub(crate) fn attach_update_callback(
+        &self,
+        callback: NotificationCallback,
+    ) -> XllResult<Option<NotificationCallback>> {
+        let _operation = self.inner.enter_operation()?;
+        let (retired, attempt) = {
+            let mut state = self.inner.state.lock();
+            let retired = state.delivery.attach_callback(callback);
+            let has_committed = state.active_by_topic.values().any(|a| a.committed);
+            let has_updates = !state.delivery.updates.is_empty() && has_committed;
+            let prepared = state.delivery.prepare_notification(has_updates)?;
+            let attempt = prepared.map(|p| state.delivery.commit_notification(p));
+            (retired, attempt)
+        };
+        if let Some(attempt) = attempt {
+            self.inner.drive_notification(attempt);
+        }
+        Ok(retired)
     }
-    if let Some(previous) = previous {
-        state.source_ids.insert(ptr_key, previous);
-    } else {
-        state.source_ids.remove(&ptr_key);
+
+    pub(crate) fn detach_update_callback(&self) -> Option<NotificationCallback> {
+        let mut state = self.inner.state.lock();
+        state.delivery.detach_callback()
     }
+
+    pub(crate) fn pulse_notification(&self) -> XllResult<()> {
+        let _operation = self.inner.enter_operation()?;
+        let attempt = {
+            let mut state = self.inner.state.lock();
+            let has_committed = state.active_by_topic.values().any(|a| a.committed);
+            let has_updates = !state.delivery.updates.is_empty() && has_committed;
+            let prepared = state.delivery.prepare_notification(has_updates)?;
+            prepared.map(|p| state.delivery.commit_notification(p))
+        };
+        if let Some(attempt) = attempt {
+            self.inner.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch> {
+        let operation = self.inner.enter_operation()?;
+        let (refresh_id, updates) = {
+            let mut state = self.inner.state.lock();
+            if matches!(state.delivery.phase, DeliveryPhase::Refreshing { .. }) {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4f56_4c50_5245_4652,
+                });
+            }
+            let refresh_id = state.delivery.allocate_refresh_id()?;
+            let ServerState {
+                active_by_topic,
+                delivery,
+                ..
+            } = &mut *state;
+            let updates = delivery
+                .updates
+                .iter()
+                .filter(|&(&topic_id, _)| {
+                    active_by_topic
+                        .get(&topic_id)
+                        .is_some_and(|active| active.committed)
+                })
+                .map(|(&topic_id, queued)| RtdUpdate {
+                    sequence: queued.sequence,
+                    topic_id: topic_id.0,
+                    value: queued.value.clone(),
+                })
+                .collect();
+            delivery.phase = DeliveryPhase::Refreshing { refresh_id };
+            (refresh_id, updates)
+        };
+        Ok(RtdRefreshBatch {
+            server: Arc::clone(&self.inner),
+            operation: Some(operation),
+            refresh_id,
+            updates,
+            completed: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_update_count(&self) -> usize {
+        let state = self.inner.state.lock();
+        state
+            .delivery
+            .updates
+            .keys()
+            .filter(|topic_id| {
+                state
+                    .active_by_topic
+                    .get(topic_id)
+                    .is_some_and(|a| a.committed)
+            })
+            .count()
+    }
+
+    pub(crate) fn claim(&self, key: &SubscriptionKey) -> XllResult<()> {
+        let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
+        parent.claim_server_key(self.inner.generation, key)
+    }
+
+    pub(crate) fn connect_transaction(
+        &self,
+        topic_id: TopicId,
+        key: &SubscriptionKey,
+    ) -> XllResult<SubscriptionConnection> {
+        let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
+        parent.connect_transaction(self, topic_id, key)
+    }
+
+    pub(crate) fn disconnect(&self, topic_id: TopicId) {
+        if let Some(parent) = self.inner.parent.upgrade() {
+            parent.disconnect(self, topic_id);
+        }
+    }
+
+    pub(crate) fn terminate(&self) -> XllResult<()> {
+        self.inner.terminate()
+    }
+}
+
+pub(crate) struct ServerRuntime {
+    generation: ServerGeneration,
+    module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    operation_gate: Arc<OperationGate>,
+    state: Mutex<ServerState>,
+    parent: Weak<SubscriptionRuntime>,
+}
+
+pub(crate) struct ServerOperation {
+    _gate_guard: OperationGuard,
+    _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    parent: Weak<SubscriptionRuntime>,
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+impl Drop for ServerOperation {
+    fn drop(&mut self) {
+        if let Some(parent) = self.parent.upgrade() {
+            parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        }
+    }
+}
+
+impl ServerRuntime {
+    fn enter_operation(&self) -> XllResult<ServerOperation> {
+        if let Some(ingress) = self.module_ingress {
+            let mut gate_guard = None;
+            let mut gate_error = None;
+            let (ingress_guard, accepted) =
+                ingress.enter_with(|| match self.operation_gate.enter() {
+                    Ok(guard) => {
+                        gate_guard = Some(guard);
+                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        if let Some(parent) = self.parent.upgrade() {
+                            parent.record_ghost_event(
+                                crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
+                            );
+                        }
+                    }
+                    Err(err) => gate_error = Some(err),
+                });
+            if !accepted {
+                return Err(XllError::Closing);
+            }
+            if let Some(err) = gate_error {
+                drop(ingress_guard);
+                return Err(err);
+            }
+            Ok(ServerOperation {
+                _gate_guard: gate_guard.expect("gate guard is acquired"),
+                _ingress_guard: Some(ingress_guard),
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                parent: self.parent.clone(),
+            })
+        } else {
+            let gate_guard = self.operation_gate.enter()?;
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(parent) = self.parent.upgrade() {
+                parent
+                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+            }
+            Ok(ServerOperation {
+                _gate_guard: gate_guard,
+                _ingress_guard: None,
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                parent: self.parent.clone(),
+            })
+        }
+    }
+
+    fn publish(
+        self: &Arc<Self>,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        value: RtdValue,
+    ) -> XllResult<()> {
+        let _operation = self.enter_operation()?;
+        let attempt = {
+            let mut state = self.state.lock();
+            let active = state
+                .active_by_topic
+                .get(&topic_id)
+                .filter(|active| active.generation == generation)
+                .ok_or(XllError::Closing)?;
+
+            let committed = active.committed;
+            let is_new_update = !state.delivery.updates.contains_key(&topic_id);
+
+            let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
+            let permit = if is_new_update {
+                Some(parent.queued_update_quota.try_acquire()?)
+            } else {
+                None
+            };
+
+            let sequence = state.delivery.allocate_update_sequence()?;
+            let prepared = if committed {
+                state.delivery.prepare_notification(true)?
+            } else {
+                None
+            };
+
+            match state.delivery.updates.entry(topic_id) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    existing.sequence = sequence;
+                    existing.value = value.clone();
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(QueuedUpdate {
+                        sequence,
+                        value: value.clone(),
+                        _permit: permit.expect("new update owns quota permit"),
+                    });
+                }
+            }
+
+            state
+                .active_by_topic
+                .get_mut(&topic_id)
+                .expect("active topic was validated above")
+                .latest = value;
+
+            prepared.map(|prepared| state.delivery.commit_notification(prepared))
+        };
+
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
+    fn drive_notification(self: &Arc<Self>, mut attempt: NotificationAttempt) {
+        loop {
+            let res = catch_unwind(AssertUnwindSafe(|| (attempt.callback)()));
+            let completion = match res {
+                Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
+                Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
+                Err(panic_payload) => {
+                    let err = XllError::Internal {
+                        diagnostic_id: 0x5041_4e49_434e_4f54,
+                    };
+                    if let Some(parent) = self.parent.upgrade() {
+                        parent.record_cleanup_result(Err(err.clone()));
+                    }
+                    std::panic::resume_unwind(panic_payload);
+                }
+            };
+
+            match completion {
+                NotificationCompletion::Finished => break,
+                NotificationCompletion::Retry(next) => attempt = next,
+                NotificationCompletion::Failed(err) => {
+                    if let Some(parent) = self.parent.upgrade() {
+                        parent.record_cleanup_result(Err(err));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn finish_notification_attempt(
+        &self,
+        ticket: u64,
+        outcome: XllResult<()>,
+    ) -> NotificationCompletion {
+        let mut state = self.state.lock();
+        let callback = state.delivery.callback.clone();
+        let Some(signal) = state.delivery.signal_for_ticket_mut(ticket) else {
+            return NotificationCompletion::Finished;
+        };
+
+        let attempt = match signal {
+            SignalState::Calling { ticket: t, attempt } if *t == ticket => *attempt,
+            _ => return NotificationCompletion::Finished,
+        };
+
+        match outcome {
+            Ok(()) => {
+                if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                    *signal = SignalState::Signaled { ticket };
+                }
+                NotificationCompletion::Finished
+            }
+            Err(error) => {
+                if attempt < 2 {
+                    let next_attempt = attempt + 1;
+                    if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                        *signal = SignalState::Calling {
+                            ticket,
+                            attempt: next_attempt,
+                        };
+                    }
+                    if let Some(callback) = callback {
+                        NotificationCompletion::Retry(NotificationAttempt {
+                            ticket,
+                            callback,
+                        })
+                    } else {
+                        state.delivery.reset_suppressed_signal();
+                        NotificationCompletion::Failed(error)
+                    }
+                } else {
+                    if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                        *signal = SignalState::Suppressed { ticket };
+                    }
+                    NotificationCompletion::Failed(error)
+                }
+            }
+        }
+    }
+
+    fn complete_refresh_inner(
+        &self,
+        refresh_id: u64,
+        delivered_updates: &[RtdUpdate],
+        outcome: RefreshOutcome,
+    ) -> XllResult<()> {
+        let (attempt, pending_notifications) = {
+            let mut state = self.state.lock();
+            let DeliveryPhase::Refreshing {
+                refresh_id: active_id,
+            } = state.delivery.phase
+            else {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4e4f_5245_4652_4143,
+                });
+            };
+
+            if active_id != refresh_id {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x5245_4652_4944_4d49,
+                });
+            }
+
+            match outcome {
+                RefreshOutcome::Delivered => {
+                    for update in delivered_updates {
+                        let topic_id = TopicId(update.topic_id);
+                        if state.delivery.updates.get(&topic_id).is_some_and(|u| u.sequence == update.sequence) {
+                            state.delivery.updates.remove(&topic_id);
+                        }
+                    }
+                }
+                RefreshOutcome::Failed => {}
+            }
+
+            state.delivery.phase = DeliveryPhase::BetweenRefreshes {
+                signal: SignalState::Dormant,
+            };
+
+            let has_committed = state.active_by_topic.values().any(|a| a.committed);
+            let has_updates = !state.delivery.updates.is_empty() && has_committed;
+            let prepared = state.delivery.prepare_notification(has_updates)?;
+            let attempt = prepared.map(|p| state.delivery.commit_notification(p));
+            (attempt, Vec::<RtdUpdate>::new())
+        };
+
+        let _ = pending_notifications;
+        if let (Some(attempt), Some(arc_self)) = (
+            attempt,
+            self.parent
+                .upgrade()
+                .and_then(|p| p.get_server(self.generation)),
+        ) {
+            arc_self.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
+    fn abort_refresh_no_unwind(&self, refresh_id: u64) {
+        let attempt = {
+            let mut state = self.state.lock();
+            if let DeliveryPhase::Refreshing {
+                refresh_id: active_id,
+            } = state.delivery.phase
+            {
+                if active_id == refresh_id {
+                    state.delivery.phase = DeliveryPhase::BetweenRefreshes {
+                        signal: SignalState::Dormant,
+                    };
+                    let has_committed = state.active_by_topic.values().any(|a| a.committed);
+                    let has_updates = !state.delivery.updates.is_empty() && has_committed;
+                    let prepared = state
+                        .delivery
+                        .prepare_notification(has_updates)
+                        .ok()
+                        .flatten();
+                    prepared.map(|p| state.delivery.commit_notification(p))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let (Some(attempt), Some(arc_self)) = (
+            attempt,
+            self.parent
+                .upgrade()
+                .and_then(|p| p.get_server(self.generation)),
+        ) {
+            arc_self.drive_notification(attempt);
+        }
+    }
+
+    fn remove_from_registry(&self) {
+        if let Some(parent) = self.parent.upgrade() {
+            let mut servers = parent.servers.lock();
+            servers.remove(&self.generation);
+        }
+    }
+
+    fn terminate(&self) -> XllResult<()> {
+        let termination = self.operation_gate.close_and_wait_begin()?;
+
+        let (callback, subscriptions) = {
+            let mut state = self.state.lock();
+            let callback = state.delivery.detach_callback();
+            state.delivery.updates.clear();
+            let subscriptions = state
+                .active_by_topic
+                .values_mut()
+                .filter_map(|active| active.subscription.take())
+                .collect::<Vec<_>>();
+            (callback, subscriptions)
+        };
+
+        drop(callback);
+        request_cancel_all_no_unwind(&subscriptions);
+
+        termination.wait();
+
+        let late_subscriptions = {
+            let mut state = self.state.lock();
+            state.delivery.updates.clear();
+            state.topic_by_key.clear();
+            state
+                .active_by_topic
+                .drain()
+                .filter_map(|(_, active)| active.subscription)
+                .collect::<Vec<_>>()
+        };
+
+        if let Some(parent) = self.parent.upgrade() {
+            let mut catalog = parent.catalog.lock();
+            catalog.active_keys.retain(|_, binding| {
+                if let Some(s) = binding.server.upgrade() {
+                    s.generation != self.generation
+                } else {
+                    false
+                }
+            });
+        }
+
+        let cleanup_result =
+            disconnect_all_no_unwind(subscriptions.into_iter().chain(late_subscriptions));
+        if let Some(parent) = self.parent.upgrade() {
+            parent.record_cleanup_result(cleanup_result);
+        }
+
+        self.remove_from_registry();
+        Ok(())
+    }
+}
+
+#[must_use]
+pub(crate) struct RtdRefreshBatch {
+    server: Arc<ServerRuntime>,
+    operation: Option<ServerOperation>,
+    refresh_id: u64,
+    pub(crate) updates: Vec<RtdUpdate>,
+    completed: bool,
+}
+
+impl RtdRefreshBatch {
+    pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
+        self.server
+            .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
+        self.completed = true;
+        self.operation.take();
+        Ok(())
+    }
+}
+
+impl Drop for RtdRefreshBatch {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.server.abort_refresh_no_unwind(self.refresh_id);
+    }
+}
+
+fn request_cancel_all_no_unwind(subscriptions: &[Box<dyn RtdSubscription>]) {
+    for subscription in subscriptions {
+        let res = catch_unwind(AssertUnwindSafe(|| subscription.request_cancel()));
+        let _ = res;
+    }
+}
+
+fn disconnect_all_no_unwind(
+    subscriptions: impl IntoIterator<Item = Box<dyn RtdSubscription>>,
+) -> XllResult<()> {
+    let mut first_error = None;
+    for subscription in subscriptions {
+        let res = catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait()));
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(XllError::Internal {
+                        diagnostic_id: 0x5041_4e49_4344_4953,
+                    });
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 pub(crate) struct SubscriptionRuntime {
     limits: RtdLimits,
     module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    state: Mutex<SubscriptionState>,
-    idle: Condvar,
+    runtime_gate: Arc<OperationGate>,
+    catalog: Mutex<SubscriptionCatalog>,
+    servers: Mutex<HashMap<ServerGeneration, Arc<ServerRuntime>>>,
+    active_quota: Arc<Quota>,
+    queued_update_quota: Arc<Quota>,
     cleanup_failure: Mutex<Option<XllError>>,
     next_preparation_id: AtomicU64,
-    next_generation: AtomicU64,
+    next_connection_generation: AtomicU64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
-}
-
-pub(crate) struct SubscriptionOperation<'a> {
-    runtime: &'a SubscriptionRuntime,
-    server_generation: Option<u64>,
-    _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
-}
-
-impl Drop for SubscriptionOperation<'_> {
-    fn drop(&mut self) {
-        let mut state = self.runtime.state.lock();
-        state.in_flight = state
-            .in_flight
-            .checked_sub(1)
-            .expect("RTD operation count remains balanced");
-        if let Some(server_generation) = self.server_generation {
-            let remove = {
-                let count = state
-                    .in_flight_by_server
-                    .get_mut(&server_generation)
-                    .expect("RTD server operation count remains installed");
-                *count = count
-                    .checked_sub(1)
-                    .expect("RTD server operation count remains balanced");
-                *count == 0
-            };
-            if remove {
-                state.in_flight_by_server.remove(&server_generation);
-            }
-        }
-        self.runtime.idle.notify_all();
-        drop(state);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.runtime
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
-    }
 }
 
 impl SubscriptionRuntime {
@@ -867,24 +1406,19 @@ impl SubscriptionRuntime {
         Self {
             limits,
             module_ingress,
-            state: Mutex::new(SubscriptionState {
-                closed: false,
-                in_flight: 0,
-                in_flight_by_server: HashMap::new(),
-                terminating_servers: HashSet::new(),
-                terminated_servers: HashSet::new(),
+            runtime_gate: OperationGate::new(),
+            catalog: Mutex::new(SubscriptionCatalog {
                 pending: HashMap::new(),
                 pending_topic_bytes: 0,
-                active: HashMap::new(),
-                topic_ids: HashMap::new(),
-                deliveries: HashMap::new(),
-                queued_update_count: 0,
                 source_ids: HashMap::new(),
+                active_keys: HashMap::new(),
             }),
-            idle: Condvar::new(),
+            servers: Mutex::new(HashMap::new()),
+            active_quota: Arc::new(Quota::new(limits.max_active)),
+            queued_update_quota: Arc::new(Quota::new(limits.max_queued_updates)),
             cleanup_failure: Mutex::new(None),
             next_preparation_id: AtomicU64::new(1),
-            next_generation: AtomicU64::new(1),
+            next_connection_generation: AtomicU64::new(1),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
         }
@@ -911,194 +1445,88 @@ impl SubscriptionRuntime {
         }
     }
 
-    fn cleanup_result(&self) -> XllResult<()> {
+    pub(crate) fn cleanup_result(&self) -> XllResult<()> {
         self.cleanup_failure
             .lock()
             .as_ref()
             .map_or(Ok(()), |error| Err(error.clone()))
     }
 
-    fn enter_operation(
-        &self,
-        server_generation: Option<u64>,
-    ) -> XllResult<SubscriptionOperation<'_>> {
-        if let Some(ingress) = self.module_ingress {
-            let mut admitted = false;
-            let mut admission_error = None;
-            let (ingress_guard, accepted) = ingress.enter_with(|| {
-                let mut state = self.state.lock();
-                match self.admit_operation_locked(&mut state, server_generation) {
-                    Ok(()) => {
-                        admitted = true;
-                        #[cfg(any(test, feature = "shutdown-refinement"))]
-                        self.record_ghost_event(
-                            crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
-                        );
-                    }
-                    Err(error) => admission_error = Some(error),
-                }
-            });
-            if !accepted {
-                return Err(XllError::Closing);
-            }
-            if !admitted {
-                drop(ingress_guard);
-                return Err(admission_error.expect("RTD admission error is recorded"));
-            }
-            return Ok(SubscriptionOperation {
-                runtime: self,
-                server_generation,
-                _ingress_guard: Some(ingress_guard),
+    pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard> {
+        self.runtime_gate.enter()
+    }
+
+    pub(crate) fn register_server(
+        self: &Arc<Self>,
+        generation: ServerGeneration,
+    ) -> XllResult<RtdServerHandle> {
+        let _operation = self.runtime_gate.enter()?;
+        let server = Arc::new(ServerRuntime {
+            generation,
+            module_ingress: self.module_ingress,
+            operation_gate: OperationGate::new(),
+            state: Mutex::new(ServerState {
+                active_by_topic: HashMap::new(),
+                topic_by_key: HashMap::new(),
+                delivery: ServerDeliveryState::default(),
+            }),
+            parent: Arc::downgrade(self),
+        });
+
+        let mut servers = self.servers.lock();
+        if servers.contains_key(&generation) {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5254_4453_5256_4455,
             });
         }
-
-        let mut state = self.state.lock();
-        let result = self.enter_operation_locked(&mut state, server_generation);
-        drop(state);
-        if result.is_ok() {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
-        }
-        result
+        servers.insert(generation, Arc::clone(&server));
+        Ok(RtdServerHandle { inner: server })
     }
 
-    fn enter_operation_locked<'a>(
-        &'a self,
-        state: &mut SubscriptionState,
-        server_generation: Option<u64>,
-    ) -> XllResult<SubscriptionOperation<'a>> {
-        self.admit_operation_locked(state, server_generation)?;
-        Ok(SubscriptionOperation {
-            runtime: self,
-            server_generation,
-            _ingress_guard: None,
-        })
-    }
-
-    fn admit_operation_locked(
-        &self,
-        state: &mut SubscriptionState,
-        server_generation: Option<u64>,
-    ) -> XllResult<()> {
-        if state.closed
-            || server_generation.is_some_and(|generation| {
-                state.terminating_servers.contains(&generation)
-                    || state.terminated_servers.contains(&generation)
-            })
-        {
-            return Err(XllError::Closing);
-        }
-        let next_in_flight = state.in_flight.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5254_444f_5043_4e54,
-        })?;
-        let next_server_count = server_generation
-            .map(|generation| {
-                state
-                    .in_flight_by_server
-                    .get(&generation)
-                    .copied()
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .ok_or(XllError::Internal {
-                        diagnostic_id: 0x5254_4453_5256_434e,
-                    })
-            })
-            .transpose()?;
-        state.in_flight = next_in_flight;
-        if let Some(server_generation) = server_generation {
-            state.in_flight_by_server.insert(
-                server_generation,
-                next_server_count.expect("server count was computed above"),
-            );
-        }
-        Ok(())
-    }
-
-    pub(crate) fn enter_server_operation(
-        &self,
-        server_generation: u64,
-    ) -> XllResult<SubscriptionOperation<'_>> {
-        self.enter_operation(Some(server_generation))
-    }
-
-    pub(crate) fn enter_external_operation(&self) -> XllResult<SubscriptionOperation<'_>> {
-        self.enter_operation(None)
+    pub(crate) fn get_server(&self, generation: ServerGeneration) -> Option<Arc<ServerRuntime>> {
+        let servers = self.servers.lock();
+        servers.get(&generation).cloned()
     }
 
     pub(crate) fn prepare<S>(
         self: &Arc<Self>,
-        source: Arc<S>,
+        source: S,
         topic: RtdTopic,
     ) -> XllResult<PreparedSubscription>
     where
         S: RtdSource,
     {
-        static NEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+        let _operation = self.runtime_gate.enter()?;
         topic.validate_with_limits(&self.limits)?;
-        let topic_bytes = topic.byte_len();
+
+        let source = Arc::new(source);
         let ptr_key = Arc::as_ptr(&source) as usize;
-        let erased_source: Arc<dyn Any + Send + Sync> = source.clone();
-        let mut state = self.state.lock();
-        if state.closed {
-            return Err(XllError::Closing);
-        }
-        state
-            .source_ids
-            .retain(|_, identity| identity.source.strong_count() != 0);
-        let mut replaced_source_identity = None;
-        let mut source_identity_inserted = false;
-        let source_identity = match state.source_ids.get(&ptr_key) {
-            Some(identity)
-                if identity
-                    .source
-                    .upgrade()
-                    .is_some_and(|existing| Arc::ptr_eq(&existing, &erased_source)) =>
-            {
-                identity.id
-            }
-            _ => {
-                if state.source_ids.len() >= self.limits.max_source_ids {
+
+        let key = {
+            let mut catalog = self.catalog.lock();
+            let source_id = if let Some(&id) = catalog.source_ids.get(&ptr_key) {
+                id
+            } else {
+                if catalog.source_ids.len() >= self.limits.max_source_ids {
                     return Err(XllError::Overloaded);
                 }
-                let id = NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-                source_identity_inserted = true;
-                replaced_source_identity = state.source_ids.insert(
-                    ptr_key,
-                    SourceIdentity {
-                        id,
-                        source: Arc::downgrade(&erased_source),
-                    },
-                );
+                let id = catalog.source_ids.len() as u64 + 1;
+                catalog.source_ids.insert(ptr_key, id);
                 id
+            };
+
+            let mut parts_str = String::new();
+            for part in topic.parts() {
+                parts_str.push_str(part);
+                parts_str.push('\0');
             }
+            format!("{source_id:016x}:{parts_str}")
         };
 
-        let mut hash = blake3::Hasher::new();
-        hash.update(&source_identity.to_le_bytes());
-        for part in topic.parts() {
-            hash.update(&(part.len() as u64).to_le_bytes());
-            hash.update(part.as_bytes());
-        }
-        let key = format!("stream:{}", hash.finalize().to_hex());
-        if let Some(pending) = state.pending.get_mut(&key) {
-            pending.live_reservations =
-                pending
-                    .live_reservations
-                    .checked_add(1)
-                    .ok_or(XllError::Internal {
-                        diagnostic_id: 0x5254_4452_534c_4541,
-                    })?;
-            return Ok(PreparedSubscription {
-                runtime: Arc::downgrade(self),
-                key,
-                reservation_id: Some(pending.preparation_id),
-                ownership: PreparationOwnership::ExistingPending,
-            });
-        }
-        if let Some(owner) = state.topic_ids.get(&key) {
-            state.active.get(owner).ok_or(XllError::Internal {
-                diagnostic_id: 0x5254_4450_5245_5041,
-            })?;
+        let key = SubscriptionKey::new(key);
+
+        let mut catalog = self.catalog.lock();
+        if catalog.active_keys.contains_key(&key) {
             return Ok(PreparedSubscription {
                 runtime: Arc::downgrade(self),
                 key,
@@ -1107,34 +1535,40 @@ impl SubscriptionRuntime {
             });
         }
 
-        let Some(next_pending_topic_bytes) = state.pending_topic_bytes.checked_add(topic_bytes)
-        else {
-            restore_source_identity(
-                &mut state,
-                ptr_key,
-                source_identity_inserted,
-                replaced_source_identity,
-            );
-            return Err(XllError::Overloaded);
-        };
-        if state.pending.len() >= self.limits.max_pending
-            || next_pending_topic_bytes > self.limits.max_total_topic_bytes
-        {
-            restore_source_identity(
-                &mut state,
-                ptr_key,
-                source_identity_inserted,
-                replaced_source_identity,
-            );
+        if let Some(pending) = catalog.pending.get_mut(&key) {
+            let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
+            pending.live_reservations =
+                pending
+                    .live_reservations
+                    .checked_add(1)
+                    .ok_or(XllError::Internal {
+                        diagnostic_id: 0x5245_5356_4f56_464c,
+                    })?;
+            return Ok(PreparedSubscription {
+                runtime: Arc::downgrade(self),
+                key,
+                reservation_id: Some(reservation_id),
+                ownership: PreparationOwnership::ExistingPending,
+            });
+        }
+
+        if catalog.pending.len() >= self.limits.max_pending {
             return Err(XllError::Overloaded);
         }
 
-        let preparation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
-        state.pending_topic_bytes = next_pending_topic_bytes;
-        state.pending.insert(
+        let new_total = catalog
+            .pending_topic_bytes
+            .checked_add(topic.byte_len())
+            .ok_or(XllError::Overloaded)?;
+        if new_total > self.limits.max_total_topic_bytes {
+            return Err(XllError::Overloaded);
+        }
+
+        let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
+        catalog.pending_topic_bytes = new_total;
+        catalog.pending.insert(
             key.clone(),
             PendingSubscription {
-                preparation_id,
                 live_reservations: 1,
                 committed: false,
                 source: Arc::new(SourceAdapter(source)),
@@ -1143,3667 +1577,1089 @@ impl SubscriptionRuntime {
                 connecting_generation: None,
             },
         );
+
         Ok(PreparedSubscription {
             runtime: Arc::downgrade(self),
             key,
-            reservation_id: Some(preparation_id),
+            reservation_id: Some(reservation_id),
             ownership: PreparationOwnership::CreatedPending,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn connect(
-        self: &Arc<Self>,
-        server_generation: u64,
-        topic_id: i32,
-        key: &str,
-    ) -> XllResult<RtdValue> {
-        let connection = self.connect_transaction(server_generation, topic_id, key)?;
-        let value = connection.value().clone();
-        connection.commit()?;
-        Ok(value)
+    fn finish_preparation(&self, key: &SubscriptionKey, _reservation_id: u64, committed: bool) {
+        let (removed_source, _removed_topic_bytes) = {
+            let mut catalog = self.catalog.lock();
+            let Some(pending) = catalog.pending.get_mut(key) else {
+                return;
+            };
+
+            pending.live_reservations = pending.live_reservations.saturating_sub(1);
+            if committed {
+                pending.committed = true;
+                return;
+            }
+
+            if pending.live_reservations == 0
+                && !pending.committed
+                && pending.connecting_generation.is_none()
+            {
+                let removed = catalog.pending.remove(key);
+                if let Some(removed) = removed {
+                    let bytes = removed.topic.byte_len();
+                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    (Some(removed.source), bytes)
+                } else {
+                    (None, 0)
+                }
+            } else {
+                (None, 0)
+            }
+        };
+
+        if let Some(source) = removed_source {
+            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5243,
+                }));
+            }
+        }
+    }
+
+    pub(crate) fn claim_server_key(
+        &self,
+        generation: ServerGeneration,
+        key: &SubscriptionKey,
+    ) -> XllResult<()> {
+        let mut catalog = self.catalog.lock();
+        let pending = catalog.pending.get_mut(key).ok_or(XllError::Closing)?;
+
+        if let Some(existing_gen) = pending.server_generation {
+            if existing_gen != generation {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x5352_5647_454e_4d49,
+                });
+            }
+        } else {
+            pending.server_generation = Some(generation);
+        }
+        Ok(())
     }
 
     pub(crate) fn connect_transaction(
         self: &Arc<Self>,
-        server_generation: u64,
-        topic_id: i32,
-        key: &str,
+        server_handle: &RtdServerHandle,
+        topic_id: TopicId,
+        key: &SubscriptionKey,
     ) -> XllResult<SubscriptionConnection> {
-        let _operation = self.enter_operation(Some(server_generation))?;
-        let owner = TopicOwner {
-            server_generation,
-            topic_id,
-        };
-        let (source, topic, generation, sink) = {
-            let mut state = self.state.lock();
-            if state.closed {
-                return Err(XllError::Closing);
+        let _operation = server_handle.inner.enter_operation()?;
+        let conn_gen = ConnectionGeneration(
+            self.next_connection_generation
+                .fetch_add(1, Ordering::Relaxed),
+        );
+
+        let (source, topic) = {
+            let mut catalog = self.catalog.lock();
+
+            if catalog.active_keys.contains_key(key) {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4143_5456_4b45_5944,
+                });
             }
-            if let Some(active) = state.active.get(&owner) {
-                return if active.key == key && active.committed && active.subscription.is_some() {
-                    Ok(SubscriptionConnection {
-                        runtime: Arc::downgrade(self),
-                        owner,
-                        generation: active.generation,
-                        key: key.to_owned(),
-                        value: active.latest.clone(),
-                        observed_sequence: None,
-                        created: false,
-                        finished: false,
-                    })
-                } else if active.key == key {
-                    Err(XllError::Overloaded)
+
+            let (source, topic) = {
+                let pending = catalog.pending.get_mut(key).ok_or(XllError::Closing)?;
+
+                if let Some(existing_gen) = pending.server_generation {
+                    if existing_gen != server_handle.inner.generation {
+                        return Err(XllError::Internal {
+                            diagnostic_id: 0x5352_5647_454e_4d49,
+                        });
+                    }
                 } else {
-                    Err(XllError::InvalidHandle)
-                };
-            }
-            if state.topic_ids.contains_key(key) {
-                return Err(XllError::InvalidHandle);
-            }
-            if state.active.len() >= self.limits.max_active {
-                return Err(XllError::Overloaded);
-            }
-            let pending = state.pending.get_mut(key).ok_or(XllError::InvalidHandle)?;
-            if pending
-                .server_generation
-                .is_some_and(|existing| existing != server_generation)
-            {
-                return Err(XllError::InvalidHandle);
-            }
-            if pending.connecting_generation.is_some() {
-                return Err(XllError::InvalidHandle);
-            }
-            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-            pending.connecting_generation = Some(generation);
-            let source = Arc::clone(&pending.source);
-            let topic = pending.topic.clone();
-            let initial = RtdValue::Error(ExcelErrorValue(crate::ExcelError::NotAvailable));
-            state.active.insert(
-                owner,
-                ActiveSubscription {
-                    key: key.to_owned(),
-                    generation,
-                    subscription: None,
-                    committed: false,
-                    latest: initial,
+                    pending.server_generation = Some(server_handle.inner.generation);
+                }
+
+                if pending.connecting_generation.is_some() {
+                    return Err(XllError::Internal {
+                        diagnostic_id: 0x434f_4e4e_494e_464c,
+                    });
+                }
+                pending.connecting_generation = Some(conn_gen);
+                (Arc::clone(&pending.source), pending.topic.clone())
+            };
+
+            catalog.active_keys.insert(
+                key.clone(),
+                ActiveKeyBinding {
+                    server: Arc::downgrade(&server_handle.inner),
+                    connection_generation: conn_gen,
+                    stage: BindingStage::Connecting,
                 },
             );
-            state.topic_ids.insert(key.to_owned(), owner);
-            let sink = ErasedSink {
-                runtime: Arc::downgrade(self),
-                owner,
-                generation,
-            };
-            (source, topic, generation, sink)
+
+            (source, topic)
         };
 
-        let subscription = match catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, sink))) {
-            Ok(Ok(subscription)) => subscription,
-            Ok(Err(error)) => {
-                self.finish_failed_connection(owner, generation, key);
-                self.record_cleanup_result(drop_erased_source_no_unwind(
-                    source,
-                    "rtd_connect_source_drop",
-                ));
-                return Err(error);
+        {
+            let mut state = server_handle.inner.state.lock();
+            if state.active_by_topic.contains_key(&topic_id) {
+                let mut catalog = self.catalog.lock();
+                if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                    pending.connecting_generation = None;
+                }
+                catalog.active_keys.remove(key);
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x544f_5049_4349_4444,
+                });
             }
-            Err(_) => {
-                self.finish_failed_connection(owner, generation, key);
-                self.record_cleanup_result(drop_erased_source_no_unwind(
-                    source,
-                    "rtd_connect_source_drop",
-                ));
-                return Err(XllError::Panic);
+            if state.topic_by_key.contains_key(key) {
+                let mut catalog = self.catalog.lock();
+                if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                    pending.connecting_generation = None;
+                }
+                catalog.active_keys.remove(key);
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x544f_5049_434b_4559,
+                });
+            }
+
+            let permit = match self.active_quota.try_acquire() {
+                Ok(p) => p,
+                Err(err) => {
+                    let mut catalog = self.catalog.lock();
+                    if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                        pending.connecting_generation = None;
+                    }
+                    catalog.active_keys.remove(key);
+                    return Err(err);
+                }
+            };
+
+            state.topic_by_key.insert(key.clone(), topic_id);
+            state.active_by_topic.insert(
+                topic_id,
+                ActiveSubscription {
+                    key: key.clone(),
+                    generation: conn_gen,
+                    subscription: None,
+                    committed: false,
+                    latest: RtdValue::Empty,
+                    _permit: permit,
+                },
+            );
+        }
+
+        let erased_sink = ErasedSink {
+            server: Arc::downgrade(&server_handle.inner),
+            topic_id,
+            connection_generation: conn_gen,
+        };
+
+        let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));
+
+        let subscription = match sub_res {
+            Ok(Ok(sub)) => sub,
+            Ok(Err(err)) => {
+                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                return Err(err);
+            }
+            Err(panic_payload) => {
+                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5542,
+                }));
+                std::panic::resume_unwind(panic_payload);
             }
         };
 
-        let mut subscription = Some(subscription);
-        let (latest, retired_pending) = {
-            let mut state = self.state.lock();
-            let can_install = !state.closed
-                && !state.terminating_servers.contains(&server_generation)
-                && !state.terminated_servers.contains(&server_generation);
-            let installed = state
-                .active
-                .get(&owner)
-                .is_some_and(|active| can_install && active.generation == generation);
-            let installed = if installed {
-                state
-                    .active
-                    .get_mut(&owner)
-                    .expect("the active RTD connection was checked above")
-                    .subscription = subscription.take();
-                let active = state
-                    .active
-                    .get(&owner)
-                    .expect("the active RTD connection was installed above");
-                Some((
-                    active.latest.clone(),
-                    state
-                        .deliveries
-                        .get(&owner.server_generation)
-                        .and_then(|d| d.updates.get(&owner.topic_id))
-                        .map(|queued| queued.sequence),
-                ))
-            } else {
-                None
+        let latest_value = {
+            let mut state = server_handle.inner.state.lock();
+            let Some(active) = state.active_by_topic.get_mut(&topic_id) else {
+                let _ = catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait()));
+                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                return Err(XllError::Closing);
             };
-            if let Some(latest) = installed {
-                (Some(latest), None)
-            } else {
-                Self::remove_active_attempt(&mut state, owner, generation, key);
-                let retired_pending = Self::reset_pending_connection(&mut state, key, generation);
-                (None, retired_pending)
-            }
+            active.subscription = Some(subscription);
+            active.latest.clone()
         };
-        // Source ownership and disconnect may execute user code.
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            retired_pending,
-            "rtd_connected_pending_source_drop",
-        ));
-        self.record_cleanup_result(drop_erased_source_no_unwind(
-            source,
-            "rtd_connect_source_drop",
-        ));
-        if let Some(subscription) = subscription {
-            self.record_cleanup_result(disconnect_one_no_unwind(subscription, owner, key));
-        }
-        match latest {
-            Some((value, observed_sequence)) => Ok(SubscriptionConnection {
-                runtime: Arc::downgrade(self),
-                owner,
-                generation,
-                key: key.to_owned(),
-                value,
-                observed_sequence,
-                created: true,
-                finished: false,
-            }),
-            None => Err(XllError::Closing),
-        }
+
+        let observed_sequence = {
+            let state = server_handle.inner.state.lock();
+            state.delivery.updates.get(&topic_id).map(|u| u.sequence)
+        };
+
+        Ok(SubscriptionConnection {
+            runtime: Arc::downgrade(self),
+            server: Arc::downgrade(&server_handle.inner),
+            topic_id,
+            generation: conn_gen,
+            key: key.clone(),
+            value: latest_value,
+            observed_sequence,
+            created: true,
+            finished: false,
+        })
     }
 
     fn commit_connection(
         &self,
-        owner: TopicOwner,
-        generation: u64,
-        key: &str,
+        server: &Arc<ServerRuntime>,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        key: &SubscriptionKey,
         observed_sequence: Option<u64>,
     ) -> XllResult<()> {
-        let _operation = self.enter_operation(Some(owner.server_generation))?;
-        let (retired_pending, attempt) = {
-            let mut state = self.state.lock();
-            if state.closed
-                || state.terminating_servers.contains(&owner.server_generation)
-                || state.terminated_servers.contains(&owner.server_generation)
-            {
+        let attempt = {
+            let mut state = server.state.lock();
+            let Some(active) = state.active_by_topic.get_mut(&topic_id) else {
                 return Err(XllError::Closing);
-            }
-            let pending_matches = state
-                .pending
-                .get(key)
-                .is_some_and(|pending| pending.connecting_generation == Some(generation));
-            if !pending_matches {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x5254_4443_4f4d_4d49,
-                });
-            }
-            let active = state.active.get_mut(&owner).ok_or(XllError::Internal {
-                diagnostic_id: 0x5254_4443_4f4d_4143,
-            })?;
-            if active.generation != generation || active.key != key || active.subscription.is_none()
-            {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x5254_4443_4f4d_4d54,
-                });
+            };
+            if active.generation != generation {
+                return Err(XllError::Closing);
             }
             active.committed = true;
-            let delivery = state.deliveries.entry(owner.server_generation).or_default();
-            let mut removed_update = false;
-            let should_keep = match delivery.updates.get(&owner.topic_id) {
-                Some(queued) if observed_sequence == Some(queued.sequence) => {
-                    delivery.updates.remove(&owner.topic_id);
-                    removed_update = true;
-                    false
-                }
-                Some(_) => true,
-                None => false,
-            };
 
-            // --- Fallible phase: reserve notification ticket ---
-            let prepared = if should_keep {
-                delivery.prepare_notification(owner.server_generation, true)?
-            } else {
-                None
-            };
-
-            // --- Infallible commit phase ---
-            let attempt = prepared.map(|p| delivery.commit_notification(p));
-
-            // Release delivery borrow before accessing state.queued_update_count.
-            if removed_update {
-                state.queued_update_count = state.queued_update_count.saturating_sub(1);
+            if let Some(obs) = observed_sequence {
+                state.delivery.updates.retain(|&tid, u| tid != topic_id || u.sequence > obs);
             }
-            (Self::remove_pending(&mut state, key), attempt)
-        };
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            retired_pending,
-            "rtd_committed_pending_source_drop",
-        ));
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
-        Ok(())
-    }
 
-    fn rollback_connection(&self, owner: TopicOwner, generation: u64, key: &str) {
-        let Ok(_operation) = self.enter_operation(Some(owner.server_generation)) else {
-            return;
+            let has_updates = !state.delivery.updates.is_empty();
+            let prepared = state.delivery.prepare_notification(has_updates)?;
+            prepared.map(|p| state.delivery.commit_notification(p))
         };
-        let (subscription, retired_pending) = {
-            let mut state = self.state.lock();
-            let subscription = if state.active.get(&owner).is_some_and(|active| {
-                active.generation == generation && active.key == key && !active.committed
-            }) {
-                let active = state
-                    .active
-                    .remove(&owner)
-                    .expect("the uncommitted RTD connection was checked above");
-                if state.topic_ids.get(key) == Some(&owner) {
-                    state.topic_ids.remove(key);
-                }
-                if state
-                    .deliveries
-                    .get_mut(&owner.server_generation)
-                    .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
-                {
-                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                }
-                active.subscription
-            } else {
-                None
-            };
-            let retired_pending = Self::reset_pending_connection(&mut state, key, generation);
-            (subscription, retired_pending)
-        };
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            retired_pending,
-            "rtd_connection_rollback_source_drop",
-        ));
-        if let Some(subscription) = subscription {
-            self.record_cleanup_result(disconnect_one_no_unwind(subscription, owner, key));
-        }
-    }
 
-    fn finish_preparation(&self, key: &str, reservation_id: u64, committed: bool) {
-        let removed = {
-            let mut state = self.state.lock();
-            let Some(pending) = state.pending.get_mut(key) else {
-                return;
-            };
-            if pending.preparation_id != reservation_id {
-                return;
-            }
-            pending.live_reservations = pending
-                .live_reservations
-                .checked_sub(1)
-                .expect("every RTD preparation lease is finished exactly once");
-            pending.committed |= committed;
-            let connecting = pending.connecting_generation.is_some();
-            let unowned = pending.live_reservations == 0 && !pending.committed;
-            let server_generation = pending.server_generation;
-            let invalid_generation = state.closed
-                || server_generation.is_some_and(|generation| {
-                    state.terminating_servers.contains(&generation)
-                        || state.terminated_servers.contains(&generation)
-                });
-            (!connecting && (unowned || invalid_generation))
-                .then(|| Self::remove_pending(&mut state, key))
-                .flatten()
-        };
-        // The source is user-owned and its Drop implementation may re-enter
-        // runtime services. Release it only after the state lock is gone.
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            removed,
-            "rtd_preparation_source_drop",
-        ));
-    }
-
-    pub(crate) fn claim_server(&self, key: &str, server_generation: u64) -> XllResult<()> {
-        let mut state = self.state.lock();
-        if state.closed
-            || state.terminating_servers.contains(&server_generation)
-            || state.terminated_servers.contains(&server_generation)
-        {
-            return Err(XllError::Closing);
-        }
-        if let Some(pending) = state.pending.get_mut(key) {
-            if pending
-                .server_generation
-                .is_some_and(|existing| existing != server_generation)
+        let removed_source = {
+            let mut catalog = self.catalog.lock();
+            if let Some(binding) = catalog
+                .active_keys
+                .get_mut(key)
+                .filter(|b| b.connection_generation == generation)
             {
-                return Err(XllError::InvalidHandle);
+                binding.stage = BindingStage::Active;
             }
-            pending.server_generation = Some(server_generation);
-            return Ok(());
-        }
-        if state
-            .topic_ids
-            .get(key)
-            .is_some_and(|owner| owner.server_generation == server_generation)
-        {
-            Ok(())
-        } else {
-            Err(XllError::InvalidHandle)
-        }
-    }
-
-    fn finish_failed_connection(&self, owner: TopicOwner, generation: u64, key: &str) {
-        let retired_pending = {
-            let mut state = self.state.lock();
-            Self::remove_active_attempt(&mut state, owner, generation, key);
-            Self::reset_pending_connection(&mut state, key, generation)
-        };
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            retired_pending,
-            "rtd_failed_connection_source_drop",
-        ));
-    }
-
-    fn remove_active_attempt(
-        state: &mut SubscriptionState,
-        owner: TopicOwner,
-        generation: u64,
-        key: &str,
-    ) {
-        if state
-            .active
-            .get(&owner)
-            .is_some_and(|active| active.generation == generation && active.key == key)
-        {
-            state.active.remove(&owner);
-            if state.topic_ids.get(key) == Some(&owner) {
-                state.topic_ids.remove(key);
-            }
-            if state
-                .deliveries
-                .get_mut(&owner.server_generation)
-                .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
+            if let Some(pending) = catalog
+                .pending
+                .get_mut(key)
+                .filter(|p| p.connecting_generation == Some(generation))
             {
-                state.queued_update_count = state.queued_update_count.saturating_sub(1);
+                pending.connecting_generation = None;
             }
-        }
-    }
-
-    fn remove_pending(state: &mut SubscriptionState, key: &str) -> Option<PendingSubscription> {
-        let pending = state.pending.remove(key)?;
-        state.pending_topic_bytes = state
-            .pending_topic_bytes
-            .checked_sub(pending.topic.byte_len())
-            .expect("pending RTD topic byte quota remains balanced");
-        Some(pending)
-    }
-
-    fn reset_pending_connection(
-        state: &mut SubscriptionState,
-        key: &str,
-        generation: u64,
-    ) -> Option<PendingSubscription> {
-        let pending = state.pending.get_mut(key)?;
-        if pending.connecting_generation != Some(generation) {
-            return None;
-        }
-        pending.connecting_generation = None;
-        let unowned = pending.live_reservations == 0 && !pending.committed;
-        let server_generation = pending.server_generation;
-        let should_remove = unowned
-            || state.closed
-            || server_generation.is_some_and(|generation| {
-                state.terminating_servers.contains(&generation)
-                    || state.terminated_servers.contains(&generation)
+            let remove_pending = catalog.pending.get(key).is_some_and(|p| {
+                p.live_reservations == 0 && p.connecting_generation.is_none()
             });
-        should_remove
-            .then(|| Self::remove_pending(state, key))
-            .flatten()
-    }
 
-    pub(crate) fn disconnect(&self, server_generation: u64, topic_id: i32) {
-        let Ok(_operation) = self.enter_operation(Some(server_generation)) else {
-            return;
-        };
-        let owner = TopicOwner {
-            server_generation,
-            topic_id,
-        };
-        let subscription = {
-            let mut state = self.state.lock();
-            let Some(active) = state.active.remove(&owner) else {
-                return;
-            };
-            state.topic_ids.remove(&active.key);
-            if state
-                .deliveries
-                .get_mut(&server_generation)
-                .is_some_and(|delivery| delivery.updates.remove(&topic_id).is_some())
-            {
-                state.queued_update_count = state.queued_update_count.saturating_sub(1);
-            }
-            active
-                .subscription
-                .map(|subscription| (active.key, subscription))
-        };
-        if let Some((key, subscription)) = subscription {
-            self.record_cleanup_result(disconnect_one_no_unwind(subscription, owner, &key));
-        }
-    }
-
-    pub(crate) fn begin_refresh(&self, server_generation: u64) -> XllResult<RtdUpdateBatch> {
-        let mut state = self.state.lock();
-
-        if state.closed
-            || state.terminating_servers.contains(&server_generation)
-            || state.terminated_servers.contains(&server_generation)
-        {
-            return Err(XllError::Closing);
-        }
-
-        let committed_topics: std::collections::HashSet<i32> = state
-            .active
-            .iter()
-            .filter(|(owner, active)| {
-                owner.server_generation == server_generation && active.committed
-            })
-            .map(|(owner, _)| owner.topic_id)
-            .collect();
-
-        let delivery = state
-            .deliveries
-            .get_mut(&server_generation)
-            .ok_or(XllError::Closing)?;
-
-        if matches!(delivery.phase, DeliveryPhase::Refreshing { .. }) {
-            return Err(XllError::Internal {
-                diagnostic_id: 0x4f56_4c50_5245_4652,
-            });
-        }
-
-        let refresh_id = delivery.allocate_refresh_id()?;
-
-        let updates: Vec<RtdUpdate> = delivery
-            .updates
-            .iter()
-            .filter(|(topic_id, _)| committed_topics.contains(topic_id))
-            .map(|(&topic_id, queued)| RtdUpdate {
-                sequence: queued.sequence,
-                topic_id,
-                value: queued.value.clone(),
-            })
-            .collect();
-
-        delivery.phase = DeliveryPhase::Refreshing { refresh_id };
-
-        Ok(RtdUpdateBatch {
-            server_generation,
-            refresh_id,
-            updates,
-        })
-    }
-
-    pub(crate) fn complete_refresh(
-        &self,
-        batch: RtdUpdateBatch,
-        outcome: RefreshOutcome,
-    ) -> XllResult<()> {
-        let attempt = {
-            let mut state = self.state.lock();
-
-            let Some(delivery) = state.deliveries.get_mut(&batch.server_generation) else {
-                return Ok(());
-            };
-
-            let DeliveryPhase::Refreshing { refresh_id, .. } = &mut delivery.phase else {
-                return Ok(());
-            };
-
-            if *refresh_id != batch.refresh_id {
-                return Ok(());
-            }
-
-            // Compute which updates to remove (without mutating yet).
-            let mut to_remove = Vec::new();
-            if outcome == RefreshOutcome::Delivered {
-                for update in &batch.updates {
-                    if delivery
-                        .updates
-                        .get(&update.topic_id)
-                        .is_some_and(|queued| queued.sequence == update.sequence)
-                    {
-                        to_remove.push(update.topic_id);
-                    }
-                }
-            }
-
-            // Transition phase to BetweenRefreshes before prepare so that
-            // prepare_notification can see the Dormant signal.
-            delivery.phase = DeliveryPhase::BetweenRefreshes {
-                signal: SignalState::Dormant,
-            };
-
-            // Remove delivered updates so prepare_notification sees the
-            // correct `updates.is_empty()` state.
-            for topic_id in &to_remove {
-                delivery.updates.remove(topic_id);
-            }
-
-            // --- Fallible phase: reserve notification ticket ---
-            let has_remaining = !delivery.updates.is_empty();
-            let prepared = if has_remaining {
-                delivery.prepare_notification(batch.server_generation, true)?
-            } else {
-                None
-            };
-
-            // --- Infallible commit phase ---
-            let removed_count = to_remove.len();
-            let attempt = prepared.map(|p| delivery.commit_notification(p));
-
-            // Release delivery borrow before accessing state.queued_update_count.
-            state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
-
-            attempt
-        };
-
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn attach_update_callback(
-        &self,
-        server_generation: u64,
-        callback: NotificationCallback,
-    ) -> XllResult<()> {
-        let _operation = self.enter_operation(Some(server_generation))?;
-        let (retired, attempt) = {
-            let mut state = self.state.lock();
-
-            if state.closed
-                || state.terminating_servers.contains(&server_generation)
-                || state.terminated_servers.contains(&server_generation)
-            {
-                return Err(XllError::Closing);
-            }
-
-            let delivery = state.deliveries.entry(server_generation).or_default();
-
-            // --- Fallible phase: attach callback first (so prepare sees it),
-            //     then reserve notification ticket. On failure the callback is
-            //     still installed, which is correct: the only possible error is
-            //     ticket overflow (u64), unreachable in practice. ---
-            let retired = delivery.attach_callback(callback);
-            let prepared =
-                delivery.prepare_notification(server_generation, !delivery.updates.is_empty())?;
-
-            // --- Infallible commit phase ---
-            let attempt = prepared.map(|p| delivery.commit_notification(p));
-            (retired, attempt)
-        };
-
-        drop(retired);
-
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn detach_update_callback(&self, server_generation: u64) {
-        let retired = {
-            let mut state = self.state.lock();
-            state
-                .deliveries
-                .get_mut(&server_generation)
-                .and_then(ServerDeliveryState::detach_callback)
-        };
-        drop(retired);
-    }
-
-    pub(crate) fn pulse_notification(&self, server_generation: u64) {
-        let Ok(_operation) = self.enter_operation(Some(server_generation)) else {
-            return;
-        };
-        let attempt = {
-            let mut state = self.state.lock();
-            let Some(d) = state.deliveries.get_mut(&server_generation) else {
-                return;
-            };
-            d.reset_suppressed_signal();
-            match d.prepare_notification(server_generation, !d.updates.is_empty()) {
-                Ok(Some(prepared)) => Some(d.commit_notification(prepared)),
-                Ok(None) => None,
-                Err(error) => {
-                    crate::diagnostics::report_no_unwind("IRtdServer::Heartbeat rearm", &error);
+            if remove_pending {
+                let removed = catalog.pending.remove(key);
+                if let Some(removed) = removed {
+                    let bytes = removed.topic.byte_len();
+                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    Some(removed.source)
+                } else {
                     None
                 }
+            } else {
+                None
             }
         };
+
+        if let Some(source) = removed_source {
+            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5243,
+                }));
+            }
+        }
 
         if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
+            server.drive_notification(attempt);
         }
+
+        Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn pending_update_count(&self, server_generation: u64) -> usize {
-        let state = self.state.lock();
-        let state_ref = &*state;
-        if let Some(delivery) = state_ref.deliveries.get(&server_generation) {
-            delivery
-                .updates
-                .iter()
-                .filter(|(topic_id, _)| {
-                    state_ref
-                        .active
-                        .get(&TopicOwner {
-                            server_generation,
-                            topic_id: **topic_id,
-                        })
-                        .is_some_and(|active| active.committed)
-                })
-                .count()
-        } else {
-            0
-        }
-    }
-
-    pub(crate) fn terminate_server(
+    fn rollback_connection(
         &self,
-        server_generation: u64,
-    ) -> XllResult<SubscriptionOperation<'_>> {
-        let operation = self.enter_operation(None)?;
-        {
-            let mut state = self.state.lock();
-            if state.terminated_servers.contains(&server_generation) {
-                drop(state);
-                self.cleanup_result()?;
-                return Ok(operation);
-            }
-            if state.terminating_servers.contains(&server_generation) {
-                return Err(XllError::Closing);
-            }
-            state.terminating_servers.insert(server_generation);
-        }
+        server_handle: &RtdServerHandle,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        key: &SubscriptionKey,
+    ) {
+        let (subscription, _removed_update) = {
+            let mut state = server_handle.inner.state.lock();
+            let sub = state
+                .active_by_topic
+                .get_mut(&topic_id)
+                .filter(|a| a.generation == generation)
+                .and_then(|a| a.subscription.take());
 
-        let retired_delivery = {
-            let mut state = self.state.lock();
-            state.deliveries.remove(&server_generation)
-        };
-        if let Some(delivery) = retired_delivery {
-            let removed_count = delivery.updates.len();
-            let mut state = self.state.lock();
-            state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
-            drop(state);
-            drop(delivery.callback);
-        }
-
-        let (mut subscriptions, _removed_subscriptions) = {
-            let mut state = self.state.lock();
-            let subscriptions = state
-                .active
-                .iter_mut()
-                .filter_map(|(owner, active)| {
-                    if owner.server_generation != server_generation {
-                        return None;
-                    }
-                    let committed = active.committed;
-                    active
-                        .subscription
-                        .take()
-                        .map(|subscription| (*owner, active.key.clone(), committed, subscription))
-                })
-                .collect::<Vec<_>>();
-            let removed = subscriptions
-                .iter()
-                .filter(|(_, _, committed, _)| *committed)
-                .count();
-            let subscriptions = subscriptions
-                .into_iter()
-                .map(|(owner, key, _, subscription)| (owner, key, subscription))
-                .collect::<Vec<_>>();
-            (subscriptions, removed)
-        };
-        self.record_cleanup_result(request_cancel_all_no_unwind(&subscriptions));
-
-        {
-            let mut state = self.state.lock();
-            while state
-                .in_flight_by_server
-                .get(&server_generation)
-                .is_some_and(|count| *count != 0)
+            if state
+                .active_by_topic
+                .get(&topic_id)
+                .is_some_and(|a| a.generation == generation)
             {
-                self.idle.wait(&mut state);
+                state.active_by_topic.remove(&topic_id);
+            }
+            if state
+                .topic_by_key
+                .get(key)
+                .is_some_and(|&tid| {
+                    state
+                        .active_by_topic
+                        .get(&tid)
+                        .is_none_or(|a| a.generation == generation)
+                })
+            {
+                state.topic_by_key.remove(key);
+            }
+
+            let rem_update = state.delivery.updates.remove(&topic_id);
+            (sub, rem_update)
+        };
+
+        let removed_source = {
+            let mut catalog = self.catalog.lock();
+            if catalog
+                .active_keys
+                .get(key)
+                .is_some_and(|b| b.connection_generation == generation)
+            {
+                catalog.active_keys.remove(key);
+            }
+
+            if let Some(pending) = catalog
+                .pending
+                .get_mut(key)
+                .filter(|p| p.connecting_generation == Some(generation))
+            {
+                pending.connecting_generation = None;
+            }
+
+            let remove_pending = catalog.pending.get(key).is_some_and(|p| {
+                p.live_reservations == 0 && !p.committed && p.connecting_generation.is_none()
+            });
+
+            if remove_pending {
+                let removed = catalog.pending.remove(key);
+                if let Some(removed) = removed {
+                    let bytes = removed.topic.byte_len();
+                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    Some(removed.source)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(sub) = subscription {
+            let res = catch_unwind(AssertUnwindSafe(|| sub.disconnect_and_wait()));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4344_4953,
+                }));
             }
         }
 
-        let (late_subscriptions, removed_pending, _late_removed_subscriptions) = {
-            let mut state = self.state.lock();
-            let pending_keys = state
-                .pending
-                .iter()
-                .filter(|(_, pending)| pending.server_generation == Some(server_generation))
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            let removed_pending = pending_keys
-                .into_iter()
-                .filter_map(|key| Self::remove_pending(&mut state, &key))
-                .collect::<Vec<_>>();
-            let owners = state
-                .active
-                .keys()
-                .filter(|owner| owner.server_generation == server_generation)
-                .copied()
-                .collect::<Vec<_>>();
-            let late_subscriptions = owners
-                .into_iter()
-                .filter_map(|owner| {
-                    if state
-                        .deliveries
-                        .get_mut(&owner.server_generation)
-                        .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
-                    {
-                        state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                    }
-                    let active = state.active.remove(&owner)?;
-                    state.topic_ids.remove(&active.key);
-                    active
-                        .subscription
-                        .map(|subscription| (owner, active.key, active.committed, subscription))
-                })
-                .collect::<Vec<_>>();
-            let late_removed = late_subscriptions
-                .iter()
-                .filter(|(_, _, committed, _)| *committed)
-                .count();
-            let late_subscriptions = late_subscriptions
-                .into_iter()
-                .map(|(owner, key, _, subscription)| (owner, key, subscription))
-                .collect::<Vec<_>>();
-            (late_subscriptions, removed_pending, late_removed)
-        };
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            removed_pending,
-            "rtd_termination_pending_source_drop",
-        ));
-        self.record_cleanup_result(request_cancel_all_no_unwind(&late_subscriptions));
-        subscriptions.extend(late_subscriptions);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        for _ in 0..(_removed_subscriptions + _late_removed_subscriptions) {
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+        if let Some(source) = removed_source {
+            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5243,
+                }));
+            }
         }
-        self.record_cleanup_result(disconnect_all_no_unwind(subscriptions));
+    }
 
-        let mut state = self.state.lock();
-        state.terminating_servers.remove(&server_generation);
-        state.terminated_servers.insert(server_generation);
-        self.idle.notify_all();
-        drop(state);
-        self.cleanup_result()?;
-        Ok(operation)
+    pub(crate) fn disconnect(&self, server_handle: &RtdServerHandle, topic_id: TopicId) {
+        let (subscription, key_to_clean, conn_gen) = {
+            let mut state = server_handle.inner.state.lock();
+            let Some((tid, active)) = state.active_by_topic.remove_entry(&topic_id) else {
+                return;
+            };
+            state.topic_by_key.remove(&active.key);
+            state.delivery.updates.remove(&tid);
+            (active.subscription, active.key, active.generation)
+        };
+
+        let removed_source = {
+            let mut catalog = self.catalog.lock();
+            if catalog
+                .active_keys
+                .get(&key_to_clean)
+                .is_some_and(|b| b.connection_generation == conn_gen)
+            {
+                catalog.active_keys.remove(&key_to_clean);
+            }
+
+            let remove_pending = catalog.pending.get(&key_to_clean).is_some_and(|p| {
+                p.live_reservations == 0 && p.connecting_generation.is_none()
+            });
+
+            if remove_pending {
+                let removed = catalog.pending.remove(&key_to_clean);
+                if let Some(removed) = removed {
+                    let bytes = removed.topic.byte_len();
+                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    Some(removed.source)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(sub) = subscription {
+            let res = catch_unwind(AssertUnwindSafe(|| sub.disconnect_and_wait()));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4344_4953,
+                }));
+            }
+        }
+
+        if let Some(source) = removed_source {
+            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5243,
+                }));
+            }
+        }
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
-        let (mut subscriptions, _removed_subscriptions) = {
-            let mut state = self.state.lock();
-            state.closed = true;
-            let subscriptions = state
-                .active
-                .iter_mut()
-                .filter_map(|(owner, active)| {
-                    let committed = active.committed;
-                    active
-                        .subscription
-                        .take()
-                        .map(|subscription| (*owner, active.key.clone(), committed, subscription))
-                })
-                .collect::<Vec<_>>();
-            let removed = subscriptions
-                .iter()
-                .filter(|(_, _, committed, _)| *committed)
-                .count();
-            let subscriptions = subscriptions
-                .into_iter()
-                .map(|(owner, key, _, subscription)| (owner, key, subscription))
-                .collect::<Vec<_>>();
-            (subscriptions, removed)
-        };
-        let retired_deliveries = {
-            let mut state = self.state.lock();
-            let deliveries = std::mem::take(&mut state.deliveries);
-            state.queued_update_count = 0;
-            deliveries
-        };
-        drop(retired_deliveries);
-        self.record_cleanup_result(request_cancel_all_no_unwind(&subscriptions));
+        let _ = self.runtime_gate.close_and_wait();
 
-        let (late_subscriptions, removed_pending, _late_removed_subscriptions) = {
-            let mut state = self.state.lock();
-            while state.in_flight != 0 {
-                self.idle.wait(&mut state);
-            }
-            let removed_pending = std::mem::take(&mut state.pending);
-            state.pending_topic_bytes = 0;
-            state.topic_ids.clear();
-            state.deliveries.clear();
-            state.queued_update_count = 0;
-            state.source_ids.clear();
-            state.in_flight_by_server.clear();
-            state.terminating_servers.clear();
-            state.terminated_servers.clear();
-            let late_subscriptions = state
-                .active
-                .drain()
-                .filter_map(|(owner, active)| {
-                    active
-                        .subscription
-                        .map(|subscription| (owner, active.key, active.committed, subscription))
-                })
-                .collect::<Vec<_>>();
-            let late_removed = late_subscriptions
-                .iter()
-                .filter(|(_, _, committed, _)| *committed)
-                .count();
-            let late_subscriptions = late_subscriptions
-                .into_iter()
-                .map(|(owner, key, _, subscription)| (owner, key, subscription))
-                .collect::<Vec<_>>();
-            (late_subscriptions, removed_pending, late_removed)
+        let server_handles = {
+            let servers = self.servers.lock();
+            servers.values().cloned().collect::<Vec<_>>()
         };
-        self.record_cleanup_result(drop_pending_subscriptions_no_unwind(
-            removed_pending.into_values(),
-            "rtd_close_pending_source_drop",
-        ));
-        self.record_cleanup_result(request_cancel_all_no_unwind(&late_subscriptions));
-        subscriptions.extend(late_subscriptions);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        for _ in 0..(_removed_subscriptions + _late_removed_subscriptions) {
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+
+        for server in &server_handles {
+            let handle = RtdServerHandle {
+                inner: Arc::clone(server),
+            };
+            let _ = handle.terminate();
         }
-        self.record_cleanup_result(disconnect_all_no_unwind(subscriptions));
+
+        let pending_sources = {
+            let mut catalog = self.catalog.lock();
+            catalog.active_keys.clear();
+            catalog.source_ids.clear();
+            catalog.pending_topic_bytes = 0;
+            catalog
+                .pending
+                .drain()
+                .map(|(_, pending)| pending.source)
+                .collect::<Vec<_>>()
+        };
+
+        for source in pending_sources {
+            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if res.is_err() {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: 0x5041_4e49_4353_5243,
+                }));
+            }
+        }
 
         self.cleanup_result()
     }
+}
 
-    fn publish(&self, owner: TopicOwner, generation: u64, value: RtdValue) -> XllResult<()> {
-        let _operation = self.enter_operation(Some(owner.server_generation))?;
-        let attempt = {
-            let mut state = self.state.lock();
-            if state.closed
-                || state.terminating_servers.contains(&owner.server_generation)
-                || state.terminated_servers.contains(&owner.server_generation)
-            {
-                return Err(XllError::Closing);
-            }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparationOwnership {
+    CreatedPending,
+    ExistingPending,
+    ExistingActive,
+}
 
-            // Read active fields then release the borrow on `state.active`.
-            let is_committed = {
-                let active = state
-                    .active
-                    .get(&owner)
-                    .filter(|active| active.generation == generation)
-                    .ok_or(XllError::Closing)?;
-                active.committed
-            };
+pub(crate) struct PreparedSubscription {
+    runtime: Weak<SubscriptionRuntime>,
+    key: SubscriptionKey,
+    reservation_id: Option<u64>,
+    ownership: PreparationOwnership,
+}
 
-            let is_new_topic = !state
-                .deliveries
-                .get(&owner.server_generation)
-                .is_some_and(|d| d.updates.contains_key(&owner.topic_id));
+impl PreparedSubscription {
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
 
-            if is_new_topic && state.queued_update_count >= self.limits.max_queued_updates {
-                return Err(XllError::Overloaded);
-            }
+    pub(crate) fn commit(mut self) {
+        self.finish(true);
+    }
 
-            let delivery = state.deliveries.entry(owner.server_generation).or_default();
+    pub(crate) fn rollback(mut self) {
+        self.finish(false);
+    }
 
-            // --- Fallible phase: reserve IDs and notification ticket ---
-            let sequence = delivery.allocate_update_sequence()?;
-            let prepared = if is_committed {
-                delivery.prepare_notification(owner.server_generation, true)?
-            } else {
-                None
-            };
-
-            // --- Infallible commit phase: mutate state ---
-            delivery.updates.insert(
-                owner.topic_id,
-                QueuedUpdate {
-                    sequence,
-                    value: value.clone(),
-                },
-            );
-            let attempt = prepared.map(|p| delivery.commit_notification(p));
-
-            // Update active.latest and queued_update_count after releasing
-            // the delivery borrow.
-            if let Some(active) = state.active.get_mut(&owner) {
-                active.latest = value;
-            }
-            if is_new_topic {
-                state.queued_update_count += 1;
-            }
-
-            attempt
-        };
-
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
+    fn finish(&mut self, committed: bool) {
+        if self.ownership == PreparationOwnership::ExistingActive {
+            debug_assert!(self.reservation_id.is_none());
+            return;
         }
+        let Some(reservation_id) = self.reservation_id.take() else {
+            return;
+        };
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.finish_preparation(&self.key, reservation_id, committed);
+        }
+    }
+}
+
+impl Drop for PreparedSubscription {
+    fn drop(&mut self) {
+        self.finish(false);
+    }
+}
+
+pub(crate) struct SubscriptionConnection {
+    runtime: Weak<SubscriptionRuntime>,
+    server: Weak<ServerRuntime>,
+    topic_id: TopicId,
+    generation: ConnectionGeneration,
+    key: SubscriptionKey,
+    value: RtdValue,
+    observed_sequence: Option<u64>,
+    created: bool,
+    finished: bool,
+}
+
+impl SubscriptionConnection {
+    pub(crate) fn value(&self) -> &RtdValue {
+        &self.value
+    }
+
+    pub(crate) fn commit(mut self) -> XllResult<()> {
+        if self.finished {
+            return Ok(());
+        }
+        if self.created {
+            let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
+            let server = self.server.upgrade().ok_or(XllError::Closing)?;
+            runtime.commit_connection(
+                &server,
+                self.topic_id,
+                self.generation,
+                &self.key,
+                self.observed_sequence,
+            )?;
+        }
+        self.finished = true;
         Ok(())
     }
 
-    fn drive_notification(&self, mut attempt: NotificationAttempt) {
-        const MAX_ATTEMPTS: u8 = 3;
-        loop {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
-
-            let callback = Arc::clone(&attempt.callback);
-            let result = match catch_unwind(AssertUnwindSafe(|| callback())) {
-                Ok(res) => res,
-                Err(_) => Err(XllError::Panic),
-            };
-
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
-
-            match self.finish_notification_attempt(&attempt, result, MAX_ATTEMPTS) {
-                NotificationCompletion::Finished => return,
-                NotificationCompletion::Retry(next) => {
-                    std::thread::yield_now();
-                    attempt = next;
-                }
-                NotificationCompletion::Failed(error) => {
-                    crate::diagnostics::report_no_unwind("rtd_update_notify", &error);
-                    return;
-                }
-            }
+    fn rollback(&mut self) {
+        if self.finished {
+            return;
         }
-    }
-
-    fn finish_notification_attempt(
-        &self,
-        attempt: &NotificationAttempt,
-        result: XllResult<()>,
-        max_attempts: u8,
-    ) -> NotificationCompletion {
-        let mut state = self.state.lock();
-
-        let Some(delivery) = state.deliveries.get_mut(&attempt.server_generation) else {
-            return NotificationCompletion::Finished;
-        };
-
-        let callback = delivery.callback.clone();
-        let Some(signal) = delivery.signal_for_ticket_mut(attempt.ticket) else {
-            return NotificationCompletion::Finished;
-        };
-
-        match result {
-            Ok(()) => {
-                *signal = SignalState::Signaled {
-                    ticket: attempt.ticket,
-                };
-                NotificationCompletion::Finished
-            }
-            Err(_error) if attempt.attempt + 1 < max_attempts => {
-                let next_attempt = attempt.attempt + 1;
-                *signal = SignalState::Calling {
-                    ticket: attempt.ticket,
-                    attempt: next_attempt,
-                };
-                let Some(callback) = callback else {
-                    *signal = SignalState::Dormant;
-                    return NotificationCompletion::Finished;
-                };
-                NotificationCompletion::Retry(NotificationAttempt {
-                    server_generation: attempt.server_generation,
-                    ticket: attempt.ticket,
-                    attempt: next_attempt,
-                    callback,
-                })
-            }
-            Err(error) => {
-                *signal = SignalState::Suppressed {
-                    ticket: attempt.ticket,
-                };
-                NotificationCompletion::Failed(error)
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ErasedSink {
-    runtime: std::sync::Weak<SubscriptionRuntime>,
-    owner: TopicOwner,
-    generation: u64,
-}
-
-impl ErasedSink {
-    fn publish(&self, value: RtdValue) -> XllResult<()> {
-        self.runtime
-            .upgrade()
-            .ok_or(XllError::Closing)?
-            .publish(self.owner, self.generation, value)
-    }
-}
-
-type DisconnectTarget = (TopicOwner, String, Box<dyn RtdSubscription>);
-
-fn report_source_drop_panic(operation: &'static str) {
-    crate::diagnostics::report_no_unwind(operation, &XllError::Panic);
-}
-
-fn drop_erased_source_no_unwind(
-    source: Arc<dyn ErasedRtdSource>,
-    operation: &'static str,
-) -> XllResult<()> {
-    if catch_unwind(AssertUnwindSafe(|| drop(source))).is_err() {
-        report_source_drop_panic(operation);
-        Err(XllError::Panic)
-    } else {
-        Ok(())
-    }
-}
-
-fn drop_pending_subscriptions_no_unwind(
-    pending: impl IntoIterator<Item = PendingSubscription>,
-    operation: &'static str,
-) -> XllResult<()> {
-    let mut failure = None;
-    for pending in pending {
-        if catch_unwind(AssertUnwindSafe(|| drop(pending))).is_err() {
-            report_source_drop_panic(operation);
-            if failure.is_none() {
-                failure = Some(XllError::Panic);
-            }
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-fn report_disconnect_failure(
-    operation: &'static str,
-    owner: TopicOwner,
-    key: &str,
-    error: &XllError,
-) -> XllError {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        tracing::error!(
-            server_generation = owner.server_generation,
-            topic_id = owner.topic_id,
-            subscription_key = key,
-            error = %error,
-            "RTD subscription shutdown failed"
-        );
-    }));
-    let contextual = XllError::RtdSubscriptionShutdown {
-        server_generation: owner.server_generation,
-        topic_id: owner.topic_id,
-        key: key.to_owned(),
-        source: Box::new(error.clone()),
-    };
-    crate::diagnostics::report_no_unwind(operation, &contextual);
-    contextual
-}
-
-fn request_cancel_no_unwind(
-    subscription: &dyn RtdSubscription,
-    owner: TopicOwner,
-    key: &str,
-) -> XllResult<()> {
-    if catch_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err() {
-        Err(report_disconnect_failure(
-            "rtd_subscription_request_cancel",
-            owner,
-            key,
-            &XllError::Panic,
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn disconnect_wait_no_unwind(
-    subscription: Box<dyn RtdSubscription>,
-    owner: TopicOwner,
-    key: &str,
-) -> XllResult<()> {
-    match catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(report_disconnect_failure(
-            "rtd_subscription_disconnect",
-            owner,
-            key,
-            &error,
-        )),
-        Err(_) => Err(report_disconnect_failure(
-            "rtd_subscription_disconnect",
-            owner,
-            key,
-            &XllError::Panic,
-        )),
-    }
-}
-
-fn disconnect_one_no_unwind(
-    subscription: Box<dyn RtdSubscription>,
-    owner: TopicOwner,
-    key: &str,
-) -> XllResult<()> {
-    let cancellation = request_cancel_no_unwind(subscription.as_ref(), owner, key);
-    let disconnection = disconnect_wait_no_unwind(subscription, owner, key);
-    cancellation.and(disconnection)
-}
-
-fn request_cancel_all_no_unwind(subscriptions: &[DisconnectTarget]) -> XllResult<()> {
-    let mut failure = None;
-    for (owner, key, subscription) in subscriptions {
-        if let Err(error) = request_cancel_no_unwind(subscription.as_ref(), *owner, key)
-            && failure.is_none()
+        self.finished = true;
+        if self.created
+            && let (Some(runtime), Some(server)) = (self.runtime.upgrade(), self.server.upgrade())
         {
-            failure = Some(error);
+            let handle = RtdServerHandle { inner: server };
+            runtime.rollback_connection(&handle, self.topic_id, self.generation, &self.key);
         }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
     }
 }
 
-fn disconnect_all_no_unwind(subscriptions: Vec<DisconnectTarget>) -> XllResult<()> {
-    let mut failure = None;
-    for (owner, key, subscription) in subscriptions {
-        if let Err(error) = disconnect_wait_no_unwind(subscription, owner, &key)
-            && failure.is_none()
-        {
-            failure = Some(error);
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
+impl Drop for SubscriptionConnection {
+    fn drop(&mut self) {
+        self.rollback();
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::IntoExcelValue;
-    use static_assertions::assert_not_impl_any;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc::{self, TryRecvError};
-    use std::time::{Duration, Instant};
 
-    assert_not_impl_any!(crate::Matrix<f64>: IntoRtdValue);
-
-    fn wait_until(mut predicate: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !predicate() {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for concurrent RTD state"
-            );
-            std::thread::yield_now();
-        }
+    struct TestSubscription {
+        canceled: Arc<AtomicBool>,
+        disconnected: Arc<AtomicBool>,
     }
 
-    #[test]
-    fn observed_rtd_values_preserve_the_scalar_contract() {
-        assert_eq!(
-            RtdValue::try_from(crate::OwnedExcelValue::Number(12.5)).unwrap(),
-            RtdValue::Number(12.5)
-        );
-        assert_eq!(
-            RtdValue::try_from(crate::OwnedExcelValue::Blank).unwrap(),
-            RtdValue::Empty
-        );
-        assert_eq!(
-            RtdValue::Empty.into_excel_value().unwrap(),
-            crate::OwnedExcelValue::Blank
-        );
-
-        let matrix = crate::Matrix::new(1, 1, vec![crate::OwnedExcelValue::Number(1.0)]).unwrap();
-        assert!(matches!(
-            RtdValue::try_from(crate::OwnedExcelValue::Matrix(matrix)),
-            Err(XllError::Input {
-                argument: "RTD value",
-                reason: crate::InputError::Malformed("RTD values must be scalar"),
-            })
-        ));
-    }
-
-    struct TestSubscription(Arc<AtomicBool>);
-
-    // SAFETY: disconnect_and_wait ensures no background work accesses module code.
+    // SAFETY: TestSubscription performs no background thread work.
     unsafe impl RtdSubscription for TestSubscription {
-        fn request_cancel(&self) {}
+        fn request_cancel(&self) {
+            self.canceled.store(true, Ordering::Release);
+        }
 
         fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-            self.0.store(true, Ordering::Release);
+            self.disconnected.store(true, Ordering::Release);
             Ok(())
         }
     }
 
-    struct TestSource {
+    pub(crate) struct PublishingSource<T = RtdValue, F = fn() -> XllResult<()>> {
+        initial: Option<T>,
+        sink_slot: Arc<Mutex<Option<RtdSink<T>>>>,
+        canceled: Arc<AtomicBool>,
         disconnected: Arc<AtomicBool>,
+        on_subscribe: Option<F>,
     }
 
-    impl RtdSource for TestSource {
-        type Value = f64;
+    impl<T, F> RtdSource for PublishingSource<T, F>
+    where
+        T: IntoRtdValue + Clone + Send + Sync + 'static,
+        F: Fn() -> XllResult<()> + Send + Sync + 'static,
+    {
+        type Value = T;
 
         fn subscribe(
             &self,
             _topic: &RtdTopic,
             sink: RtdSink<Self::Value>,
         ) -> XllResult<Box<dyn RtdSubscription>> {
-            sink.publish(12.5)?;
-            Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-        }
-    }
-
-    pub(crate) type PublishingSink = Arc<Mutex<Option<RtdSink<f64>>>>;
-
-    pub(crate) struct PublishingSource {
-        sink: PublishingSink,
-        initial: Option<f64>,
-        disconnected: Arc<AtomicBool>,
-    }
-
-    impl RtdSource for PublishingSource {
-        type Value = f64;
-
-        fn subscribe(
-            &self,
-            _topic: &RtdTopic,
-            sink: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            if let Some(initial) = self.initial {
+            if let Some(on_sub) = &self.on_subscribe {
+                on_sub()?;
+            }
+            if let Some(initial) = self.initial.clone() {
                 sink.publish(initial)?;
             }
-            self.sink.lock().replace(sink);
-            Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
+            *self.sink_slot.lock() = Some(sink);
+            Ok(Box::new(TestSubscription {
+                canceled: Arc::clone(&self.canceled),
+                disconnected: Arc::clone(&self.disconnected),
+            }))
         }
     }
 
-    pub(crate) fn publishing_source(
-        initial: Option<f64>,
-    ) -> (Arc<PublishingSource>, PublishingSink, Arc<AtomicBool>) {
-        let sink = Arc::new(Mutex::new(None));
+    pub(crate) type PublishingSourceResult<T> = (
+        PublishingSource<T, fn() -> XllResult<()>>,
+        Arc<Mutex<Option<RtdSink<T>>>>,
+        Arc<AtomicBool>,
+    );
+
+    pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+        initial: Option<T>,
+    ) -> PublishingSourceResult<T> {
+        let slot = Arc::new(Mutex::new(None));
         let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(PublishingSource {
-            sink: Arc::clone(&sink),
+        let source = PublishingSource {
             initial,
+            sink_slot: Arc::clone(&slot),
+            canceled: Arc::new(AtomicBool::new(false)),
             disconnected: Arc::clone(&disconnected),
-        });
-        (source, sink, disconnected)
-    }
-
-    #[test]
-    fn synchronous_initial_publish_is_isolated_until_connection_commit() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(1, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("initial-isolation").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-
-        let connection = runtime.connect_transaction(1, 1, &key).unwrap();
-        assert_eq!(connection.value(), &RtdValue::Number(12.5));
-        assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.pending_update_count(1), 0);
-
-        connection.commit().unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.pending_update_count(1), 0);
-    }
-
-    #[test]
-    fn snapshot_updates_excludes_an_uncommitted_connection() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("snapshot-isolation").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-
-        let connection = runtime.connect_transaction(2, 2, &key).unwrap();
-        assert_eq!(runtime.pending_update_count(2), 0);
-        drop(connection);
-        assert_eq!(runtime.pending_update_count(2), 0);
-    }
-
-    #[test]
-    fn failed_initial_value_write_leaves_no_notification_history() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(3, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-        let (source, _sink, _disconnected) = publishing_source(Some(12.5));
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("failed-write").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-
-        let connection = runtime.connect_transaction(3, 3, &key).unwrap();
-        assert_eq!(connection.value(), &RtdValue::Number(12.5));
-        // Model ConnectData's failed VARIANT write: dropping the uncommitted
-        // connection must roll back the source and its queued initial value.
-        drop(connection);
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.pending_update_count(3), 0);
-        assert!(runtime.state.lock().active.is_empty());
-    }
-
-    #[test]
-    fn publish_before_commit_notifies_once_after_commit() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(4, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-        let (source, sink, _disconnected) = publishing_source(Some(12.5));
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("publish-before-commit").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-
-        let connection = runtime.connect_transaction(4, 4, &key).unwrap();
-        sink.lock()
-            .as_ref()
-            .expect("source captured the RTD sink")
-            .publish(13.5)
-            .unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.pending_update_count(4), 0);
-
-        connection.commit().unwrap();
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        let batch = runtime.begin_refresh(4).unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, RtdValue::Number(13.5));
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Delivered)
-            .unwrap();
-    }
-
-    #[test]
-    fn rtd_topic_limits_are_checked_before_subscription_admission() {
-        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-            max_topic_parts: 1,
-            max_topic_bytes: 3,
-            ..RtdLimits::standard()
-        }));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-
-        let too_many_parts = RtdTopic::new(["one", "two"]).unwrap();
-        assert!(matches!(
-            runtime.prepare(Arc::clone(&source), too_many_parts),
-            Err(XllError::Input {
-                reason: crate::InputError::TooLarge { .. },
-                ..
-            })
-        ));
-
-        let too_many_bytes = RtdTopic::single("four").unwrap();
-        assert!(matches!(
-            runtime.prepare(source, too_many_bytes),
-            Err(XllError::Input {
-                reason: crate::InputError::TooLarge { .. },
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn pending_and_active_rtd_quotas_are_released_by_transaction_cleanup() {
-        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-            max_pending: 1,
-            max_active: 1,
-            ..RtdLimits::standard()
-        }));
-        let first = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let second = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-
-        let pending = runtime
-            .prepare(Arc::clone(&first), RtdTopic::single("pending").unwrap())
-            .unwrap();
-        assert!(matches!(
-            runtime.prepare(Arc::clone(&first), RtdTopic::single("same-source").unwrap()),
-            Err(XllError::Overloaded)
-        ));
-        assert!(matches!(
-            runtime.prepare(Arc::clone(&second), RtdTopic::single("blocked").unwrap()),
-            Err(XllError::Overloaded)
-        ));
-        assert_eq!(runtime.state.lock().source_ids.len(), 1);
-        drop(pending);
-        let active_key = runtime
-            .prepare(Arc::clone(&first), RtdTopic::single("active").unwrap())
-            .unwrap();
-        let active_key = active_key.key().to_owned();
-        runtime
-            .connect_transaction(1, 1, &active_key)
-            .unwrap()
-            .commit()
-            .unwrap();
-
-        let blocked_key = runtime
-            .prepare(second, RtdTopic::single("blocked").unwrap())
-            .unwrap();
-        let blocked_key = blocked_key.key().to_owned();
-        let preparation = match runtime.connect_transaction(1, 2, &blocked_key) {
-            Ok(_) => panic!("active RTD quota unexpectedly admitted a second stream"),
-            Err(error) => error,
+            on_subscribe: None,
         };
-        assert!(matches!(preparation, XllError::Overloaded));
-
-        runtime.disconnect(1, 1);
-        runtime
-            .connect_transaction(1, 2, &blocked_key)
-            .unwrap()
-            .commit()
-            .unwrap();
+        (source, slot, disconnected)
     }
 
     #[test]
-    fn aggregate_pending_topic_bytes_are_released_with_the_pending_entry() {
-        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-            max_total_topic_bytes: 3,
-            ..RtdLimits::standard()
-        }));
-        let first = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
+    fn server_publish_isolation() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
+        let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
+        let (source_b, sink_b, _) = publishing_source(Some(2.0f64));
+
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a").unwrap())
+            .unwrap();
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b").unwrap())
+            .unwrap();
+
+        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_a.commit();
+        prep_b.commit();
+
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let _sink_a = sink_a.lock().clone().unwrap();
+        let sink_b = sink_b.lock().clone().unwrap();
+
+        let lock_guard = server_a.inner.state.lock();
+
+        let b_published = Arc::new(AtomicBool::new(false));
+        let b_published_clone = Arc::clone(&b_published);
+        let handle_b = std::thread::spawn(move || {
+            sink_b.publish(100.0).unwrap();
+            b_published_clone.store(true, Ordering::Release);
         });
-        let second = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let pending = runtime
-            .prepare(Arc::clone(&first), RtdTopic::single("one").unwrap())
-            .unwrap();
-        assert!(matches!(
-            runtime.prepare(Arc::clone(&second), RtdTopic::single("two").unwrap()),
-            Err(XllError::Overloaded)
-        ));
-        drop(pending);
-        let released = runtime
-            .prepare(second, RtdTopic::single("two").unwrap())
-            .unwrap();
-        released.rollback();
-    }
 
-    struct ReentrantDropSource {
-        runtime: Weak<SubscriptionRuntime>,
-        dropped: mpsc::SyncSender<()>,
-    }
-
-    impl Drop for ReentrantDropSource {
-        fn drop(&mut self) {
-            if let Some(runtime) = self.runtime.upgrade() {
-                runtime.detach_update_callback(9_999);
-            }
-            self.dropped.send(()).unwrap();
-        }
-    }
-
-    impl RtdSource for ReentrantDropSource {
-        type Value = f64;
-
-        fn subscribe(
-            &self,
-            _topic: &RtdTopic,
-            _sink: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            panic!("pending-only reentrant Drop source must not be subscribed")
-        }
-    }
-
-    fn reentrant_drop_source(
-        runtime: &Arc<SubscriptionRuntime>,
-    ) -> (Arc<ReentrantDropSource>, mpsc::Receiver<()>) {
-        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
-        (
-            Arc::new(ReentrantDropSource {
-                runtime: Arc::downgrade(runtime),
-                dropped: dropped_tx,
-            }),
-            dropped_rx,
-        )
-    }
-
-    struct PanickingDropSource {
-        dropped: Arc<AtomicBool>,
-    }
-
-    impl Drop for PanickingDropSource {
-        fn drop(&mut self) {
-            self.dropped.store(true, Ordering::Release);
-            panic!("injected RTD source drop panic");
-        }
-    }
-
-    impl RtdSource for PanickingDropSource {
-        type Value = f64;
-
-        fn subscribe(
-            &self,
-            _topic: &RtdTopic,
-            sink: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            sink.publish(17.0)?;
-            Ok(Box::new(TestSubscription(Arc::new(AtomicBool::new(false)))))
-        }
-    }
-
-    fn panicking_drop_source(dropped: &Arc<AtomicBool>) -> Arc<PanickingDropSource> {
-        Arc::new(PanickingDropSource {
-            dropped: Arc::clone(dropped),
-        })
-    }
-
-    struct BlockingFailSource {
-        entered: mpsc::SyncSender<()>,
-        release: Mutex<mpsc::Receiver<()>>,
-    }
-
-    impl RtdSource for BlockingFailSource {
-        type Value = f64;
-
-        fn subscribe(
-            &self,
-            _topic: &RtdTopic,
-            _sink: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            self.entered.send(()).unwrap();
-            self.release
-                .lock()
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap();
-            Err(XllError::Domain {
-                code: crate::DomainErrorCode::NativeFailure,
-            })
-        }
+        handle_b.join().unwrap();
+        assert!(b_published.load(Ordering::Acquire));
+        drop(lock_guard);
     }
 
     #[test]
-    fn source_lifecycle_and_updates_are_independent_from_handles() {
+    fn notification_callback_isolation() {
         let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        });
-        let key = runtime
-            .prepare(source, RtdTopic::single("EURUSD").unwrap())
-            .unwrap();
-        let initial = runtime.connect(1, 7, key.key()).unwrap();
-        assert_eq!(initial, RtdValue::Number(12.5));
-        assert_eq!(runtime.pending_update_count(1), 0);
-        runtime.disconnect(1, 7);
-        assert!(disconnected.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn failed_observation_preserves_an_existing_active_subscription() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        });
-        let topic = RtdTopic::single("rollback").unwrap();
-        let created = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        runtime.connect(1, 8, created.key()).unwrap();
-        let existing = runtime.prepare(source, topic).unwrap();
-        assert_eq!(existing.ownership(), PreparationOwnership::ExistingActive);
-
-        existing.rollback();
-
-        let state = runtime.state.lock();
-        assert_eq!(state.active.len(), 1);
-        assert_eq!(state.queued_update_count, 0);
-        assert!(state.topic_ids.contains_key(created.key()));
-        drop(state);
-        assert!(!disconnected.load(Ordering::Acquire));
-
-        runtime.disconnect(1, 8);
-        assert!(disconnected.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn failed_observation_preserves_an_existing_pending_subscription() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let source = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let topic = RtdTopic::single("shared-pending").unwrap();
-        let created = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let existing = runtime.prepare(source, topic).unwrap();
-        assert_eq!(created.ownership(), PreparationOwnership::CreatedPending);
-        assert_eq!(existing.ownership(), PreparationOwnership::ExistingPending);
-
-        existing.rollback();
-
-        let state = runtime.state.lock();
-        assert!(state.pending.contains_key(created.key()));
-        assert!(state.active.is_empty());
-        assert!(state.topic_ids.is_empty());
-        drop(state);
-
-        created.rollback();
-        assert!(runtime.state.lock().pending.is_empty());
-    }
-
-    #[test]
-    fn creator_failure_does_not_invalidate_a_later_pending_observer() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        });
-        let topic = RtdTopic::single("creator-fails-first").unwrap();
-        let creator = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let observer = runtime.prepare(source, topic).unwrap();
-        let key = observer.key().to_owned();
-
-        creator.rollback();
-
-        {
-            let state = runtime.state.lock();
-            let pending = state
-                .pending
-                .get(&key)
-                .expect("observer retains the pending");
-            assert_eq!(pending.live_reservations, 1);
-            assert!(!pending.committed);
-        }
-        assert_eq!(
-            runtime.connect(7, 23, &key).unwrap(),
-            RtdValue::Number(12.5)
-        );
-        observer.commit();
-        assert!(!disconnected.load(Ordering::Acquire));
-        runtime.disconnect(7, 23);
-        assert!(disconnected.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn pending_creator_rollback_and_shared_connect_are_linearizable() {
-        for iteration in 0..64 {
-            let runtime = Arc::new(SubscriptionRuntime::new());
-            let source = Arc::new(TestSource {
-                disconnected: Arc::new(AtomicBool::new(false)),
-            });
-            let topic = RtdTopic::single(format!("parallel-{iteration}")).unwrap();
-            let creator = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-            let observer = runtime.prepare(source, topic).unwrap();
-            let key = observer.key().to_owned();
-            let barrier = Arc::new(std::sync::Barrier::new(3));
-
-            let rollback_barrier = Arc::clone(&barrier);
-            let rollback = std::thread::spawn(move || {
-                rollback_barrier.wait();
-                creator.rollback();
-            });
-            let connecting_runtime = Arc::clone(&runtime);
-            let connect_barrier = Arc::clone(&barrier);
-            let connect = std::thread::spawn(move || {
-                connect_barrier.wait();
-                let result = connecting_runtime.connect(9, 24, &key);
-                observer.commit();
-                result
-            });
-
-            barrier.wait();
-            rollback.join().unwrap();
-            assert_eq!(connect.join().unwrap().unwrap(), RtdValue::Number(12.5));
-            runtime.disconnect(9, 24);
-        }
-    }
-
-    #[test]
-    fn failed_connect_applies_rollbacks_recorded_while_subscribe_is_in_flight() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let source = Arc::new(BlockingFailSource {
-            entered: entered_tx,
-            release: Mutex::new(release_rx),
-        });
-        let topic = RtdTopic::single("in-flight-rollbacks").unwrap();
-        let creator = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let observer = runtime.prepare(source, topic).unwrap();
-        let key = observer.key().to_owned();
-        let connecting_runtime = Arc::clone(&runtime);
-        let connecting_key = key.clone();
-        let connecting =
-            std::thread::spawn(move || connecting_runtime.connect(11, 25, &connecting_key));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        creator.rollback();
-        observer.rollback();
-        {
-            let state = runtime.state.lock();
-            let pending = state
-                .pending
-                .get(&key)
-                .expect("connecting placeholder remains installed");
-            assert_eq!(pending.live_reservations, 0);
-            assert!(!pending.committed);
-            assert!(pending.connecting_generation.is_some());
-        }
-
-        release_tx.send(()).unwrap();
-        assert!(matches!(
-            connecting.join().unwrap(),
-            Err(XllError::Domain {
-                code: crate::DomainErrorCode::NativeFailure
-            })
-        ));
-        assert!(!runtime.state.lock().pending.contains_key(&key));
-    }
-
-    #[test]
-    fn failed_connect_applies_commit_recorded_while_subscribe_is_in_flight() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let source = Arc::new(BlockingFailSource {
-            entered: entered_tx,
-            release: Mutex::new(release_rx),
-        });
-        let topic = RtdTopic::single("in-flight-commit").unwrap();
-        let committed = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let failed = runtime.prepare(source, topic).unwrap();
-        let key = committed.key().to_owned();
-        let connecting_runtime = Arc::clone(&runtime);
-        let connecting_key = key.clone();
-        let connecting =
-            std::thread::spawn(move || connecting_runtime.connect(12, 26, &connecting_key));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        committed.commit();
-        failed.rollback();
-        release_tx.send(()).unwrap();
-        assert!(connecting.join().unwrap().is_err());
-
-        let state = runtime.state.lock();
-        let pending = state
-            .pending
-            .get(&key)
-            .expect("a committed observation keeps the pending retryable");
-        assert_eq!(pending.live_reservations, 0);
-        assert!(pending.committed);
-        assert!(pending.connecting_generation.is_none());
-    }
-
-    #[test]
-    fn concurrent_connect_does_not_observe_an_uncommitted_placeholder() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let source = Arc::new(BlockingFailSource {
-            entered: entered_tx,
-            release: Mutex::new(release_rx),
-        });
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("single-flight-owner").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        let connecting_runtime = Arc::clone(&runtime);
-        let connecting_key = key.clone();
-        let connecting =
-            std::thread::spawn(move || connecting_runtime.connect(13, 27, &connecting_key));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        assert!(matches!(
-            runtime.connect(13, 27, &key),
-            Err(XllError::Overloaded)
-        ));
-
-        release_tx.send(()).unwrap();
-        assert!(matches!(
-            connecting.join().unwrap(),
-            Err(XllError::Domain {
-                code: crate::DomainErrorCode::NativeFailure
-            })
-        ));
-        drop(prepared);
-    }
-
-    #[test]
-    fn uncommitted_connection_rolls_back_to_a_retryable_pending_subscription() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let prepared = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("transaction-rollback").unwrap(),
-            )
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-
-        let connection = runtime.connect_transaction(14, 28, &key).unwrap();
-        assert_eq!(connection.value(), &RtdValue::Number(12.5));
-        drop(connection);
-
-        assert!(disconnected.load(Ordering::Acquire));
-        {
-            let state = runtime.state.lock();
-            assert!(state.active.is_empty());
-            let pending = state
-                .pending
-                .get(&key)
-                .expect("committed observation remains retryable");
-            assert!(pending.committed);
-            assert!(pending.connecting_generation.is_none());
-        }
-
-        let retry = runtime.connect_transaction(14, 28, &key).unwrap();
-        retry.commit().unwrap();
-        let state = runtime.state.lock();
-        assert!(state.pending.is_empty());
-        assert!(
-            state
-                .active
-                .values()
-                .all(|active| active.committed && active.subscription.is_some())
-        );
-    }
-
-    #[test]
-    fn failed_repeated_connection_preserves_the_existing_subscription() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let prepared = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("existing-transaction").unwrap(),
-            )
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime
-            .connect_transaction(15, 29, &key)
-            .unwrap()
-            .commit()
-            .unwrap();
-
-        let repeated = runtime.connect_transaction(15, 29, &key).unwrap();
-        assert_eq!(repeated.value(), &RtdValue::Number(12.5));
-        drop(repeated);
-
-        assert!(!disconnected.load(Ordering::Acquire));
-        assert_eq!(runtime.state.lock().active.len(), 1);
-        runtime.disconnect(15, 29);
-        assert!(disconnected.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn abandoned_pending_leases_release_only_the_last_uncommitted_entry() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let source = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let topic = RtdTopic::single("abandoned-leases").unwrap();
-        let first = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let key = first.key().to_owned();
-        let second = runtime.prepare(source, topic).unwrap();
-
-        drop(first);
-        assert_eq!(runtime.state.lock().pending[&key].live_reservations, 1);
-        drop(second);
-        assert!(!runtime.state.lock().pending.contains_key(&key));
-    }
-
-    #[test]
-    fn one_committed_observation_retains_pending_after_other_leases_fail() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let source = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let topic = RtdTopic::single("committed-pending").unwrap();
-        let committed = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let key = committed.key().to_owned();
-        let failed = runtime.prepare(source, topic).unwrap();
-
-        committed.commit();
-        failed.rollback();
-
-        let state = runtime.state.lock();
-        let pending = state
-            .pending
-            .get(&key)
-            .expect("committed pending is durable");
-        assert_eq!(pending.live_reservations, 0);
-        assert!(pending.committed);
-    }
-
-    #[test]
-    fn last_pending_rollback_drops_user_source_after_unlock_for_reentry() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, dropped) = reentrant_drop_source(&runtime);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("drop-on-rollback").unwrap())
-            .unwrap();
-
-        prepared.rollback();
-
-        dropped.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(runtime.state.lock().pending.is_empty());
-    }
-
-    #[test]
-    fn termination_drops_pending_user_source_after_unlock_for_reentry() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, dropped) = reentrant_drop_source(&runtime);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("drop-on-terminate").unwrap())
-            .unwrap();
-        runtime.claim_server(prepared.key(), 61).unwrap();
-
-        drop(runtime.terminate_server(61).unwrap());
-
-        dropped.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(!runtime.state.lock().pending.contains_key(prepared.key()));
-    }
-
-    #[test]
-    fn close_drops_pending_user_source_after_unlock_for_reentry() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, dropped) = reentrant_drop_source(&runtime);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("drop-on-close").unwrap())
-            .unwrap();
-
-        runtime.close().unwrap();
-
-        dropped.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(runtime.state.lock().closed);
-        assert!(!runtime.state.lock().pending.contains_key(prepared.key()));
-    }
-
-    #[test]
-    fn last_pending_rollback_contains_a_panicking_source_drop() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let prepared = runtime
-            .prepare(
-                panicking_drop_source(&dropped),
-                RtdTopic::single("panic-drop-on-rollback").unwrap(),
-            )
-            .unwrap();
-
-        prepared.rollback();
-
-        assert!(dropped.load(Ordering::Acquire));
-        assert!(runtime.state.lock().pending.is_empty());
-        assert!(matches!(runtime.cleanup_result(), Err(XllError::Panic)));
-    }
-
-    #[test]
-    fn termination_contains_a_panicking_pending_source_drop() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let prepared = runtime
-            .prepare(
-                panicking_drop_source(&dropped),
-                RtdTopic::single("panic-drop-on-terminate").unwrap(),
-            )
-            .unwrap();
-        runtime.claim_server(prepared.key(), 62).unwrap();
-
-        assert!(matches!(runtime.terminate_server(62), Err(XllError::Panic)));
-
-        assert!(dropped.load(Ordering::Acquire));
-        let state = runtime.state.lock();
-        assert!(!state.terminating_servers.contains(&62));
-        assert!(state.terminated_servers.contains(&62));
-        assert!(!state.pending.contains_key(prepared.key()));
-    }
-
-    #[test]
-    fn close_contains_each_panicking_pending_source_drop() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let first_dropped = Arc::new(AtomicBool::new(false));
-        let second_dropped = Arc::new(AtomicBool::new(false));
-        let first = runtime
-            .prepare(
-                panicking_drop_source(&first_dropped),
-                RtdTopic::single("first-panic-drop-on-close").unwrap(),
-            )
-            .unwrap();
-        let second = runtime
-            .prepare(
-                panicking_drop_source(&second_dropped),
-                RtdTopic::single("second-panic-drop-on-close").unwrap(),
-            )
-            .unwrap();
-        first.commit();
-        second.commit();
-
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
-
-        assert!(first_dropped.load(Ordering::Acquire));
-        assert!(second_dropped.load(Ordering::Acquire));
-        let state = runtime.state.lock();
-        assert!(state.closed);
-        assert!(state.pending.is_empty());
-    }
-
-    #[test]
-    fn connect_contains_the_final_source_drop_panic() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let prepared = runtime
-            .prepare(
-                panicking_drop_source(&dropped),
-                RtdTopic::single("panic-drop-after-connect").unwrap(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            runtime.connect(63, 27, prepared.key()).unwrap(),
-            RtdValue::Number(17.0)
-        );
-
-        assert!(dropped.load(Ordering::Acquire));
-        assert_eq!(runtime.state.lock().active.len(), 1);
-        runtime.disconnect(63, 27);
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
-    }
-
-    #[test]
-    fn failed_observation_preserves_a_new_subscription_after_connect_owns_it() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        });
-        let created = runtime
-            .prepare(source, RtdTopic::single("owned-active").unwrap())
-            .unwrap();
-        runtime.connect(4, 21, created.key()).unwrap();
-
-        created.rollback();
-
-        let state = runtime.state.lock();
-        assert!(state.pending.is_empty());
-        assert_eq!(state.active.len(), 1);
-        assert_eq!(state.queued_update_count, 0);
-        assert_eq!(state.topic_ids.len(), 1);
-        drop(state);
-        assert!(!disconnected.load(Ordering::Acquire));
-
-        runtime.disconnect(4, 21);
-        assert!(disconnected.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn stale_sink_cannot_publish_after_disconnect() {
-        struct CapturingSource {
-            sink: Arc<Mutex<Option<RtdSink<f64>>>>,
-            disconnected: Arc<AtomicBool>,
-        }
-
-        impl RtdSource for CapturingSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                *self.sink.lock() = Some(sink);
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let sink = Arc::new(Mutex::new(None));
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let key = runtime
-            .prepare(
-                Arc::new(CapturingSource {
-                    sink: Arc::clone(&sink),
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("job-1").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(1, 9, key.key()).unwrap();
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-        runtime.disconnect(1, 9);
-        assert!(disconnected.load(Ordering::Acquire));
-        assert!(matches!(sink.publish(2.0), Err(XllError::Closing)));
-    }
-
-    #[test]
-    fn invalid_scalar_is_rejected_before_subscription_state_changes() {
-        struct InvalidSource;
-
-        impl RtdSource for InvalidSource {
-            type Value = String;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                sink.publish("x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1))?;
-                Ok(Box::new(TestSubscription(Arc::new(AtomicBool::new(false)))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let key = runtime
-            .prepare(
-                Arc::new(InvalidSource),
-                RtdTopic::single("invalid").unwrap(),
-            )
-            .unwrap();
-
-        assert!(runtime.connect(1, 5, key.key()).is_err());
-        let state = runtime.state.lock();
-        assert!(state.active.is_empty());
-        assert!(state.deliveries.is_empty());
-        assert!(state.pending.contains_key(key.key()));
-    }
-
-    #[test]
-    fn committing_a_snapshot_preserves_a_newer_update() {
-        struct CapturingSource {
-            sink: Arc<Mutex<Option<RtdSink<f64>>>>,
-        }
-
-        impl RtdSource for CapturingSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                *self.sink.lock() = Some(sink);
-                Ok(Box::new(TestSubscription(Arc::new(AtomicBool::new(false)))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let sink = Arc::new(Mutex::new(None));
-        let key = runtime
-            .prepare(
-                Arc::new(CapturingSource {
-                    sink: Arc::clone(&sink),
-                }),
-                RtdTopic::single("transactional").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(1, 11, key.key()).unwrap();
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-        let first = runtime.begin_refresh(1).unwrap();
-        sink.publish(2.0).unwrap();
-
-        runtime
-            .complete_refresh(first, RefreshOutcome::Delivered)
-            .unwrap();
-
-        let remaining = runtime.begin_refresh(1).unwrap();
-        assert_eq!(remaining.updates.len(), 1);
-        assert_eq!(remaining.updates[0].value, RtdValue::Number(2.0));
-        runtime
-            .complete_refresh(remaining, RefreshOutcome::Delivered)
-            .unwrap();
-    }
-
-    #[test]
-    fn update_notify_failure_is_retried_and_reported() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let succeed = Arc::new(AtomicBool::new(false));
-
-        runtime
-            .attach_update_callback(1, {
-                let attempts = Arc::clone(&attempts);
-                let succeed = Arc::clone(&succeed);
-                Arc::new(move || {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    if succeed.load(Ordering::SeqCst) {
-                        Ok(())
-                    } else {
-                        Err(XllError::ExcelApi {
-                            function: "IRTDUpdateEvent::UpdateNotify",
-                            code: -2147467259, // E_FAIL
-                        })
-                    }
-                })
-            })
-            .unwrap();
-
-        let (source, sink, _disconnected) = publishing_source(None);
-        let key = runtime
-            .prepare(source, RtdTopic::single("notify-fail").unwrap())
-            .unwrap();
-        runtime.connect(1, 15, key.key()).unwrap();
-        sink.lock()
-            .as_ref()
-            .expect("source captured the RTD sink")
-            .publish(12.5)
-            .unwrap();
-
-        // A committed publication attempts bounded retries (3 times) and fails.
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-
-        // Verify pending updates remain in the queue
-        assert_eq!(runtime.pending_update_count(1), 1);
-
-        // Enable success and trigger retry via heartbeat / pulse_notification
-        succeed.store(true, Ordering::SeqCst);
-        runtime.pulse_notification(1);
-
-        // Succeeded on the 4th attempt
-        assert_eq!(attempts.load(Ordering::SeqCst), 4);
-    }
-
-    #[test]
-    fn replaced_notification_can_reenter_notification_registration_from_drop() {
-        struct ReentrantDrop {
-            runtime: Weak<SubscriptionRuntime>,
-            server_generation: u64,
-            dropped: mpsc::SyncSender<()>,
-        }
-
-        impl Drop for ReentrantDrop {
-            fn drop(&mut self) {
-                if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.detach_update_callback(self.server_generation);
-                }
-                self.dropped.send(()).unwrap();
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
-        let reentrant = ReentrantDrop {
-            runtime: Arc::downgrade(&runtime),
-            server_generation: 41,
-            dropped: dropped_tx,
-        };
-        runtime
-            .attach_update_callback(
-                41,
-                Arc::new(move || {
-                    let _keep_drop_live = &reentrant;
-                    Ok(())
-                }),
-            )
-            .unwrap();
-
-        runtime
-            .attach_update_callback(41, Arc::new(|| Ok(())))
-            .unwrap();
-
-        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    }
-
-    #[test]
-    fn close_drops_notification_callbacks_after_all_runtime_locks() {
-        struct ReentrantDrop {
-            runtime: Weak<SubscriptionRuntime>,
-            dropped: mpsc::SyncSender<()>,
-        }
-
-        impl Drop for ReentrantDrop {
-            fn drop(&mut self) {
-                if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.detach_update_callback(42);
-                    assert!(runtime.state.lock().closed);
-                }
-                self.dropped.send(()).unwrap();
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
-        let reentrant = ReentrantDrop {
-            runtime: Arc::downgrade(&runtime),
-            dropped: dropped_tx,
-        };
-        runtime
-            .attach_update_callback(
-                42,
-                Arc::new(move || {
-                    let _keep_drop_live = &reentrant;
-                    Ok(())
-                }),
-            )
-            .unwrap();
-
-        runtime.close().unwrap();
-
-        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    }
-
-    #[test]
-    fn termination_drops_notification_callback_after_notification_lock() {
-        struct ReentrantDrop {
-            runtime: Weak<SubscriptionRuntime>,
-            dropped: mpsc::SyncSender<()>,
-        }
-
-        impl Drop for ReentrantDrop {
-            fn drop(&mut self) {
-                if let Some(runtime) = self.runtime.upgrade() {
-                    runtime.detach_update_callback(43);
-                }
-                self.dropped.send(()).unwrap();
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
-        let reentrant = ReentrantDrop {
-            runtime: Arc::downgrade(&runtime),
-            dropped: dropped_tx,
-        };
-        runtime
-            .attach_update_callback(
-                43,
-                Arc::new(move || {
-                    let _keep_drop_live = &reentrant;
-                    Ok(())
-                }),
-            )
-            .unwrap();
-
-        drop(runtime.terminate_server(43).unwrap());
-
-        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(runtime.state.lock().terminated_servers.contains(&43));
-    }
-
-    #[test]
-    fn failed_refresh_can_renotify_without_consuming_the_batch() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(1, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-        let (source, sink, _disconnected) = publishing_source(None);
-        let key = runtime
-            .prepare(source, RtdTopic::single("retry-refresh").unwrap())
-            .unwrap();
-        runtime.connect(1, 12, key.key()).unwrap();
-        sink.lock()
-            .as_ref()
-            .expect("source captured the RTD sink")
-            .publish(12.5)
-            .unwrap();
-        let batch = runtime.begin_refresh(1).unwrap();
-
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Failed)
-            .unwrap();
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 2);
-        assert_eq!(runtime.pending_update_count(1), 1);
-    }
-
-    #[test]
-    fn repeated_prepare_reuses_stable_subscription_key() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        });
-        let topic = RtdTopic::single("EURUSD").unwrap();
-
-        let key1 = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let key2 = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-
-        assert_eq!(key1.key(), key2.key());
-    }
-
-    #[test]
-    fn failed_subscribe_can_be_retried_with_the_same_key() {
-        struct RetrySource {
-            attempts: Arc<AtomicUsize>,
-            disconnected: Arc<AtomicBool>,
-        }
-
-        impl RtdSource for RetrySource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(XllError::Domain {
-                        code: crate::DomainErrorCode::NativeFailure,
-                    });
-                }
-                sink.publish(42.0)?;
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let key = runtime
-            .prepare(
-                Arc::new(RetrySource {
-                    attempts: Arc::clone(&attempts),
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("retry").unwrap(),
-            )
-            .unwrap();
-
-        assert!(matches!(
-            runtime.connect(1, 7, key.key()),
-            Err(XllError::Domain {
-                code: crate::DomainErrorCode::NativeFailure
-            })
-        ));
-        assert_eq!(
-            runtime.connect(1, 7, key.key()).unwrap(),
-            RtdValue::Number(42.0)
-        );
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn panicking_subscribe_can_be_retried_with_the_same_key() {
-        struct PanicOnceSource {
-            attempts: Arc<AtomicUsize>,
-        }
-
-        impl RtdSource for PanicOnceSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    panic!("injected subscribe panic");
-                }
-                sink.publish(7.5)?;
-                Ok(Box::new(TestSubscription(Arc::new(AtomicBool::new(false)))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let key = runtime
-            .prepare(
-                Arc::new(PanicOnceSource {
-                    attempts: Arc::clone(&attempts),
-                }),
-                RtdTopic::single("panic-retry").unwrap(),
-            )
-            .unwrap();
-
-        assert!(matches!(
-            runtime.connect(1, 8, key.key()),
-            Err(XllError::Panic)
-        ));
-        assert_eq!(
-            runtime.connect(1, 8, key.key()).unwrap(),
-            RtdValue::Number(7.5)
-        );
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn topic_ids_cannot_be_reused_for_a_different_subscription() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let first = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("first").unwrap(),
-            )
-            .unwrap();
-        let second = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("second").unwrap(),
-            )
-            .unwrap();
-
-        runtime.connect(1, 7, first.key()).unwrap();
-        assert!(matches!(
-            runtime.connect(1, 7, second.key()),
-            Err(XllError::InvalidHandle)
-        ));
-        assert_eq!(runtime.state.lock().active.len(), 1);
-    }
-
-    #[test]
-    fn terminating_an_old_server_generation_preserves_new_topics() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let old_key = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("old").unwrap(),
-            )
-            .unwrap();
-        let new_key = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("new").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(1, 4, old_key.key()).unwrap();
-        runtime.connect(2, 4, new_key.key()).unwrap();
-
-        runtime.terminate_server(1).unwrap();
-
-        let state = runtime.state.lock();
-        assert!(!state.active.contains_key(&TopicOwner {
-            server_generation: 1,
-            topic_id: 4,
-        }));
-        assert!(state.active.contains_key(&TopicOwner {
-            server_generation: 2,
-            topic_id: 4,
-        }));
-    }
-
-    #[test]
-    fn claim_rejects_a_generation_after_termination_has_scanned_pending() {
-        struct BlockingDisconnectSource {
-            entered: mpsc::SyncSender<()>,
-            release: Arc<Mutex<mpsc::Receiver<()>>>,
-        }
-
-        struct BlockingDisconnectSubscription {
-            entered: mpsc::SyncSender<()>,
-            release: Arc<Mutex<mpsc::Receiver<()>>>,
-        }
-
-        // SAFETY: disconnect_and_wait ensures no background work accesses module code.
-        unsafe impl RtdSubscription for BlockingDisconnectSubscription {
-            fn request_cancel(&self) {}
-
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-                self.entered.send(()).unwrap();
-                self.release
-                    .lock()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
-                Ok(())
-            }
-        }
-
-        impl RtdSource for BlockingDisconnectSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                _sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                Ok(Box::new(BlockingDisconnectSubscription {
-                    entered: self.entered.clone(),
-                    release: Arc::clone(&self.release),
-                }))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let active = runtime
-            .prepare(
-                Arc::new(BlockingDisconnectSource {
-                    entered: entered_tx,
-                    release: Arc::new(Mutex::new(release_rx)),
-                }),
-                RtdTopic::single("termination-barrier").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(31, 1, active.key()).unwrap();
-        let pending = runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("unclaimed-during-termination").unwrap(),
-            )
-            .unwrap();
-        let pending_key = pending.key().to_owned();
-
-        let terminating_runtime = Arc::clone(&runtime);
-        let terminating =
-            std::thread::spawn(move || drop(terminating_runtime.terminate_server(31).unwrap()));
-        // disconnect_and_wait runs after terminate_server's pending scan.
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        assert!(matches!(
-            runtime.claim_server(&pending_key, 31),
-            Err(XllError::Closing)
-        ));
-        pending.commit();
-        release_tx.send(()).unwrap();
-        terminating.join().unwrap();
-
-        assert!(runtime.claim_server(&pending_key, 32).is_ok());
-        assert_eq!(
-            runtime.state.lock().pending[&pending_key].server_generation,
-            Some(32)
-        );
-    }
-
-    #[test]
-    fn expired_source_identities_are_reclaimed_and_close_clears_them() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let first_source = Arc::new(TestSource {
-            disconnected: Arc::new(AtomicBool::new(false)),
-        });
-        let first_key = runtime
-            .prepare(first_source.clone(), RtdTopic::single("first").unwrap())
-            .unwrap();
-        first_key.rollback();
-        drop(first_source);
-
-        runtime
-            .prepare(
-                Arc::new(TestSource {
-                    disconnected: Arc::new(AtomicBool::new(false)),
-                }),
-                RtdTopic::single("second").unwrap(),
-            )
-            .unwrap();
-        assert_eq!(runtime.state.lock().source_ids.len(), 1);
-
-        runtime.close().unwrap();
-        assert!(runtime.state.lock().source_ids.is_empty());
-    }
-
-    #[test]
-    fn close_reports_a_panicking_cancellation_hook() {
-        struct Source;
-        struct Subscription;
-
-        // SAFETY: disconnect_and_wait ensures no background work accesses module code.
-        unsafe impl RtdSubscription for Subscription {
-            fn request_cancel(&self) {
-                panic!("injected cancellation panic");
-            }
-
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-                Ok(())
-            }
-        }
-
-        impl RtdSource for Source {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                _sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                Ok(Box::new(Subscription))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let prepared = runtime
-            .prepare(Arc::new(Source), RtdTopic::single("cancel-panic").unwrap())
-            .unwrap();
-        runtime.connect(1, 1, prepared.key()).unwrap();
-
-        assert!(matches!(
-            runtime.close(),
-            Err(XllError::RtdSubscriptionShutdown { source, .. })
-                if matches!(*source, XllError::Panic)
-        ));
-    }
-
-    #[test]
-    fn close_reports_a_failed_disconnect_wait() {
-        struct Source;
-        struct Subscription;
-
-        // SAFETY: disconnect_and_wait ensures no background work accesses module code.
-        unsafe impl RtdSubscription for Subscription {
-            fn request_cancel(&self) {}
-
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-                Err(XllError::Internal {
-                    diagnostic_id: 0x4449_5343_4641_494c,
-                })
-            }
-        }
-
-        impl RtdSource for Source {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                _sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                Ok(Box::new(Subscription))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let prepared = runtime
-            .prepare(
-                Arc::new(Source),
-                RtdTopic::single("disconnect-failure").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(1, 1, prepared.key()).unwrap();
-
-        assert!(matches!(
-            runtime.close(),
-            Err(XllError::RtdSubscriptionShutdown { source, .. })
-                if matches!(
-                    *source,
-                    XllError::Internal {
-                        diagnostic_id: 0x4449_5343_4641_494c
-                    }
-                )
-        ));
-    }
-
-    #[test]
-    fn close_cancels_every_subscription_before_the_first_wait() {
-        struct ContractSource {
-            id: usize,
-            canceled: Arc<Vec<AtomicBool>>,
-            waited: Arc<AtomicUsize>,
-        }
-
-        struct ContractSubscription {
-            id: usize,
-            canceled: Arc<Vec<AtomicBool>>,
-            waited: Arc<AtomicUsize>,
-        }
-
-        // SAFETY: disconnect_and_wait ensures no background work accesses module code.
-        unsafe impl RtdSubscription for ContractSubscription {
-            fn request_cancel(&self) {
-                self.canceled[self.id].store(true, Ordering::Release);
-            }
-
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-                assert!(
-                    self.canceled
-                        .iter()
-                        .all(|canceled| canceled.load(Ordering::Acquire)),
-                    "all cancellation requests must precede the first blocking wait"
-                );
-                self.waited.fetch_add(1, Ordering::AcqRel);
-                Ok(())
-            }
-        }
-
-        impl RtdSource for ContractSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                _sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                Ok(Box::new(ContractSubscription {
-                    id: self.id,
-                    canceled: Arc::clone(&self.canceled),
-                    waited: Arc::clone(&self.waited),
-                }))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let canceled = Arc::new((0..3).map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
-        let waited = Arc::new(AtomicUsize::new(0));
-        for id in 0..3 {
-            let key = runtime
-                .prepare(
-                    Arc::new(ContractSource {
-                        id,
-                        canceled: Arc::clone(&canceled),
-                        waited: Arc::clone(&waited),
-                    }),
-                    RtdTopic::single(format!("contract-{id}")).unwrap(),
-                )
-                .unwrap();
-            runtime.connect(8, id as i32, key.key()).unwrap();
-        }
-
-        runtime.close().unwrap();
-
-        assert!(canceled.iter().all(|flag| flag.load(Ordering::Acquire)));
-        assert_eq!(waited.load(Ordering::Acquire), 3);
-    }
-
-    #[test]
-    fn close_waits_for_subscribe_initialization_and_its_cleanup() {
-        struct BlockingSource {
-            entered: mpsc::SyncSender<()>,
-            release: Mutex<mpsc::Receiver<()>>,
-            disconnected: Arc<AtomicBool>,
-        }
-
-        impl RtdSource for BlockingSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                _sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                self.entered.send(()).unwrap();
-                self.release
-                    .lock()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let key = runtime
-            .prepare(
-                Arc::new(BlockingSource {
-                    entered: entered_tx,
-                    release: Mutex::new(release_rx),
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("blocking-subscribe").unwrap(),
-            )
-            .unwrap();
-
-        let connecting_runtime = Arc::clone(&runtime);
-        let connecting = std::thread::spawn(move || connecting_runtime.connect(1, 17, key.key()));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
-        let closing_runtime = Arc::clone(&runtime);
-        let closing = std::thread::spawn(move || {
-            closing_runtime.close().unwrap();
-            closed_tx.send(()).unwrap();
-        });
-        wait_until(|| runtime.state.lock().closed);
-
-        assert_eq!(closed_rx.try_recv(), Err(TryRecvError::Empty));
-        assert!(!disconnected.load(Ordering::Acquire));
-
-        release_tx.send(()).unwrap();
-        assert!(matches!(connecting.join().unwrap(), Err(XllError::Closing)));
-        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        closing.join().unwrap();
-
-        assert!(disconnected.load(Ordering::Acquire));
-        assert_eq!(runtime.state.lock().in_flight, 0);
-    }
-
-    #[test]
-    fn close_waits_for_a_cloned_notification_callback() {
-        struct CapturingSource {
-            sink: Arc<Mutex<Option<RtdSink<f64>>>>,
-            disconnected: Arc<AtomicBool>,
-        }
-
-        impl RtdSource for CapturingSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                *self.sink.lock() = Some(sink);
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-            }
-        }
-
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let sink = Arc::new(Mutex::new(None));
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let key = runtime
-            .prepare(
-                Arc::new(CapturingSource {
-                    sink: Arc::clone(&sink),
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("blocking-notify").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(2, 18, key.key()).unwrap();
-        let sink = sink.lock().clone().unwrap();
-
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let release_rx = Arc::new(Mutex::new(release_rx));
-        runtime
-            .attach_update_callback(
-                2,
-                Arc::new(move || {
-                    entered_tx.send(()).unwrap();
-                    release_rx
-                        .lock()
-                        .recv_timeout(Duration::from_secs(2))
-                        .unwrap();
-                    Ok(())
-                }),
-            )
+
+        server_a
+            .attach_update_callback(Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.lock().recv().unwrap();
+                Ok(())
+            }))
             .unwrap();
 
-        let publishing_sink = sink.clone();
-        let publishing = std::thread::spawn(move || publishing_sink.publish(42.0));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let callback_b_count = Arc::new(AtomicUsize::new(0));
+        let cb_b = Arc::clone(&callback_b_count);
+        server_b
+            .attach_update_callback(Arc::new(move || {
+                cb_b.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }))
+            .unwrap();
 
-        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
-        let closing_runtime = Arc::clone(&runtime);
-        let closing = std::thread::spawn(move || {
-            closing_runtime.close().unwrap();
-            closed_tx.send(()).unwrap();
+        let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
+        let (source_b, sink_b, _) = publishing_source(Some(2.0f64));
+
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a").unwrap())
+            .unwrap();
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b").unwrap())
+            .unwrap();
+        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_a.commit();
+        prep_b.commit();
+
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let sink_a = sink_a.lock().clone().unwrap();
+        let sink_b = sink_b.lock().clone().unwrap();
+
+        let thread_a = std::thread::spawn(move || {
+            sink_a.publish(10.0).unwrap();
         });
-        wait_until(|| runtime.state.lock().closed);
 
-        assert_eq!(closed_rx.try_recv(), Err(TryRecvError::Empty));
+        entered_rx.recv().unwrap();
+
+        for i in 0..100 {
+            sink_b.publish(i as f64).unwrap();
+        }
+
+        assert!(callback_b_count.load(Ordering::SeqCst) > 0);
+
         release_tx.send(()).unwrap();
-        publishing.join().unwrap().unwrap();
-        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        closing.join().unwrap();
-
-        assert!(disconnected.load(Ordering::Acquire));
-        assert!(matches!(sink.publish(43.0), Err(XllError::Closing)));
+        thread_a.join().unwrap();
     }
 
     #[test]
-    fn server_termination_waits_for_generation_notifications() {
-        struct CapturingSource {
-            sink: Arc<Mutex<Option<RtdSink<f64>>>>,
-            disconnected: Arc<AtomicBool>,
-        }
-
-        impl RtdSource for CapturingSource {
-            type Value = f64;
-
-            fn subscribe(
-                &self,
-                _topic: &RtdTopic,
-                sink: RtdSink<Self::Value>,
-            ) -> XllResult<Box<dyn RtdSubscription>> {
-                *self.sink.lock() = Some(sink);
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
-            }
-        }
-
+    fn refresh_server_locality() {
         let runtime = Arc::new(SubscriptionRuntime::new());
-        let sink = Arc::new(Mutex::new(None));
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let key = runtime
-            .prepare(
-                Arc::new(CapturingSource {
-                    sink: Arc::clone(&sink),
-                    disconnected: Arc::clone(&disconnected),
-                }),
-                RtdTopic::single("terminate-notify").unwrap(),
-            )
-            .unwrap();
-        runtime.connect(3, 19, key.key()).unwrap();
-        let sink = sink.lock().clone().unwrap();
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
 
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let release_rx = Arc::new(Mutex::new(release_rx));
-        runtime
-            .attach_update_callback(
-                3,
-                Arc::new(move || {
-                    entered_tx.send(()).unwrap();
-                    release_rx
-                        .lock()
-                        .recv_timeout(Duration::from_secs(2))
-                        .unwrap();
-                    Ok(())
-                }),
-            )
-            .unwrap();
-
-        let publishing_sink = sink.clone();
-        let publishing = std::thread::spawn(move || publishing_sink.publish(7.0));
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        let (terminated_tx, terminated_rx) = mpsc::sync_channel(1);
-        let terminating_runtime = Arc::clone(&runtime);
-        let terminating = std::thread::spawn(move || {
-            drop(terminating_runtime.terminate_server(3).unwrap());
-            terminated_tx.send(()).unwrap();
-        });
-        wait_until(|| runtime.state.lock().terminating_servers.contains(&3));
-
-        assert_eq!(terminated_rx.try_recv(), Err(TryRecvError::Empty));
-        assert!(matches!(
-            runtime.terminate_server(3),
-            Err(XllError::Closing)
-        ));
-        release_tx.send(()).unwrap();
-        publishing.join().unwrap().unwrap();
-        terminated_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        terminating.join().unwrap();
-
-        assert!(disconnected.load(Ordering::Acquire));
-        assert!(runtime.state.lock().terminated_servers.contains(&3));
-        assert!(matches!(sink.publish(8.0), Err(XllError::Closing)));
-    }
-
-    #[test]
-    fn same_topic_burst_coalesces_to_single_notification() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(100, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("burst-same").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(100, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
         for i in 0..1000 {
-            sink.publish(i as f64).unwrap();
-        }
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.pending_update_count(100), 1);
-
-        let batch = runtime.begin_refresh(100).unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, RtdValue::Number(999.0));
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Delivered)
-            .unwrap();
-        assert_eq!(runtime.pending_update_count(100), 0);
-    }
-
-    #[test]
-    fn distinct_topics_burst_coalesces_to_single_notification() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(101, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        let mut sinks = Vec::new();
-        for i in 0..10i32 {
-            let (source, sink, _) = publishing_source(None);
-            let prepared = runtime
-                .prepare(source, RtdTopic::single(format!("topic-{}", i)).unwrap())
+            let (source, _, _) = publishing_source(Some(i as f64));
+            let prep = runtime
+                .prepare(source, RtdTopic::single(format!("a-{}", i)).unwrap())
                 .unwrap();
-            let key = prepared.key().to_owned();
-            prepared.commit();
-            runtime.connect(101, i, &key).unwrap();
-            sinks.push(sink.lock().clone().unwrap());
-        }
-
-        for sink in &sinks {
-            for v in 0..100 {
-                sink.publish(v as f64).unwrap();
-            }
-        }
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.pending_update_count(101), 10);
-
-        let batch = runtime.begin_refresh(101).unwrap();
-        assert_eq!(batch.updates.len(), 10);
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Delivered)
-            .unwrap();
-        assert_eq!(runtime.pending_update_count(101), 0);
-    }
-
-    #[test]
-    fn publish_during_notify_coalesces_next_signal() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-
-        let (source, sink_slot, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("reentrant-pub").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(102, 1, &key).unwrap();
-
-        let sink = sink_slot.lock().clone().unwrap();
-
-        let sink_clone = sink.clone();
-        let notifications_clone = Arc::clone(&notifications);
-        runtime
-            .attach_update_callback(
-                102,
-                Arc::new(move || {
-                    let count = notifications_clone.fetch_add(1, Ordering::SeqCst);
-                    if count == 0 {
-                        sink_clone.publish(200.0).unwrap();
-                    }
-                    Ok(())
-                }),
-            )
-            .unwrap();
-
-        sink.publish(100.0).unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-
-        let batch = runtime.begin_refresh(102).unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, RtdValue::Number(200.0));
-
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Delivered)
-            .unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn publish_during_refresh_arms_next_signal() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(103, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("during-refresh").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(103, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-
-        let batch = runtime.begin_refresh(103).unwrap();
-        assert_eq!(batch.updates.len(), 1);
-
-        sink.publish(2.0).unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Delivered)
-            .unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 2);
-
-        let second_batch = runtime.begin_refresh(103).unwrap();
-        assert_eq!(second_batch.updates.len(), 1);
-        assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
-        runtime
-            .complete_refresh(second_batch, RefreshOutcome::Delivered)
-            .unwrap();
-    }
-
-    #[test]
-    fn same_topic_overwrite_during_refresh_retains_newer_sequence() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        runtime
-            .attach_update_callback(104, Arc::new(|| Ok(())))
-            .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("overwrite-refresh").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(104, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-
-        let first_batch = runtime.begin_refresh(104).unwrap();
-        assert_eq!(first_batch.updates[0].value, RtdValue::Number(1.0));
-
-        sink.publish(2.0).unwrap();
-
-        runtime
-            .complete_refresh(first_batch, RefreshOutcome::Delivered)
-            .unwrap();
-
-        assert_eq!(runtime.pending_update_count(104), 1);
-        let second_batch = runtime.begin_refresh(104).unwrap();
-        assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
-        runtime
-            .complete_refresh(second_batch, RefreshOutcome::Delivered)
-            .unwrap();
-    }
-
-    #[test]
-    fn failed_refresh_data_does_not_consume_queue_and_retries() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(105, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("fail-refresh").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(105, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(10.0).unwrap();
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-
-        let batch = runtime.begin_refresh(105).unwrap();
-        runtime
-            .complete_refresh(batch, RefreshOutcome::Failed)
-            .unwrap();
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 2);
-        assert_eq!(runtime.pending_update_count(105), 1);
-
-        let retry_batch = runtime.begin_refresh(105).unwrap();
-        assert_eq!(retry_batch.updates.len(), 1);
-        runtime
-            .complete_refresh(retry_batch, RefreshOutcome::Delivered)
-            .unwrap();
-        assert_eq!(runtime.pending_update_count(105), 0);
-    }
-
-    #[test]
-    fn notify_failure_retries_up_to_max_attempts() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(106, {
-                let attempts = Arc::clone(&attempts);
-                Arc::new(move || {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    Err(XllError::Panic)
-                })
-            })
-            .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("notify-fail-max").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(106, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(55.0).unwrap();
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert_eq!(runtime.pending_update_count(106), 1);
-    }
-
-    #[test]
-    fn publish_without_callback_arms_notification_on_attach() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("no-callback").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(107, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-        assert_eq!(runtime.pending_update_count(107), 1);
-
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(107, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn benchmark_rtd_burst() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let notifications = Arc::new(AtomicUsize::new(0));
-        runtime
-            .attach_update_callback(200, {
-                let notifications = Arc::clone(&notifications);
-                Arc::new(move || {
-                    notifications.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        let mut sinks = Vec::new();
-        for i in 0..100i32 {
-            let (source, sink, _) = publishing_source(None);
-            let prepared = runtime
-                .prepare(
-                    source,
-                    RtdTopic::single(format!("bench-topic-{}", i)).unwrap(),
-                )
+            let key = SubscriptionKey::new(prep.key());
+            prep.commit();
+            let conn = runtime
+                .connect_transaction(&server_a, TopicId(i), &key)
                 .unwrap();
-            let key = prepared.key().to_owned();
-            prepared.commit();
-            runtime.connect(200, i, &key).unwrap();
-            sinks.push(sink.lock().clone().unwrap());
+            conn.commit().unwrap();
         }
+
+        let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b-0").unwrap())
+            .unwrap();
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let sink_b = sink_b.lock().clone().unwrap();
+        sink_b.publish(42.0).unwrap();
 
         let start = std::time::Instant::now();
-        const PUBLISH_COUNT: usize = 100_000;
-        for i in 0..PUBLISH_COUNT {
-            sinks[i % 100].publish(i as f64).unwrap();
-        }
+        let batch = server_b.begin_refresh().unwrap();
         let elapsed = start.elapsed();
 
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.pending_update_count(200), 100);
-
-        let ops_per_sec = (PUBLISH_COUNT as f64) / elapsed.as_secs_f64();
-        println!(
-            "SubscriptionRuntime coalesced publish throughput: {:.2} ops/sec ({:?})",
-            ops_per_sec, elapsed
-        );
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, RtdValue::Number(42.0));
+        assert!(elapsed < std::time::Duration::from_millis(50));
+        batch.complete(RefreshOutcome::Delivered).unwrap();
     }
 
     #[test]
-    fn failed_notification_is_not_retried_by_subsequent_publishes() {
+    fn server_standalone_termination() {
         let runtime = Arc::new(SubscriptionRuntime::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
 
-        runtime
-            .attach_update_callback(1, {
-                let attempts = Arc::clone(&attempts);
-                Arc::new(move || {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    Err(XllError::Panic)
-                })
-            })
+        let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b").unwrap())
             .unwrap();
-
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("suppress-test").unwrap())
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
             .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(1, 1, &key).unwrap();
+        conn_b.commit().unwrap();
 
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(0.0).unwrap();
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let sink_b = sink_b.lock().clone().unwrap();
 
-        for value in 1..100_000 {
-            sink.publish(value as f64).unwrap();
+        let server_a_clone = server_a.clone();
+        let handle_term = std::thread::spawn(move || {
+            server_a_clone.terminate().unwrap();
+        });
+
+        sink_b.publish(1.0).unwrap();
+        let batch = server_b.begin_refresh().unwrap();
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+
+        handle_term.join().unwrap();
+    }
+
+    #[test]
+    fn stale_sink_returns_closing() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
+        let (source_a, sink_a, _) = publishing_source(Some(0.0f64));
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a").unwrap())
+            .unwrap();
+        let key_a = SubscriptionKey::new(prep_a.key());
+        prep_a.commit();
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
+
+        let sink_a = sink_a.lock().clone().unwrap();
+
+        server_a.terminate().unwrap();
+
+        assert!(matches!(sink_a.publish(1.0), Err(XllError::Closing)));
+
+        let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b").unwrap())
+            .unwrap();
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let sink_b = sink_b.lock().clone().unwrap();
+        assert!(sink_b.publish(2.0).is_ok());
+    }
+
+    #[test]
+    fn global_quota_enforcement() {
+        let limits = RtdLimits {
+            max_queued_updates: 10,
+            ..RtdLimits::standard()
+        };
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(limits));
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
+        let mut sinks_a = Vec::new();
+        for i in 0..6 {
+            let (source, sink, _) = publishing_source(Some(0.0f64));
+            let prep = runtime
+                .prepare(source, RtdTopic::single(format!("a-{}", i)).unwrap())
+                .unwrap();
+            let key = SubscriptionKey::new(prep.key());
+            prep.commit();
+            let conn = runtime
+                .connect_transaction(&server_a, TopicId(i), &key)
+                .unwrap();
+            conn.commit().unwrap();
+            sinks_a.push(sink.lock().clone().unwrap());
         }
 
-        // Publish burst must NOT re-arm a suppressed notification signal
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert_eq!(runtime.pending_update_count(1), 1);
+        let mut sinks_b = Vec::new();
+        for i in 0..5 {
+            let (source, sink, _) = publishing_source(Some(0.0f64));
+            let prep = runtime
+                .prepare(source, RtdTopic::single(format!("b-{}", i)).unwrap())
+                .unwrap();
+            let key = SubscriptionKey::new(prep.key());
+            prep.commit();
+            let conn = runtime
+                .connect_transaction(&server_b, TopicId(i), &key)
+                .unwrap();
+            conn.commit().unwrap();
+            sinks_b.push(sink.lock().clone().unwrap());
+        }
 
-        runtime.pulse_notification(1);
+        for sink in &sinks_a[0..6] {
+            sink.publish(1.0).unwrap();
+        }
+        for sink in &sinks_b[0..4] {
+            sink.publish(1.0).unwrap();
+        }
 
-        // Heartbeat explicitly resets suppressed signal and re-arms retries
-        assert_eq!(attempts.load(Ordering::SeqCst), 6);
+        assert!(matches!(sinks_b[4].publish(1.0), Err(XllError::Overloaded)));
+
+        let batch_a = server_a.begin_refresh().unwrap();
+        batch_a.complete(RefreshOutcome::Delivered).unwrap();
+
+        assert!(sinks_b[4].publish(1.0).is_ok());
     }
 
     #[test]
-    fn detached_callback_invalidates_in_flight_ticket_and_resets_signal() {
+    fn key_binding_concurrency_rejection() {
         let runtime = Arc::new(SubscriptionRuntime::new());
-        let callback_a_calls = Arc::new(AtomicUsize::new(0));
-        let callback_b_calls = Arc::new(AtomicUsize::new(0));
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
 
-        runtime
-            .attach_update_callback(10, {
-                let calls = Arc::clone(&callback_a_calls);
-                Arc::new(move || {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
+        let (source, _, _) = publishing_source(Some(1.0f64));
+        let prep = runtime
+            .prepare(source, RtdTopic::single("shared").unwrap())
             .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+        prep.commit();
 
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("detach-race").unwrap())
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key)
             .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(10, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-        assert_eq!(callback_a_calls.load(Ordering::SeqCst), 1);
-
-        // Detach callback A -> signal resets to Dormant
-        runtime.detach_update_callback(10);
-
-        // Attach callback B
-        runtime
-            .attach_update_callback(10, {
-                let calls = Arc::clone(&callback_b_calls);
-                Arc::new(move || {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
-
-        // B should be notified because updates exist and signal was reset to Dormant
-        assert_eq!(callback_b_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn overlapping_begin_refresh_does_not_invalidate_active_batch() {
-        let runtime = Arc::new(SubscriptionRuntime::new());
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("overlap-test").unwrap())
-            .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(1, 1, &key).unwrap();
-
-        let sink = sink.lock().clone().unwrap();
-        sink.publish(1.0).unwrap();
-
-        let first = runtime.begin_refresh(1).unwrap();
-
         assert!(matches!(
-            runtime.begin_refresh(1),
+            runtime.connect_transaction(&server_b, TopicId(1), &key),
             Err(XllError::Internal { .. })
         ));
 
-        // The first batch must remain valid and complete cleanly.
-        runtime
-            .complete_refresh(first, RefreshOutcome::Delivered)
-            .unwrap();
-
-        assert_eq!(runtime.pending_update_count(1), 0);
-
-        // Verify phase is not stuck in Refreshing
-        sink.publish(2.0).unwrap();
-        let next = runtime.begin_refresh(1).unwrap();
-        assert_eq!(next.updates[0].value, RtdValue::Number(2.0));
-        runtime
-            .complete_refresh(next, RefreshOutcome::Delivered)
-            .unwrap();
+        conn_a.commit().unwrap();
+        assert!(matches!(
+            runtime.connect_transaction(&server_b, TopicId(1), &key),
+            Err(XllError::Internal { .. })
+        ));
     }
 
     #[test]
-    fn in_flight_callback_detach_race_invalidates_stale_completion() {
+    fn runtime_close_waits_for_inflight() {
         let runtime = Arc::new(SubscriptionRuntime::new());
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let _server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let callback_b_calls = Arc::new(AtomicUsize::new(0));
-
         let release_rx = Arc::new(Mutex::new(release_rx));
-        runtime
-            .attach_update_callback(1000, {
-                let entered_tx = entered_tx.clone();
-                let release_rx = Arc::clone(&release_rx);
-                Arc::new(move || {
-                    entered_tx.send(()).unwrap();
-                    release_rx.lock().recv().unwrap();
-                    Ok(())
-                })
-            })
+
+        server_a
+            .attach_update_callback(Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.lock().recv().unwrap();
+                Ok(())
+            }))
             .unwrap();
 
-        let (source, sink, _) = publishing_source(None);
-        let prepared = runtime
-            .prepare(source, RtdTopic::single("true-race").unwrap())
+        let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a").unwrap())
             .unwrap();
-        let key = prepared.key().to_owned();
-        prepared.commit();
-        runtime.connect(1000, 1, &key).unwrap();
+        let key_a = SubscriptionKey::new(prep_a.key());
+        prep_a.commit();
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
 
-        let sink = sink.lock().clone().unwrap();
+        let sink_a = sink_a.lock().clone().unwrap();
 
-        let runtime_clone = Arc::clone(&runtime);
-        let handle = std::thread::spawn(move || {
-            sink.publish(1.0).unwrap();
+        let handle_a = std::thread::spawn(move || {
+            sink_a.publish(10.0).unwrap();
         });
 
-        // Wait for Callback A to enter
         entered_rx.recv().unwrap();
 
-        // Detach A while in-flight and attach B
-        runtime_clone.detach_update_callback(1000);
+        let runtime_clone = Arc::clone(&runtime);
+        let closed_flag = Arc::new(AtomicBool::new(false));
+        let cf = Arc::clone(&closed_flag);
 
-        runtime_clone
-            .attach_update_callback(1000, {
-                let calls = Arc::clone(&callback_b_calls);
-                Arc::new(move || {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .unwrap();
+        let handle_close = std::thread::spawn(move || {
+            runtime_clone.close().unwrap();
+            cf.store(true, Ordering::Release);
+        });
 
-        // Release Callback A
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!closed_flag.load(Ordering::Acquire));
+
         release_tx.send(()).unwrap();
-        handle.join().unwrap();
+        handle_a.join().unwrap();
+        handle_close.join().unwrap();
+        assert!(closed_flag.load(Ordering::Acquire));
+    }
 
-        assert_eq!(callback_b_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime_clone.pending_update_count(1000), 1);
+    #[test]
+    fn reentrant_drop_safety() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        struct ReentrantSource {
+            runtime: Arc<SubscriptionRuntime>,
+        }
+
+        impl Drop for ReentrantSource {
+            fn drop(&mut self) {
+                let _ = self.runtime.cleanup_result();
+            }
+        }
+
+        impl RtdSource for ReentrantSource {
+            type Value = RtdValue;
+            fn subscribe(
+                &self,
+                _: &RtdTopic,
+                _: RtdSink<Self::Value>,
+            ) -> XllResult<Box<dyn RtdSubscription>> {
+                Ok(Box::new(TestSubscription {
+                    canceled: Arc::new(AtomicBool::new(false)),
+                    disconnected: Arc::new(AtomicBool::new(false)),
+                }))
+            }
+        }
+
+        let source = ReentrantSource {
+            runtime: Arc::clone(&runtime),
+        };
+        let prep = runtime
+            .prepare(source, RtdTopic::single("reentrant").unwrap())
+            .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+        prep.commit();
+
+        let conn = runtime
+            .connect_transaction(&server, TopicId(1), &key)
+            .unwrap();
+        conn.commit().unwrap();
+
+        runtime.close().unwrap();
     }
 }

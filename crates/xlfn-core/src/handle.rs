@@ -376,7 +376,10 @@ impl HandleRegistry {
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(target_os = "windows"),
+        allow(dead_code, reason = "Ghost handle only used in Windows COM shutdown path")
+    )]
     fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()
     }
@@ -926,14 +929,13 @@ pub(crate) struct HandleRuntime {
     registry: HandleRegistry,
     topics: Mutex<TopicState>,
     leases: Arc<HandleLeaseState>,
-    #[allow(dead_code)]
-    module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    _module_ingress: Option<&'static crate::ingress::ExportIngress>,
     #[cfg(test)]
     after_replace_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleRuntime {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn try_new(maximum_handles: usize) -> XllResult<Self> {
         Self::try_new_with_ingress(maximum_handles, None)
     }
@@ -946,7 +948,7 @@ impl HandleRuntime {
             registry: HandleRegistry::try_new(maximum_handles)?,
             topics: Mutex::new(TopicState::default()),
             leases: Arc::new(HandleLeaseState::new()),
-            module_ingress,
+            _module_ingress: module_ingress,
             #[cfg(test)]
             after_replace_hook: Mutex::new(None),
         })
@@ -958,12 +960,12 @@ impl HandleRuntime {
         self.leases.set_ghost(ghost);
     }
 
-    #[allow(dead_code)]
+    #[cfg(target_os = "windows")]
     pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let ghost = self.registry.ghost_handle();
 
-        let ingress_guard = if let Some(ingress) = self.module_ingress {
+        let ingress_guard = if let Some(ingress) = self._module_ingress {
             let (guard, accepted) = ingress.enter_with(|| {
                 #[cfg(any(test, feature = "shutdown-refinement"))]
                 if let Some(ghost) = ghost.as_ref() {
@@ -1449,13 +1451,14 @@ impl HandleRuntime {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(target_os = "windows")]
 pub(crate) struct RtdOperationGuard {
     _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
 
+#[cfg(target_os = "windows")]
 impl Drop for RtdOperationGuard {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "shutdown-refinement"))]
