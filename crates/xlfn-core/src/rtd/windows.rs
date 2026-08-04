@@ -5199,6 +5199,8 @@ mod tests {
         // New locks are rejected after close admission stops, while releasing
         // an existing module hold remains available.
         assert_eq!(
+            // SAFETY: `pointer` is the live class-factory instance created above. This
+            // test intentionally exercises LockServer(TRUE) through the COM ABI.
             unsafe { factory_lock_server(pointer, 1) },
             CO_E_SERVER_STOPPING
         );
@@ -5207,7 +5209,13 @@ mod tests {
             COM_MODULE_LIFETIME.snapshot().server_locks,
             baseline.server_locks
         );
-        assert_eq!(unsafe { factory_lock_server(pointer, 0) }, E_UNEXPECTED);
+        assert_eq!(
+            // SAFETY: `pointer` still refers to the same live class factory. Unlocking is
+            // permitted even after shutdown admission has closed so the module hold can be
+            // released during teardown.
+            unsafe { factory_lock_server(pointer, 0) },
+            E_UNEXPECTED
+        );
         drop(factory);
 
         assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
