@@ -2374,13 +2374,17 @@ mod tests {
     fn cancellation_after_evaluation_does_not_leak_the_return_block() {
         let runtime = Box::leak(Box::new(Runtime::new()));
         let _guard = test_lock_for_runtime(runtime);
-        let before = crate::return_value::live_return_blocks();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
 
         let _callback_guard = reset_test_callback();
+        // Record the process-global allocation count only after this runtime
+        // owns the module test lease and callback state has been reset. A
+        // concurrent return-value test may otherwise free its own block after
+        // this test samples the baseline.
+        let before = crate::return_value::live_return_blocks();
         let (reached_tx, reached_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         *EVALUATION_BARRIER.lock() = Some((reached_tx, release_rx));

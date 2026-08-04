@@ -466,11 +466,11 @@ pub struct PreparedDirectoryCommit {
     expected_names: BTreeSet<String>,
 }
 
-/// Holds read handles for every source file in a prepared tree until its
-/// directory rename completes. On Windows the handles omit write sharing, so
-/// a new writer cannot modify an already-verified source between the final
-/// verification and publication.
-#[must_use = "keep the source lease alive through the directory rename"]
+/// Holds read handles for every source file in a prepared tree through its
+/// final source verification. On Windows these descendant handles must be
+/// released immediately before renaming the non-empty parent directory;
+/// Windows rejects that rename while any descendant file handle remains open.
+#[must_use = "keep the source lease alive through final source verification"]
 #[derive(Debug, Default)]
 pub struct CommitSourceLease {
     handles: Vec<std::fs::File>,
@@ -749,8 +749,8 @@ impl PreparedPackageCommit {
         verify_prepared_package_directory(self, destination, false)
     }
 
-    /// Acquires the source lease used for the final commit window. Callers
-    /// must keep the returned lease alive through the source directory rename.
+    /// Acquires the source lease used for final source verification. Windows
+    /// callers must release it immediately before renaming the source directory.
     pub fn lock_source_for_commit(&self) -> PackageResult<CommitSourceLease> {
         CommitSourceLease::default().lock_package(
             &self.staging_directory,
@@ -829,8 +829,8 @@ impl PreparedDirectoryCommit {
         verify_prepared_directory(self, destination, false)
     }
 
-    /// Acquires the source lease used for the final commit window. Callers
-    /// must keep the returned lease alive through the source directory rename.
+    /// Acquires the source lease used for final source verification. Windows
+    /// callers must release it immediately before renaming the source directory.
     pub fn lock_source_for_commit(&self) -> PackageResult<CommitSourceLease> {
         CommitSourceLease::default().lock_directory(
             &self.staging_directory,
@@ -2394,9 +2394,10 @@ fn open_commit_source_file(path: &Path) -> io::Result<std::fs::File> {
         use crate::win32::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ};
         use std::os::windows::fs::OpenOptionsExt;
 
-        // Keep the source directory renameable while refusing new writers.
-        // Writers that were already open are covered when they race the final
-        // stable-content check; portable Rust cannot revoke those handles.
+        // Refuse new writers while the final stable-content check runs.
+        // FILE_SHARE_DELETE permits file-level delete/rename access, but
+        // Windows still requires these descendant handles to be closed before
+        // their non-empty parent directory can be renamed.
         options
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);

@@ -938,15 +938,27 @@ mod tests {
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
 
-    use crate::runtime::tests::TEST_LOCK;
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    struct ReturnValueTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _module_lease: crate::ingress::TestModuleLease,
+    }
+
+    fn test_lock() -> ReturnValueTestGuard {
+        // Return-value tests directly reset the process-global ingress state.
+        // Participate in the same reentrant module lease used by Runtime tests
+        // so one test cannot close another test's active opening epoch.
+        let module_lease = crate::ingress::acquire_test_module_lease();
+        let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if crate::ingress::global_ingress().phase() != crate::ingress::PHASE_CLOSED {
             crate::ingress::global_ingress().begin_close_with(|| {});
             let _ = crate::ingress::global_ingress().seal_and_drain();
         }
-        guard
+        ReturnValueTestGuard {
+            _lock: lock,
+            _module_lease: module_lease,
+        }
     }
 
     fn open_test_runtime() -> Runtime<()> {

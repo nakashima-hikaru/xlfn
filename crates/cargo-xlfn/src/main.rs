@@ -442,7 +442,13 @@ fn sync_scaffold_files(staging: &Path) -> io::Result<()> {
         staging.join("src/lib.rs"),
         staging.join("src/udf.rs"),
     ] {
-        std::fs::File::open(path)?.sync_all()?;
+        // FlushFileBuffers requires a handle opened with write access on
+        // Windows. File::open is read-only and deterministically returns
+        // ERROR_ACCESS_DENIED when sync_all maps to that API.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .sync_all()?;
     }
     Ok(())
 }
@@ -509,9 +515,10 @@ fn move_file_ex_with_retry(
 fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use crate::win32::MOVEFILE_WRITE_THROUGH;
-
-        move_file_ex_with_retry(from, to, MOVEFILE_WRITE_THROUGH)
+        // std::fs::rename can use the newer Windows rename-by-handle path when
+        // MoveFileExW alone is rejected, while preserving same-volume rename
+        // semantics. The bounded retry still covers transient scanner locks.
+        retry_windows_path_operation(|| fs::rename(from, to))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1760,15 +1767,21 @@ fn commit_prepared_directory_with(
         file_ops,
     )?;
     commit_guard.ensure_held()?;
-    // The lease closes the final publication window to new writers on
-    // Windows. Mandatory exclusion of a process that already owns a writable
-    // handle is not available through portable Rust file APIs; the staged
-    // tree remains private and the final verification is the integrity check
-    // for that out-of-scope case.
+    // The lease excludes new writers while the final source identity and
+    // contents are verified. Mandatory exclusion of a process that already
+    // owns a writable handle is not available through portable Rust file APIs;
+    // the staged tree remains private and post-commit verification remains the
+    // integrity check for that out-of-scope case.
     let source_lease = prepared.lock_source_for_commit()?;
     prepared.verify_source_contents()?;
     verify_source(prepared.staging_directory())?;
     commit_guard.ensure_held()?;
+    #[cfg(target_os = "windows")]
+    // Windows rejects renaming a non-empty directory while a descendant file
+    // has an open handle, even when that handle permits delete sharing. The
+    // private staging tree has just passed its final identity/content check,
+    // and the transaction lock remains held across publication.
+    drop(source_lease);
     if let Err(commit_error) = file_ops.rename(prepared.staging_directory(), destination) {
         let rollback_state = if had_previous {
             TransactionState::RollbackPending
@@ -1836,6 +1849,7 @@ fn commit_prepared_directory_with(
         return Err(commit_error.into());
     }
     sync_rename_parents(prepared.staging_directory(), destination, file_ops)?;
+    #[cfg(not(target_os = "windows"))]
     drop(source_lease);
     journal_state.installed_identity = Some(directory_identity(destination)?);
     write_transaction_state(
