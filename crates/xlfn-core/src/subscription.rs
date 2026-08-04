@@ -599,7 +599,9 @@ enum DeliveryPhase {
     },
     Refreshing {
         refresh_id: u64,
+        #[allow(dead_code)]
         snapshot_max_sequence: u64,
+        #[allow(dead_code)]
         consumed_signal: SignalState,
         next_signal: SignalState,
     },
@@ -1327,7 +1329,6 @@ impl SubscriptionRuntime {
             } else {
                 None
             };
-            drop(delivery);
             if removed_update {
                 state.queued_update_count = state.queued_update_count.saturating_sub(1);
             }
@@ -1361,10 +1362,12 @@ impl SubscriptionRuntime {
                 if state.topic_ids.get(key) == Some(&owner) {
                     state.topic_ids.remove(key);
                 }
-                if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
-                    if delivery.updates.remove(&owner.topic_id).is_some() {
-                        state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                    }
+                if state
+                    .deliveries
+                    .get_mut(&owner.server_generation)
+                    .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
+                {
+                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
                 }
                 active.subscription
             } else {
@@ -1472,10 +1475,12 @@ impl SubscriptionRuntime {
             if state.topic_ids.get(key) == Some(&owner) {
                 state.topic_ids.remove(key);
             }
-            if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
-                if delivery.updates.remove(&owner.topic_id).is_some() {
-                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                }
+            if state
+                .deliveries
+                .get_mut(&owner.server_generation)
+                .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
+            {
+                state.queued_update_count = state.queued_update_count.saturating_sub(1);
             }
         }
     }
@@ -1526,10 +1531,12 @@ impl SubscriptionRuntime {
                 return;
             };
             state.topic_ids.remove(&active.key);
-            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
-                if delivery.updates.remove(&topic_id).is_some() {
-                    state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                }
+            if state
+                .deliveries
+                .get_mut(&server_generation)
+                .is_some_and(|delivery| delivery.updates.remove(&topic_id).is_some())
+            {
+                state.queued_update_count = state.queued_update_count.saturating_sub(1);
             }
             active
                 .subscription
@@ -1617,12 +1624,7 @@ impl SubscriptionRuntime {
                 return;
             };
 
-            let DeliveryPhase::Refreshing {
-                refresh_id,
-                next_signal: _,
-                ..
-            } = &mut delivery.phase
-            else {
+            let DeliveryPhase::Refreshing { refresh_id, .. } = &mut delivery.phase else {
                 return;
             };
 
@@ -1657,7 +1659,6 @@ impl SubscriptionRuntime {
                 None
             };
 
-            drop(delivery);
             state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
 
             attempt
@@ -1718,14 +1719,11 @@ impl SubscriptionRuntime {
         };
         let attempt = {
             let mut state = self.state.lock();
-            if let Some(delivery) = state.deliveries.get_mut(&server_generation) {
-                delivery
-                    .arm_notification_if_needed(server_generation)
+            state.deliveries.get_mut(&server_generation).and_then(|d| {
+                d.arm_notification_if_needed(server_generation)
                     .ok()
                     .flatten()
-            } else {
-                None
-            }
+            })
         };
 
         if let Some(attempt) = attempt {
@@ -1846,10 +1844,12 @@ impl SubscriptionRuntime {
             let late_subscriptions = owners
                 .into_iter()
                 .filter_map(|owner| {
-                    if let Some(delivery) = state.deliveries.get_mut(&owner.server_generation) {
-                        if delivery.updates.remove(&owner.topic_id).is_some() {
-                            state.queued_update_count = state.queued_update_count.saturating_sub(1);
-                        }
+                    if state
+                        .deliveries
+                        .get_mut(&owner.server_generation)
+                        .is_some_and(|delivery| delivery.updates.remove(&owner.topic_id).is_some())
+                    {
+                        state.queued_update_count = state.queued_update_count.saturating_sub(1);
                     }
                     let active = state.active.remove(&owner)?;
                     state.topic_ids.remove(&active.key);
@@ -1992,7 +1992,7 @@ impl SubscriptionRuntime {
             let is_new_topic = !state
                 .deliveries
                 .get(&owner.server_generation)
-                .map_or(false, |d| d.updates.contains_key(&owner.topic_id));
+                .is_some_and(|d| d.updates.contains_key(&owner.topic_id));
 
             if is_new_topic && state.queued_update_count >= self.limits.max_queued_updates {
                 return Err(XllError::Overloaded);
@@ -2009,7 +2009,6 @@ impl SubscriptionRuntime {
             } else {
                 None
             };
-            drop(delivery);
 
             if is_new_topic {
                 state.queued_update_count += 1;
@@ -4233,14 +4232,14 @@ mod tests {
             .unwrap();
 
         let mut sinks = Vec::new();
-        for i in 0..10 {
+        for i in 0..10i32 {
             let (source, sink, _) = publishing_source(None);
             let prepared = runtime
-                .prepare(source, RtdTopic::single(&format!("topic-{}", i)).unwrap())
+                .prepare(source, RtdTopic::single(format!("topic-{}", i)).unwrap())
                 .unwrap();
             let key = prepared.key().to_owned();
             prepared.commit();
-            runtime.connect(101, i as i32, &key).unwrap();
+            runtime.connect(101, i, &key).unwrap();
             sinks.push(sink.lock().clone().unwrap());
         }
 
@@ -4483,17 +4482,17 @@ mod tests {
             .unwrap();
 
         let mut sinks = Vec::new();
-        for i in 0..100 {
+        for i in 0..100i32 {
             let (source, sink, _) = publishing_source(None);
             let prepared = runtime
                 .prepare(
                     source,
-                    RtdTopic::single(&format!("bench-topic-{}", i)).unwrap(),
+                    RtdTopic::single(format!("bench-topic-{}", i)).unwrap(),
                 )
                 .unwrap();
             let key = prepared.key().to_owned();
             prepared.commit();
-            runtime.connect(200, i as i32, &key).unwrap();
+            runtime.connect(200, i, &key).unwrap();
             sinks.push(sink.lock().clone().unwrap());
         }
 

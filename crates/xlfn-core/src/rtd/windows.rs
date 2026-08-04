@@ -2094,7 +2094,7 @@ fn ensure_server(
                 // remains held, so cloning the Arc-backed barrier is valid.
                 subscriptions.attach_update_callback(
                     existing.generation,
-                    notification_for(callback, operations),
+                    notification_for(callback, operations.clone()),
                 )?;
             }
         }
@@ -3379,7 +3379,7 @@ unsafe fn refresh_data_inner(
     let batch = match subscriptions.begin_refresh(generation) {
         Ok(batch) => batch,
         Err(error) => {
-            report_no_unwind("IRtdServer::RefreshData begin", &error);
+            crate::diagnostics::report_no_unwind("IRtdServer::RefreshData begin", &error);
             return E_FAIL;
         }
     };
