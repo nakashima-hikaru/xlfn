@@ -625,6 +625,12 @@ struct NotificationAttempt {
     callback: NotificationCallback,
 }
 
+struct PreparedNotification {
+    server_generation: u64,
+    ticket: u64,
+    callback: NotificationCallback,
+}
+
 enum NotificationCompletion {
     Finished,
     Retry(NotificationAttempt),
@@ -673,15 +679,27 @@ impl ServerDeliveryState {
         retired
     }
 
-    fn arm_notification_if_needed(
-        &mut self,
+    /// Checks whether a notification should be armed and, if so, reserves a
+    /// ticket and clones the callback. This method is **fallible** but does
+    /// **not** mutate `SignalState`, so callers can invoke it before any
+    /// side-effecting state changes. On success the caller must pass the
+    /// returned [`PreparedNotification`] to [`commit_notification`] to
+    /// transition the signal to `Calling`.
+    ///
+    /// `has_pending_updates` indicates whether the delivery has (or will have)
+    /// pending updates. Callers that are about to insert an update should pass
+    /// `true` even before the insert so the notification is prepared ahead of
+    /// the state mutation.
+    fn prepare_notification(
+        &self,
         server_generation: u64,
-    ) -> XllResult<Option<NotificationAttempt>> {
-        if self.updates.is_empty() {
+        has_pending_updates: bool,
+    ) -> XllResult<Option<PreparedNotification>> {
+        if !has_pending_updates {
             return Ok(None);
         }
 
-        let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
+        let DeliveryPhase::BetweenRefreshes { signal } = &self.phase else {
             return Ok(None);
         };
 
@@ -694,18 +712,37 @@ impl ServerDeliveryState {
         };
 
         let ticket = self.next_notification_ticket;
-        self.next_notification_ticket = ticket.checked_add(1).ok_or(XllError::Internal {
+        let _next = ticket.checked_add(1).ok_or(XllError::Internal {
             diagnostic_id: 0x5449_434b_4f56_464c,
         })?;
 
-        *signal = SignalState::Calling { ticket, attempt: 0 };
-
-        Ok(Some(NotificationAttempt {
+        Ok(Some(PreparedNotification {
             server_generation,
             ticket,
-            attempt: 0,
             callback,
         }))
+    }
+
+    /// Commits a previously prepared notification by advancing the ticket
+    /// counter and transitioning the signal to `Calling`. This method is
+    /// **infallible** — all validation was performed in [`prepare_notification`].
+    fn commit_notification(&mut self, prepared: PreparedNotification) -> NotificationAttempt {
+        // The ticket was validated in prepare_notification; this cannot overflow.
+        self.next_notification_ticket = prepared.ticket + 1;
+
+        if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
+            *signal = SignalState::Calling {
+                ticket: prepared.ticket,
+                attempt: 0,
+            };
+        }
+
+        NotificationAttempt {
+            server_generation: prepared.server_generation,
+            ticket: prepared.ticket,
+            attempt: 0,
+            callback: prepared.callback,
+        }
     }
 
     fn signal_for_ticket_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
@@ -1333,11 +1370,18 @@ impl SubscriptionRuntime {
                 Some(_) => true,
                 None => false,
             };
-            let attempt = if should_keep {
-                delivery.arm_notification_if_needed(owner.server_generation)?
+
+            // --- Fallible phase: reserve notification ticket ---
+            let prepared = if should_keep {
+                delivery.prepare_notification(owner.server_generation, true)?
             } else {
                 None
             };
+
+            // --- Infallible commit phase ---
+            let attempt = prepared.map(|p| delivery.commit_notification(p));
+
+            // Release delivery borrow before accessing state.queued_update_count.
             if removed_update {
                 state.queued_update_count = state.queued_update_count.saturating_sub(1);
             }
@@ -1628,7 +1672,8 @@ impl SubscriptionRuntime {
                 return Ok(());
             }
 
-            let mut removed_count = 0_usize;
+            // Compute which updates to remove (without mutating yet).
+            let mut to_remove = Vec::new();
             if outcome == RefreshOutcome::Delivered {
                 for update in &batch.updates {
                     if delivery
@@ -1636,22 +1681,36 @@ impl SubscriptionRuntime {
                         .get(&update.topic_id)
                         .is_some_and(|queued| queued.sequence == update.sequence)
                     {
-                        delivery.updates.remove(&update.topic_id);
-                        removed_count += 1;
+                        to_remove.push(update.topic_id);
                     }
                 }
             }
 
+            // Transition phase to BetweenRefreshes before prepare so that
+            // prepare_notification can see the Dormant signal.
             delivery.phase = DeliveryPhase::BetweenRefreshes {
                 signal: SignalState::Dormant,
             };
 
-            let attempt = if !delivery.updates.is_empty() {
-                delivery.arm_notification_if_needed(batch.server_generation)?
+            // Remove delivered updates so prepare_notification sees the
+            // correct `updates.is_empty()` state.
+            for topic_id in &to_remove {
+                delivery.updates.remove(topic_id);
+            }
+
+            // --- Fallible phase: reserve notification ticket ---
+            let has_remaining = !delivery.updates.is_empty();
+            let prepared = if has_remaining {
+                delivery.prepare_notification(batch.server_generation, true)?
             } else {
                 None
             };
 
+            // --- Infallible commit phase ---
+            let removed_count = to_remove.len();
+            let attempt = prepared.map(|p| delivery.commit_notification(p));
+
+            // Release delivery borrow before accessing state.queued_update_count.
             state.queued_update_count = state.queued_update_count.saturating_sub(removed_count);
 
             attempt
@@ -1681,8 +1740,16 @@ impl SubscriptionRuntime {
 
             let delivery = state.deliveries.entry(server_generation).or_default();
 
+            // --- Fallible phase: attach callback first (so prepare sees it),
+            //     then reserve notification ticket. On failure the callback is
+            //     still installed, which is correct: the only possible error is
+            //     ticket overflow (u64), unreachable in practice. ---
             let retired = delivery.attach_callback(callback);
-            let attempt = delivery.arm_notification_if_needed(server_generation)?;
+            let prepared =
+                delivery.prepare_notification(server_generation, !delivery.updates.is_empty())?;
+
+            // --- Infallible commit phase ---
+            let attempt = prepared.map(|p| delivery.commit_notification(p));
             (retired, attempt)
         };
 
@@ -1712,12 +1779,18 @@ impl SubscriptionRuntime {
         };
         let attempt = {
             let mut state = self.state.lock();
-            state.deliveries.get_mut(&server_generation).and_then(|d| {
-                d.reset_suppressed_signal();
-                d.arm_notification_if_needed(server_generation)
-                    .ok()
-                    .flatten()
-            })
+            let Some(d) = state.deliveries.get_mut(&server_generation) else {
+                return;
+            };
+            d.reset_suppressed_signal();
+            match d.prepare_notification(server_generation, !d.updates.is_empty()) {
+                Ok(Some(prepared)) => Some(d.commit_notification(prepared)),
+                Ok(None) => None,
+                Err(error) => {
+                    crate::diagnostics::report_no_unwind("IRtdServer::Heartbeat rearm", &error);
+                    None
+                }
+            }
         };
 
         if let Some(attempt) = attempt {
@@ -1975,13 +2048,16 @@ impl SubscriptionRuntime {
             {
                 return Err(XllError::Closing);
             }
-            let active = state
-                .active
-                .get_mut(&owner)
-                .filter(|active| active.generation == generation)
-                .ok_or(XllError::Closing)?;
-            active.latest = value.clone();
-            let is_committed = active.committed;
+
+            // Read active fields then release the borrow on `state.active`.
+            let is_committed = {
+                let active = state
+                    .active
+                    .get(&owner)
+                    .filter(|active| active.generation == generation)
+                    .ok_or(XllError::Closing)?;
+                active.committed
+            };
 
             let is_new_topic = !state
                 .deliveries
@@ -1994,16 +2070,29 @@ impl SubscriptionRuntime {
 
             let delivery = state.deliveries.entry(owner.server_generation).or_default();
 
+            // --- Fallible phase: reserve IDs and notification ticket ---
             let sequence = delivery.allocate_update_sequence()?;
-            delivery
-                .updates
-                .insert(owner.topic_id, QueuedUpdate { sequence, value });
-            let attempt = if is_committed {
-                delivery.arm_notification_if_needed(owner.server_generation)?
+            let prepared = if is_committed {
+                delivery.prepare_notification(owner.server_generation, true)?
             } else {
                 None
             };
 
+            // --- Infallible commit phase: mutate state ---
+            delivery.updates.insert(
+                owner.topic_id,
+                QueuedUpdate {
+                    sequence,
+                    value: value.clone(),
+                },
+            );
+            let attempt = prepared.map(|p| delivery.commit_notification(p));
+
+            // Update active.latest and queued_update_count after releasing
+            // the delivery borrow.
+            if let Some(active) = state.active.get_mut(&owner) {
+                active.latest = value;
+            }
             if is_new_topic {
                 state.queued_update_count += 1;
             }
