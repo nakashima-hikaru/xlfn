@@ -1041,7 +1041,7 @@ impl<S> Runtime<S> {
         *self.zero_active_hook.lock() = Some(hook);
     }
 
-    #[cfg(all(test, feature = "async"))]
+    #[cfg(test)]
     pub(crate) fn release_test_module_lease(&self) {
         drop(self.test_module_lease.lock().take());
     }
@@ -1158,7 +1158,7 @@ impl<S> Drop for CallGuard<'_, S> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
@@ -1196,6 +1196,7 @@ mod tests {
             })
             .unwrap();
         runtime.finish_close(certificate).unwrap();
+        runtime.release_test_module_lease();
     }
 
     fn finish_test_open_rollback<S>(runtime: &Runtime<S>) {
@@ -1220,9 +1221,10 @@ mod tests {
             })
             .unwrap();
         runtime.finish_open_rollback(certificate).unwrap();
+        runtime.release_test_module_lease();
     }
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn runtime_can_open_close_and_reopen() {
@@ -1290,6 +1292,9 @@ mod tests {
         runtime.finish_open(&mut first, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         assert_eq!(runtime.enter().unwrap().state(), &11);
+        let _close = runtime.begin_final_close();
+        let _ = runtime.take_state();
+        finish_test_close(&runtime);
     }
 
     #[test]
@@ -1358,6 +1363,7 @@ mod tests {
 
     #[test]
     fn abandoned_close_owner_notifies_and_allows_takeover() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), Vec::new());
@@ -1375,6 +1381,7 @@ mod tests {
 
     #[test]
     fn close_certificate_refuses_to_publish_closed_before_state_is_released() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::new();
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), Vec::new());
@@ -1418,6 +1425,7 @@ mod tests {
 
     #[test]
     fn close_rejects_new_calls_and_waits_for_existing_call() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::new());
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
@@ -1442,6 +1450,7 @@ mod tests {
 
     #[test]
     fn zero_active_calls_implies_no_guard_owns_state() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::new());
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(7_u32, Vec::new());
@@ -1521,6 +1530,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[test]
     fn calculation_end_advances_the_async_task_generation() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
         runtime.start_async(1).unwrap();
         let first = runtime.calculation_id().get();
@@ -1565,6 +1575,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[test]
     fn published_async_generation_already_has_a_registry_entry() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         runtime.start_async(1).unwrap();
         let first = runtime.calculation_id().get();

@@ -938,7 +938,7 @@ mod tests {
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::runtime::tests::TEST_LOCK;
 
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -123,11 +123,6 @@ impl AsyncManager {
         let target: Result<ExecutorHandle, (XllError, bool)> = {
             let state = self.state.lock();
             match &*state {
-                ExecutorState::Running(_)
-                    if generation != self.current_generation.load(Ordering::Acquire) =>
-                {
-                    Err((cancelled_calculation_error(), true))
-                }
                 ExecutorState::Running(executor) => Ok(executor.handle.clone()),
                 ExecutorState::Stopped | ExecutorState::Closing(_) => {
                     Err((XllError::Closing, false))
@@ -275,10 +270,11 @@ impl AsyncManager {
     #[cfg(test)]
     fn set_before_task_schedule_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         let state = self.state.lock();
-        let ExecutorState::Running(executor) = &*state else {
+        if let ExecutorState::Running(executor) = &*state {
+            *executor.handle.inner.before_task_schedule_hook.lock() = hook;
+        } else if hook.is_some() {
             panic!("async executor must be running when installing a test hook");
-        };
-        *executor.handle.inner.before_task_schedule_hook.lock() = hook;
+        }
     }
 
     pub(crate) fn close(&self) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
@@ -414,8 +410,14 @@ struct ExecutorInner {
     before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutorPhase {
+    Running,
+    Closing,
+}
+
 struct TaskRegistry {
-    closing: bool,
+    phase: ExecutorPhase,
     current_generation: u64,
     generations: HashMap<u64, CalculationGeneration>,
 }
@@ -438,6 +440,44 @@ struct SpawnRejection<F> {
     cancel: bool,
 }
 
+struct ActiveReservation {
+    inner: Arc<ExecutorInner>,
+    armed: bool,
+}
+
+impl ActiveReservation {
+    fn try_acquire(inner: Arc<ExecutorInner>) -> Option<Self> {
+        inner
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_PENDING).then_some(active + 1)
+            })
+            .ok()?;
+
+        Some(Self { inner, armed: true })
+    }
+
+    fn commit(mut self, generation: u64, id: u64) -> CompletionGuard {
+        self.armed = false;
+
+        CompletionGuard {
+            inner: Arc::clone(&self.inner),
+            generation,
+            id,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
+        }
+    }
+}
+
+impl Drop for ActiveReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            release_active(&self.inner);
+        }
+    }
+}
+
 impl Executor {
     fn start(worker_count: usize, generation: u64) -> XllResult<Self> {
         let worker_count = worker_count.clamp(1, 32);
@@ -448,7 +488,7 @@ impl Executor {
             live_workers: AtomicUsize::new(0),
             fatal_worker_failure: AtomicBool::new(false),
             registry: Mutex::new(TaskRegistry {
-                closing: false,
+                phase: ExecutorPhase::Running,
                 current_generation: generation,
                 generations: HashMap::from([(
                     generation,
@@ -529,25 +569,13 @@ impl ExecutorHandle {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let active = self.inner.active.fetch_add(1, Ordering::AcqRel);
-        if active >= MAX_PENDING {
-            self.inner.active.fetch_sub(1, Ordering::Release);
-            return Err(SpawnRejection {
-                error: XllError::Overloaded,
-                future,
-                cancellation,
-                cancel: false,
-            });
-        }
-        let reservation = scopeguard::guard(Arc::clone(&self.inner), |inner| {
-            release_active(&inner);
-        });
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (abort, registration) = AbortHandle::new_pair();
-        {
+
+        let reservation = {
             let mut registry = self.inner.registry.lock();
-            if registry.closing {
-                drop(registry);
+
+            if registry.phase == ExecutorPhase::Closing {
                 return Err(SpawnRejection {
                     error: XllError::Closing,
                     future,
@@ -555,8 +583,8 @@ impl ExecutorHandle {
                     cancel: true,
                 });
             }
-            if registry.current_generation != generation {
-                drop(registry);
+
+            if generation != registry.current_generation {
                 return Err(SpawnRejection {
                     error: cancelled_calculation_error(),
                     future,
@@ -564,20 +592,19 @@ impl ExecutorHandle {
                     cancel: true,
                 });
             }
+
             let Some(current) = registry.generations.get_mut(&generation) else {
-                drop(registry);
                 return Err(SpawnRejection {
                     error: XllError::Internal {
-                        diagnostic_id: 0x4153_594e_4745_4e49,
+                        diagnostic_id: 0x4153_594e_4745_4e4d,
                     },
                     future,
                     cancellation,
                     cancel: true,
                 });
             };
-            debug_assert_eq!(current.id, generation);
+
             if current.cancelled {
-                drop(registry);
                 return Err(SpawnRejection {
                     error: cancelled_calculation_error(),
                     future,
@@ -585,6 +612,16 @@ impl ExecutorHandle {
                     cancel: true,
                 });
             }
+
+            let Some(reservation) = ActiveReservation::try_acquire(Arc::clone(&self.inner)) else {
+                return Err(SpawnRejection {
+                    error: XllError::Overloaded,
+                    future,
+                    cancellation,
+                    cancel: false,
+                });
+            };
+
             current.tasks.insert(
                 id,
                 TaskControl {
@@ -592,19 +629,17 @@ impl ExecutorHandle {
                     cancellation,
                 },
             );
-        }
-        let completion = CompletionGuard {
-            inner: Arc::clone(&self.inner),
-            generation,
-            id,
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
+
+            reservation
         };
+
+        let completion = reservation.commit(generation, id);
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncTask);
         }
-        drop(scopeguard::ScopeGuard::into_inner(reservation));
+
         let wrapped = async move {
             let _completion = completion;
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -649,7 +684,7 @@ impl ExecutorHandle {
 
     fn advance_generation(&self, next: u64) -> bool {
         let mut registry = self.inner.registry.lock();
-        if registry.closing {
+        if registry.phase == ExecutorPhase::Closing {
             return false;
         }
         registry
@@ -669,7 +704,7 @@ impl ExecutorHandle {
 
     fn request_close(&self) -> Vec<TaskControl> {
         let mut registry = self.inner.registry.lock();
-        registry.closing = true;
+        registry.phase = ExecutorPhase::Closing;
         registry
             .generations
             .values_mut()
@@ -1214,7 +1249,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::runtime::tests::TEST_LOCK;
     const TEST_GENERATION: u64 = 1;
     static EVALUATION_BARRIER: Mutex<
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -2383,5 +2418,206 @@ mod tests {
         assert_eq!(crate::return_value::live_return_blocks(), before);
         *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;
         *EVALUATION_BARRIER.lock() = None;
+    }
+
+    #[test]
+    fn advance_generation_does_not_block_on_task_schedule_hook() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("task scheduling should be released");
+        })));
+
+        let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+                .unwrap();
+        });
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("task should be admitted before scheduling");
+
+        let advancing_manager = Arc::clone(&manager);
+        let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
+        let advancing = std::thread::spawn(move || {
+            advance_done_tx
+                .send(advancing_manager.advance_generation())
+                .unwrap();
+        });
+        assert!(
+            advance_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("advance_generation should not block while task schedule hook is held")
+        );
+
+        release_tx.send(()).unwrap();
+        spawn_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        spawning.join().unwrap();
+        advancing.join().unwrap();
+        manager.set_before_task_schedule_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn spawn_registered_before_close_is_drained_safely() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (registered_tx, registered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+            registered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("schedule hook should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+                .unwrap();
+        });
+        registered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("task should be registered");
+
+        let closing_manager = Arc::clone(&manager);
+        let (close_result_tx, close_result_rx) = std::sync::mpsc::sync_channel(1);
+        let closing = std::thread::spawn(move || {
+            close_result_tx
+                .send(closing_manager.close_with_timeout(Duration::from_secs(1)))
+                .unwrap();
+        });
+
+        release_tx.send(()).unwrap();
+        spawning.join().unwrap();
+        let _ = spawn_result_rx.recv_timeout(Duration::from_secs(1));
+
+        assert!(
+            close_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        closing.join().unwrap();
+        assert!(token.is_cancelled());
+        manager.set_before_task_schedule_hook(None);
+        assert!(manager.is_stopped());
+    }
+
+    #[test]
+    fn old_generation_retained_entry_rejected_on_spawn() {
+        let manager = AsyncManager::new();
+        manager.start(1).unwrap();
+        let (source1, _token1) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        manager
+            .spawn(TEST_GENERATION, std::future::pending::<()>(), source1)
+            .unwrap();
+        assert!(manager.advance_generation());
+        assert_eq!(manager.current_generation(), TEST_GENERATION + 1);
+
+        let (source2, token2) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let res = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source2);
+        assert!(matches!(
+            res,
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+        assert!(token2.is_cancelled());
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn rejection_priority_old_generation_over_max_pending() {
+        let manager = AsyncManager::new();
+        manager.start(1).unwrap();
+        for _ in 0..MAX_PENDING {
+            let (source, _token) =
+                CancellationSource::new(CancellationGuarantee::CalculationScoped);
+            let _ = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+        }
+        let (source_curr, token_curr) =
+            CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let res_curr = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source_curr);
+        assert!(matches!(res_curr, Err(XllError::Overloaded)));
+        assert!(!token_curr.is_cancelled());
+
+        assert!(manager.advance_generation());
+        let gen2 = TEST_GENERATION + 1;
+
+        for _ in 0..MAX_PENDING {
+            let (source, _token) =
+                CancellationSource::new(CancellationGuarantee::CalculationScoped);
+            let _ = manager.spawn(gen2, std::future::pending::<()>(), source);
+        }
+
+        let (source_old, token_old) =
+            CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let res_old = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source_old);
+        assert!(matches!(
+            res_old,
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+        assert!(token_old.is_cancelled());
+
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn benchmark_concurrent_spawns() {
+        let thread_counts = [1, 2, 4, 8, 16, 32];
+        let iterations_per_thread = 500;
+
+        for &threads in &thread_counts {
+            let manager = Arc::new(AsyncManager::new());
+            manager.start(4).unwrap();
+            let current_gen = manager.current_generation();
+            let start = Instant::now();
+
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let mgr = Arc::clone(&manager);
+                    std::thread::spawn(move || {
+                        for _ in 0..iterations_per_thread {
+                            let (source, _token) =
+                                CancellationSource::new(CancellationGuarantee::BestEffort);
+                            let _ = mgr.spawn(current_gen, async {}, source);
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            let elapsed = start.elapsed();
+            let total_ops = threads * iterations_per_thread;
+            let ops_per_sec = total_ops as f64 / elapsed.as_secs_f64();
+            println!(
+                "Concurrent spawn bench: {threads} threads, {total_ops} total ops, elapsed: {:?}, throughput: {:.2} ops/sec",
+                elapsed, ops_per_sec
+            );
+
+            assert!(manager.close().issues.is_empty());
+        }
     }
 }
