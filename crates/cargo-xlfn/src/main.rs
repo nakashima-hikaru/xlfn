@@ -291,7 +291,7 @@ fn check(args: &CheckArgs) -> Result {
             .tempdir()?;
         let package = staging_guard.path().join("package");
         let package_staging = xlfn_package::PrivateStagingDirectory::create(&package)?;
-        let staged_bundle = xlfn_package::stage_bundle(&bundle, &package_staging)?;
+        let mut staged_bundle = xlfn_package::stage_bundle(&bundle, &package_staging)?;
         let xll = package_staging
             .path()
             .join(format!("{}.xll", metadata.artifact_name));
@@ -304,6 +304,10 @@ fn check(args: &CheckArgs) -> Result {
         fs::write(&xll, source_snapshot.as_ref())?;
         let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
         observation.warn_if_mixed();
+        // Dynamic MSVC runtimes are redistributable external dependencies,
+        // not Windows inbox DLLs. Admit only names classified from the actual
+        // PE import table by the CRT observer.
+        staged_bundle.try_add_external_imports(&observation.observed_dynamic_crt_imports)?;
         xlfn_package::verify_staged_package(&xll, target, &[], staged_bundle)?;
     }
     println!("Cargo manifest / cdylib  OK");
@@ -1014,7 +1018,7 @@ fn stage_distribution_target(
     let validation_staging = xlfn_package::PrivateStagingDirectory::create(
         &staging.path().with_extension("validation"),
     )?;
-    let staged_bundle = xlfn_package::stage_bundle(&bundle, &validation_staging)?;
+    let mut staged_bundle = xlfn_package::stage_bundle(&bundle, &validation_staging)?;
     let xll = validation_staging
         .path()
         .join(format!("{}.xll", metadata.artifact_name));
@@ -1026,21 +1030,15 @@ fn stage_distribution_target(
     }
     fs::write(&xll, source_snapshot.as_ref())?;
 
+    let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
+    observation.warn_if_mixed();
+    // Keep the closed-world verifier strict for arbitrary imports while
+    // permitting only dynamic CRT names observed in this exact XLL image.
+    staged_bundle.try_add_external_imports(&observation.observed_dynamic_crt_imports)?;
+
     // Inspect only the isolated files. These same staged bytes are hashed
     // below and become the committed distribution directory.
     let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
-    let xll_artifact = verified
-        .artifacts()
-        .iter()
-        .find(|artifact| {
-            artifact.relative_path() == Path::new(&format!("{}.xll", metadata.artifact_name))
-        })
-        .context("verified package is missing the generated XLL artifact")?;
-    let observation = CrtObservation::inspect(
-        &xlfn_package::parse_pe_bytes(xll_artifact.bytes())?,
-        metadata.crt,
-    )?;
-    observation.warn_if_mixed();
 
     let files = verified
         .artifacts()
