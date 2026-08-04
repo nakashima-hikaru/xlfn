@@ -1136,10 +1136,7 @@ impl ServerRuntime {
                         };
                     }
                     if let Some(callback) = callback {
-                        NotificationCompletion::Retry(NotificationAttempt {
-                            ticket,
-                            callback,
-                        })
+                        NotificationCompletion::Retry(NotificationAttempt { ticket, callback })
                     } else {
                         state.delivery.reset_suppressed_signal();
                         NotificationCompletion::Failed(error)
@@ -1181,7 +1178,12 @@ impl ServerRuntime {
                 RefreshOutcome::Delivered => {
                     for update in delivered_updates {
                         let topic_id = TopicId(update.topic_id);
-                        if state.delivery.updates.get(&topic_id).is_some_and(|u| u.sequence == update.sequence) {
+                        if state
+                            .delivery
+                            .updates
+                            .get(&topic_id)
+                            .is_some_and(|u| u.sequence == update.sequence)
+                        {
                             state.delivery.updates.remove(&topic_id);
                         }
                     }
@@ -1705,7 +1707,11 @@ impl SubscriptionRuntime {
             let mut state = server_handle.inner.state.lock();
             if state.active_by_topic.contains_key(&topic_id) {
                 let mut catalog = self.catalog.lock();
-                if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                if let Some(pending) = catalog
+                    .pending
+                    .get_mut(key)
+                    .filter(|p| p.connecting_generation == Some(conn_gen))
+                {
                     pending.connecting_generation = None;
                 }
                 catalog.active_keys.remove(key);
@@ -1715,7 +1721,11 @@ impl SubscriptionRuntime {
             }
             if state.topic_by_key.contains_key(key) {
                 let mut catalog = self.catalog.lock();
-                if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                if let Some(pending) = catalog
+                    .pending
+                    .get_mut(key)
+                    .filter(|p| p.connecting_generation == Some(conn_gen))
+                {
                     pending.connecting_generation = None;
                 }
                 catalog.active_keys.remove(key);
@@ -1728,7 +1738,11 @@ impl SubscriptionRuntime {
                 Ok(p) => p,
                 Err(err) => {
                     let mut catalog = self.catalog.lock();
-                    if let Some(pending) = catalog.pending.get_mut(key).filter(|p| p.connecting_generation == Some(conn_gen)) {
+                    if let Some(pending) = catalog
+                        .pending
+                        .get_mut(key)
+                        .filter(|p| p.connecting_generation == Some(conn_gen))
+                    {
                         pending.connecting_generation = None;
                     }
                     catalog.active_keys.remove(key);
@@ -1821,7 +1835,10 @@ impl SubscriptionRuntime {
             active.committed = true;
 
             if let Some(obs) = observed_sequence {
-                state.delivery.updates.retain(|&tid, u| tid != topic_id || u.sequence > obs);
+                state
+                    .delivery
+                    .updates
+                    .retain(|&tid, u| tid != topic_id || u.sequence > obs);
             }
 
             let has_updates = !state.delivery.updates.is_empty();
@@ -1845,9 +1862,10 @@ impl SubscriptionRuntime {
             {
                 pending.connecting_generation = None;
             }
-            let remove_pending = catalog.pending.get(key).is_some_and(|p| {
-                p.live_reservations == 0 && p.connecting_generation.is_none()
-            });
+            let remove_pending = catalog
+                .pending
+                .get(key)
+                .is_some_and(|p| p.live_reservations == 0 && p.connecting_generation.is_none());
 
             if remove_pending {
                 let removed = catalog.pending.remove(key);
@@ -1901,16 +1919,12 @@ impl SubscriptionRuntime {
             {
                 state.active_by_topic.remove(&topic_id);
             }
-            if state
-                .topic_by_key
-                .get(key)
-                .is_some_and(|&tid| {
-                    state
-                        .active_by_topic
-                        .get(&tid)
-                        .is_none_or(|a| a.generation == generation)
-                })
-            {
+            if state.topic_by_key.get(key).is_some_and(|&tid| {
+                state
+                    .active_by_topic
+                    .get(&tid)
+                    .is_none_or(|a| a.generation == generation)
+            }) {
                 state.topic_by_key.remove(key);
             }
 
@@ -1994,9 +2008,10 @@ impl SubscriptionRuntime {
                 catalog.active_keys.remove(&key_to_clean);
             }
 
-            let remove_pending = catalog.pending.get(&key_to_clean).is_some_and(|p| {
-                p.live_reservations == 0 && p.connecting_generation.is_none()
-            });
+            let remove_pending = catalog
+                .pending
+                .get(&key_to_clean)
+                .is_some_and(|p| p.live_reservations == 0 && p.connecting_generation.is_none());
 
             if remove_pending {
                 let removed = catalog.pending.remove(&key_to_clean);

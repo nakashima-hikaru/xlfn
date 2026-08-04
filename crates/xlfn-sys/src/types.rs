@@ -1,6 +1,10 @@
 //! C-compatible Excel 12 value and constant definitions.
 
-#![allow(non_camel_case_types, non_snake_case, reason = "C C-ABI SDK type names")]
+#![allow(
+    non_camel_case_types,
+    non_snake_case,
+    reason = "C C-ABI SDK type names"
+)]
 
 use core::fmt;
 

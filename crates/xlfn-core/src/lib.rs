@@ -16,7 +16,11 @@
 #![deny(unsafe_code)]
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, clippy::undocumented_unsafe_blocks, reason = "Windows C-ABI integration")]
+#[allow(
+    unsafe_code,
+    clippy::undocumented_unsafe_blocks,
+    reason = "Windows C-ABI integration"
+)]
 pub(crate) mod win32;
 
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]

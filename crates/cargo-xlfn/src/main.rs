@@ -21,7 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
 
 #[cfg(target_os = "windows")]
-#[allow(clippy::undocumented_unsafe_blocks, reason = "FFI bindings in win32 module")]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "FFI bindings in win32 module"
+)]
 mod win32;
 
 mod crt;

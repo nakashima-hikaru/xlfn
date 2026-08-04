@@ -265,7 +265,10 @@ fn retain_transaction_error<S>(
 struct OpenRollbackOutcome {
     local_quiescent: bool,
     host_callbacks_detached: bool,
-    #[allow(dead_code, reason = "Host callback session token retained for rollback outcome verification")]
+    #[allow(
+        dead_code,
+        reason = "Host callback session token retained for rollback outcome verification"
+    )]
     host_callback_state: HostCallbackState,
     registration_state_known: bool,
     finalized: bool,

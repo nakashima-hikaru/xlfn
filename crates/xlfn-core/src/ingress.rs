@@ -98,7 +98,10 @@ const fn active_of(state: u64) -> u64 {
 /// Proof token certifying that all module export entries have been drained.
 #[derive(Debug)]
 pub struct ExportsDrained {
-    #[allow(dead_code, reason = "Linear proof token tracking epoch for ingress drain")]
+    #[allow(
+        dead_code,
+        reason = "Linear proof token tracking epoch for ingress drain"
+    )]
     pub(crate) epoch: u64,
 }
 

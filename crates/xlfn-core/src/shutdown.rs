@@ -71,7 +71,10 @@ impl<'a> CleanupReporter<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnloadHazard {
     HostCallbackStillRegistered,
-    #[allow(dead_code, reason = "Async hazard variant used in async feature builds")]
+    #[allow(
+        dead_code,
+        reason = "Async hazard variant used in async feature builds"
+    )]
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
     HandleRuntimeNotQuiescent,

@@ -2594,7 +2594,10 @@ unsafe extern "system" fn server_invoke(
     })
 }
 
-#[allow(clippy::too_many_arguments, reason = "COM IDispatch::Invoke ABI signature")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "COM IDispatch::Invoke ABI signature"
+)]
 unsafe fn server_invoke_inner(
     this: *mut RtdServer,
     id: i32,
@@ -5703,10 +5706,7 @@ mod tests {
             unsafe { install_callback(&(*server).callbacks, Arc::clone(&callback)) };
             // SAFETY: the same retained server remains live. This post-install
             // re-read must observe the attachment made before the barrier.
-            unsafe {
-                synchronize_callback_notification(&*server, Arc::clone(&callback))
-            }
-            .unwrap();
+            unsafe { synchronize_callback_notification(&*server, Arc::clone(&callback)) }.unwrap();
 
             // local + server active slot + SubscriptionRuntime notification.
             assert_eq!(Arc::strong_count(&callback), 3);

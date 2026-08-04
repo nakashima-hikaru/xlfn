@@ -28,7 +28,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, clippy::undocumented_unsafe_blocks, reason = "Windows Win32 FFI bindings")]
+#[allow(
+    unsafe_code,
+    clippy::undocumented_unsafe_blocks,
+    reason = "Windows Win32 FFI bindings"
+)]
 mod win32;
 
 #[cfg(target_os = "windows")]
@@ -2518,7 +2522,10 @@ fn validate_private_directory(path: &Path, metadata: &std::fs::Metadata) -> Pack
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, reason = "Windows security API access for process token SID")]
+#[allow(
+    unsafe_code,
+    reason = "Windows security API access for process token SID"
+)]
 fn current_windows_user_sid_string() -> PackageResult<String> {
     use crate::win32::{
         CloseHandle, GetCurrentProcess, GetLengthSid, GetTokenInformation, IsValidSid,
@@ -2641,7 +2648,10 @@ fn current_windows_user_sid_string() -> PackageResult<String> {
 }
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code, reason = "Windows security API for ACL directory creation")]
+#[allow(
+    unsafe_code,
+    reason = "Windows security API for ACL directory creation"
+)]
 fn create_private_windows_directory(path: &Path) -> PackageResult {
     use crate::win32::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateDirectoryW, HLOCAL, LocalFree,
@@ -2966,7 +2976,10 @@ fn validate_private_windows_directory(path: &Path) -> PackageResult {
     result
 }
 
-#[allow(clippy::permissions_set_readonly_false, reason = "Explicit non-readonly permission specification")]
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "Explicit non-readonly permission specification"
+)]
 fn manifest_permissions() -> PackageResult<std::fs::Permissions> {
     #[cfg(unix)]
     {

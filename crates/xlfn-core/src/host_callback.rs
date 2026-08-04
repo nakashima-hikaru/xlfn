@@ -201,7 +201,10 @@ mod tests {
         );
     }
 
-    #[allow(clippy::forget_non_drop, reason = "Intentionally testing std::mem::forget on borrowed context")]
+    #[allow(
+        clippy::forget_non_drop,
+        reason = "Intentionally testing std::mem::forget on borrowed context"
+    )]
     #[test]
     fn forgetting_a_borrowed_context_does_not_keep_callbacks_open() {
         let escaped = crate::with_excel_call_scope(|scope| {

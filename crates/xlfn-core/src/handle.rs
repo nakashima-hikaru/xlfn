@@ -378,7 +378,10 @@ impl HandleRegistry {
     #[cfg(any(test, feature = "shutdown-refinement"))]
     #[cfg_attr(
         not(target_os = "windows"),
-        allow(dead_code, reason = "Ghost handle only used in Windows COM shutdown path")
+        allow(
+            dead_code,
+            reason = "Ghost handle only used in Windows COM shutdown path"
+        )
     )]
     fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()

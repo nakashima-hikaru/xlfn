@@ -673,21 +673,45 @@ impl<S> Runtime<S> {
 
 #[derive(Debug)]
 pub struct CloseCertificate {
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) exports: crate::ingress::ExportsDrained,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) rtd: crate::rtd::RtdQuiescent,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     runtime_address: usize,
     close_attempt_id: u64,
@@ -704,21 +728,45 @@ pub(crate) struct ClosedWitness {
 
 #[derive(Debug)]
 pub(crate) struct OpenRollbackCertificate {
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) exports: crate::ingress::ExportsDrained,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) rtd: crate::rtd::RtdQuiescent,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
-    #[allow(dead_code, reason = "Typestate proof token for linear lifecycle release")]
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     runtime_address: usize,
 }
