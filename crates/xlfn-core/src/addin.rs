@@ -534,7 +534,9 @@ mod tests {
 
         let batch = subscriptions.begin_refresh(51).unwrap();
         assert!(batch.updates.is_empty());
-        subscriptions.complete_refresh(batch, crate::subscription::RefreshOutcome::Delivered);
+        subscriptions
+            .complete_refresh(batch, crate::subscription::RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(
             subscriptions.connect(51, 7, prepared.key()).unwrap(),
             crate::RtdValue::Number(17.5),

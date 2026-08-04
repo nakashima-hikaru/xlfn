@@ -1580,6 +1580,12 @@ impl SubscriptionRuntime {
             .get_mut(&server_generation)
             .ok_or(XllError::Closing)?;
 
+        if matches!(delivery.phase, DeliveryPhase::Refreshing { .. }) {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x4f56_4c50_5245_4652,
+            });
+        }
+
         let refresh_id = delivery.allocate_refresh_id()?;
 
         let updates: Vec<RtdUpdate> = delivery
@@ -1593,16 +1599,7 @@ impl SubscriptionRuntime {
             })
             .collect();
 
-        let previous_phase = std::mem::replace(
-            &mut delivery.phase,
-            DeliveryPhase::Refreshing { refresh_id },
-        );
-
-        if matches!(previous_phase, DeliveryPhase::Refreshing { .. }) {
-            return Err(XllError::Internal {
-                diagnostic_id: 0x4f56_4c50_5245_4652,
-            });
-        }
+        delivery.phase = DeliveryPhase::Refreshing { refresh_id };
 
         Ok(RtdUpdateBatch {
             server_generation,
@@ -1611,20 +1608,24 @@ impl SubscriptionRuntime {
         })
     }
 
-    pub(crate) fn complete_refresh(&self, batch: RtdUpdateBatch, outcome: RefreshOutcome) {
+    pub(crate) fn complete_refresh(
+        &self,
+        batch: RtdUpdateBatch,
+        outcome: RefreshOutcome,
+    ) -> XllResult<()> {
         let attempt = {
             let mut state = self.state.lock();
 
             let Some(delivery) = state.deliveries.get_mut(&batch.server_generation) else {
-                return;
+                return Ok(());
             };
 
             let DeliveryPhase::Refreshing { refresh_id, .. } = &mut delivery.phase else {
-                return;
+                return Ok(());
             };
 
             if *refresh_id != batch.refresh_id {
-                return;
+                return Ok(());
             }
 
             let mut removed_count = 0_usize;
@@ -1646,10 +1647,7 @@ impl SubscriptionRuntime {
             };
 
             let attempt = if !delivery.updates.is_empty() {
-                delivery
-                    .arm_notification_if_needed(batch.server_generation)
-                    .ok()
-                    .flatten()
+                delivery.arm_notification_if_needed(batch.server_generation)?
             } else {
                 None
             };
@@ -1662,6 +1660,7 @@ impl SubscriptionRuntime {
         if let Some(attempt) = attempt {
             self.drive_notification(attempt);
         }
+        Ok(())
     }
 
     pub(crate) fn attach_update_callback(
@@ -2256,7 +2255,7 @@ fn disconnect_all_no_unwind(subscriptions: Vec<DisconnectTarget>) -> XllResult<(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::IntoExcelValue;
     use static_assertions::assert_not_impl_any;
@@ -2331,9 +2330,9 @@ mod tests {
         }
     }
 
-    type PublishingSink = Arc<Mutex<Option<RtdSink<f64>>>>;
+    pub(crate) type PublishingSink = Arc<Mutex<Option<RtdSink<f64>>>>;
 
-    struct PublishingSource {
+    pub(crate) struct PublishingSource {
         sink: PublishingSink,
         initial: Option<f64>,
         disconnected: Arc<AtomicBool>,
@@ -2355,7 +2354,7 @@ mod tests {
         }
     }
 
-    fn publishing_source(
+    pub(crate) fn publishing_source(
         initial: Option<f64>,
     ) -> (Arc<PublishingSource>, PublishingSink, Arc<AtomicBool>) {
         let sink = Arc::new(Mutex::new(None));
@@ -2480,7 +2479,9 @@ mod tests {
         let batch = runtime.begin_refresh(4).unwrap();
         assert_eq!(batch.updates.len(), 1);
         assert_eq!(batch.updates[0].value, RtdValue::Number(13.5));
-        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Delivered)
+            .unwrap();
     }
 
     #[test]
@@ -3311,12 +3312,16 @@ mod tests {
         let first = runtime.begin_refresh(1).unwrap();
         sink.publish(2.0).unwrap();
 
-        runtime.complete_refresh(first, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(first, RefreshOutcome::Delivered)
+            .unwrap();
 
         let remaining = runtime.begin_refresh(1).unwrap();
         assert_eq!(remaining.updates.len(), 1);
         assert_eq!(remaining.updates[0].value, RtdValue::Number(2.0));
-        runtime.complete_refresh(remaining, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(remaining, RefreshOutcome::Delivered)
+            .unwrap();
     }
 
     #[test]
@@ -3510,7 +3515,9 @@ mod tests {
             .unwrap();
         let batch = runtime.begin_refresh(1).unwrap();
 
-        runtime.complete_refresh(batch, RefreshOutcome::Failed);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Failed)
+            .unwrap();
 
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
         assert_eq!(runtime.pending_update_count(1), 1);
@@ -4210,7 +4217,9 @@ mod tests {
         let batch = runtime.begin_refresh(100).unwrap();
         assert_eq!(batch.updates.len(), 1);
         assert_eq!(batch.updates[0].value, RtdValue::Number(999.0));
-        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(runtime.pending_update_count(100), 0);
     }
 
@@ -4251,7 +4260,9 @@ mod tests {
 
         let batch = runtime.begin_refresh(101).unwrap();
         assert_eq!(batch.updates.len(), 10);
-        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(runtime.pending_update_count(101), 0);
     }
 
@@ -4292,7 +4303,9 @@ mod tests {
         assert_eq!(batch.updates.len(), 1);
         assert_eq!(batch.updates[0].value, RtdValue::Number(200.0));
 
-        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
     }
 
@@ -4328,13 +4341,17 @@ mod tests {
         sink.publish(2.0).unwrap();
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
 
-        runtime.complete_refresh(batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
 
         let second_batch = runtime.begin_refresh(103).unwrap();
         assert_eq!(second_batch.updates.len(), 1);
         assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
-        runtime.complete_refresh(second_batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(second_batch, RefreshOutcome::Delivered)
+            .unwrap();
     }
 
     #[test]
@@ -4360,12 +4377,16 @@ mod tests {
 
         sink.publish(2.0).unwrap();
 
-        runtime.complete_refresh(first_batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(first_batch, RefreshOutcome::Delivered)
+            .unwrap();
 
         assert_eq!(runtime.pending_update_count(104), 1);
         let second_batch = runtime.begin_refresh(104).unwrap();
         assert_eq!(second_batch.updates[0].value, RtdValue::Number(2.0));
-        runtime.complete_refresh(second_batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(second_batch, RefreshOutcome::Delivered)
+            .unwrap();
     }
 
     #[test]
@@ -4395,14 +4416,18 @@ mod tests {
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
 
         let batch = runtime.begin_refresh(105).unwrap();
-        runtime.complete_refresh(batch, RefreshOutcome::Failed);
+        runtime
+            .complete_refresh(batch, RefreshOutcome::Failed)
+            .unwrap();
 
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
         assert_eq!(runtime.pending_update_count(105), 1);
 
         let retry_batch = runtime.begin_refresh(105).unwrap();
         assert_eq!(retry_batch.updates.len(), 1);
-        runtime.complete_refresh(retry_batch, RefreshOutcome::Delivered);
+        runtime
+            .complete_refresh(retry_batch, RefreshOutcome::Delivered)
+            .unwrap();
         assert_eq!(runtime.pending_update_count(105), 0);
     }
 
@@ -4595,5 +4620,101 @@ mod tests {
 
         // B should be notified because updates exist and signal was reset to Dormant
         assert_eq!(callback_b_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn overlapping_begin_refresh_does_not_invalidate_active_batch() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("overlap-test").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(1, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+
+        let first = runtime.begin_refresh(1).unwrap();
+
+        assert!(matches!(
+            runtime.begin_refresh(1),
+            Err(XllError::Internal { .. })
+        ));
+
+        // The first batch must remain valid and complete cleanly.
+        runtime
+            .complete_refresh(first, RefreshOutcome::Delivered)
+            .unwrap();
+
+        assert_eq!(runtime.pending_update_count(1), 0);
+
+        // Verify phase is not stuck in Refreshing
+        sink.publish(2.0).unwrap();
+        let next = runtime.begin_refresh(1).unwrap();
+        assert_eq!(next.updates[0].value, RtdValue::Number(2.0));
+        runtime
+            .complete_refresh(next, RefreshOutcome::Delivered)
+            .unwrap();
+    }
+
+    #[test]
+    fn in_flight_callback_detach_race_invalidates_stale_completion() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let callback_b_calls = Arc::new(AtomicUsize::new(0));
+
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        runtime
+            .attach_update_callback(1000, {
+                let entered_tx = entered_tx.clone();
+                let release_rx = Arc::clone(&release_rx);
+                Arc::new(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.lock().recv().unwrap();
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = publishing_source(None);
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("true-race").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        runtime.connect(1000, 1, &key).unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+
+        let runtime_clone = Arc::clone(&runtime);
+        let handle = std::thread::spawn(move || {
+            sink.publish(1.0).unwrap();
+        });
+
+        // Wait for Callback A to enter
+        entered_rx.recv().unwrap();
+
+        // Detach A while in-flight and attach B
+        runtime_clone.detach_update_callback(1000);
+
+        runtime_clone
+            .attach_update_callback(1000, {
+                let calls = Arc::clone(&callback_b_calls);
+                Arc::new(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        // Release Callback A
+        release_tx.send(()).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(callback_b_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime_clone.pending_update_count(1000), 1);
     }
 }

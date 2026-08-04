@@ -2049,39 +2049,37 @@ fn ensure_server(
         let mut backends = unsafe { (*server).backends.lock() };
 
         if let Some(handles) = handles {
-            if backends
-                .handles
-                .as_ref()
-                .is_some_and(|active| !Arc::ptr_eq(active, &handles))
-            {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x5254_444d_554c_5449,
-                });
+            match backends.handles.as_ref() {
+                Some(active) if Arc::ptr_eq(active, &handles) => {}
+                Some(_) => {
+                    return Err(XllError::Internal {
+                        diagnostic_id: 0x5254_444d_554c_5449,
+                    });
+                }
+                None => backends.handles = Some(handles),
             }
-
-            backends.handles = Some(handles);
         }
 
-        let mut attached_subscriptions = None;
-
-        if let Some(subscriptions) = subscriptions {
-            if backends
-                .subscriptions
-                .as_ref()
-                .is_some_and(|active| !Arc::ptr_eq(active, &subscriptions))
-            {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x5254_444d_554c_5449,
-                });
+        let newly_attached_subscriptions = if let Some(subscriptions) = subscriptions {
+            match backends.subscriptions.as_ref() {
+                Some(active) if Arc::ptr_eq(active, &subscriptions) => None,
+                Some(_) => {
+                    return Err(XllError::Internal {
+                        diagnostic_id: 0x5254_444d_554c_5449,
+                    });
+                }
+                None => {
+                    backends.subscriptions = Some(Arc::clone(&subscriptions));
+                    Some(subscriptions)
+                }
             }
-
-            backends.subscriptions = Some(Arc::clone(&subscriptions));
-            attached_subscriptions = Some(subscriptions);
-        }
+        } else {
+            None
+        };
 
         drop(backends);
 
-        if let Some(subscriptions) = attached_subscriptions {
+        if let Some(subscriptions) = newly_attached_subscriptions {
             // SAFETY: ACTIVE_SERVER still owns a live reference, so the callback
             // mutex can be accessed while the global server lock is held.
             // Clone in a separate block so set_notification never runs while
@@ -3394,7 +3392,9 @@ unsafe fn refresh_data_inner(
         crate::subscription::RefreshOutcome::Failed
     };
 
-    subscriptions.complete_refresh(batch, outcome);
+    if let Err(error) = subscriptions.complete_refresh(batch, outcome) {
+        crate::diagnostics::report_no_unwind("IRtdServer::RefreshData rearm", &error);
+    }
 
     status
 }
@@ -7000,11 +7000,60 @@ mod tests {
                 .as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, &subscriptions))
         );
+    }
 
-        drop(backends);
+    #[test]
+    fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
+        use std::sync::atomic::AtomicUsize;
 
+        let _guard = TEST_LOCK.lock().unwrap();
+        let subscriptions = Arc::new(SubscriptionRuntime::new());
+        let notifications = Arc::new(AtomicUsize::new(0));
+
+        let ensured = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+        let server = ensured.active.pointer as *mut RtdServer;
+
+        let callback = Arc::new(RetainedUpdateCallback {
+            cookie: None,
+            drop_hook: None,
+        });
+        // SAFETY: EnsuredServer keeps server reference alive
+        unsafe {
+            install_callback(&(*server).callbacks, callback);
+        }
+
+        subscriptions
+            .attach_update_callback(ensured.active.generation, {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .unwrap();
+
+        let (source, sink, _) = crate::subscription::tests::publishing_source(None);
+        let prepared = subscriptions
+            .prepare(source, RtdTopic::single("ensure-test").unwrap())
+            .unwrap();
+        let key = prepared.key().to_owned();
+        prepared.commit();
+        subscriptions
+            .connect(ensured.active.generation, 1, &key)
+            .unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(1.0).unwrap();
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        for _ in 0..100 {
+            let _res = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+        }
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        drop(ensured);
         shutdown_subscriptions(subscriptions).unwrap();
-        handles.close().unwrap();
     }
 
     #[test]
