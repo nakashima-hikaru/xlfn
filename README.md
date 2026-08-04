@@ -73,6 +73,7 @@ Load the generated `.xll` from the matching `dist/win-x64` or `dist/win-x86` dir
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
 See the [quick-start guide](guide/src/quick-start.md) for creating a project, packaging optional sidecars, and troubleshooting.
+
 ## Programming model
 
 Define one add-in and annotate exported worksheet functions:
@@ -153,19 +154,6 @@ CI builds the Lean project, runs `leanchecker`, and rejects committed `sorry` or
 Implemented areas include typed registration and conversion, lifecycle management, handles, async UDFs, RTD, diagnostics, caches, package staging, PE validation, and the Lean shutdown model. External-engine adapters, worker models, and runtime loading remain application responsibilities.
 
 The public API is not stable at `0.1.0`. Automated tests and artifact inspection also do not replace qualification in the exact Excel versions, channels, locales, and deployment environment used in production.
-
-## Contributing
-
-Contributions should keep unsafe Excel ABI operations inside narrow, documented boundaries and prefer compile-time validation over runtime interpretation. Changes to unsafe code should include explicit `SAFETY` reasoning and focused tests; changes to shutdown semantics should update the Lean model or its refinement obligations where applicable.
-
-Before opening a pull request, run:
-
-```console
-cargo fmt --all -- --check
-cargo clippy --workspace --exclude excel-abi-probe --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --exclude excel-abi-probe --all-targets --all-features --locked
-python3 guide/check.py
-```
 
 ## Security
 
