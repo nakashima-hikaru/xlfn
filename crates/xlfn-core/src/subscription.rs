@@ -1273,7 +1273,9 @@ impl ServerRuntime {
     fn begin_termination<'a>(self: &'a Arc<Self>) -> TerminationAdmission<'a> {
         let mut term_state = self.termination_coordinator.state.lock();
         match term_state.phase {
-            ServerTerminationPhase::Terminated => TerminationAdmission::Complete,
+            ServerTerminationPhase::Terminated | ServerTerminationPhase::Failed => {
+                TerminationAdmission::Complete
+            }
             ServerTerminationPhase::Terminating => {
                 TerminationAdmission::Waiter(ServerTerminationWaiter {
                     coordinator: &self.termination_coordinator,
@@ -1336,6 +1338,7 @@ enum ServerTerminationPhase {
     Open,
     Terminating,
     Terminated,
+    Failed,
 }
 
 #[derive(Debug, Default)]
@@ -1371,13 +1374,16 @@ struct ServerTerminationWaiter<'a> {
 impl<'a> ServerTerminationWaiter<'a> {
     fn wait(self) -> XllResult<()> {
         let mut state = self.coordinator.state.lock();
-        while state.phase != ServerTerminationPhase::Terminated {
+        while state.phase == ServerTerminationPhase::Terminating {
             self.coordinator.completed.wait(&mut state);
         }
-        state
-            .failure
-            .as_ref()
-            .map_or(Ok(()), |error| Err(error.clone()))
+        match state.phase {
+            ServerTerminationPhase::Terminated | ServerTerminationPhase::Failed => state
+                .failure
+                .as_ref()
+                .map_or(Ok(()), |error| Err(error.clone())),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -1390,15 +1396,15 @@ struct TerminationCompletionGuard<'a> {
 impl TerminationCompletionGuard<'_> {
     fn complete(mut self, result: XllResult<()>) -> XllResult<()> {
         self.failure = result.as_ref().err().cloned();
-        self.publish_completion();
+        self.publish_completion(ServerTerminationPhase::Terminated);
         self.completed = true;
         result
     }
 
-    fn publish_completion(&self) {
+    fn publish_completion(&self, phase: ServerTerminationPhase) {
         let mut state = self.coordinator.state.lock();
         state.failure = self.failure.clone();
-        state.phase = ServerTerminationPhase::Terminated;
+        state.phase = phase;
         self.coordinator.completed.notify_all();
     }
 }
@@ -1413,7 +1419,7 @@ impl Drop for TerminationCompletionGuard<'_> {
             self.failure = Some(XllError::Panic);
         }
 
-        self.publish_completion();
+        self.publish_completion(ServerTerminationPhase::Failed);
     }
 }
 
@@ -1428,8 +1434,9 @@ struct TerminatedTopic {
 }
 
 #[cfg(test)]
-static PANIC_AFTER_TERMINATION_GUARD: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static PANIC_AFTER_TERMINATION_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 struct ServerTermination<'a> {
     server: Arc<ServerRuntime>,
@@ -1459,7 +1466,7 @@ impl<'a> ServerTermination<'a> {
         };
 
         #[cfg(test)]
-        if PANIC_AFTER_TERMINATION_GUARD.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if PANIC_AFTER_TERMINATION_GUARD.with(|cell| cell.replace(false)) {
             panic!("injected termination owner panic");
         }
 
@@ -2128,11 +2135,11 @@ impl SubscriptionRuntime {
         let subscription = match sub_res {
             Ok(Ok(sub)) => sub,
             Ok(Err(err)) => {
-                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let _ = self.rollback_connection(server_handle, topic_id, conn_gen, key);
                 return Err(err);
             }
             Err(panic_payload) => {
-                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let _ = self.rollback_connection(server_handle, topic_id, conn_gen, key);
                 self.record_cleanup_result(Err(XllError::Internal {
                     diagnostic_id: 0x5041_4e49_4353_5542,
                 }));
@@ -2165,8 +2172,13 @@ impl SubscriptionRuntime {
         let (latest_value, observed_sequence) = match install_result {
             Ok(res) => res,
             Err(sub) => {
-                let _ = catch_unwind(AssertUnwindSafe(|| sub.disconnect_and_wait()));
-                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let cleanup_res = disconnect_one_no_unwind(sub);
+                let rollback_res = self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let first_error = cleanup_res.err().or_else(|| rollback_res.err());
+                if let Some(error) = first_error {
+                    self.record_cleanup_result(Err(error.clone()));
+                    return Err(error);
+                }
                 return Err(XllError::Closing);
             }
         };
@@ -2273,7 +2285,7 @@ impl SubscriptionRuntime {
         topic_id: TopicId,
         generation: ConnectionGeneration,
         key: &SubscriptionKey,
-    ) {
+    ) -> XllResult<()> {
         let (subscription, _removed_update) = {
             let mut state = server_handle.inner.state.lock();
             let sub = state
@@ -2347,21 +2359,30 @@ impl SubscriptionRuntime {
             }
         };
 
+        let mut first_error = None;
+
         if let Some(sub) = subscription {
             let res = disconnect_one_no_unwind(sub);
-            if res.is_err() {
-                self.record_cleanup_result(res);
+            if let Err(ref err) = res {
+                self.record_cleanup_result(res.clone());
+                first_error = Some(err.clone());
             }
         }
 
         if let Some(source) = removed_source {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
-                self.record_cleanup_result(Err(XllError::Internal {
+                let err = XllError::Internal {
                     diagnostic_id: 0x5041_4e49_4353_5243,
-                }));
+                };
+                self.record_cleanup_result(Err(err.clone()));
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
             }
         }
+
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(crate) fn disconnect(
@@ -2413,9 +2434,11 @@ impl SubscriptionRuntime {
         {
             let mut term_state = self.termination_coordinator.state.lock();
             match term_state.phase {
-                ServerTerminationPhase::Terminated => return self.cleanup_result(),
+                ServerTerminationPhase::Terminated | ServerTerminationPhase::Failed => {
+                    return self.cleanup_result();
+                }
                 ServerTerminationPhase::Terminating => {
-                    while term_state.phase != ServerTerminationPhase::Terminated {
+                    while term_state.phase == ServerTerminationPhase::Terminating {
                         self.termination_coordinator.completed.wait(&mut term_state);
                     }
                     return self.cleanup_result();
@@ -2595,8 +2618,12 @@ impl SubscriptionConnection {
             let handle = RtdServerHandle {
                 inner: Arc::clone(&self.server),
             };
-            self.runtime
-                .rollback_connection(&handle, self.topic_id, self.generation, &self.key);
+            let _ = self.runtime.rollback_connection(
+                &handle,
+                self.topic_id,
+                self.generation,
+                &self.key,
+            );
         }
         self.operation.take();
     }
@@ -3505,7 +3532,7 @@ pub(crate) mod tests {
 
         let handle = std::thread::spawn(move || server.terminate());
 
-        PANIC_AFTER_TERMINATION_GUARD.store(true, std::sync::atomic::Ordering::Release);
+        PANIC_AFTER_TERMINATION_GUARD.with(|cell| cell.set(true));
 
         let cancel_res = owner.request_cancel();
         let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish(cancel_res)));
@@ -3615,5 +3642,77 @@ pub(crate) mod tests {
 
         let res = server.terminate();
         assert!(matches!(res, Err(XllError::Panic)));
+    }
+
+    struct DelayedSubscribeFailingSource {
+        tx_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        rx_close: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl RtdSource for DelayedSubscribeFailingSource {
+        type Value = f64;
+        fn subscribe(
+            &self,
+            _topic: &RtdTopic,
+            _sink: RtdSink<Self::Value>,
+        ) -> XllResult<Box<dyn RtdSubscription>> {
+            if let Some(tx) = self.tx_entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let rx = self.rx_close.lock();
+            let _ = rx.recv();
+            Ok(Box::new(FailingDisconnectSubscription))
+        }
+    }
+
+    #[test]
+    fn install_failure_during_closing_propagates_cleanup_error() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+        let (tx_close, rx_close) = std::sync::mpsc::channel();
+        let (tx_enter, rx_enter) = std::sync::mpsc::channel();
+
+        let prep = runtime
+            .prepare(
+                Arc::new(DelayedSubscribeFailingSource {
+                    tx_entered: std::sync::Mutex::new(Some(tx_enter)),
+                    rx_close: Mutex::new(rx_close),
+                }),
+                RtdTopic::single("delayed_fail").unwrap(),
+            )
+            .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+        prep.commit();
+
+        let runtime_clone = Arc::clone(&runtime);
+        let server_clone = server.clone();
+        let key_clone = key.clone();
+
+        let handle = std::thread::spawn(move || {
+            runtime_clone.connect_transaction(&server_clone, TopicId(1), &key_clone)
+        });
+
+        rx_enter.recv().unwrap();
+
+        {
+            let mut state = server.inner.state.lock();
+            state.lifecycle = ServerLifecycle::Closing;
+        }
+
+        tx_close.send(()).unwrap();
+
+        let res = handle.join().unwrap();
+        assert!(matches!(
+            res,
+            Err(XllError::Internal {
+                diagnostic_id: 0xDEAD_BEEF
+            })
+        ));
+
+        assert!(matches!(
+            runtime.cleanup_result(),
+            Err(XllError::Internal {
+                diagnostic_id: 0xDEAD_BEEF
+            })
+        ));
     }
 }
