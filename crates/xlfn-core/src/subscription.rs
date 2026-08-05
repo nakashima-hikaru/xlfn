@@ -517,24 +517,9 @@ impl OperationGate {
         })
     }
 
-    pub(crate) fn close_and_wait(&self) -> XllResult<()> {
-        let prev = self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
-        if (prev & CLOSING_BIT) != 0 {
-            return Ok(());
-        }
-        let mut guard = self.wait_lock.lock();
-        while (self.state.load(Ordering::Acquire) & !CLOSING_BIT) > 0 {
-            self.idle.wait(&mut guard);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn close_and_wait_begin(&self) -> XllResult<TerminationWaitGuard<'_>> {
-        let prev = self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
-        if (prev & CLOSING_BIT) != 0 {
-            return Err(XllError::Closing);
-        }
-        Ok(TerminationWaitGuard { gate: self })
+    pub(crate) fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
+        self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+        TerminationWaitGuard { gate: self }
     }
 
     fn leave(&self) {
@@ -577,7 +562,6 @@ enum BindingStage {
 }
 
 struct ActiveKeyBinding {
-    server: Weak<ServerRuntime>,
     connection_generation: ConnectionGeneration,
     stage: BindingStage,
 }
@@ -622,6 +606,7 @@ struct ActiveSubscription {
 }
 
 struct QueuedUpdate {
+    connection_generation: ConnectionGeneration,
     sequence: u64,
     value: RtdValue,
     _permit: QuotaPermit,
@@ -812,6 +797,16 @@ struct ServerState {
     delivery: ServerDeliveryState,
 }
 
+impl ServerState {
+    fn has_deliverable_updates(&self) -> bool {
+        self.delivery.updates.keys().any(|topic_id| {
+            self.active_by_topic
+                .get(topic_id)
+                .is_some_and(|active| active.committed)
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RtdServerHandle {
     inner: Arc<ServerRuntime>,
@@ -826,8 +821,7 @@ impl RtdServerHandle {
         let (retired, attempt) = {
             let mut state = self.inner.state.lock();
             let retired = state.delivery.attach_callback(callback);
-            let has_committed = state.active_by_topic.values().any(|a| a.committed);
-            let has_updates = !state.delivery.updates.is_empty() && has_committed;
+            let has_updates = state.has_deliverable_updates();
             let prepared = state.delivery.prepare_notification(has_updates)?;
             let attempt = prepared.map(|p| state.delivery.commit_notification(p));
             (retired, attempt)
@@ -847,8 +841,7 @@ impl RtdServerHandle {
         let _operation = self.inner.enter_operation()?;
         let attempt = {
             let mut state = self.inner.state.lock();
-            let has_committed = state.active_by_topic.values().any(|a| a.committed);
-            let has_updates = !state.delivery.updates.is_empty() && has_committed;
+            let has_updates = state.has_deliverable_updates();
             let prepared = state.delivery.prepare_notification(has_updates)?;
             prepared.map(|p| state.delivery.commit_notification(p))
         };
@@ -946,6 +939,7 @@ pub(crate) struct ServerRuntime {
     operation_gate: Arc<OperationGate>,
     state: Mutex<ServerState>,
     parent: Weak<SubscriptionRuntime>,
+    termination_coordinator: TerminationCoordinator,
 }
 
 pub(crate) struct ServerOperation {
@@ -966,6 +960,11 @@ impl Drop for ServerOperation {
 
 impl ServerRuntime {
     fn enter_operation(&self) -> XllResult<ServerOperation> {
+        let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
+        if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
+            return Err(XllError::Closing);
+        }
+
         if let Some(ingress) = self.module_ingress {
             let mut gate_guard = None;
             let mut gate_error = None;
@@ -1036,6 +1035,7 @@ impl ServerRuntime {
                 None
             };
 
+            let conn_gen = active.generation;
             let sequence = state.delivery.allocate_update_sequence()?;
             let prepared = if committed {
                 state.delivery.prepare_notification(true)?
@@ -1046,11 +1046,13 @@ impl ServerRuntime {
             match state.delivery.updates.entry(topic_id) {
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let existing = entry.get_mut();
+                    existing.connection_generation = conn_gen;
                     existing.sequence = sequence;
                     existing.value = value.clone();
                 }
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(QueuedUpdate {
+                        connection_generation: conn_gen,
                         sequence,
                         value: value.clone(),
                         _permit: permit.expect("new update owns quota permit"),
@@ -1156,65 +1158,51 @@ impl ServerRuntime {
         refresh_id: u64,
         delivered_updates: &[RtdUpdate],
         outcome: RefreshOutcome,
-    ) -> XllResult<()> {
-        let (attempt, pending_notifications) = {
-            let mut state = self.state.lock();
-            let DeliveryPhase::Refreshing {
-                refresh_id: active_id,
-            } = state.delivery.phase
-            else {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x4e4f_5245_4652_4143,
-                });
-            };
-
-            if active_id != refresh_id {
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x5245_4652_4944_4d49,
-                });
-            }
-
-            match outcome {
-                RefreshOutcome::Delivered => {
-                    for update in delivered_updates {
-                        let topic_id = TopicId(update.topic_id);
-                        if state
-                            .delivery
-                            .updates
-                            .get(&topic_id)
-                            .is_some_and(|u| u.sequence == update.sequence)
-                        {
-                            state.delivery.updates.remove(&topic_id);
-                        }
-                    }
-                }
-                RefreshOutcome::Failed => {}
-            }
-
-            state.delivery.phase = DeliveryPhase::BetweenRefreshes {
-                signal: SignalState::Dormant,
-            };
-
-            let has_committed = state.active_by_topic.values().any(|a| a.committed);
-            let has_updates = !state.delivery.updates.is_empty() && has_committed;
-            let prepared = state.delivery.prepare_notification(has_updates)?;
-            let attempt = prepared.map(|p| state.delivery.commit_notification(p));
-            (attempt, Vec::<RtdUpdate>::new())
+    ) -> XllResult<Option<NotificationAttempt>> {
+        let mut state = self.state.lock();
+        let DeliveryPhase::Refreshing {
+            refresh_id: active_id,
+        } = state.delivery.phase
+        else {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x4e4f_5245_4652_4143,
+            });
         };
 
-        let _ = pending_notifications;
-        if let (Some(attempt), Some(arc_self)) = (
-            attempt,
-            self.parent
-                .upgrade()
-                .and_then(|p| p.get_server(self.generation)),
-        ) {
-            arc_self.drive_notification(attempt);
+        if active_id != refresh_id {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5245_4652_4944_4d49,
+            });
         }
-        Ok(())
+
+        match outcome {
+            RefreshOutcome::Delivered => {
+                for update in delivered_updates {
+                    let topic_id = TopicId(update.topic_id);
+                    if state
+                        .delivery
+                        .updates
+                        .get(&topic_id)
+                        .is_some_and(|u| u.sequence == update.sequence)
+                    {
+                        state.delivery.updates.remove(&topic_id);
+                    }
+                }
+            }
+            RefreshOutcome::Failed => {}
+        }
+
+        state.delivery.phase = DeliveryPhase::BetweenRefreshes {
+            signal: SignalState::Dormant,
+        };
+
+        let has_updates = state.has_deliverable_updates();
+        let prepared = state.delivery.prepare_notification(has_updates)?;
+        let attempt = prepared.map(|p| state.delivery.commit_notification(p));
+        Ok(attempt)
     }
 
-    fn abort_refresh_no_unwind(&self, refresh_id: u64) {
+    fn abort_refresh_no_unwind(self: &Arc<Self>, refresh_id: u64) {
         let attempt = {
             let mut state = self.state.lock();
             if let DeliveryPhase::Refreshing {
@@ -1225,8 +1213,7 @@ impl ServerRuntime {
                     state.delivery.phase = DeliveryPhase::BetweenRefreshes {
                         signal: SignalState::Dormant,
                     };
-                    let has_committed = state.active_by_topic.values().any(|a| a.committed);
-                    let has_updates = !state.delivery.updates.is_empty() && has_committed;
+                    let has_updates = state.has_deliverable_updates();
                     let prepared = state
                         .delivery
                         .prepare_notification(has_updates)
@@ -1241,13 +1228,8 @@ impl ServerRuntime {
             }
         };
 
-        if let (Some(attempt), Some(arc_self)) = (
-            attempt,
-            self.parent
-                .upgrade()
-                .and_then(|p| p.get_server(self.generation)),
-        ) {
-            arc_self.drive_notification(attempt);
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
         }
     }
 
@@ -1258,56 +1240,202 @@ impl ServerRuntime {
         }
     }
 
-    fn terminate(&self) -> XllResult<()> {
-        let termination = self.operation_gate.close_and_wait_begin()?;
+    fn begin_termination<'a>(self: &'a Arc<Self>) -> XllResult<TerminationAdmission<'a>> {
+        let mut term_state = self.termination_coordinator.state.lock();
+        match *term_state {
+            ServerTerminationPhase::Terminated => Ok(TerminationAdmission::Complete),
+            ServerTerminationPhase::Terminating => {
+                Ok(TerminationAdmission::Waiter(ServerTerminationWaiter {
+                    coordinator: &self.termination_coordinator,
+                }))
+            }
+            ServerTerminationPhase::Open => {
+                let wait = self.operation_gate.close_and_wait_begin();
+                *term_state = ServerTerminationPhase::Terminating;
 
-        let (callback, subscriptions) = {
-            let mut state = self.state.lock();
-            let callback = state.delivery.detach_callback();
-            state.delivery.updates.clear();
-            let subscriptions = state
-                .active_by_topic
-                .values_mut()
-                .filter_map(|active| active.subscription.take())
-                .collect::<Vec<_>>();
-            (callback, subscriptions)
-        };
+                let (callback, active_entries) = {
+                    let mut state = self.state.lock();
+                    let callback = state.delivery.detach_callback();
+                    state.delivery.updates.clear();
+                    let active_entries = state
+                        .active_by_topic
+                        .drain()
+                        .map(|(_, active)| TerminatedTopic {
+                            key: active.key,
+                            generation: active.generation,
+                            subscription: active.subscription,
+                        })
+                        .collect::<Vec<_>>();
+                    state.topic_by_key.clear();
+                    (callback, active_entries)
+                };
 
-        drop(callback);
-        request_cancel_all_no_unwind(&subscriptions);
+                Ok(TerminationAdmission::Owner(ServerTermination {
+                    server: Arc::clone(self),
+                    wait,
+                    callback,
+                    active_entries,
+                }))
+            }
+        }
+    }
 
-        termination.wait();
+    fn terminate(self: &Arc<Self>) -> XllResult<()> {
+        match self.begin_termination()? {
+            TerminationAdmission::Owner(owner) => {
+                owner.request_cancel();
+                owner.finish();
+            }
+            TerminationAdmission::Waiter(waiter) => {
+                waiter.wait();
+            }
+            TerminationAdmission::Complete => {}
+        }
+        Ok(())
+    }
+}
 
-        let late_subscriptions = {
-            let mut state = self.state.lock();
-            state.delivery.updates.clear();
-            state.topic_by_key.clear();
-            state
-                .active_by_topic
-                .drain()
-                .filter_map(|(_, active)| active.subscription)
-                .collect::<Vec<_>>()
-        };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerTerminationPhase {
+    Open,
+    Terminating,
+    Terminated,
+}
 
-        if let Some(parent) = self.parent.upgrade() {
+struct TerminationCoordinator {
+    state: Mutex<ServerTerminationPhase>,
+    completed: Condvar,
+}
+
+impl Default for TerminationCoordinator {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ServerTerminationPhase::Open),
+            completed: Condvar::new(),
+        }
+    }
+}
+
+enum TerminationAdmission<'a> {
+    Owner(ServerTermination<'a>),
+    Waiter(ServerTerminationWaiter<'a>),
+    Complete,
+}
+
+struct ServerTerminationWaiter<'a> {
+    coordinator: &'a TerminationCoordinator,
+}
+
+impl<'a> ServerTerminationWaiter<'a> {
+    fn wait(self) {
+        let mut state = self.coordinator.state.lock();
+        while *state != ServerTerminationPhase::Terminated {
+            self.coordinator.completed.wait(&mut state);
+        }
+    }
+}
+
+struct TerminatedTopic {
+    key: SubscriptionKey,
+    generation: ConnectionGeneration,
+    subscription: Option<Box<dyn RtdSubscription>>,
+}
+
+struct ServerTermination<'a> {
+    server: Arc<ServerRuntime>,
+    wait: TerminationWaitGuard<'a>,
+    callback: Option<NotificationCallback>,
+    active_entries: Vec<TerminatedTopic>,
+}
+
+impl<'a> ServerTermination<'a> {
+    fn request_cancel(&self) {
+        let subscriptions = self
+            .active_entries
+            .iter()
+            .filter_map(|e| e.subscription.as_ref().map(|s| s.as_ref()));
+        for sub in subscriptions {
+            let _ = catch_unwind(AssertUnwindSafe(|| sub.request_cancel()));
+        }
+    }
+
+    fn finish(self) {
+        drop(self.callback);
+        self.wait.wait();
+
+        let removed_sources = if let Some(parent) = self.server.parent.upgrade() {
             let mut catalog = parent.catalog.lock();
-            catalog.active_keys.retain(|_, binding| {
-                if let Some(s) = binding.server.upgrade() {
-                    s.generation != self.generation
-                } else {
-                    false
+            let mut sources = Vec::new();
+
+            for topic in &self.active_entries {
+                if let Some(src) = cleanup_catalog_binding_and_pending(
+                    &mut catalog,
+                    &topic.key,
+                    self.server.generation,
+                    topic.generation,
+                ) {
+                    sources.push(src);
                 }
-            });
+            }
+
+            sources
+        } else {
+            Vec::new()
+        };
+
+        if let Some(parent) = self.server.parent.upgrade() {
+            let mut catalog = parent.catalog.lock();
+            let unactive_pending_keys: Vec<_> = catalog
+                .pending
+                .iter()
+                .filter(|(_, p)| p.server_generation == Some(self.server.generation))
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            let mut extra_sources = Vec::new();
+            for key in unactive_pending_keys {
+                let should_remove = catalog.pending.get_mut(&key).is_some_and(|pending| {
+                    pending.server_generation = None;
+                    pending.connecting_generation = None;
+                    pending.committed = false;
+                    pending.live_reservations == 0
+                });
+
+                if should_remove {
+                    let Some(removed) = catalog.pending.remove(&key) else {
+                        continue;
+                    };
+                    catalog.pending_topic_bytes = catalog
+                        .pending_topic_bytes
+                        .saturating_sub(removed.topic.byte_len());
+                    extra_sources.push(removed.source);
+                }
+            }
+            drop(catalog);
+            for src in extra_sources {
+                let _ = catch_unwind(AssertUnwindSafe(|| drop(src)));
+            }
         }
 
-        let cleanup_result =
-            disconnect_all_no_unwind(subscriptions.into_iter().chain(late_subscriptions));
-        if let Some(parent) = self.parent.upgrade() {
+        for source in removed_sources {
+            let _ = catch_unwind(AssertUnwindSafe(|| drop(source)));
+        }
+
+        let subscriptions = self
+            .active_entries
+            .into_iter()
+            .filter_map(|e| e.subscription);
+        let cleanup_result = disconnect_all_no_unwind(subscriptions);
+
+        if let Some(parent) = self.server.parent.upgrade() {
             parent.record_cleanup_result(cleanup_result);
         }
 
-        self.remove_from_registry();
-        Ok(())
+        self.server.remove_from_registry();
+
+        let mut term_state = self.server.termination_coordinator.state.lock();
+        *term_state = ServerTerminationPhase::Terminated;
+        self.server.termination_coordinator.completed.notify_all();
     }
 }
 
@@ -1322,8 +1450,12 @@ pub(crate) struct RtdRefreshBatch {
 
 impl RtdRefreshBatch {
     pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
-        self.server
-            .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
+        let attempt =
+            self.server
+                .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
+        if let Some(attempt) = attempt {
+            self.server.drive_notification(attempt);
+        }
         self.completed = true;
         self.operation.take();
         Ok(())
@@ -1336,13 +1468,6 @@ impl Drop for RtdRefreshBatch {
             return;
         }
         self.server.abort_refresh_no_unwind(self.refresh_id);
-    }
-}
-
-fn request_cancel_all_no_unwind(subscriptions: &[Box<dyn RtdSubscription>]) {
-    for subscription in subscriptions {
-        let res = catch_unwind(AssertUnwindSafe(|| subscription.request_cancel()));
-        let _ = res;
     }
 }
 
@@ -1371,6 +1496,70 @@ fn disconnect_all_no_unwind(
     first_error.map_or(Ok(()), Err)
 }
 
+fn cleanup_catalog_binding_and_pending(
+    catalog: &mut SubscriptionCatalog,
+    key: &SubscriptionKey,
+    server_generation: ServerGeneration,
+    conn_generation: ConnectionGeneration,
+) -> Option<Arc<dyn ErasedRtdSource>> {
+    if catalog
+        .active_keys
+        .get(key)
+        .is_some_and(|binding| binding.connection_generation == conn_generation)
+    {
+        catalog.active_keys.remove(key);
+    }
+
+    if let Some(pending) = catalog
+        .pending
+        .get_mut(key)
+        .filter(|p| p.server_generation == Some(server_generation))
+    {
+        if pending.connecting_generation == Some(conn_generation) {
+            pending.connecting_generation = None;
+        }
+        pending.server_generation = None;
+        pending.committed = false;
+    }
+
+    if let Some(pending) = catalog.pending.get(key).filter(|p| {
+        p.connecting_generation.is_none()
+            && p.server_generation.is_none()
+            && p.live_reservations == 0
+    }) {
+        let _ = pending;
+        let removed = catalog.pending.remove(key);
+        if let Some(removed) = removed {
+            catalog.pending_topic_bytes = catalog
+                .pending_topic_bytes
+                .saturating_sub(removed.topic.byte_len());
+            return Some(removed.source);
+        }
+    }
+
+    None
+}
+
+enum ServerReservationFailure {
+    DuplicateTopicId,
+    DuplicateKey,
+    Overloaded(XllError),
+}
+
+impl ServerReservationFailure {
+    fn into_xll_error(self) -> XllError {
+        match self {
+            ServerReservationFailure::DuplicateTopicId => XllError::Internal {
+                diagnostic_id: 0x544f_5049_4349_4444,
+            },
+            ServerReservationFailure::DuplicateKey => XllError::Internal {
+                diagnostic_id: 0x544f_5049_434b_4559,
+            },
+            ServerReservationFailure::Overloaded(err) => err,
+        }
+    }
+}
+
 pub(crate) struct SubscriptionRuntime {
     limits: RtdLimits,
     module_ingress: Option<&'static crate::ingress::ExportIngress>,
@@ -1382,6 +1571,7 @@ pub(crate) struct SubscriptionRuntime {
     cleanup_failure: Mutex<Option<XllError>>,
     next_preparation_id: AtomicU64,
     next_connection_generation: AtomicU64,
+    termination_coordinator: TerminationCoordinator,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
@@ -1421,6 +1611,7 @@ impl SubscriptionRuntime {
             cleanup_failure: Mutex::new(None),
             next_preparation_id: AtomicU64::new(1),
             next_connection_generation: AtomicU64::new(1),
+            termination_coordinator: TerminationCoordinator::default(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
         }
@@ -1473,6 +1664,7 @@ impl SubscriptionRuntime {
                 delivery: ServerDeliveryState::default(),
             }),
             parent: Arc::downgrade(self),
+            termination_coordinator: TerminationCoordinator::default(),
         });
 
         let mut servers = self.servers.lock();
@@ -1483,11 +1675,6 @@ impl SubscriptionRuntime {
         }
         servers.insert(generation, Arc::clone(&server));
         Ok(RtdServerHandle { inner: server })
-    }
-
-    pub(crate) fn get_server(&self, generation: ServerGeneration) -> Option<Arc<ServerRuntime>> {
-        let servers = self.servers.lock();
-        servers.get(&generation).cloned()
     }
 
     pub(crate) fn prepare<S>(
@@ -1648,13 +1835,37 @@ impl SubscriptionRuntime {
         Ok(())
     }
 
+    fn rollback_catalog_connection_reservation(
+        &self,
+        key: &SubscriptionKey,
+        generation: ConnectionGeneration,
+    ) {
+        let mut catalog = self.catalog.lock();
+
+        if let Some(pending) = catalog
+            .pending
+            .get_mut(key)
+            .filter(|p| p.connecting_generation == Some(generation))
+        {
+            pending.connecting_generation = None;
+        }
+
+        if catalog
+            .active_keys
+            .get(key)
+            .is_some_and(|binding| binding.connection_generation == generation)
+        {
+            catalog.active_keys.remove(key);
+        }
+    }
+
     pub(crate) fn connect_transaction(
         self: &Arc<Self>,
         server_handle: &RtdServerHandle,
         topic_id: TopicId,
         key: &SubscriptionKey,
     ) -> XllResult<SubscriptionConnection> {
-        let _operation = server_handle.inner.enter_operation()?;
+        let operation = server_handle.inner.enter_operation()?;
         let conn_gen = ConnectionGeneration(
             self.next_connection_generation
                 .fetch_add(1, Ordering::Relaxed),
@@ -1694,7 +1905,6 @@ impl SubscriptionRuntime {
             catalog.active_keys.insert(
                 key.clone(),
                 ActiveKeyBinding {
-                    server: Arc::downgrade(&server_handle.inner),
                     connection_generation: conn_gen,
                     stage: BindingStage::Connecting,
                 },
@@ -1703,65 +1913,38 @@ impl SubscriptionRuntime {
             (source, topic)
         };
 
-        {
+        let reservation_result = {
             let mut state = server_handle.inner.state.lock();
+
             if state.active_by_topic.contains_key(&topic_id) {
-                let mut catalog = self.catalog.lock();
-                if let Some(pending) = catalog
-                    .pending
-                    .get_mut(key)
-                    .filter(|p| p.connecting_generation == Some(conn_gen))
-                {
-                    pending.connecting_generation = None;
-                }
-                catalog.active_keys.remove(key);
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x544f_5049_4349_4444,
-                });
-            }
-            if state.topic_by_key.contains_key(key) {
-                let mut catalog = self.catalog.lock();
-                if let Some(pending) = catalog
-                    .pending
-                    .get_mut(key)
-                    .filter(|p| p.connecting_generation == Some(conn_gen))
-                {
-                    pending.connecting_generation = None;
-                }
-                catalog.active_keys.remove(key);
-                return Err(XllError::Internal {
-                    diagnostic_id: 0x544f_5049_434b_4559,
-                });
-            }
-
-            let permit = match self.active_quota.try_acquire() {
-                Ok(p) => p,
-                Err(err) => {
-                    let mut catalog = self.catalog.lock();
-                    if let Some(pending) = catalog
-                        .pending
-                        .get_mut(key)
-                        .filter(|p| p.connecting_generation == Some(conn_gen))
-                    {
-                        pending.connecting_generation = None;
+                Err(ServerReservationFailure::DuplicateTopicId)
+            } else if state.topic_by_key.contains_key(key) {
+                Err(ServerReservationFailure::DuplicateKey)
+            } else {
+                match self.active_quota.try_acquire() {
+                    Ok(permit) => {
+                        state.topic_by_key.insert(key.clone(), topic_id);
+                        state.active_by_topic.insert(
+                            topic_id,
+                            ActiveSubscription {
+                                key: key.clone(),
+                                generation: conn_gen,
+                                subscription: None,
+                                committed: false,
+                                latest: RtdValue::Empty,
+                                _permit: permit,
+                            },
+                        );
+                        Ok(())
                     }
-                    catalog.active_keys.remove(key);
-                    return Err(err);
+                    Err(error) => Err(ServerReservationFailure::Overloaded(error)),
                 }
-            };
+            }
+        };
 
-            state.topic_by_key.insert(key.clone(), topic_id);
-            state.active_by_topic.insert(
-                topic_id,
-                ActiveSubscription {
-                    key: key.clone(),
-                    generation: conn_gen,
-                    subscription: None,
-                    committed: false,
-                    latest: RtdValue::Empty,
-                    _permit: permit,
-                },
-            );
+        if let Err(failure) = reservation_result {
+            self.rollback_catalog_connection_reservation(key, conn_gen);
+            return Err(failure.into_xll_error());
         }
 
         let erased_sink = ErasedSink {
@@ -1787,25 +1970,37 @@ impl SubscriptionRuntime {
             }
         };
 
-        let latest_value = {
+        let install_result = {
             let mut state = server_handle.inner.state.lock();
-            let Some(active) = state.active_by_topic.get_mut(&topic_id) else {
-                let _ = catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait()));
-                self.rollback_connection(server_handle, topic_id, conn_gen, key);
-                return Err(XllError::Closing);
-            };
-            active.subscription = Some(subscription);
-            active.latest.clone()
+            match state.active_by_topic.get_mut(&topic_id) {
+                Some(active) if active.generation == conn_gen => {
+                    active.subscription = Some(subscription);
+                    let latest = active.latest.clone();
+                    let observed = state
+                        .delivery
+                        .updates
+                        .get(&topic_id)
+                        .filter(|u| u.connection_generation == conn_gen)
+                        .map(|u| u.sequence);
+                    Ok((latest, observed))
+                }
+                _ => Err(subscription),
+            }
         };
 
-        let observed_sequence = {
-            let state = server_handle.inner.state.lock();
-            state.delivery.updates.get(&topic_id).map(|u| u.sequence)
+        let (latest_value, observed_sequence) = match install_result {
+            Ok(res) => res,
+            Err(sub) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| sub.disconnect_and_wait()));
+                self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                return Err(XllError::Closing);
+            }
         };
 
         Ok(SubscriptionConnection {
-            runtime: Arc::downgrade(self),
-            server: Arc::downgrade(&server_handle.inner),
+            runtime: Arc::clone(self),
+            server: Arc::clone(&server_handle.inner),
+            operation: Some(operation),
             topic_id,
             generation: conn_gen,
             key: key.clone(),
@@ -1841,7 +2036,7 @@ impl SubscriptionRuntime {
                     .retain(|&tid, u| tid != topic_id || u.sequence > obs);
             }
 
-            let has_updates = !state.delivery.updates.is_empty();
+            let has_updates = state.has_deliverable_updates();
             let prepared = state.delivery.prepare_notification(has_updates)?;
             prepared.map(|p| state.delivery.commit_notification(p))
         };
@@ -1928,7 +2123,16 @@ impl SubscriptionRuntime {
                 state.topic_by_key.remove(key);
             }
 
-            let rem_update = state.delivery.updates.remove(&topic_id);
+            let rem_update = if state
+                .delivery
+                .updates
+                .get(&topic_id)
+                .is_some_and(|u| u.connection_generation == generation)
+            {
+                state.delivery.updates.remove(&topic_id)
+            } else {
+                None
+            };
             (sub, rem_update)
         };
 
@@ -2000,31 +2204,12 @@ impl SubscriptionRuntime {
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
-            if catalog
-                .active_keys
-                .get(&key_to_clean)
-                .is_some_and(|b| b.connection_generation == conn_gen)
-            {
-                catalog.active_keys.remove(&key_to_clean);
-            }
-
-            let remove_pending = catalog
-                .pending
-                .get(&key_to_clean)
-                .is_some_and(|p| p.live_reservations == 0 && p.connecting_generation.is_none());
-
-            if remove_pending {
-                let removed = catalog.pending.remove(&key_to_clean);
-                if let Some(removed) = removed {
-                    let bytes = removed.topic.byte_len();
-                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
-                    Some(removed.source)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            cleanup_catalog_binding_and_pending(
+                &mut catalog,
+                &key_to_clean,
+                server_handle.inner.generation,
+                conn_gen,
+            )
         };
 
         if let Some(sub) = subscription {
@@ -2047,18 +2232,56 @@ impl SubscriptionRuntime {
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
-        let _ = self.runtime_gate.close_and_wait();
+        {
+            let mut term_state = self.termination_coordinator.state.lock();
+            match *term_state {
+                ServerTerminationPhase::Terminated => return self.cleanup_result(),
+                ServerTerminationPhase::Terminating => {
+                    while *term_state != ServerTerminationPhase::Terminated {
+                        self.termination_coordinator.completed.wait(&mut term_state);
+                    }
+                    return self.cleanup_result();
+                }
+                ServerTerminationPhase::Open => {
+                    *term_state = ServerTerminationPhase::Terminating;
+                }
+            }
+        }
+
+        self.runtime_gate.close_and_wait_begin();
 
         let server_handles = {
             let servers = self.servers.lock();
             servers.values().cloned().collect::<Vec<_>>()
         };
 
-        for server in &server_handles {
-            let handle = RtdServerHandle {
-                inner: Arc::clone(server),
-            };
-            let _ = handle.terminate();
+        let admissions = server_handles
+            .iter()
+            .map(|server| server.begin_termination())
+            .collect::<XllResult<Vec<_>>>();
+
+        let admissions = match admissions {
+            Ok(adm) => adm,
+            Err(err) => {
+                let mut term_state = self.termination_coordinator.state.lock();
+                *term_state = ServerTerminationPhase::Open;
+                self.termination_coordinator.completed.notify_all();
+                return Err(err);
+            }
+        };
+
+        for admission in &admissions {
+            if let TerminationAdmission::Owner(owner) = admission {
+                owner.request_cancel();
+            }
+        }
+
+        for admission in admissions {
+            match admission {
+                TerminationAdmission::Owner(owner) => owner.finish(),
+                TerminationAdmission::Waiter(waiter) => waiter.wait(),
+                TerminationAdmission::Complete => {}
+            }
         }
 
         let pending_sources = {
@@ -2080,6 +2303,12 @@ impl SubscriptionRuntime {
                     diagnostic_id: 0x5041_4e49_4353_5243,
                 }));
             }
+        }
+
+        {
+            let mut term_state = self.termination_coordinator.state.lock();
+            *term_state = ServerTerminationPhase::Terminated;
+            self.termination_coordinator.completed.notify_all();
         }
 
         self.cleanup_result()
@@ -2134,8 +2363,9 @@ impl Drop for PreparedSubscription {
 }
 
 pub(crate) struct SubscriptionConnection {
-    runtime: Weak<SubscriptionRuntime>,
-    server: Weak<ServerRuntime>,
+    runtime: Arc<SubscriptionRuntime>,
+    server: Arc<ServerRuntime>,
+    operation: Option<ServerOperation>,
     topic_id: TopicId,
     generation: ConnectionGeneration,
     key: SubscriptionKey,
@@ -2154,19 +2384,23 @@ impl SubscriptionConnection {
         if self.finished {
             return Ok(());
         }
-        if self.created {
-            let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
-            let server = self.server.upgrade().ok_or(XllError::Closing)?;
-            runtime.commit_connection(
-                &server,
+        let result = if self.created {
+            self.runtime.commit_connection(
+                &self.server,
                 self.topic_id,
                 self.generation,
                 &self.key,
                 self.observed_sequence,
-            )?;
+            )
+        } else {
+            Ok(())
+        };
+
+        if result.is_ok() {
+            self.finished = true;
+            self.operation.take();
         }
-        self.finished = true;
-        Ok(())
+        result
     }
 
     fn rollback(&mut self) {
@@ -2174,12 +2408,14 @@ impl SubscriptionConnection {
             return;
         }
         self.finished = true;
-        if self.created
-            && let (Some(runtime), Some(server)) = (self.runtime.upgrade(), self.server.upgrade())
-        {
-            let handle = RtdServerHandle { inner: server };
-            runtime.rollback_connection(&handle, self.topic_id, self.generation, &self.key);
+        if self.created {
+            let handle = RtdServerHandle {
+                inner: Arc::clone(&self.server),
+            };
+            self.runtime
+                .rollback_connection(&handle, self.topic_id, self.generation, &self.key);
         }
+        self.operation.take();
     }
 }
 
@@ -2383,23 +2619,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn refresh_server_locality() {
+    fn server_locality_refresh_lock_independence() {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
         let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
-
-        for i in 0..1000 {
-            let (source, _, _) = publishing_source(Some(i as f64));
-            let prep = runtime
-                .prepare(source, RtdTopic::single(format!("a-{}", i)).unwrap())
-                .unwrap();
-            let key = SubscriptionKey::new(prep.key());
-            prep.commit();
-            let conn = runtime
-                .connect_transaction(&server_a, TopicId(i), &key)
-                .unwrap();
-            conn.commit().unwrap();
-        }
 
         let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
         let prep_b = runtime
@@ -2415,14 +2638,184 @@ pub(crate) mod tests {
         let sink_b = sink_b.lock().clone().unwrap();
         sink_b.publish(42.0).unwrap();
 
-        let start = std::time::Instant::now();
-        let batch = server_b.begin_refresh().unwrap();
-        let elapsed = start.elapsed();
+        // server A の state mutex を保持した状態で server B.begin_refresh を実行
+        let _guard_a = server_a.inner.state.lock();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server_b_clone = server_b.clone();
+        std::thread::spawn(move || {
+            let batch = server_b_clone.begin_refresh().unwrap();
+            tx.send(batch).unwrap();
+        });
+
+        let batch = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server_b.begin_refresh should not block on server_a state lock");
 
         assert_eq!(batch.updates.len(), 1);
         assert_eq!(batch.updates[0].value, RtdValue::Number(42.0));
-        assert!(elapsed < std::time::Duration::from_millis(50));
         batch.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
+    #[test]
+    fn runtime_close_blocks_all_servers_immediately() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+
+        let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b-0").unwrap())
+            .unwrap();
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let (callback_started_tx, callback_started_rx) = std::sync::mpsc::channel();
+        let (unblock_callback_tx, unblock_callback_rx) = std::sync::mpsc::channel();
+        let unblock_callback_rx = Arc::new(Mutex::new(unblock_callback_rx));
+
+        let unblock_rx_clone = Arc::clone(&unblock_callback_rx);
+        server_a
+            .attach_update_callback(Arc::new(move || {
+                callback_started_tx.send(()).unwrap();
+                let _ = unblock_rx_clone.lock().recv();
+                Ok(())
+            }))
+            .unwrap();
+
+        let (source_a, sink_a, _) = publishing_source(Some(0.0f64));
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a-0").unwrap())
+            .unwrap();
+        let key_a = SubscriptionKey::new(prep_a.key());
+        prep_a.commit();
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
+
+        let sink_a = sink_a.lock().clone().unwrap();
+        let publish_handle = std::thread::spawn(move || {
+            sink_a.publish(1.0).unwrap();
+        });
+
+        callback_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let runtime_clone = Arc::clone(&runtime);
+        let close_handle = std::thread::spawn(move || {
+            runtime_clone.close().unwrap();
+        });
+
+        // server_a が close 処理に入り OperationGate が Closing になるまで待機
+        while server_a.inner.enter_operation().is_ok() {
+            std::thread::yield_now();
+        }
+
+        let sink_b = sink_b.lock().clone().unwrap();
+        assert!(matches!(sink_b.publish(42.0), Err(XllError::Closing)));
+
+        unblock_callback_tx.send(()).unwrap();
+        publish_handle.join().unwrap();
+        close_handle.join().unwrap();
+    }
+
+    #[test]
+    fn server_termination_clears_pending_and_allows_reconnect() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        let (source, sink, disconnected) = publishing_source(Some(10.0));
+        let source = Arc::new(source);
+        let prep = runtime
+            .prepare(source.clone(), RtdTopic::single("shared-topic").unwrap())
+            .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+        prep.commit();
+
+        let conn_a = runtime
+            .connect_transaction(&server_a, TopicId(1), &key)
+            .unwrap();
+        conn_a.commit().unwrap();
+
+        // server A を終了
+        server_a.terminate().unwrap();
+
+        // disconnect が呼ばれていること
+        assert!(disconnected.load(Ordering::SeqCst));
+        let server_b = runtime.register_server(ServerGeneration(2)).unwrap();
+        let prep_b = runtime
+            .prepare(source, RtdTopic::single("shared-topic").unwrap())
+            .unwrap();
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+
+        runtime
+            .claim_server_key(server_b.inner.generation, &key_b)
+            .unwrap();
+
+        let conn_b = runtime
+            .connect_transaction(&server_b, TopicId(1), &key_b)
+            .unwrap();
+        conn_b.commit().unwrap();
+
+        let sink = sink.lock().clone().unwrap();
+        sink.publish(20.0).unwrap();
+
+        let batch = server_b.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, RtdValue::Number(20.0));
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
+    #[test]
+    fn uncommitted_update_does_not_trigger_notification() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&callback_count);
+        server
+            .attach_update_callback(Arc::new(move || {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }))
+            .unwrap();
+
+        let (source_a, _, _) = publishing_source(Some(0.0f64));
+        let prep_a = runtime
+            .prepare(source_a, RtdTopic::single("a-0").unwrap())
+            .unwrap();
+        let key_a = SubscriptionKey::new(prep_a.key());
+        prep_a.commit();
+        let conn_a = runtime
+            .connect_transaction(&server, TopicId(1), &key_a)
+            .unwrap();
+        conn_a.commit().unwrap();
+
+        let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
+        let prep_b = runtime
+            .prepare(source_b, RtdTopic::single("b-0").unwrap())
+            .unwrap();
+        let key_b = SubscriptionKey::new(prep_b.key());
+        prep_b.commit();
+        let _conn_b = runtime
+            .connect_transaction(&server, TopicId(2), &key_b)
+            .unwrap();
+
+        callback_count.store(0, Ordering::SeqCst);
+
+        let sink_b = sink_b.lock().clone().unwrap();
+        sink_b.publish(100.0).unwrap();
+
+        server.pulse_notification().unwrap();
+
+        assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     }
 
     #[test]
