@@ -545,7 +545,7 @@ mod tests {
 
         assert!(!disconnected.load(Ordering::Acquire));
 
-        server.disconnect(crate::subscription::TopicId(7));
+        let _ = server.disconnect(crate::subscription::TopicId(7));
         assert!(disconnected.load(Ordering::Acquire));
     }
 

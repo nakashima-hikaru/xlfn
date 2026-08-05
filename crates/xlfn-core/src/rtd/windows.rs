@@ -3449,7 +3449,12 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     }
 
     if let Some(subscription_server) = subscription_server.as_ref() {
-        subscription_server.disconnect(crate::subscription::TopicId(topic_id));
+        match subscription_server.disconnect(crate::subscription::TopicId(topic_id)) {
+            Err(error) if !matches!(error, crate::XllError::Closing) => {
+                crate::diagnostics::report_no_unwind("IRtdServer::DisconnectData", &error);
+            }
+            _ => {}
+        }
     }
 
     S_OK
