@@ -1451,9 +1451,10 @@ impl<'a> ServerTermination<'a> {
         let mut first_error = None;
 
         if let Err(err) = drop_callback_no_unwind(self.callback.take())
-            && first_error.is_none() {
-                first_error = Some(err);
-            }
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
 
         let wait_res = catch_unwind(AssertUnwindSafe(|| self.wait.wait()));
         if wait_res.is_err() && first_error.is_none() {
@@ -1482,9 +1483,10 @@ impl<'a> ServerTermination<'a> {
         };
 
         if let Err(err) = drop_callback_no_unwind(late_callback)
-            && first_error.is_none() {
-                first_error = Some(err);
-            }
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
 
         let removed_sources = if let Some(parent) = self.server.parent.upgrade() {
             let mut catalog = parent.catalog.lock();
@@ -1554,9 +1556,10 @@ impl<'a> ServerTermination<'a> {
             .chain(active_entries.into_iter().filter_map(|e| e.subscription));
 
         if let Err(error) = disconnect_all_no_unwind(all_subscriptions)
-            && first_error.is_none() {
-                first_error = Some(error);
-            }
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
 
         let result = first_error.map_or(Ok(()), Err);
 
@@ -2441,9 +2444,10 @@ impl SubscriptionRuntime {
                 TerminationAdmission::Complete => server.termination_result(),
             };
             if let Err(err) = res
-                && first_error.is_none() {
-                    first_error = Some(err);
-                }
+                && first_error.is_none()
+            {
+                first_error = Some(err);
+            }
         }
 
         if let Some(err) = first_error {
