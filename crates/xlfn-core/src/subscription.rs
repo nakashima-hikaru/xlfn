@@ -728,6 +728,14 @@ impl ServerDeliveryState {
         retired
     }
 
+    fn ensure_notification_ticket(&self) -> XllResult<()> {
+        let ticket = self.next_notification_ticket;
+        ticket.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5449_434b_4f56_464c,
+        })?;
+        Ok(())
+    }
+
     fn prepare_notification(
         &self,
         has_pending_updates: bool,
@@ -745,9 +753,7 @@ impl ServerDeliveryState {
             return Ok(None);
         };
         let ticket = self.next_notification_ticket;
-        let _next = ticket.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5449_434b_4f56_464c,
-        })?;
+        self.ensure_notification_ticket()?;
         Ok(Some(PreparedNotification { ticket, callback }))
     }
 
@@ -929,6 +935,7 @@ impl RtdServerHandle {
 
     pub(crate) fn claim(&self, key: &SubscriptionKey) -> XllResult<()> {
         let _operation = self.inner.enter_operation()?;
+        self.inner.state.lock().ensure_open()?;
         let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
         parent.claim_server_key(self.inner.generation, key)
     }
@@ -1196,6 +1203,8 @@ impl ServerRuntime {
             });
         }
 
+        state.delivery.ensure_notification_ticket()?;
+
         match outcome {
             RefreshOutcome::Delivered => {
                 for update in delivered_updates {
@@ -1263,7 +1272,7 @@ impl ServerRuntime {
 
     fn begin_termination<'a>(self: &'a Arc<Self>) -> TerminationAdmission<'a> {
         let mut term_state = self.termination_coordinator.state.lock();
-        match *term_state {
+        match term_state.phase {
             ServerTerminationPhase::Terminated => TerminationAdmission::Complete,
             ServerTerminationPhase::Terminating => {
                 TerminationAdmission::Waiter(ServerTerminationWaiter {
@@ -1272,7 +1281,7 @@ impl ServerRuntime {
             }
             ServerTerminationPhase::Open => {
                 let wait = self.operation_gate.close_and_wait_begin();
-                *term_state = ServerTerminationPhase::Terminating;
+                term_state.phase = ServerTerminationPhase::Terminating;
 
                 let (callback, initial_subscriptions) = {
                     let mut state = self.state.lock();
@@ -1301,37 +1310,49 @@ impl ServerRuntime {
         }
     }
 
+    fn termination_result(&self) -> XllResult<()> {
+        let state = self.termination_coordinator.state.lock();
+        state
+            .failure
+            .as_ref()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+
     fn terminate(self: &Arc<Self>) -> XllResult<()> {
         match self.begin_termination() {
             TerminationAdmission::Owner(owner) => {
                 owner.request_cancel();
-                owner.finish();
+                owner.finish()
             }
-            TerminationAdmission::Waiter(waiter) => {
-                waiter.wait();
-            }
-            TerminationAdmission::Complete => {}
+            TerminationAdmission::Waiter(waiter) => waiter.wait(),
+            TerminationAdmission::Complete => self.termination_result(),
         }
-        Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ServerTerminationPhase {
+    #[default]
     Open,
     Terminating,
     Terminated,
 }
 
+#[derive(Debug, Default)]
+struct TerminationState {
+    phase: ServerTerminationPhase,
+    failure: Option<XllError>,
+}
+
 struct TerminationCoordinator {
-    state: Mutex<ServerTerminationPhase>,
+    state: Mutex<TerminationState>,
     completed: Condvar,
 }
 
 impl Default for TerminationCoordinator {
     fn default() -> Self {
         Self {
-            state: Mutex::new(ServerTerminationPhase::Open),
+            state: Mutex::new(TerminationState::default()),
             completed: Condvar::new(),
         }
     }
@@ -1348,12 +1369,56 @@ struct ServerTerminationWaiter<'a> {
 }
 
 impl<'a> ServerTerminationWaiter<'a> {
-    fn wait(self) {
+    fn wait(self) -> XllResult<()> {
         let mut state = self.coordinator.state.lock();
-        while *state != ServerTerminationPhase::Terminated {
+        while state.phase != ServerTerminationPhase::Terminated {
             self.coordinator.completed.wait(&mut state);
         }
+        state
+            .failure
+            .as_ref()
+            .map_or(Ok(()), |error| Err(error.clone()))
     }
+}
+
+struct TerminationCompletionGuard<'a> {
+    coordinator: &'a TerminationCoordinator,
+    failure: Option<XllError>,
+    completed: bool,
+}
+
+impl TerminationCompletionGuard<'_> {
+    fn complete(mut self, result: XllResult<()>) -> XllResult<()> {
+        self.failure = result.as_ref().err().cloned();
+        self.publish_completion();
+        self.completed = true;
+        result
+    }
+
+    fn publish_completion(&self) {
+        let mut state = self.coordinator.state.lock();
+        state.failure = self.failure.clone();
+        state.phase = ServerTerminationPhase::Terminated;
+        self.coordinator.completed.notify_all();
+    }
+}
+
+impl Drop for TerminationCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+
+        if self.failure.is_none() {
+            self.failure = Some(XllError::Panic);
+        }
+
+        self.publish_completion();
+    }
+}
+
+fn drop_callback_no_unwind(callback: Option<NotificationCallback>) -> XllResult<()> {
+    catch_unwind(AssertUnwindSafe(|| drop(callback))).map_err(|_| XllError::Panic)
 }
 
 struct TerminatedTopic {
@@ -1376,9 +1441,24 @@ impl<'a> ServerTermination<'a> {
         }
     }
 
-    fn finish(mut self) {
-        drop(self.callback);
-        self.wait.wait();
+    fn finish(mut self) -> XllResult<()> {
+        let guard = TerminationCompletionGuard {
+            coordinator: &self.server.termination_coordinator,
+            failure: None,
+            completed: false,
+        };
+
+        let mut first_error = None;
+
+        if let Err(err) = drop_callback_no_unwind(self.callback.take())
+            && first_error.is_none() {
+                first_error = Some(err);
+            }
+
+        let wait_res = catch_unwind(AssertUnwindSafe(|| self.wait.wait()));
+        if wait_res.is_err() && first_error.is_none() {
+            first_error = Some(XllError::Panic);
+        }
 
         let (late_callback, active_entries) = {
             let mut state = self.server.state.lock();
@@ -1400,7 +1480,11 @@ impl<'a> ServerTermination<'a> {
 
             (late_callback, active_entries)
         };
-        drop(late_callback);
+
+        if let Err(err) = drop_callback_no_unwind(late_callback)
+            && first_error.is_none() {
+                first_error = Some(err);
+            }
 
         let removed_sources = if let Some(parent) = self.server.parent.upgrade() {
             let mut catalog = parent.catalog.lock();
@@ -1452,29 +1536,37 @@ impl<'a> ServerTermination<'a> {
             }
             drop(catalog);
             for src in extra_sources {
-                let _ = catch_unwind(AssertUnwindSafe(|| drop(src)));
+                if catch_unwind(AssertUnwindSafe(|| drop(src))).is_err() && first_error.is_none() {
+                    first_error = Some(XllError::Panic);
+                }
             }
         }
 
         for source in removed_sources {
-            let _ = catch_unwind(AssertUnwindSafe(|| drop(source)));
+            if catch_unwind(AssertUnwindSafe(|| drop(source))).is_err() && first_error.is_none() {
+                first_error = Some(XllError::Panic);
+            }
         }
 
         let all_subscriptions = self
             .initial_subscriptions
             .drain(..)
             .chain(active_entries.into_iter().filter_map(|e| e.subscription));
-        let cleanup_result = disconnect_all_no_unwind(all_subscriptions);
+
+        if let Err(error) = disconnect_all_no_unwind(all_subscriptions)
+            && first_error.is_none() {
+                first_error = Some(error);
+            }
+
+        let result = first_error.map_or(Ok(()), Err);
 
         if let Some(parent) = self.server.parent.upgrade() {
-            parent.record_cleanup_result(cleanup_result);
+            parent.record_cleanup_result(result.clone());
         }
 
         self.server.remove_from_registry();
 
-        let mut term_state = self.server.termination_coordinator.state.lock();
-        *term_state = ServerTerminationPhase::Terminated;
-        self.server.termination_coordinator.completed.notify_all();
+        guard.complete(result)
     }
 }
 
@@ -2308,16 +2400,16 @@ impl SubscriptionRuntime {
     pub(crate) fn close(&self) -> XllResult<()> {
         {
             let mut term_state = self.termination_coordinator.state.lock();
-            match *term_state {
+            match term_state.phase {
                 ServerTerminationPhase::Terminated => return self.cleanup_result(),
                 ServerTerminationPhase::Terminating => {
-                    while *term_state != ServerTerminationPhase::Terminated {
+                    while term_state.phase != ServerTerminationPhase::Terminated {
                         self.termination_coordinator.completed.wait(&mut term_state);
                     }
                     return self.cleanup_result();
                 }
                 ServerTerminationPhase::Open => {
-                    *term_state = ServerTerminationPhase::Terminating;
+                    term_state.phase = ServerTerminationPhase::Terminating;
                 }
             }
         }
@@ -2341,12 +2433,21 @@ impl SubscriptionRuntime {
             }
         }
 
-        for admission in admissions {
-            match admission {
+        let mut first_error = None;
+        for (server, admission) in server_handles.iter().zip(admissions) {
+            let res = match admission {
                 TerminationAdmission::Owner(owner) => owner.finish(),
                 TerminationAdmission::Waiter(waiter) => waiter.wait(),
-                TerminationAdmission::Complete => {}
-            }
+                TerminationAdmission::Complete => server.termination_result(),
+            };
+            if let Err(err) = res
+                && first_error.is_none() {
+                    first_error = Some(err);
+                }
+        }
+
+        if let Some(err) = first_error {
+            self.record_cleanup_result(Err(err));
         }
 
         let pending_sources = {
@@ -2372,7 +2473,7 @@ impl SubscriptionRuntime {
 
         {
             let mut term_state = self.termination_coordinator.state.lock();
-            *term_state = ServerTerminationPhase::Terminated;
+            term_state.phase = ServerTerminationPhase::Terminated;
             self.termination_coordinator.completed.notify_all();
         }
 
@@ -3254,6 +3355,12 @@ pub(crate) mod tests {
         let runtime = Arc::new(SubscriptionRuntime::new());
         let server = runtime.register_server(ServerGeneration(1)).unwrap();
 
+        let (source, _, _) = publishing_source(Some(0.0f64));
+        let prep = runtime
+            .prepare(source, RtdTopic::single("test").unwrap())
+            .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+
         {
             let mut state = server.inner.state.lock();
             state.lifecycle = ServerLifecycle::Closing;
@@ -3268,13 +3375,103 @@ pub(crate) mod tests {
             Err(XllError::Closing)
         ));
         assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
-        assert!(matches!(
-            server.claim(&SubscriptionKey::new("test")),
-            Err(XllError::Closing)
-        ));
+        assert!(matches!(server.claim(&key), Err(XllError::Closing)));
         assert!(matches!(
             server.disconnect(TopicId(1)),
             Err(XllError::Closing)
         ));
+    }
+
+    struct FailingDisconnectSubscription;
+    // SAFETY: FailingDisconnectSubscription has no unsafe invariants to uphold.
+    unsafe impl RtdSubscription for FailingDisconnectSubscription {
+        fn request_cancel(&self) {}
+        fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+            Err(XllError::Internal {
+                diagnostic_id: 0xDEAD_BEEF,
+            })
+        }
+    }
+
+    #[test]
+    fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        let (source, _, _) = publishing_source(Some(0.0f64));
+        let prep = runtime
+            .prepare(source, RtdTopic::single("test_err").unwrap())
+            .unwrap();
+        let key = SubscriptionKey::new(prep.key());
+        prep.commit();
+
+        let conn = runtime
+            .connect_transaction(&server, TopicId(1), &key)
+            .unwrap();
+        conn.commit().unwrap();
+
+        {
+            let mut state = server.inner.state.lock();
+            let active = state.active_by_topic.get_mut(&TopicId(1)).unwrap();
+            active.subscription = Some(Box::new(FailingDisconnectSubscription));
+        }
+
+        let server_clone = server.clone();
+        let handle = std::thread::spawn(move || server_clone.terminate());
+
+        let res_owner = server.terminate();
+        let res_waiter = handle.join().unwrap();
+
+        assert!(matches!(
+            res_owner,
+            Err(XllError::Internal {
+                diagnostic_id: 0xDEAD_BEEF
+            }) | Err(XllError::Panic)
+        ));
+        assert!(matches!(
+            res_waiter,
+            Err(XllError::Internal {
+                diagnostic_id: 0xDEAD_BEEF
+            }) | Err(XllError::Panic)
+        ));
+    }
+
+    struct PanickingDropCallback {
+        _guard: std::marker::PhantomData<()>,
+    }
+    impl Drop for PanickingDropCallback {
+        fn drop(&mut self) {
+            panic!("callback drop panic test");
+        }
+    }
+
+    #[test]
+    fn server_terminate_owner_panic_notifies_waiter() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        let panicker = PanickingDropCallback {
+            _guard: std::marker::PhantomData,
+        };
+        let callback: NotificationCallback = Arc::new(move || {
+            let _ = &panicker;
+            Ok(())
+        });
+        server.attach_update_callback(callback).unwrap();
+
+        let server_clone = server.inner.clone();
+        let admission = server_clone.begin_termination();
+        let TerminationAdmission::Owner(owner) = admission else {
+            panic!("expected Owner admission");
+        };
+
+        let handle = std::thread::spawn(move || server.terminate());
+
+        owner.request_cancel();
+        let res_owner = owner.finish();
+        assert!(matches!(res_owner, Err(XllError::Panic)));
+
+        let res_waiter = handle.join().unwrap();
+        assert!(matches!(res_waiter, Err(XllError::Panic)));
     }
 }
