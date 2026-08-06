@@ -66,7 +66,7 @@ Keep the source in add-in state and subscribe from a main-thread function:
 {{#include ../../examples/rtd-source/src/lib.rs:42:48}}
 ```
 
-The source is typically an `Arc<S>` or another cloneable value satisfying the source API. The exact identity of source plus topic determines sharing. Multiple formulas that observe the same active subscription share it; a failed new observation rolls back only the reservation created by that attempt, not an unrelated established subscriber. The complete compile-tested fixture, including the add-in state and `Client` placeholder, lives under `examples/rtd-source`.
+The source is typically an `Arc<S>`. Source sharing uses `Arc` allocation identity, equivalent to `Arc::ptr_eq`, combined with the logical RTD topic. Cloning the same `Arc` shares the subscription; constructing a new `Arc`, even around an equivalent value, creates a distinct source identity. Multiple formulas that observe the same active subscription share it; a failed new observation rolls back only the reservation created by that attempt, not an unrelated established subscriber. The complete compile-tested fixture, including the add-in state and `Client` placeholder, lives under `examples/rtd-source`.
 
 ## RTD value types
 

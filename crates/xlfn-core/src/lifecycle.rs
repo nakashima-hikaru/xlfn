@@ -1516,9 +1516,9 @@ mod tests {
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let prepared = subscriptions
             .prepare(
-                TraceSource {
+                std::sync::Arc::new(TraceSource {
                     sink: std::sync::Arc::clone(&trace_sink),
-                },
+                }),
                 crate::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
@@ -1942,9 +1942,9 @@ mod tests {
             .unwrap();
         let prepared = subscriptions
             .prepare(
-                OrderedSource {
+                std::sync::Arc::new(OrderedSource {
                     events: std::sync::Arc::clone(&events),
-                },
+                }),
                 crate::RtdTopic::single("ordered").unwrap(),
             )
             .unwrap();

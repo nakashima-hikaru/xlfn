@@ -389,17 +389,6 @@ pub trait RtdSource: Send + Sync + 'static {
     ) -> XllResult<Box<dyn RtdSubscription>>;
 }
 
-impl<S: RtdSource + ?Sized> RtdSource for Arc<S> {
-    type Value = S::Value;
-
-    fn subscribe(
-        &self,
-        topic: &RtdTopic,
-        sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
-        (**self).subscribe(topic, sink)
-    }
-}
 
 pub struct RtdSink<T> {
     sink: ErasedSink,
@@ -575,10 +564,19 @@ struct PendingSubscription {
     connecting_generation: Option<ConnectionGeneration>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SourceAllocationIdentity(usize);
+
+impl SourceAllocationIdentity {
+    fn of<S: ?Sized>(source: &Arc<S>) -> Self {
+        Self(Arc::as_ptr(source) as *const () as usize)
+    }
+}
+
 struct SubscriptionCatalog {
     pending: HashMap<SubscriptionKey, PendingSubscription>,
     pending_topic_bytes: usize,
-    source_ids: HashMap<usize, u64>,
+    source_ids: HashMap<SourceAllocationIdentity, u64>,
     active_keys: HashMap<SubscriptionKey, ActiveKeyBinding>,
 }
 
@@ -1850,7 +1848,7 @@ impl SubscriptionRuntime {
 
     pub(crate) fn prepare<S>(
         self: &Arc<Self>,
-        source: S,
+        source: Arc<S>,
         topic: RtdTopic,
     ) -> XllResult<PreparedSubscription>
     where
@@ -1863,33 +1861,27 @@ impl SubscriptionRuntime {
         }
         topic.validate_with_limits(&self.limits)?;
 
-        let source = Arc::new(source);
-        let ptr_key = Arc::as_ptr(&source) as usize;
-
-        let key = {
-            let mut catalog = self.catalog.lock();
-            let source_id = if let Some(&id) = catalog.source_ids.get(&ptr_key) {
-                id
-            } else {
-                if catalog.source_ids.len() >= self.limits.max_source_ids {
-                    return Err(XllError::Overloaded);
-                }
-                let id = catalog.source_ids.len() as u64 + 1;
-                catalog.source_ids.insert(ptr_key, id);
-                id
-            };
-
-            let mut parts_str = String::new();
-            for part in topic.parts() {
-                parts_str.push_str(part);
-                parts_str.push('\0');
-            }
-            format!("{source_id:016x}:{parts_str}")
-        };
-
-        let key = SubscriptionKey::new(key);
+        let source_identity = SourceAllocationIdentity::of(&source);
 
         let mut catalog = self.catalog.lock();
+        let source_id = if let Some(&id) = catalog.source_ids.get(&source_identity) {
+            id
+        } else {
+            if catalog.source_ids.len() >= self.limits.max_source_ids {
+                return Err(XllError::Overloaded);
+            }
+            let id = catalog.source_ids.len() as u64 + 1;
+            catalog.source_ids.insert(source_identity, id);
+            id
+        };
+
+        let mut parts_str = String::new();
+        for part in topic.parts() {
+            parts_str.push_str(part);
+            parts_str.push('\0');
+        }
+        let key = SubscriptionKey::new(format!("{source_id:016x}:{parts_str}"));
+
         if catalog.active_keys.contains_key(&key) {
             return Ok(PreparedSubscription {
                 runtime: Arc::downgrade(self),
@@ -2532,7 +2524,7 @@ pub(crate) struct PreparedSubscription {
     runtime: Weak<SubscriptionRuntime>,
     key: SubscriptionKey,
     reservation_id: Option<u64>,
-    ownership: PreparationOwnership,
+    pub(crate) ownership: PreparationOwnership,
 }
 
 impl PreparedSubscription {
@@ -2692,7 +2684,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) type PublishingSourceResult<T> = (
-        PublishingSource<T, fn() -> XllResult<()>>,
+        Arc<PublishingSource<T, fn() -> XllResult<()>>>,
         Arc<Mutex<Option<RtdSink<T>>>>,
         Arc<AtomicBool>,
     );
@@ -2702,13 +2694,13 @@ pub(crate) mod tests {
     ) -> PublishingSourceResult<T> {
         let slot = Arc::new(Mutex::new(None));
         let disconnected = Arc::new(AtomicBool::new(false));
-        let source = PublishingSource {
+        let source = Arc::new(PublishingSource {
             initial,
             sink_slot: Arc::clone(&slot),
             canceled: Arc::new(AtomicBool::new(false)),
             disconnected: Arc::clone(&disconnected),
             on_subscribe: None,
-        };
+        });
         (source, slot, disconnected)
     }
 
@@ -2941,9 +2933,8 @@ pub(crate) mod tests {
         let server_a = runtime.register_server(ServerGeneration(1)).unwrap();
 
         let (source, sink, disconnected) = publishing_source(Some(10.0));
-        let source = Arc::new(source);
         let prep = runtime
-            .prepare(source.clone(), RtdTopic::single("shared-topic").unwrap())
+            .prepare(Arc::clone(&source), RtdTopic::single("shared-topic").unwrap())
             .unwrap();
         let key = SubscriptionKey::new(prep.key());
         prep.commit();
@@ -3311,7 +3302,7 @@ pub(crate) mod tests {
             }
         }
 
-        let source = DroppingSource(Arc::clone(&source_dropped));
+        let source = Arc::new(DroppingSource(Arc::clone(&source_dropped)));
         let runtime_clone = Arc::clone(&runtime);
         let handle_prep = std::thread::spawn(move || {
             runtime_clone.prepare(source, RtdTopic::single("topic").unwrap())
@@ -3377,9 +3368,9 @@ pub(crate) mod tests {
             }
         }
 
-        let source = ReentrantSource {
+        let source = Arc::new(ReentrantSource {
             runtime: Arc::clone(&runtime),
-        };
+        });
         let prep = runtime
             .prepare(source, RtdTopic::single("reentrant").unwrap())
             .unwrap();
@@ -3714,5 +3705,73 @@ pub(crate) mod tests {
                 diagnostic_id: 0xDEAD_BEEF
             })
         ));
+    }
+
+    #[test]
+    fn cloned_arc_and_same_topic_reuse_pending_identity() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _, _) = publishing_source::<f64>(None);
+        let topic = RtdTopic::single("shared").unwrap();
+
+        let first = runtime
+            .prepare(Arc::clone(&source), topic.clone())
+            .unwrap();
+        let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
+
+        assert_eq!(first.key(), second.key());
+        assert_eq!(first.ownership, PreparationOwnership::CreatedPending);
+        assert_eq!(second.ownership, PreparationOwnership::ExistingPending);
+
+        second.rollback();
+        first.rollback();
+
+        assert!(runtime.catalog.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn distinct_arc_allocations_do_not_share_source_identity() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+
+        let (source_a, _, _) = publishing_source::<f64>(None);
+        let (source_b, _, _) = publishing_source::<f64>(None);
+        let topic = RtdTopic::single("shared").unwrap();
+
+        let first = runtime.prepare(source_a, topic.clone()).unwrap();
+        let second = runtime.prepare(source_b, topic).unwrap();
+
+        assert_ne!(first.key(), second.key());
+
+        first.rollback();
+        second.rollback();
+    }
+
+    #[test]
+    fn cloned_arc_reuses_active_subscription_identity() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+        let (source, _, _) = publishing_source(Some(1.0_f64));
+        let topic = RtdTopic::single("shared-active").unwrap();
+
+        let first = runtime
+            .prepare(Arc::clone(&source), topic.clone())
+            .unwrap();
+        let key = SubscriptionKey::new(first.key());
+        first.commit();
+
+        let connection = runtime
+            .connect_transaction(&server, TopicId(1), &key)
+            .unwrap();
+        connection.commit().unwrap();
+
+        let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
+
+        assert_eq!(second.key(), &*key);
+        assert_eq!(second.ownership, PreparationOwnership::ExistingActive);
+
+        // ExistingActiveに対するrollbackは既存subscriptionを壊さない。
+        second.rollback();
+
+        assert!(runtime.catalog.lock().active_keys.contains_key(&key));
     }
 }

@@ -525,6 +525,16 @@ mod tests {
         assert_eq!(conn.value(), &crate::RtdValue::Number(17.5));
         conn.commit().unwrap();
 
+        let repeated = subscriptions
+            .prepare(Arc::clone(&source), topic.clone())
+            .unwrap();
+        assert_eq!(repeated.key(), &*key_obj);
+        assert_eq!(
+            repeated.ownership,
+            crate::subscription::PreparationOwnership::ExistingActive
+        );
+        repeated.rollback();
+
         let state = ();
         crate::with_excel_call_scope(|scope| {
             let context = MainThreadContext::new(&state, &runtime, scope);
