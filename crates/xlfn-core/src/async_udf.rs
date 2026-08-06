@@ -466,6 +466,8 @@ impl ActiveReservation {
             id,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: None,
         }
     }
 }
@@ -633,11 +635,16 @@ impl ExecutorHandle {
             reservation
         };
 
-        let completion = reservation.commit(generation, id);
+        #[allow(
+            unused_mut,
+            reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
+        )]
+        let mut completion = reservation.commit(generation, id);
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncTask);
+            completion.ghost = Some(ghost);
         }
 
         let wrapped = async move {
@@ -808,6 +815,8 @@ struct CompletionGuard {
     id: u64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     completion: Mutex<crate::shutdown_refinement::Completion>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
 
 impl Drop for CompletionGuard {
@@ -818,7 +827,7 @@ impl Drop for CompletionGuard {
         }
         drop(registry);
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
+        if let Some(ghost) = self.ghost.as_ref() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::EndAsyncTask(
                 *self.completion.lock(),
             ));

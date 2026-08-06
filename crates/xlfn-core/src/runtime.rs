@@ -664,6 +664,10 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(any(test, feature = "shutdown-trace"))]
+    #[allow(
+        dead_code,
+        reason = "Trace extraction is consumed by the feature-gated Lean checker test"
+    )]
     pub(crate) fn ghost_trace_json(&self) -> String {
         self.ghost_handle()
             .trace_json()

@@ -389,7 +389,6 @@ pub trait RtdSource: Send + Sync + 'static {
     ) -> XllResult<Box<dyn RtdSubscription>>;
 }
 
-
 pub struct RtdSink<T> {
     sink: ErasedSink,
     _value: PhantomData<fn(T)>,
@@ -1103,7 +1102,15 @@ impl ServerRuntime {
 
     fn drive_notification(self: &Arc<Self>, mut attempt: NotificationAttempt) {
         loop {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(parent) = self.parent.upgrade() {
+                parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
+            }
             let res = catch_unwind(AssertUnwindSafe(|| (attempt.callback)()));
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(parent) = self.parent.upgrade() {
+                parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
+            }
             let completion = match res {
                 Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
                 Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
@@ -1501,6 +1508,14 @@ impl<'a> ServerTermination<'a> {
 
             (late_callback, active_entries)
         };
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(parent) = self.server.parent.upgrade() {
+            for _ in 0..self.initial_subscriptions.len() {
+                parent
+                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+            }
+        }
 
         if let Err(err) = drop_callback_no_unwind(late_callback)
             && first_error.is_none()
@@ -2268,6 +2283,9 @@ impl SubscriptionRuntime {
             server.drive_notification(attempt);
         }
 
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
+
         Ok(())
     }
 
@@ -2368,9 +2386,6 @@ impl SubscriptionRuntime {
                     diagnostic_id: 0x5041_4e49_4353_5243,
                 };
                 self.record_cleanup_result(Err(err.clone()));
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
             }
         }
 
@@ -2392,6 +2407,9 @@ impl SubscriptionRuntime {
             state.delivery.updates.remove(&tid);
             (active.subscription, active.key, active.generation)
         };
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
@@ -2484,6 +2502,14 @@ impl SubscriptionRuntime {
 
         let pending_sources = {
             let mut catalog = self.catalog.lock();
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            {
+                for _ in 0..catalog.active_keys.len() {
+                    self.record_ghost_event(
+                        crate::shutdown_refinement::GhostEvent::RemoveSubscription,
+                    );
+                }
+            }
             catalog.active_keys.clear();
             catalog.source_ids.clear();
             catalog.pending_topic_bytes = 0;
@@ -2934,7 +2960,10 @@ pub(crate) mod tests {
 
         let (source, sink, disconnected) = publishing_source(Some(10.0));
         let prep = runtime
-            .prepare(Arc::clone(&source), RtdTopic::single("shared-topic").unwrap())
+            .prepare(
+                Arc::clone(&source),
+                RtdTopic::single("shared-topic").unwrap(),
+            )
             .unwrap();
         let key = SubscriptionKey::new(prep.key());
         prep.commit();
@@ -3713,9 +3742,7 @@ pub(crate) mod tests {
         let (source, _, _) = publishing_source::<f64>(None);
         let topic = RtdTopic::single("shared").unwrap();
 
-        let first = runtime
-            .prepare(Arc::clone(&source), topic.clone())
-            .unwrap();
+        let first = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
         let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
 
         assert_eq!(first.key(), second.key());
@@ -3753,9 +3780,7 @@ pub(crate) mod tests {
         let (source, _, _) = publishing_source(Some(1.0_f64));
         let topic = RtdTopic::single("shared-active").unwrap();
 
-        let first = runtime
-            .prepare(Arc::clone(&source), topic.clone())
-            .unwrap();
+        let first = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
         let key = SubscriptionKey::new(first.key());
         first.commit();
 

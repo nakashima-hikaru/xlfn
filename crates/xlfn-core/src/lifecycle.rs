@@ -1544,6 +1544,9 @@ mod tests {
                 crate::CancellationGuarantee::BestEffort,
             );
             runtime.start_async(1).unwrap();
+            let call = runtime
+                .enter()
+                .expect("async trace task must be spawned from an admitted call");
             runtime
                 .async_manager()
                 .spawn(
@@ -1554,6 +1557,7 @@ mod tests {
                     cancellation,
                 )
                 .unwrap();
+            drop(call);
             done_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .expect("Lean checker async trace task did not complete");

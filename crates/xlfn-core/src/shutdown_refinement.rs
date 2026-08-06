@@ -1,9 +1,6 @@
-#![cfg_attr(
-    not(feature = "shutdown-refinement"),
-    allow(
-        dead_code,
-        reason = "Ghost trace types for shutdown refinement feature"
-    )
+#![allow(
+    dead_code,
+    reason = "Shutdown ghost model mirrors the complete Lean transition and trace schema; some states and serializers are exercised only by checker tests"
 )]
 
 use parking_lot::Mutex;
