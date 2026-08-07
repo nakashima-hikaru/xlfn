@@ -261,15 +261,17 @@ pub(crate) struct ReturnProducerGuard {
 
 impl ReturnProducerGuard {
     fn transfer_to_block(&mut self) -> ReturnObligation {
-        let _obligation = self
-            .obligation
-            .as_ref()
-            .expect("return obligation is transferred exactly once");
-
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        _obligation
-            .tracker()
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
+        {
+            let _obligation = self
+                .obligation
+                .as_ref()
+                .expect("return obligation is transferred exactly once");
+
+            _obligation
+                .tracker()
+                .record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
+        }
 
         self.obligation
             .take()
@@ -833,13 +835,21 @@ where
     if !accepted {
         return closing_error_pointer();
     }
+    let call = match runtime.enter() {
+        Ok(call) => call,
+        Err(_) => {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+            return closing_error_pointer();
+        }
+    };
     let Some(mut producer) = runtime.enter_return_producer() else {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
         return closing_error_pointer();
     };
     let result = match catch_unwind(AssertUnwindSafe(|| {
-        udf_boundary_named_inner(runtime, &mut producer, udf_id, excel_name, operation)
+        udf_boundary_named_inner(runtime, &call, &mut producer, udf_id, excel_name, operation)
     })) {
         Ok(pointer) => pointer,
         Err(_) => {
@@ -849,6 +859,8 @@ where
             allocate_excel_error(&XllError::Panic, &mut producer)
         }
     };
+    drop(producer);
+    drop(call);
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
     result
@@ -856,6 +868,7 @@ where
 
 fn udf_boundary_named_inner<S, F, T>(
     runtime: &Runtime<S>,
+    guard: &crate::runtime::CallGuard<'_, S>,
     producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -868,71 +881,50 @@ where
     let call_id = runtime.next_call_id();
     let timer = crate::execution::CallTimer::start();
     let started_at = timer.started_at();
-    match runtime.enter() {
-        Ok(guard) => {
-            let concurrent_calls = guard.concurrent_calls();
-            let metadata = CallMetadata {
-                udf_id,
-                excel_name,
-                call_id: CallId::from(call_id),
-                calculation_id: runtime.calculation_id(),
-                started_at,
-                concurrent_calls,
-            };
-            let configured_layers = runtime.layers();
-            let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata)
-            {
-                Ok(layers) => layers,
-                Err(error) => {
-                    crate::diagnostics::report_no_unwind(udf_id, &error);
-                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
-                    crate::execution::trace(&metadata, &outcome);
-                    return allocate_excel_error(&error, producer);
-                }
-            };
-            let prepared = catch_unwind(AssertUnwindSafe(|| {
-                let value = operation(guard.state())?;
-                let value = value.into_excel_value()?;
-                PreparedReturn::encode(value)
-            }))
-            .unwrap_or(Err(XllError::Panic));
+    let concurrent_calls = guard.concurrent_calls();
+    let metadata = CallMetadata {
+        udf_id,
+        excel_name,
+        call_id: CallId::from(call_id),
+        calculation_id: runtime.calculation_id(),
+        started_at,
+        concurrent_calls,
+    };
+    let configured_layers = runtime.layers();
+    let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata) {
+        Ok(layers) => layers,
+        Err(error) => {
+            crate::diagnostics::report_no_unwind(udf_id, &error);
+            let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+            crate::execution::trace(&metadata, &outcome);
+            return allocate_excel_error(&error, producer);
+        }
+    };
+    let prepared = catch_unwind(AssertUnwindSafe(|| {
+        let value = operation(guard.state())?;
+        let value = value.into_excel_value()?;
+        PreparedReturn::encode(value)
+    }))
+    .unwrap_or(Err(XllError::Panic));
 
-            let pointer = match prepared {
-                Ok(prepared) => {
-                    let outcome = CallOutcome {
-                        result: UdfResultKind::Success,
-                        error: None,
-                        vendor_code: None,
-                        duration: timer.elapsed(),
-                    };
-                    layers.exit(&outcome);
-                    crate::execution::trace(&metadata, &outcome);
-                    prepared.publish_excel(producer)
-                }
-                Err(error) => {
-                    crate::diagnostics::report_no_unwind(udf_id, &error);
-                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
-                    layers.exit(&outcome);
-                    crate::execution::trace(&metadata, &outcome);
-                    PreparedReturn::error(&error).publish_excel(producer)
-                }
+    match prepared {
+        Ok(prepared) => {
+            let outcome = CallOutcome {
+                result: UdfResultKind::Success,
+                error: None,
+                vendor_code: None,
+                duration: timer.elapsed(),
             };
-            drop(guard);
-            pointer
+            layers.exit(&outcome);
+            crate::execution::trace(&metadata, &outcome);
+            prepared.publish_excel(producer)
         }
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
-            let metadata = CallMetadata {
-                udf_id,
-                excel_name,
-                call_id: CallId::from(call_id),
-                calculation_id: runtime.calculation_id(),
-                started_at,
-                concurrent_calls: 0,
-            };
             let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+            layers.exit(&outcome);
             crate::execution::trace(&metadata, &outcome);
-            allocate_excel_error(&error, producer)
+            PreparedReturn::error(&error).publish_excel(producer)
         }
     }
 }
@@ -983,14 +975,16 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     let ownership = unsafe { &mut (*block).ownership };
     match ownership {
         ReturnOwnership::Excel(slot) => {
-            let _obligation = slot
-                .as_ref()
-                .expect("Excel return obligation is taken exactly once");
-
             #[cfg(any(test, feature = "shutdown-refinement"))]
-            _obligation
-                .tracker()
-                .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
+            {
+                let _obligation = slot
+                    .as_ref()
+                    .expect("Excel return obligation is taken exactly once");
+
+                _obligation
+                    .tracker()
+                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
+            }
 
             Some(ReturnFreeGuard {
                 obligation: slot
