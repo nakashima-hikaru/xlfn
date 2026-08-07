@@ -9,6 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_sys::{
     XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLRET_ABORT, XLRET_SUCCESS,
     XLRET_UNCALCED, XLTYPE_MULTI, XLTYPE_STR,
@@ -87,124 +88,227 @@ impl CleanupDebtSet {
     }
 }
 
-#[derive(Default)]
-struct ReturnTrackerState {
-    producers: usize,
-    blocks: usize,
-    free_operations: usize,
-}
+const RETURN_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
+const RETURN_PRODUCER_MASK: usize = RETURN_ADMISSION_CLOSED - 1;
 
 /// Runtime-local accounting for code paths that can retain or re-enter the
 /// XLL after a synchronous function has returned to Excel.
 pub(crate) struct ReturnTracker {
-    state: Mutex<ReturnTrackerState>,
+    // Most significant bit: admission closed
+    // Remaining bits: producer count
+    producer_state: AtomicUsize,
+    blocks: AtomicUsize,
+    free_operations: AtomicUsize,
+    waiters: AtomicUsize,
+    wait_lock: Mutex<()>,
     quiescent: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
 impl ReturnTracker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new_closed() -> Self {
         Self {
-            state: Mutex::new(ReturnTrackerState::default()),
+            producer_state: AtomicUsize::new(RETURN_ADMISSION_CLOSED),
+            blocks: AtomicUsize::new(0),
+            free_operations: AtomicUsize::new(0),
+            waiters: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
-            ghost: Mutex::new(None),
+            ghost: std::sync::OnceLock::new(),
         }
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(ghost);
+        let _ = self.ghost.set(ghost);
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+        if let Some(ghost) = self.ghost.get() {
             ghost.record_event(event);
         }
     }
 
-    pub(crate) fn enter_producer(self: &Arc<Self>) -> ReturnProducerGuard {
-        let mut state = self.state.lock();
-        state.producers = state
-            .producers
-            .checked_add(1)
-            .expect("return producer count cannot overflow");
-        drop(state);
-        ReturnProducerGuard {
-            tracker: Arc::clone(self),
+    pub(crate) fn reopen_admission(&self) -> XllResult<()> {
+        if self.blocks.load(Ordering::Acquire) != 0
+            || self.free_operations.load(Ordering::Acquire) != 0
+        {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5254_4e52_4554_4f50,
+            });
+        }
+
+        self.producer_state
+            .compare_exchange(
+                RETURN_ADMISSION_CLOSED,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| XllError::Internal {
+                diagnostic_id: 0x5254_4e52_454f_504e,
+            })
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.producer_state
+            .fetch_or(RETURN_ADMISSION_CLOSED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn try_enter_producer(self: &Arc<Self>) -> Option<ReturnProducerGuard<'_>> {
+        let mut observed = self.producer_state.load(Ordering::Acquire);
+
+        loop {
+            if observed & RETURN_ADMISSION_CLOSED != 0 {
+                return None;
+            }
+
+            let producers = observed & RETURN_PRODUCER_MASK;
+            if producers == RETURN_PRODUCER_MASK {
+                std::process::abort();
+            }
+
+            let next = observed + 1;
+
+            match self.producer_state.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ReturnProducerGuard { tracker: self });
+                }
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    fn leave_producer(&self) {
+        let previous = self.producer_state.fetch_sub(1, Ordering::AcqRel);
+        let producers = previous & RETURN_PRODUCER_MASK;
+
+        if producers == 0 {
+            std::process::abort();
+        }
+
+        if producers == 1 {
+            self.notify_if_quiescent();
         }
     }
 
     fn register_block(&self) {
-        let mut state = self.state.lock();
-        state.blocks = state
-            .blocks
-            .checked_add(1)
-            .expect("return block count cannot overflow");
-        drop(state);
+        let previous = self.blocks.fetch_add(1, Ordering::AcqRel);
+        if previous == usize::MAX {
+            std::process::abort();
+        }
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
     }
 
     fn release_block(&self) {
-        let mut state = self.state.lock();
-        state.blocks = state
-            .blocks
-            .checked_sub(1)
-            .expect("return block count remains balanced");
-        self.quiescent.notify_all();
-        drop(state);
+        let previous = self.blocks.fetch_sub(1, Ordering::AcqRel);
+        if previous == 0 {
+            std::process::abort();
+        }
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
+
+        if previous == 1 {
+            self.notify_if_quiescent();
+        }
     }
 
     fn enter_free(self: &Arc<Self>) -> ReturnFreeGuard {
-        let mut state = self.state.lock();
-        state.free_operations = state
-            .free_operations
-            .checked_add(1)
-            .expect("return free-operation count cannot overflow");
-        drop(state);
+        let previous = self.free_operations.fetch_add(1, Ordering::AcqRel);
+        if previous == usize::MAX {
+            std::process::abort();
+        }
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
+
         ReturnFreeGuard {
             tracker: Arc::clone(self),
         }
     }
 
-    pub(crate) fn wait_for_quiescence(&self) {
-        let mut state = self.state.lock();
-        while state.producers != 0 || state.blocks != 0 || state.free_operations != 0 {
-            self.quiescent.wait(&mut state);
+    fn leave_free(&self) {
+        let previous = self.free_operations.fetch_sub(1, Ordering::AcqRel);
+        if previous == 0 {
+            std::process::abort();
+        }
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
+
+        if previous == 1 {
+            self.notify_if_quiescent();
         }
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
-        let state = self.state.lock();
-        state.producers == 0 && state.blocks == 0 && state.free_operations == 0
+        let producer_state = self.producer_state.load(Ordering::Acquire);
+
+        producer_state & RETURN_PRODUCER_MASK == 0
+            && self.blocks.load(Ordering::Acquire) == 0
+            && self.free_operations.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn admission_closed(&self) -> bool {
+        self.producer_state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
+    }
+
+    pub(crate) fn wait_for_quiescence(&self) {
+        debug_assert!(self.admission_closed());
+
+        let mut guard = self.wait_lock.lock();
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+
+        while !self.is_quiescent() {
+            self.quiescent.wait(&mut guard);
+        }
+
+        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+
+    fn notify_if_quiescent(&self) {
+        if self.waiters.load(Ordering::Acquire) == 0 {
+            return;
+        }
+
+        if !self.is_quiescent() {
+            return;
+        }
+
+        let _guard = self.wait_lock.lock();
+
+        if self.is_quiescent() {
+            self.quiescent.notify_all();
+        }
     }
 }
 
-pub(crate) struct ReturnProducerGuard {
-    tracker: Arc<ReturnTracker>,
+pub(crate) struct ReturnProducerGuard<'tracker> {
+    tracker: &'tracker Arc<ReturnTracker>,
 }
 
-impl ReturnProducerGuard {
+impl ReturnProducerGuard<'_> {
     fn tracker(&self) -> &Arc<ReturnTracker> {
-        &self.tracker
+        self.tracker
     }
 }
 
-impl Drop for ReturnProducerGuard {
+impl Drop for ReturnProducerGuard<'_> {
     fn drop(&mut self) {
-        let mut state = self.tracker.state.lock();
-        state.producers = state
-            .producers
-            .checked_sub(1)
-            .expect("return producer count remains balanced");
-        self.tracker.quiescent.notify_all();
+        self.tracker.leave_producer();
     }
 }
 
@@ -220,16 +324,7 @@ pub struct ReturnFreeBoundaryGuard {
 
 impl Drop for ReturnFreeGuard {
     fn drop(&mut self) {
-        let mut state = self.tracker.state.lock();
-        state.free_operations = state
-            .free_operations
-            .checked_sub(1)
-            .expect("return free-operation count remains balanced");
-        self.tracker.quiescent.notify_all();
-        drop(state);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.tracker
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
+        self.tracker.leave_free();
     }
 }
 
@@ -900,7 +995,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     // tracker does not transfer or mutate ownership of the block itself.
     let ownership = unsafe { &(*block_pointer).ownership };
     match ownership {
-        ReturnOwnership::Excel(tracker) => Some(Arc::clone(tracker).enter_free()),
+        ReturnOwnership::Excel(tracker) => Some(tracker.enter_free()),
         #[cfg(any(feature = "async", test))]
         ReturnOwnership::Local => None,
     }
@@ -933,7 +1028,7 @@ pub(crate) fn live_return_blocks() -> usize {
 mod tests {
     use super::*;
     use crate::{ExcelError, Matrix};
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
 
@@ -1357,6 +1452,85 @@ mod tests {
 
             free_return(excel_ptr);
             free_return(async_ptr.as_ptr());
+        }
+    }
+
+    #[test]
+    fn producer_entry_is_linearized_against_close() {
+        for _ in 0..10_000 {
+            let tracker = Arc::new(ReturnTracker::new_closed());
+            tracker.reopen_admission().unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            let producer_tracker = Arc::clone(&tracker);
+            let producer_barrier = Arc::clone(&barrier);
+            let producer = std::thread::spawn(move || {
+                producer_barrier.wait();
+                let guard = producer_tracker.try_enter_producer();
+                let admitted = guard.is_some();
+                drop(guard);
+                admitted
+            });
+
+            barrier.wait();
+            tracker.close_admission();
+
+            let _admitted = producer.join().unwrap();
+
+            tracker.wait_for_quiescence();
+            assert!(tracker.is_quiescent());
+        }
+    }
+
+    #[test]
+    fn closed_admission_rejects_all_producers() {
+        let tracker = Arc::new(ReturnTracker::new_closed());
+
+        std::thread::scope(|scope| {
+            for _ in 0..32 {
+                let tracker_ref = &tracker;
+                scope.spawn(move || {
+                    for _ in 0..10_000 {
+                        assert!(tracker_ref.try_enter_producer().is_none());
+                    }
+                });
+            }
+        });
+
+        assert!(tracker.is_quiescent());
+    }
+
+    #[test]
+    fn quiescent_lost_wakeup_stress_test() {
+        for _ in 0..200 {
+            let tracker = Arc::new(ReturnTracker::new_closed());
+            tracker.reopen_admission().unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+            let tracker_waiter = Arc::clone(&tracker);
+            let barrier_waiter = Arc::clone(&barrier);
+            let waiter_handle = std::thread::spawn(move || {
+                barrier_waiter.wait();
+                tracker_waiter.wait_for_quiescence();
+            });
+
+            let tracker_prod = Arc::clone(&tracker);
+            let producer_handle = std::thread::spawn(move || {
+                if let Some(guard) = tracker_prod.try_enter_producer() {
+                    tracker_prod.register_block();
+                    let free_guard = tracker_prod.enter_free();
+                    drop(guard);
+                    tracker_prod.release_block();
+                    drop(free_guard);
+                }
+            });
+
+            producer_handle.join().unwrap();
+            tracker.close_admission();
+            barrier.wait();
+            waiter_handle.join().unwrap();
+            assert!(tracker.is_quiescent());
         }
     }
 }

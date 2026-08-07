@@ -5,10 +5,8 @@ use arc_swap::ArcSwapOption;
 use parking_lot::MutexGuard;
 use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
-use std::sync::Arc;
-#[cfg(any(test, feature = "shutdown-refinement"))]
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -45,8 +43,7 @@ pub struct Runtime<S> {
         Mutex<BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>>>,
     event_registrations: Mutex<Vec<crate::registration::EventRegistration>>,
     active_calls: AtomicUsize,
-    return_admission_closed: AtomicBool,
-    returns: Mutex<Option<Arc<crate::return_value::ReturnTracker>>>,
+    returns: OnceLock<Arc<crate::return_value::ReturnTracker>>,
     next_call_id: AtomicU64,
     #[cfg(not(feature = "async"))]
     calculation_id: AtomicU64,
@@ -87,8 +84,7 @@ impl<S> Runtime<S> {
             metadata_debt: Mutex::new(BTreeMap::new()),
             event_registrations: Mutex::new(Vec::new()),
             active_calls: AtomicUsize::new(0),
-            return_admission_closed: AtomicBool::new(false),
-            returns: Mutex::new(None),
+            returns: OnceLock::new(),
             next_call_id: AtomicU64::new(1),
             #[cfg(not(feature = "async"))]
             calculation_id: AtomicU64::new(1),
@@ -145,6 +141,9 @@ impl<S> Runtime<S> {
         }
 
         let attempt_id = self.next_lifecycle_attempt_id();
+        let tracker = self.return_tracker();
+        tracker.reopen_admission()?;
+
         crate::rtd::begin_module_open();
         crate::callback_gate::reset_from_runtime();
         crate::ingress::global_ingress().begin_opening();
@@ -153,7 +152,6 @@ impl<S> Runtime<S> {
             *self.test_module_lease.lock() = Some(test_module_lease);
         }
         self.open_attempt_id.store(attempt_id, Ordering::Release);
-        self.return_admission_closed.store(false, Ordering::Release);
         self.phase
             .store(LifecyclePhase::Opening as u8, Ordering::Release);
         Ok(OpenAttemptGuard {
@@ -246,7 +244,7 @@ impl<S> Runtime<S> {
                                 })
                         })?;
                         crate::rtd::set_ghost(Arc::clone(&ghost));
-                        if let Some(tracker) = self.returns.lock().as_ref().cloned() {
+                        if let Some(tracker) = self.returns.get() {
                             tracker.set_ghost(Arc::clone(&ghost));
                         }
                         if let Some(Ok(handles)) = self.handles.lock().as_ref() {
@@ -325,7 +323,9 @@ impl<S> Runtime<S> {
         self.open_attempt_id.store(0, Ordering::Release);
         let should_rollback = match self.phase() {
             LifecyclePhase::Opening => {
-                self.return_admission_closed.store(true, Ordering::Release);
+                if let Some(tracker) = self.returns.get() {
+                    tracker.close_admission();
+                }
                 self.phase
                     .store(LifecyclePhase::OpenRollbackPending as u8, Ordering::Release);
                 true
@@ -404,7 +404,9 @@ impl<S> Runtime<S> {
         let _wait_guard = self.wait_lock.lock();
         crate::ingress::global_ingress().with_linearization(|| {
             if self.phase() == LifecyclePhase::Open {
-                self.return_admission_closed.store(true, Ordering::Release);
+                if let Some(tracker) = self.returns.get() {
+                    tracker.close_admission();
+                }
                 self.phase
                     .store(LifecyclePhase::Closing as u8, Ordering::Release);
                 true
@@ -420,7 +422,9 @@ impl<S> Runtime<S> {
         // before it, including an operation that is between rollback recovery
         // and acquisition of its open-attempt token while the phase is Closed.
         self.close_epoch.fetch_add(1, Ordering::AcqRel);
-        self.return_admission_closed.store(true, Ordering::Release);
+        if let Some(tracker) = self.returns.get() {
+            tracker.close_admission();
+        }
         loop {
             let decision = crate::ingress::global_ingress().with_linearization(|| {
                 match self.phase() {
@@ -550,36 +554,41 @@ impl<S> Runtime<S> {
         }
     }
 
-    pub(crate) fn enter_return_producer(&self) -> Option<crate::return_value::ReturnProducerGuard> {
-        let _wait_guard = self.wait_lock.lock();
-        if self.return_admission_closed.load(Ordering::Acquire) {
-            return None;
-        }
-        let tracker = {
-            let mut slot = self.returns.lock();
-            Arc::clone(
-                slot.get_or_insert_with(|| Arc::new(crate::return_value::ReturnTracker::new())),
-            )
-        };
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        if self.ghost_handle().active() {
-            tracker.set_ghost(self.ghost_handle());
-        }
-        Some(tracker.enter_producer())
+    fn return_tracker(&self) -> &Arc<crate::return_value::ReturnTracker> {
+        self.returns.get_or_init(|| {
+            let tracker = Arc::new(crate::return_value::ReturnTracker::new_closed());
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if self.ghost_handle().active() {
+                tracker.set_ghost(self.ghost_handle());
+            }
+            tracker
+        })
+    }
+
+    pub(crate) fn enter_return_producer(
+        &self,
+    ) -> Option<crate::return_value::ReturnProducerGuard<'_>> {
+        self.returns
+            .get()
+            .and_then(|tracker| tracker.try_enter_producer())
     }
 
     pub(crate) fn wait_for_returns(&self) {
-        let tracker = self.returns.lock().clone();
-        if let Some(tracker) = tracker {
+        if let Some(tracker) = self.returns.get() {
             tracker.wait_for_quiescence();
         }
     }
 
     fn returns_are_quiescent(&self) -> bool {
         self.returns
-            .lock()
-            .as_ref()
+            .get()
             .is_none_or(|tracker| tracker.is_quiescent())
+    }
+
+    fn returns_closed_and_quiescent(&self) -> bool {
+        self.returns
+            .get()
+            .is_none_or(|tracker| tracker.admission_closed() && tracker.is_quiescent())
     }
 
     pub(crate) fn take_state(&self) -> Option<Arc<S>> {
@@ -815,8 +824,7 @@ impl<S> Runtime<S> {
         ) && self.open_attempt_id.load(Ordering::Acquire) == 0
             && self.close_attempt_active.load(Ordering::Acquire)
             && self.active_calls.load(Ordering::Acquire) == 0
-            && self.return_admission_closed.load(Ordering::Acquire)
-            && self.returns_are_quiescent()
+            && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
             && self.state.load_full().is_none()
@@ -888,8 +896,7 @@ impl<S> Runtime<S> {
             && self.open_attempt_id.load(Ordering::Acquire) == 0
             && self.close_attempt_active.load(Ordering::Acquire)
             && self.active_calls.load(Ordering::Acquire) == 0
-            && self.return_admission_closed.load(Ordering::Acquire)
-            && self.returns_are_quiescent()
+            && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
             && self.state.load_full().is_none()
