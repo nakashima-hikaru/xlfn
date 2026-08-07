@@ -72,9 +72,7 @@ pub(crate) struct SubscriptionKey(pub(crate) Arc<str>);
 
 impl SubscriptionKey {
     fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
-        Self(
-            format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}").into(),
-        )
+        Self(format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}").into())
     }
 
     pub(crate) fn parse_transport(value: &str) -> XllResult<Self> {
@@ -91,7 +89,10 @@ impl SubscriptionKey {
         if runtime.len() != 16
             || subscription.len() != 16
             || !runtime.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
-            || !subscription.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+            || !subscription
+                .as_bytes()
+                .iter()
+                .all(|b| b.is_ascii_hexdigit())
         {
             return Err(XllError::InvalidHandle);
         }
@@ -651,11 +652,7 @@ impl SourceIdentityRegistry {
         Ok(id)
     }
 
-    fn resolve<S>(
-        &mut self,
-        source: &Arc<S>,
-        limit: usize,
-    ) -> XllResult<ResolvedSourceIdentity>
+    fn resolve<S>(&mut self, source: &Arc<S>, limit: usize) -> XllResult<ResolvedSourceIdentity>
     where
         S: RtdSource,
     {
@@ -746,14 +743,8 @@ impl SubscriptionIdentityIndex {
         self.identity_by_key.get(key)
     }
 
-    fn insert(
-        &mut self,
-        identity: SubscriptionIdentity,
-        key: SubscriptionKey,
-    ) -> XllResult<()> {
-        if self.key_by_identity.contains_key(&identity)
-            || self.identity_by_key.contains_key(&key)
-        {
+    fn insert(&mut self, identity: SubscriptionIdentity, key: SubscriptionKey) -> XllResult<()> {
+        if self.key_by_identity.contains_key(&identity) || self.identity_by_key.contains_key(&key) {
             return Err(XllError::Internal {
                 diagnostic_id: 0x5254_4449_4458_4455,
             });
@@ -804,23 +795,14 @@ impl SubscriptionCatalog {
         );
 
         for (identity, key) in &self.identities.key_by_identity {
-            assert_eq!(
-                self.identities.identity_by_key.get(key),
-                Some(identity),
-            );
+            assert_eq!(self.identities.identity_by_key.get(key), Some(identity),);
 
-            assert!(
-                self.pending.contains_key(key)
-                    || self.active_keys.contains_key(key),
-            );
+            assert!(self.pending.contains_key(key) || self.active_keys.contains_key(key),);
         }
     }
 }
 
-fn remove_identity_if_unbound(
-    catalog: &mut SubscriptionCatalog,
-    key: &SubscriptionKey,
-) {
+fn remove_identity_if_unbound(catalog: &mut SubscriptionCatalog, key: &SubscriptionKey) {
     let has_pending = catalog.pending.contains_key(key);
     let has_active = catalog.active_keys.contains_key(key);
 
@@ -2157,15 +2139,15 @@ impl SubscriptionRuntime {
             }
 
             if let Some(pending) = catalog.pending.get_mut(&existing_key) {
-                let reservation_id =
-                    self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
+                let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
 
-                pending.live_reservations = pending
-                    .live_reservations
-                    .checked_add(1)
-                    .ok_or(XllError::Internal {
-                        diagnostic_id: 0x5245_5356_4f56_464c,
-                    })?;
+                pending.live_reservations =
+                    pending
+                        .live_reservations
+                        .checked_add(1)
+                        .ok_or(XllError::Internal {
+                            diagnostic_id: 0x5245_5356_4f56_464c,
+                        })?;
 
                 return Ok(PreparedSubscription {
                     runtime: Arc::downgrade(self),
@@ -2185,10 +2167,7 @@ impl SubscriptionRuntime {
             return Err(XllError::Overloaded);
         }
 
-        let new_total = match catalog
-            .pending_topic_bytes
-            .checked_add(topic.byte_len())
-        {
+        let new_total = match catalog.pending_topic_bytes.checked_add(topic.byte_len()) {
             Some(total) if total <= self.limits.max_total_topic_bytes => total,
             _ => {
                 catalog.sources.rollback_registration(source_identity);
@@ -4142,10 +4121,7 @@ pub(crate) mod tests {
         let first_key = {
             let (source, _, _) = publishing_source::<f64>(None);
             let prepared = runtime
-                .prepare(
-                    Arc::clone(&source),
-                    RtdTopic::single("same-topic").unwrap(),
-                )
+                .prepare(Arc::clone(&source), RtdTopic::single("same-topic").unwrap())
                 .unwrap();
 
             let key = prepared.key().to_owned();
@@ -4215,13 +4191,9 @@ pub(crate) mod tests {
         let topic_a = RtdTopic::new(["a\0b", "c"]).unwrap();
         let topic_b = RtdTopic::new(["a", "b\0c"]).unwrap();
 
-        let prepared_a = runtime
-            .prepare(Arc::clone(&source), topic_a)
-            .unwrap();
+        let prepared_a = runtime.prepare(Arc::clone(&source), topic_a).unwrap();
 
-        let prepared_b = runtime
-            .prepare(Arc::clone(&source), topic_b)
-            .unwrap();
+        let prepared_b = runtime.prepare(Arc::clone(&source), topic_b).unwrap();
 
         assert_ne!(prepared_a.key(), prepared_b.key());
         runtime.catalog.lock().assert_identity_invariants();
@@ -4255,10 +4227,7 @@ pub(crate) mod tests {
         let part = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1);
         let topic = RtdTopic::single(part).unwrap();
 
-        assert_eq!(
-            topic.parts()[0].len(),
-            crate::utf16::EXCEL_STRING_LIMIT + 1,
-        );
+        assert_eq!(topic.parts()[0].len(), crate::utf16::EXCEL_STRING_LIMIT + 1,);
     }
 
     #[test]

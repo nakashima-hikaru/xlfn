@@ -3304,10 +3304,9 @@ unsafe fn connect_data_inner(
             return E_FAIL;
         };
 
-        match subscription_server.connect_transaction(
-            crate::subscription::TopicId(topic_id),
-            &sub_key,
-        ) {
+        match subscription_server
+            .connect_transaction(crate::subscription::TopicId(topic_id), &sub_key)
+        {
             Ok(connection) => ConnectDataTransaction::Subscription(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
