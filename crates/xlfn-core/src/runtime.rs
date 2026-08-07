@@ -194,7 +194,11 @@ impl<S> Runtime<S> {
     }
 
     pub(crate) fn publish_layers(&self, layers: Vec<Arc<dyn crate::UdfLayer>>) {
-        self.layers.store(Some(Arc::new(layers)));
+        if layers.is_empty() {
+            self.layers.store(None);
+        } else {
+            self.layers.store(Some(Arc::new(layers)));
+        }
     }
 
     pub(crate) fn finish_open(
@@ -968,10 +972,17 @@ impl<S> Runtime<S> {
         self.next_call_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub(crate) fn layers(&self) -> Arc<SharedUdfLayers> {
-        self.layers
-            .load_full()
-            .unwrap_or_else(|| Arc::new(Vec::new()))
+    #[cfg(test)]
+    pub(crate) fn peek_next_call_id(&self) -> u64 {
+        self.next_call_id.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn layers_if_configured(&self) -> Option<Arc<SharedUdfLayers>> {
+        let layers = self.layers.load();
+        match layers.as_ref() {
+            Some(layers) if !layers.is_empty() => Some(Arc::clone(layers)),
+            _ => None,
+        }
     }
 
     pub(crate) fn calculation_id(&self) -> crate::CalculationId {

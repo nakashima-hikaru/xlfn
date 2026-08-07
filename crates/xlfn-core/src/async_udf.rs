@@ -23,7 +23,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
-use std::time::SystemTime;
 use xlfn_sys::{
     XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL,
 };
@@ -989,7 +988,6 @@ struct AsyncCompletionTracker {
     excel_name: &'static str,
     call_id: CallId,
     calculation_id: crate::execution::CalculationId,
-    started_at: SystemTime,
     concurrent_calls: usize,
     timer: crate::execution::CallTimer,
     layers: Option<crate::execution::EnteredLayers>,
@@ -1007,7 +1005,6 @@ impl AsyncCompletionTracker {
             excel_name: metadata.excel_name,
             call_id: metadata.call_id,
             calculation_id: metadata.calculation_id,
-            started_at: metadata.started_at,
             concurrent_calls: metadata.concurrent_calls,
             timer,
             layers: Some(layers),
@@ -1021,15 +1018,14 @@ impl AsyncCompletionTracker {
             if let Some(layers) = self.layers.take() {
                 layers.exit(outcome);
             }
-            let metadata = CallMetadata {
+            let trace_metadata = crate::execution::UdfTraceMetadata {
                 udf_id: self.udf_id,
                 excel_name: self.excel_name,
                 call_id: self.call_id,
                 calculation_id: self.calculation_id,
-                started_at: self.started_at,
                 concurrent_calls: self.concurrent_calls,
             };
-            crate::execution::trace(&metadata, outcome);
+            crate::execution::trace(&trace_metadata, outcome);
         }
     }
 
@@ -1072,7 +1068,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
 {
     let call_id = runtime.next_call_id();
     let timer = crate::execution::CallTimer::start();
-    let started_at = timer.started_at();
+    let started_at = std::time::SystemTime::now();
     let guard = match runtime.enter() {
         Ok(guard) => guard,
         Err(error) => {
@@ -1091,7 +1087,9 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
         started_at,
         concurrent_calls,
     };
-    let configured_layers = runtime.layers();
+    let configured_layers = runtime
+        .layers_if_configured()
+        .unwrap_or_else(|| Arc::new(Vec::new()));
     let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata) {
         Ok(layers) => layers,
         Err(error) => {

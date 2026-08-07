@@ -883,28 +883,101 @@ where
     F: FnOnce(&S) -> XllResult<T>,
     T: IntoExcelValue,
 {
-    let call_id = runtime.next_call_id();
-    let timer = crate::execution::CallTimer::start();
-    let started_at = timer.started_at();
-    let concurrent_calls = guard.concurrent_calls();
-    let metadata = CallMetadata {
+    let instrumentation = crate::execution::InstrumentationPlan::for_runtime(runtime);
+
+    if !instrumentation.enabled() {
+        return udf_boundary_uninstrumented(guard, producer, udf_id, operation);
+    }
+
+    udf_boundary_instrumented(
+        runtime,
+        guard,
+        producer,
         udf_id,
         excel_name,
-        call_id: CallId::from(call_id),
-        calculation_id: runtime.calculation_id(),
-        started_at,
-        concurrent_calls,
-    };
-    let configured_layers = runtime.layers();
-    let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata) {
-        Ok(layers) => layers,
+        operation,
+        instrumentation,
+    )
+}
+
+#[inline]
+fn udf_boundary_uninstrumented<S, F, T>(
+    guard: &crate::runtime::CallGuard<'_, S>,
+    producer: &mut ReturnProducerGuard,
+    udf_id: &'static str,
+    operation: F,
+) -> *mut XLOPER12
+where
+    F: FnOnce(&S) -> XllResult<T>,
+    T: IntoExcelValue,
+{
+    let prepared = catch_unwind(AssertUnwindSafe(|| {
+        let value = operation(guard.state())?;
+        let value = value.into_excel_value()?;
+        PreparedReturn::encode(value)
+    }))
+    .unwrap_or(Err(XllError::Panic));
+
+    match prepared {
+        Ok(prepared) => prepared.publish_excel(producer),
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
-            let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
-            crate::execution::trace(&metadata, &outcome);
-            return allocate_excel_error(&error, producer);
+            PreparedReturn::error(&error).publish_excel(producer)
         }
+    }
+}
+
+fn udf_boundary_instrumented<S, F, T>(
+    runtime: &Runtime<S>,
+    guard: &crate::runtime::CallGuard<'_, S>,
+    producer: &mut ReturnProducerGuard,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    operation: F,
+    instrumentation: crate::execution::InstrumentationPlan,
+) -> *mut XLOPER12
+where
+    F: FnOnce(&S) -> XllResult<T>,
+    T: IntoExcelValue,
+{
+    let call_id = CallId::from(runtime.next_call_id());
+    let calculation_id = runtime.calculation_id();
+    let concurrent_calls = guard.concurrent_calls();
+    let timer = crate::execution::CallTimer::start();
+
+    let trace_metadata = crate::execution::UdfTraceMetadata {
+        udf_id,
+        excel_name,
+        call_id,
+        calculation_id,
+        concurrent_calls,
     };
+
+    let layers = match instrumentation.layers() {
+        Some(configured_layers) => {
+            let layer_metadata = CallMetadata {
+                udf_id,
+                excel_name,
+                call_id,
+                calculation_id,
+                started_at: std::time::SystemTime::now(),
+                concurrent_calls,
+            };
+            match crate::execution::EnteredLayers::enter(configured_layers, &layer_metadata) {
+                Ok(layers) => Some(layers),
+                Err(error) => {
+                    crate::diagnostics::report_no_unwind(udf_id, &error);
+                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+                    if instrumentation.trace_enabled() {
+                        crate::execution::trace(&trace_metadata, &outcome);
+                    }
+                    return allocate_excel_error(&error, producer);
+                }
+            }
+        }
+        None => None,
+    };
+
     let prepared = catch_unwind(AssertUnwindSafe(|| {
         let value = operation(guard.state())?;
         let value = value.into_excel_value()?;
@@ -920,15 +993,23 @@ where
                 vendor_code: None,
                 duration: timer.elapsed(),
             };
-            layers.exit(&outcome);
-            crate::execution::trace(&metadata, &outcome);
+            if let Some(layers) = layers {
+                layers.exit(&outcome);
+            }
+            if instrumentation.trace_enabled() {
+                crate::execution::trace(&trace_metadata, &outcome);
+            }
             prepared.publish_excel(producer)
         }
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
             let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
-            layers.exit(&outcome);
-            crate::execution::trace(&metadata, &outcome);
+            if let Some(layers) = layers {
+                layers.exit(&outcome);
+            }
+            if instrumentation.trace_enabled() {
+                crate::execution::trace(&trace_metadata, &outcome);
+            }
             PreparedReturn::error(&error).publish_excel(producer)
         }
     }
@@ -1628,5 +1709,24 @@ mod tests {
             assert_eq!(s0, "hello");
             assert_eq!(s1, "world");
         }
+    }
+
+    #[test]
+    fn uninstrumented_udf_does_not_allocate_call_id() {
+        let _test = test_lock();
+        let runtime = open_test_runtime();
+
+        let before = runtime.peek_next_call_id();
+
+        for _ in 0..100 {
+            let ptr =
+                udf_boundary_named(&runtime, "test_fast_path", "TEST.FAST_PATH", |_| Ok(42.0));
+            // SAFETY: ptr is a live ReturnBlock produced above.
+            let free_guard = unsafe { free_return_boundary(ptr) };
+            drop(free_guard);
+        }
+
+        let after = runtime.peek_next_call_id();
+        assert_eq!(before, after);
     }
 }

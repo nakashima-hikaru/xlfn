@@ -45,9 +45,52 @@ pub struct CallMetadata {
     pub concurrent_calls: usize,
 }
 
+pub(crate) const UDF_TRACE_TARGET: &str = "xlfn::udf";
+
+pub(crate) fn udf_trace_enabled() -> bool {
+    catch_unwind(AssertUnwindSafe(
+        || tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO),
+    ))
+    .unwrap_or(false)
+}
+
+pub(crate) struct InstrumentationPlan {
+    layers: Option<Arc<SharedUdfLayers>>,
+    trace_enabled: bool,
+}
+
+impl InstrumentationPlan {
+    pub(crate) fn for_runtime<S>(runtime: &crate::Runtime<S>) -> Self {
+        Self {
+            layers: runtime.layers_if_configured(),
+            trace_enabled: udf_trace_enabled(),
+        }
+    }
+
+    pub(crate) const fn enabled(&self) -> bool {
+        self.layers.is_some() || self.trace_enabled
+    }
+
+    pub(crate) fn layers(&self) -> Option<&SharedUdfLayers> {
+        self.layers.as_deref()
+    }
+
+    pub(crate) const fn trace_enabled(&self) -> bool {
+        self.trace_enabled
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UdfTraceMetadata {
+    pub udf_id: &'static str,
+    pub excel_name: &'static str,
+    pub call_id: CallId,
+    pub calculation_id: CalculationId,
+    pub concurrent_calls: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CallTimer {
-    started_at: SystemTime,
     started: Instant,
 }
 
@@ -55,12 +98,7 @@ impl CallTimer {
     pub(crate) fn start() -> Self {
         Self {
             started: Instant::now(),
-            started_at: SystemTime::now(),
         }
-    }
-
-    pub(crate) const fn started_at(self) -> SystemTime {
-        self.started_at
     }
 
     pub(crate) fn elapsed(self) -> Duration {
@@ -189,9 +227,10 @@ pub(crate) fn outcome_for_error(error: &XllError, duration: Duration) -> CallOut
     }
 }
 
-pub(crate) fn trace(metadata: &CallMetadata, outcome: &CallOutcome<'_>) {
+pub(crate) fn trace(metadata: &UdfTraceMetadata, outcome: &CallOutcome<'_>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         tracing::event!(
+            target: UDF_TRACE_TARGET,
             tracing::Level::INFO,
             udf = metadata.udf_id,
             excel_name = metadata.excel_name,
