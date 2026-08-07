@@ -1522,7 +1522,7 @@ mod tests {
                 crate::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
-        let key = crate::subscription::SubscriptionKey::new(prepared.key());
+        let key = prepared.key().clone();
         prepared.commit();
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(1), &key)
@@ -1952,7 +1952,7 @@ mod tests {
                 crate::RtdTopic::single("ordered").unwrap(),
             )
             .unwrap();
-        let key = crate::subscription::SubscriptionKey::new(prepared.key());
+        let key = prepared.key().clone();
         prepared.commit();
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(1), &key)

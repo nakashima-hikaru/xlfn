@@ -58,12 +58,49 @@ pub(crate) struct ServerGeneration(pub(crate) u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct TopicId(pub(crate) i32);
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SourceId(pub(crate) u64);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SubscriptionIdentity {
+    pub(crate) source_id: SourceId,
+    pub(crate) topic: RtdTopic,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SubscriptionKey(pub(crate) Arc<str>);
 
 impl SubscriptionKey {
-    pub(crate) fn new(s: impl Into<Arc<str>>) -> Self {
-        Self(s.into())
+    fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
+        Self(
+            format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}").into(),
+        )
+    }
+
+    pub(crate) fn parse_transport(value: &str) -> XllResult<Self> {
+        const PREFIX: &str = "stream:v1:";
+
+        let Some(rest) = value.strip_prefix(PREFIX) else {
+            return Err(XllError::InvalidHandle);
+        };
+
+        let Some((runtime, subscription)) = rest.split_once(':') else {
+            return Err(XllError::InvalidHandle);
+        };
+
+        if runtime.len() != 16
+            || subscription.len() != 16
+            || !runtime.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+            || !subscription.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(XllError::InvalidHandle);
+        }
+
+        Ok(Self(value.into()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -74,15 +111,21 @@ impl std::ops::Deref for SubscriptionKey {
     }
 }
 
-impl From<&str> for SubscriptionKey {
-    fn from(s: &str) -> Self {
-        Self::new(s)
+impl PartialEq<str> for SubscriptionKey {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
     }
 }
 
-impl From<String> for SubscriptionKey {
-    fn from(s: String) -> Self {
-        Self::new(s)
+impl PartialEq<&str> for SubscriptionKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<SubscriptionKey> for str {
+    fn eq(&self, other: &SubscriptionKey) -> bool {
+        self == other.as_str()
     }
 }
 
@@ -114,16 +157,6 @@ impl RtdTopic {
                 return Err(XllError::input(
                     "RTD topic",
                     crate::InputError::Malformed("RTD topics require non-empty parts"),
-                ));
-            }
-            let utf16_len = part.encode_utf16().count();
-            if utf16_len > 32_767 {
-                return Err(XllError::input(
-                    "RTD topic",
-                    crate::InputError::TooLarge {
-                        limit: 32_767,
-                        actual: utf16_len,
-                    },
                 ));
             }
             total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
@@ -686,11 +719,114 @@ impl SourceIdentityRegistry {
     }
 }
 
+static NEXT_RTD_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_runtime_id() -> XllResult<u64> {
+    NEXT_RTD_RUNTIME_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| XllError::Internal {
+            diagnostic_id: 0x5254_4452_5449_444f,
+        })
+}
+
+#[derive(Default)]
+struct SubscriptionIdentityIndex {
+    key_by_identity: HashMap<SubscriptionIdentity, SubscriptionKey>,
+    identity_by_key: HashMap<SubscriptionKey, SubscriptionIdentity>,
+}
+
+impl SubscriptionIdentityIndex {
+    fn get_key(&self, identity: &SubscriptionIdentity) -> Option<&SubscriptionKey> {
+        self.key_by_identity.get(identity)
+    }
+
+    fn get_identity(&self, key: &SubscriptionKey) -> Option<&SubscriptionIdentity> {
+        self.identity_by_key.get(key)
+    }
+
+    fn insert(
+        &mut self,
+        identity: SubscriptionIdentity,
+        key: SubscriptionKey,
+    ) -> XllResult<()> {
+        if self.key_by_identity.contains_key(&identity)
+            || self.identity_by_key.contains_key(&key)
+        {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5254_4449_4458_4455,
+            });
+        }
+
+        self.key_by_identity.insert(identity.clone(), key.clone());
+        self.identity_by_key.insert(key, identity);
+
+        Ok(())
+    }
+
+    fn remove_by_key(&mut self, key: &SubscriptionKey) -> Option<SubscriptionIdentity> {
+        let identity = self.identity_by_key.remove(key)?;
+        let removed_key = self.key_by_identity.remove(&identity);
+        debug_assert_eq!(removed_key.as_ref(), Some(key));
+        Some(identity)
+    }
+
+    fn clear(&mut self) {
+        self.key_by_identity.clear();
+        self.identity_by_key.clear();
+    }
+}
+
 struct SubscriptionCatalog {
     pending: HashMap<SubscriptionKey, PendingSubscription>,
     pending_topic_bytes: usize,
     sources: SourceIdentityRegistry,
     active_keys: HashMap<SubscriptionKey, ActiveKeyBinding>,
+    identities: SubscriptionIdentityIndex,
+    next_subscription_id: u64,
+}
+
+impl SubscriptionCatalog {
+    fn allocate_transport_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
+        let id = self.next_subscription_id;
+        self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5254_4453_5542_4f56,
+        })?;
+        Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
+    }
+
+    #[cfg(test)]
+    fn assert_identity_invariants(&self) {
+        assert_eq!(
+            self.identities.key_by_identity.len(),
+            self.identities.identity_by_key.len(),
+        );
+
+        for (identity, key) in &self.identities.key_by_identity {
+            assert_eq!(
+                self.identities.identity_by_key.get(key),
+                Some(identity),
+            );
+
+            assert!(
+                self.pending.contains_key(key)
+                    || self.active_keys.contains_key(key),
+            );
+        }
+    }
+}
+
+fn remove_identity_if_unbound(
+    catalog: &mut SubscriptionCatalog,
+    key: &SubscriptionKey,
+) {
+    let has_pending = catalog.pending.contains_key(key);
+    let has_active = catalog.active_keys.contains_key(key);
+
+    if !has_pending && !has_active {
+        let _ = catalog.identities.remove_by_key(key);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1803,22 +1939,25 @@ fn cleanup_catalog_binding_and_pending(
         pending.committed = false;
     }
 
-    if let Some(pending) = catalog.pending.get(key).filter(|p| {
+    let res = if catalog.pending.get(key).is_some_and(|p| {
         p.connecting_generation.is_none()
             && p.server_generation.is_none()
             && p.live_reservations == 0
     }) {
-        let _ = pending;
         let removed = catalog.pending.remove(key);
         if let Some(removed) = removed {
-            catalog.pending_topic_bytes = catalog
-                .pending_topic_bytes
-                .saturating_sub(removed.topic.byte_len());
-            return Some(removed.source);
+            let bytes = removed.topic.byte_len();
+            catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+            Some(removed.source)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    None
+    remove_identity_if_unbound(catalog, key);
+    res
 }
 
 enum ServerReservationFailure {
@@ -1845,6 +1984,7 @@ impl ServerReservationFailure {
 type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub(crate) struct SubscriptionRuntime {
+    runtime_id: u64,
     limits: RtdLimits,
     module_ingress: Option<&'static crate::ingress::ExportIngress>,
     runtime_gate: Arc<OperationGate>,
@@ -1881,7 +2021,9 @@ impl SubscriptionRuntime {
         limits: RtdLimits,
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> Self {
+        let runtime_id = allocate_runtime_id().expect("runtime ID allocation overflow");
         Self {
+            runtime_id,
             limits,
             module_ingress,
             runtime_gate: OperationGate::new(),
@@ -1890,6 +2032,8 @@ impl SubscriptionRuntime {
                 pending_topic_bytes: 0,
                 sources: SourceIdentityRegistry::new(),
                 active_keys: HashMap::new(),
+                identities: SubscriptionIdentityIndex::default(),
+                next_subscription_id: 1,
             }),
             servers: Mutex::new(HashMap::new()),
             active_quota: Arc::new(Quota::new(limits.max_active)),
@@ -1995,39 +2139,44 @@ impl SubscriptionRuntime {
         let source_identity = catalog
             .sources
             .resolve(&source, self.limits.max_source_ids)?;
+        let source_id = source_identity.id;
 
-        let mut parts_str = String::new();
-        for part in topic.parts() {
-            parts_str.push_str(part);
-            parts_str.push('\0');
-        }
-        let key = SubscriptionKey::new(format!("{:016x}:{parts_str}", source_identity.id));
+        let identity = SubscriptionIdentity {
+            source_id: SourceId(source_id),
+            topic: topic.clone(),
+        };
 
-        if catalog.active_keys.contains_key(&key) {
-            debug_assert!(!source_identity.newly_registered);
-            return Ok(PreparedSubscription {
-                runtime: Arc::downgrade(self),
-                key,
-                reservation_id: None,
-                ownership: PreparationOwnership::ExistingActive,
-            });
-        }
+        if let Some(existing_key) = catalog.identities.get_key(&identity).cloned() {
+            if catalog.active_keys.contains_key(&existing_key) {
+                return Ok(PreparedSubscription {
+                    runtime: Arc::downgrade(self),
+                    key: existing_key,
+                    reservation_id: None,
+                    ownership: PreparationOwnership::ExistingActive,
+                });
+            }
 
-        if let Some(pending) = catalog.pending.get_mut(&key) {
-            debug_assert!(!source_identity.newly_registered);
-            let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
-            pending.live_reservations =
-                pending
+            if let Some(pending) = catalog.pending.get_mut(&existing_key) {
+                let reservation_id =
+                    self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
+
+                pending.live_reservations = pending
                     .live_reservations
                     .checked_add(1)
                     .ok_or(XllError::Internal {
                         diagnostic_id: 0x5245_5356_4f56_464c,
                     })?;
-            return Ok(PreparedSubscription {
-                runtime: Arc::downgrade(self),
-                key,
-                reservation_id: Some(reservation_id),
-                ownership: PreparationOwnership::ExistingPending,
+
+                return Ok(PreparedSubscription {
+                    runtime: Arc::downgrade(self),
+                    key: existing_key,
+                    reservation_id: Some(reservation_id),
+                    ownership: PreparationOwnership::ExistingPending,
+                });
+            }
+
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5254_4449_4458_4f52,
             });
         }
 
@@ -2046,6 +2195,10 @@ impl SubscriptionRuntime {
                 return Err(XllError::Overloaded);
             }
         };
+
+        let key = catalog.allocate_transport_key(self.runtime_id)?;
+
+        catalog.identities.insert(identity, key.clone())?;
 
         let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;
@@ -2090,6 +2243,7 @@ impl SubscriptionRuntime {
                 if let Some(removed) = removed {
                     let bytes = removed.topic.byte_len();
                     catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    remove_identity_if_unbound(&mut catalog, key);
                     (Some(removed.source), bytes)
                 } else {
                     (None, 0)
@@ -2151,6 +2305,8 @@ impl SubscriptionRuntime {
         {
             catalog.active_keys.remove(key);
         }
+
+        remove_identity_if_unbound(&mut catalog, key);
     }
 
     pub(crate) fn connect_transaction(
@@ -2373,6 +2529,7 @@ impl SubscriptionRuntime {
                 if let Some(removed) = removed {
                     let bytes = removed.topic.byte_len();
                     catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    remove_identity_if_unbound(&mut catalog, key);
                     Some(removed.source)
                 } else {
                     None
@@ -2472,6 +2629,7 @@ impl SubscriptionRuntime {
                 if let Some(removed) = removed {
                     let bytes = removed.topic.byte_len();
                     catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
+                    remove_identity_if_unbound(&mut catalog, key);
                     Some(removed.source)
                 } else {
                     None
@@ -2624,6 +2782,7 @@ impl SubscriptionRuntime {
             }
             catalog.active_keys.clear();
             catalog.sources.clear();
+            catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
             catalog
                 .pending
@@ -2667,7 +2826,7 @@ pub(crate) struct PreparedSubscription {
 }
 
 impl PreparedSubscription {
-    pub(crate) fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &SubscriptionKey {
         &self.key
     }
 
@@ -2859,8 +3018,8 @@ pub(crate) mod tests {
             .prepare(source_b, RtdTopic::single("b").unwrap())
             .unwrap();
 
-        let key_a = SubscriptionKey::new(prep_a.key());
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_a = prep_a.key().clone();
+        let key_b = prep_b.key().clone();
         prep_a.commit();
         prep_b.commit();
 
@@ -2926,8 +3085,8 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b").unwrap())
             .unwrap();
-        let key_a = SubscriptionKey::new(prep_a.key());
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_a = prep_a.key().clone();
+        let key_b = prep_b.key().clone();
         prep_a.commit();
         prep_b.commit();
 
@@ -2969,7 +3128,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b-0").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
         let conn_b = runtime
             .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -3008,7 +3167,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b-0").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
         let conn_b = runtime
             .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -3032,7 +3191,7 @@ pub(crate) mod tests {
         let prep_a = runtime
             .prepare(source_a, RtdTopic::single("a-0").unwrap())
             .unwrap();
-        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_a = prep_a.key().clone();
         prep_a.commit();
         let conn_a = runtime
             .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -3078,7 +3237,7 @@ pub(crate) mod tests {
                 RtdTopic::single("shared-topic").unwrap(),
             )
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn_a = runtime
@@ -3095,7 +3254,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source, RtdTopic::single("shared-topic").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
 
         runtime
@@ -3134,7 +3293,7 @@ pub(crate) mod tests {
         let prep_a = runtime
             .prepare(source_a, RtdTopic::single("a-0").unwrap())
             .unwrap();
-        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_a = prep_a.key().clone();
         prep_a.commit();
         let conn_a = runtime
             .connect_transaction(&server, TopicId(1), &key_a)
@@ -3145,7 +3304,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b-0").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
         let _conn_b = runtime
             .connect_transaction(&server, TopicId(2), &key_b)
@@ -3171,7 +3330,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
         let conn_b = runtime
             .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -3202,7 +3361,7 @@ pub(crate) mod tests {
         let prep_a = runtime
             .prepare(source_a, RtdTopic::single("a").unwrap())
             .unwrap();
-        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_a = prep_a.key().clone();
         prep_a.commit();
         let conn_a = runtime
             .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -3219,7 +3378,7 @@ pub(crate) mod tests {
         let prep_b = runtime
             .prepare(source_b, RtdTopic::single("b").unwrap())
             .unwrap();
-        let key_b = SubscriptionKey::new(prep_b.key());
+        let key_b = prep_b.key().clone();
         prep_b.commit();
         let conn_b = runtime
             .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -3246,7 +3405,7 @@ pub(crate) mod tests {
             let prep = runtime
                 .prepare(source, RtdTopic::single(format!("a-{}", i)).unwrap())
                 .unwrap();
-            let key = SubscriptionKey::new(prep.key());
+            let key = prep.key().clone();
             prep.commit();
             let conn = runtime
                 .connect_transaction(&server_a, TopicId(i), &key)
@@ -3261,7 +3420,7 @@ pub(crate) mod tests {
             let prep = runtime
                 .prepare(source, RtdTopic::single(format!("b-{}", i)).unwrap())
                 .unwrap();
-            let key = SubscriptionKey::new(prep.key());
+            let key = prep.key().clone();
             prep.commit();
             let conn = runtime
                 .connect_transaction(&server_b, TopicId(i), &key)
@@ -3295,7 +3454,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("shared").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn_a = runtime
@@ -3335,7 +3494,7 @@ pub(crate) mod tests {
         let prep_a = runtime
             .prepare(source_a, RtdTopic::single("a").unwrap())
             .unwrap();
-        let key_a = SubscriptionKey::new(prep_a.key());
+        let key_a = prep_a.key().clone();
         prep_a.commit();
         let conn_a = runtime
             .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -3516,7 +3675,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("reentrant").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn = runtime
@@ -3536,7 +3695,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("test").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
 
         {
             let mut state = server.inner.state.lock();
@@ -3579,7 +3738,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("test_err").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn = runtime
@@ -3684,7 +3843,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("disc_err").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn = runtime
@@ -3716,7 +3875,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("roll_err").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let mut conn = runtime
@@ -3759,7 +3918,7 @@ pub(crate) mod tests {
         let prep = runtime
             .prepare(source, RtdTopic::single("cancel_panic").unwrap())
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let conn = runtime
@@ -3813,7 +3972,7 @@ pub(crate) mod tests {
                 RtdTopic::single("delayed_fail").unwrap(),
             )
             .unwrap();
-        let key = SubscriptionKey::new(prep.key());
+        let key = prep.key().clone();
         prep.commit();
 
         let runtime_clone = Arc::clone(&runtime);
@@ -3894,7 +4053,7 @@ pub(crate) mod tests {
         let topic = RtdTopic::single("shared-active").unwrap();
 
         let first = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
-        let key = SubscriptionKey::new(first.key());
+        let key = first.key().clone();
         first.commit();
 
         let connection = runtime
@@ -3904,7 +4063,7 @@ pub(crate) mod tests {
 
         let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
 
-        assert_eq!(second.key(), &*key);
+        assert_eq!(second.key(), &key);
         assert_eq!(second.ownership, PreparationOwnership::ExistingActive);
 
         // ExistingActiveに対するrollbackは既存subscriptionを壊さない。
@@ -3970,7 +4129,7 @@ pub(crate) mod tests {
 
         let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
 
-        assert_eq!(second.key(), first_key);
+        assert_ne!(second.key(), &first_key);
     }
 
     #[test]
@@ -4000,7 +4159,7 @@ pub(crate) mod tests {
             .prepare(second_source, RtdTopic::single("same-topic").unwrap())
             .unwrap();
 
-        assert_ne!(second.key(), first_key);
+        assert_ne!(second.key(), &first_key);
     }
 
     #[test]
@@ -4046,5 +4205,128 @@ pub(crate) mod tests {
 
         assert_eq!(resolved.id, 101);
         assert!(resolved.newly_registered);
+    }
+
+    #[test]
+    fn topic_part_boundaries_are_part_of_subscription_identity() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _, _) = publishing_source::<f64>(None);
+
+        let topic_a = RtdTopic::new(["a\0b", "c"]).unwrap();
+        let topic_b = RtdTopic::new(["a", "b\0c"]).unwrap();
+
+        let prepared_a = runtime
+            .prepare(Arc::clone(&source), topic_a)
+            .unwrap();
+
+        let prepared_b = runtime
+            .prepare(Arc::clone(&source), topic_b)
+            .unwrap();
+
+        assert_ne!(prepared_a.key(), prepared_b.key());
+        runtime.catalog.lock().assert_identity_invariants();
+    }
+
+    #[test]
+    fn structurally_equal_topics_share_transport_key() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _, _) = publishing_source::<f64>(None);
+
+        let prepared_a = runtime
+            .prepare(
+                Arc::clone(&source),
+                RtdTopic::new(["market", "USD\0JPY"]).unwrap(),
+            )
+            .unwrap();
+
+        let prepared_b = runtime
+            .prepare(
+                Arc::clone(&source),
+                RtdTopic::new(["market", "USD\0JPY"]).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(prepared_a.key(), prepared_b.key());
+        runtime.catalog.lock().assert_identity_invariants();
+    }
+
+    #[test]
+    fn logical_topic_is_not_limited_by_excel_string_length() {
+        let part = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1);
+        let topic = RtdTopic::single(part).unwrap();
+
+        assert_eq!(
+            topic.parts()[0].len(),
+            crate::utf16::EXCEL_STRING_LIMIT + 1,
+        );
+    }
+
+    #[test]
+    fn large_logical_topic_uses_bounded_transport_key() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _, _) = publishing_source::<f64>(None);
+
+        let topic = RtdTopic::single("x".repeat(16 * 1024)).unwrap();
+        let prepared = runtime.prepare(source, topic).unwrap();
+
+        assert_eq!(prepared.key().encode_utf16().count(), 43);
+        assert!(prepared.key().starts_with("stream:v1:"));
+        runtime.catalog.lock().assert_identity_invariants();
+    }
+
+    #[test]
+    fn distinct_identities_receive_distinct_transport_keys() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+
+        let (source_a, _, _) = publishing_source::<f64>(None);
+        let (source_b, _, _) = publishing_source::<f64>(None);
+
+        let topic = RtdTopic::single("same").unwrap();
+
+        let a = runtime.prepare(source_a, topic.clone()).unwrap();
+        let b = runtime.prepare(source_b, topic).unwrap();
+
+        assert_ne!(a.key(), b.key());
+        runtime.catalog.lock().assert_identity_invariants();
+    }
+
+    #[test]
+    fn identity_index_is_removed_after_final_unbind() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let server = runtime.register_server(ServerGeneration(1)).unwrap();
+        let (source, _, _) = publishing_source(Some(1.0_f64));
+
+        let prepared = runtime
+            .prepare(source, RtdTopic::single("unbind_test").unwrap())
+            .unwrap();
+        let key = prepared.key().clone();
+        prepared.commit();
+
+        let conn = runtime
+            .connect_transaction(&server, TopicId(1), &key)
+            .unwrap();
+        conn.commit().unwrap();
+
+        runtime.disconnect(&server, TopicId(1)).unwrap();
+
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.pending.is_empty());
+        assert!(catalog.active_keys.is_empty());
+        assert!(catalog.identities.key_by_identity.is_empty());
+        assert!(catalog.identities.identity_by_key.is_empty());
+        catalog.assert_identity_invariants();
+    }
+
+    #[test]
+    fn transport_key_parser_rejects_noncanonical_keys() {
+        for invalid in [
+            "stream:",
+            "stream:v2:0000000000000001:0000000000000001",
+            "stream:v1:1:2",
+            "stream:v1:000000000000000g:0000000000000001",
+            "stream:v1:0000000000000001:0000000000000001:extra",
+        ] {
+            assert!(SubscriptionKey::parse_transport(invalid).is_err());
+        }
     }
 }

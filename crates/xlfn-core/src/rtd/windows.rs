@@ -1670,7 +1670,7 @@ pub(super) fn observe(
 
 pub(super) fn observe_subscription(
     subscriptions: Arc<SubscriptionRuntime>,
-    key: &str,
+    key: &crate::subscription::SubscriptionKey,
     callbacks: &HostCallbackSession,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
@@ -1709,7 +1709,7 @@ pub(super) fn observe_subscription(
         }
     };
 
-    let mut topic = match CountedString::new(key) {
+    let mut topic = match CountedString::new(key.as_str()) {
         Ok(value) => value,
         Err(error) => {
             discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -1718,8 +1718,7 @@ pub(super) fn observe_subscription(
     };
 
     if let Some(subscription_server) = &ensured.subscription_server {
-        let key_obj = crate::subscription::SubscriptionKey::new(key);
-        if let Err(error) = subscription_server.claim(&key_obj) {
+        if let Err(error) = subscription_server.claim(key) {
             discard_unpublished_server(active.pointer, ensured.newly_created);
             return Err(error);
         }
@@ -3300,14 +3299,14 @@ unsafe fn connect_data_inner(
                 return E_FAIL;
             }
         }
-    } else if key.starts_with("stream:") {
+    } else if let Ok(sub_key) = crate::subscription::SubscriptionKey::parse_transport(&key) {
         let Some(subscription_server) = subscription_server.as_ref() else {
             return E_FAIL;
         };
 
         match subscription_server.connect_transaction(
             crate::subscription::TopicId(topic_id),
-            &crate::subscription::SubscriptionKey::new(&*key),
+            &sub_key,
         ) {
             Ok(connection) => ConnectDataTransaction::Subscription(connection),
             Err(error) => {
@@ -6927,8 +6926,7 @@ mod tests {
                 RtdTopic::single("dispatch-refresh").unwrap(),
             )
             .unwrap();
-        let key = prepared.key().to_owned();
-        let key_obj = crate::subscription::SubscriptionKey::new(key);
+        let key_obj = prepared.key().clone();
         let conn = subscriptions
             .connect_transaction(&handle, crate::subscription::TopicId(77), &key_obj)
             .unwrap();
@@ -7190,8 +7188,7 @@ mod tests {
         let prepared = subscriptions
             .prepare(source, RtdTopic::single("ensure-test").unwrap())
             .unwrap();
-        let key = prepared.key().to_owned();
-        let key_obj = crate::subscription::SubscriptionKey::new(key);
+        let key_obj = prepared.key().clone();
         prepared.commit();
         let conn = subscriptions
             .connect_transaction(handle, crate::subscription::TopicId(1), &key_obj)

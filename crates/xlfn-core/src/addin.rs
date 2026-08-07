@@ -518,7 +518,7 @@ mod tests {
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(51))
             .unwrap();
-        let key_obj = crate::subscription::SubscriptionKey::new(prepared.key());
+        let key_obj = prepared.key().clone();
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(7), &key_obj)
             .unwrap();
@@ -528,7 +528,7 @@ mod tests {
         let repeated = subscriptions
             .prepare(Arc::clone(&source), topic.clone())
             .unwrap();
-        assert_eq!(repeated.key(), &*key_obj);
+        assert_eq!(repeated.key(), &key_obj);
         assert_eq!(
             repeated.ownership,
             crate::subscription::PreparationOwnership::ExistingActive
