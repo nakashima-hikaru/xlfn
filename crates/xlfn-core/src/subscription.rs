@@ -564,18 +564,132 @@ struct PendingSubscription {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct SourceAllocationIdentity(usize);
+struct SourceAddress(usize);
 
-impl SourceAllocationIdentity {
+impl SourceAddress {
     fn of<S: ?Sized>(source: &Arc<S>) -> Self {
-        Self(Arc::as_ptr(source) as *const () as usize)
+        let ptr = Arc::as_ptr(source).cast::<()>();
+        Self(ptr as usize)
+    }
+}
+
+trait SourceIdentityAnchor: Send + Sync + 'static {}
+
+impl<T> SourceIdentityAnchor for T where T: Send + Sync + 'static {}
+
+struct SourceIdentityEntry {
+    id: u64,
+    anchor: Weak<dyn SourceIdentityAnchor>,
+}
+
+fn weak_source_anchor<S>(source: &Arc<S>) -> Weak<dyn SourceIdentityAnchor>
+where
+    S: RtdSource,
+{
+    let erased: Arc<dyn SourceIdentityAnchor> = Arc::clone(source) as _;
+    Arc::downgrade(&erased)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedSourceIdentity {
+    address: SourceAddress,
+    id: u64,
+    newly_registered: bool,
+}
+
+struct SourceIdentityRegistry {
+    by_address: HashMap<SourceAddress, SourceIdentityEntry>,
+    next_id: u64,
+}
+
+impl SourceIdentityRegistry {
+    fn new() -> Self {
+        Self {
+            by_address: HashMap::new(),
+            next_id: 1,
+        }
+    }
+
+    fn allocate_id(&mut self) -> XllResult<u64> {
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5254_4453_4944_4f56,
+        })?;
+        Ok(id)
+    }
+
+    fn resolve<S>(
+        &mut self,
+        source: &Arc<S>,
+        limit: usize,
+    ) -> XllResult<ResolvedSourceIdentity>
+    where
+        S: RtdSource,
+    {
+        let address = SourceAddress::of(source);
+
+        if let Some(entry) = self.by_address.get(&address)
+            && entry.anchor.upgrade().is_some()
+        {
+            return Ok(ResolvedSourceIdentity {
+                address,
+                id: entry.id,
+                newly_registered: false,
+            });
+        }
+
+        self.by_address.remove(&address);
+
+        if self.by_address.len() >= limit {
+            self.reclaim_dead();
+        }
+
+        if self.by_address.len() >= limit {
+            return Err(XllError::Overloaded);
+        }
+
+        let id = self.allocate_id()?;
+        let anchor = weak_source_anchor(source);
+
+        self.by_address
+            .insert(address, SourceIdentityEntry { id, anchor });
+
+        Ok(ResolvedSourceIdentity {
+            address,
+            id,
+            newly_registered: true,
+        })
+    }
+
+    fn rollback_registration(&mut self, identity: ResolvedSourceIdentity) {
+        if !identity.newly_registered {
+            return;
+        }
+
+        let should_remove = self
+            .by_address
+            .get(&identity.address)
+            .is_some_and(|entry| entry.id == identity.id);
+
+        if should_remove {
+            self.by_address.remove(&identity.address);
+        }
+    }
+
+    fn reclaim_dead(&mut self) {
+        self.by_address
+            .retain(|_, entry| entry.anchor.upgrade().is_some());
+    }
+
+    fn clear(&mut self) {
+        self.by_address.clear();
     }
 }
 
 struct SubscriptionCatalog {
     pending: HashMap<SubscriptionKey, PendingSubscription>,
     pending_topic_bytes: usize,
-    source_ids: HashMap<SourceAllocationIdentity, u64>,
+    sources: SourceIdentityRegistry,
     active_keys: HashMap<SubscriptionKey, ActiveKeyBinding>,
 }
 
@@ -1774,7 +1888,7 @@ impl SubscriptionRuntime {
             catalog: Mutex::new(SubscriptionCatalog {
                 pending: HashMap::new(),
                 pending_topic_bytes: 0,
-                source_ids: HashMap::new(),
+                sources: SourceIdentityRegistry::new(),
                 active_keys: HashMap::new(),
             }),
             servers: Mutex::new(HashMap::new()),
@@ -1876,28 +1990,21 @@ impl SubscriptionRuntime {
         }
         topic.validate_with_limits(&self.limits)?;
 
-        let source_identity = SourceAllocationIdentity::of(&source);
-
         let mut catalog = self.catalog.lock();
-        let source_id = if let Some(&id) = catalog.source_ids.get(&source_identity) {
-            id
-        } else {
-            if catalog.source_ids.len() >= self.limits.max_source_ids {
-                return Err(XllError::Overloaded);
-            }
-            let id = catalog.source_ids.len() as u64 + 1;
-            catalog.source_ids.insert(source_identity, id);
-            id
-        };
+
+        let source_identity = catalog
+            .sources
+            .resolve(&source, self.limits.max_source_ids)?;
 
         let mut parts_str = String::new();
         for part in topic.parts() {
             parts_str.push_str(part);
             parts_str.push('\0');
         }
-        let key = SubscriptionKey::new(format!("{source_id:016x}:{parts_str}"));
+        let key = SubscriptionKey::new(format!("{:016x}:{parts_str}", source_identity.id));
 
         if catalog.active_keys.contains_key(&key) {
+            debug_assert!(!source_identity.newly_registered);
             return Ok(PreparedSubscription {
                 runtime: Arc::downgrade(self),
                 key,
@@ -1907,6 +2014,7 @@ impl SubscriptionRuntime {
         }
 
         if let Some(pending) = catalog.pending.get_mut(&key) {
+            debug_assert!(!source_identity.newly_registered);
             let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
             pending.live_reservations =
                 pending
@@ -1924,16 +2032,20 @@ impl SubscriptionRuntime {
         }
 
         if catalog.pending.len() >= self.limits.max_pending {
+            catalog.sources.rollback_registration(source_identity);
             return Err(XllError::Overloaded);
         }
 
-        let new_total = catalog
+        let new_total = match catalog
             .pending_topic_bytes
             .checked_add(topic.byte_len())
-            .ok_or(XllError::Overloaded)?;
-        if new_total > self.limits.max_total_topic_bytes {
-            return Err(XllError::Overloaded);
-        }
+        {
+            Some(total) if total <= self.limits.max_total_topic_bytes => total,
+            _ => {
+                catalog.sources.rollback_registration(source_identity);
+                return Err(XllError::Overloaded);
+            }
+        };
 
         let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;
@@ -2511,7 +2623,7 @@ impl SubscriptionRuntime {
                 }
             }
             catalog.active_keys.clear();
-            catalog.source_ids.clear();
+            catalog.sources.clear();
             catalog.pending_topic_bytes = 0;
             catalog
                 .pending
@@ -2546,6 +2658,7 @@ pub(crate) enum PreparationOwnership {
     ExistingActive,
 }
 
+#[derive(Debug)]
 pub(crate) struct PreparedSubscription {
     runtime: Weak<SubscriptionRuntime>,
     key: SubscriptionKey,
@@ -3798,5 +3911,140 @@ pub(crate) mod tests {
         second.rollback();
 
         assert!(runtime.catalog.lock().active_keys.contains_key(&key));
+    }
+
+    #[test]
+    fn dead_source_identities_do_not_exhaust_quota() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_source_ids: 1,
+            ..RtdLimits::standard()
+        }));
+
+        for index in 0..100 {
+            let (source, _, _) = publishing_source::<f64>(None);
+            let topic = RtdTopic::single(format!("topic-{index}")).unwrap();
+
+            let prepared = runtime.prepare(Arc::clone(&source), topic).unwrap();
+
+            prepared.rollback();
+            drop(source);
+        }
+    }
+
+    #[test]
+    fn live_source_identity_retains_its_quota_slot() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_source_ids: 1,
+            ..RtdLimits::standard()
+        }));
+
+        let (first_source, _, _) = publishing_source::<f64>(None);
+
+        runtime
+            .prepare(
+                Arc::clone(&first_source),
+                RtdTopic::single("first").unwrap(),
+            )
+            .unwrap()
+            .rollback();
+
+        let (second_source, _, _) = publishing_source::<f64>(None);
+
+        let error = runtime
+            .prepare(second_source, RtdTopic::single("second").unwrap())
+            .unwrap_err();
+
+        assert!(matches!(error, XllError::Overloaded));
+    }
+
+    #[test]
+    fn live_source_reuses_identity_after_pending_subscription_is_removed() {
+        let runtime = Arc::new(SubscriptionRuntime::new());
+        let (source, _, _) = publishing_source::<f64>(None);
+        let topic = RtdTopic::single("stable").unwrap();
+
+        let first = runtime.prepare(Arc::clone(&source), topic.clone()).unwrap();
+
+        let first_key = first.key().to_owned();
+        first.rollback();
+
+        let second = runtime.prepare(Arc::clone(&source), topic).unwrap();
+
+        assert_eq!(second.key(), first_key);
+    }
+
+    #[test]
+    fn source_ids_are_monotonic_and_never_reused() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_source_ids: 1,
+            ..RtdLimits::standard()
+        }));
+
+        let first_key = {
+            let (source, _, _) = publishing_source::<f64>(None);
+            let prepared = runtime
+                .prepare(
+                    Arc::clone(&source),
+                    RtdTopic::single("same-topic").unwrap(),
+                )
+                .unwrap();
+
+            let key = prepared.key().to_owned();
+            prepared.rollback();
+            drop(source);
+            key
+        };
+
+        let (second_source, _, _) = publishing_source::<f64>(None);
+        let second = runtime
+            .prepare(second_source, RtdTopic::single("same-topic").unwrap())
+            .unwrap();
+
+        assert_ne!(second.key(), first_key);
+    }
+
+    #[test]
+    fn failed_pending_admission_rolls_back_new_source_identity() {
+        let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+            max_pending: 0,
+            max_source_ids: 1,
+            ..RtdLimits::standard()
+        }));
+
+        let (source, _, _) = publishing_source::<f64>(None);
+
+        assert!(matches!(
+            runtime.prepare(Arc::clone(&source), RtdTopic::single("blocked").unwrap()),
+            Err(XllError::Overloaded)
+        ));
+
+        assert!(runtime.catalog.lock().sources.by_address.is_empty());
+    }
+
+    #[test]
+    fn dead_entry_at_same_address_is_replaced_with_fresh_id() {
+        let mut registry = SourceIdentityRegistry::new();
+        let (source, _, _) = publishing_source::<f64>(None);
+        let address = SourceAddress::of(&source);
+
+        let dead_anchor = {
+            let old = Arc::new(());
+            let erased: Arc<dyn SourceIdentityAnchor> = old;
+            Arc::downgrade(&erased)
+        };
+
+        registry.by_address.insert(
+            address,
+            SourceIdentityEntry {
+                id: 100,
+                anchor: dead_anchor,
+            },
+        );
+        registry.next_id = 101;
+
+        let resolved = registry.resolve(&source, 1).unwrap();
+
+        assert_eq!(resolved.id, 101);
+        assert!(resolved.newly_registered);
     }
 }
