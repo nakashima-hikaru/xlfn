@@ -1717,12 +1717,11 @@ pub(super) fn observe_subscription(
         }
     };
 
-    if let Some(subscription_server) = &ensured.subscription_server {
-        if let Err(error) = subscription_server.claim(key) {
+    if let Some(subscription_server) = &ensured.subscription_server
+        && let Err(error) = subscription_server.claim(key) {
             discard_unpublished_server(active.pointer, ensured.newly_created);
             return Err(error);
         }
-    }
 
     let mut server_name = XLOPER12::missing();
     let arguments = [

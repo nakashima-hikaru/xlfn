@@ -71,7 +71,7 @@ pub(crate) fn observe(
 
 pub(crate) fn observe_subscription(
     subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
-    key: &str,
+    key: &crate::subscription::SubscriptionKey,
     callbacks: &HostCallbackSession,
 ) -> XllResult<crate::RtdValue> {
     #[cfg(target_os = "windows")]
