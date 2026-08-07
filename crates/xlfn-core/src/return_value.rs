@@ -780,7 +780,9 @@ where
         Ok(Ok(pointer)) => pointer,
         Ok(Err(error)) => allocate_excel_error(&error, &mut producer),
         Err(_) => {
-            debug_assert!(producer.is_armed());
+            if !producer.is_armed() {
+                std::process::abort();
+            }
             allocate_excel_error(&XllError::Panic, &mut producer)
         }
     };
@@ -1336,12 +1338,16 @@ mod tests {
 
         let pointer = ffi_boundary(&runtime, || Ok(7.0));
         assert!(!pointer.is_null());
-        // SAFETY: admission rejection returns a standalone Box<XLOPER12>, not a
-        // ReturnBlock, specifically so Excel will never call xlAutoFree12.
+        // SAFETY: Admission rejection returns the permanently owned detached closing
+        // error singleton, which deliberately does not carry XLBIT_DLL_FREE.
         unsafe {
             assert_eq!((*pointer).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
-            drop(Box::from_raw(pointer));
         }
+        assert!(is_detached_error_pointer(pointer));
+
+        let second = ffi_boundary(&runtime, || Ok(8.0));
+        assert_eq!(pointer, second);
+        assert!(is_detached_error_pointer(second));
     }
 
     #[test]
