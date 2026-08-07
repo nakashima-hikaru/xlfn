@@ -554,7 +554,7 @@ impl<S> Runtime<S> {
         }
     }
 
-    fn return_tracker(&self) -> &Arc<crate::return_value::ReturnTracker> {
+    pub(crate) fn return_tracker(&self) -> &Arc<crate::return_value::ReturnTracker> {
         self.returns.get_or_init(|| {
             let tracker = Arc::new(crate::return_value::ReturnTracker::new_closed());
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -565,9 +565,7 @@ impl<S> Runtime<S> {
         })
     }
 
-    pub(crate) fn enter_return_producer(
-        &self,
-    ) -> Option<crate::return_value::ReturnProducerGuard<'_>> {
+    pub(crate) fn enter_return_producer(&self) -> Option<crate::return_value::ReturnProducerGuard> {
         self.returns
             .get()
             .and_then(|tracker| tracker.try_enter_producer())
@@ -579,7 +577,7 @@ impl<S> Runtime<S> {
         }
     }
 
-    fn returns_are_quiescent(&self) -> bool {
+    pub(crate) fn returns_are_quiescent(&self) -> bool {
         self.returns
             .get()
             .is_none_or(|tracker| tracker.is_quiescent())

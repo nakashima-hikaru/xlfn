@@ -6,7 +6,7 @@ use crate::{
 use parking_lot::{Condvar, Mutex};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,16 +89,14 @@ impl CleanupDebtSet {
 }
 
 const RETURN_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
-const RETURN_PRODUCER_MASK: usize = RETURN_ADMISSION_CLOSED - 1;
+const RETURN_OBLIGATION_MASK: usize = RETURN_ADMISSION_CLOSED - 1;
 
 /// Runtime-local accounting for code paths that can retain or re-enter the
 /// XLL after a synchronous function has returned to Excel.
 pub(crate) struct ReturnTracker {
     // Most significant bit: admission closed
-    // Remaining bits: producer count
-    producer_state: AtomicUsize,
-    blocks: AtomicUsize,
-    free_operations: AtomicUsize,
+    // Remaining bits: outstanding return obligations
+    state: AtomicUsize,
     waiters: AtomicUsize,
     wait_lock: Mutex<()>,
     quiescent: Condvar,
@@ -106,12 +104,30 @@ pub(crate) struct ReturnTracker {
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
+pub(crate) struct ReturnObligation {
+    tracker: Arc<ReturnTracker>,
+}
+
+impl ReturnObligation {
+    #[allow(
+        dead_code,
+        reason = "Internal tracker accessor for testing or ghost events"
+    )]
+    fn tracker(&self) -> &ReturnTracker {
+        &self.tracker
+    }
+}
+
+impl Drop for ReturnObligation {
+    fn drop(&mut self) {
+        self.tracker.release_obligation();
+    }
+}
+
 impl ReturnTracker {
     pub(crate) fn new_closed() -> Self {
         Self {
-            producer_state: AtomicUsize::new(RETURN_ADMISSION_CLOSED),
-            blocks: AtomicUsize::new(0),
-            free_operations: AtomicUsize::new(0),
+            state: AtomicUsize::new(RETURN_ADMISSION_CLOSED),
             waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
@@ -133,15 +149,7 @@ impl ReturnTracker {
     }
 
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
-        if self.blocks.load(Ordering::Acquire) != 0
-            || self.free_operations.load(Ordering::Acquire) != 0
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: 0x5254_4e52_4554_4f50,
-            });
-        }
-
-        self.producer_state
+        self.state
             .compare_exchange(
                 RETURN_ADMISSION_CLOSED,
                 0,
@@ -155,114 +163,60 @@ impl ReturnTracker {
     }
 
     pub(crate) fn close_admission(&self) {
-        self.producer_state
+        self.state
             .fetch_or(RETURN_ADMISSION_CLOSED, Ordering::AcqRel);
     }
 
-    pub(crate) fn try_enter_producer(self: &Arc<Self>) -> Option<ReturnProducerGuard<'_>> {
-        let mut observed = self.producer_state.load(Ordering::Acquire);
+    pub(crate) fn try_enter_producer(self: &Arc<Self>) -> Option<ReturnProducerGuard> {
+        let mut observed = self.state.load(Ordering::Acquire);
 
         loop {
             if observed & RETURN_ADMISSION_CLOSED != 0 {
                 return None;
             }
 
-            let producers = observed & RETURN_PRODUCER_MASK;
-            if producers == RETURN_PRODUCER_MASK {
+            let obligations = observed & RETURN_OBLIGATION_MASK;
+            if obligations == RETURN_OBLIGATION_MASK {
                 std::process::abort();
             }
 
-            let next = observed + 1;
-
-            match self.producer_state.compare_exchange_weak(
+            match self.state.compare_exchange_weak(
                 observed,
-                next,
+                observed + 1,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    return Some(ReturnProducerGuard { tracker: self });
+                    return Some(ReturnProducerGuard {
+                        obligation: Some(ReturnObligation {
+                            tracker: Arc::clone(self),
+                        }),
+                    });
                 }
                 Err(actual) => observed = actual,
             }
         }
     }
 
-    fn leave_producer(&self) {
-        let previous = self.producer_state.fetch_sub(1, Ordering::AcqRel);
-        let producers = previous & RETURN_PRODUCER_MASK;
+    fn release_obligation(&self) {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        let obligations = previous & RETURN_OBLIGATION_MASK;
 
-        if producers == 0 {
+        if obligations == 0 {
             std::process::abort();
         }
 
-        if producers == 1 {
-            self.notify_if_quiescent();
-        }
-    }
-
-    fn register_block(&self) {
-        let previous = self.blocks.fetch_add(1, Ordering::AcqRel);
-        if previous == usize::MAX {
-            std::process::abort();
-        }
-
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
-    }
-
-    fn release_block(&self) {
-        let previous = self.blocks.fetch_sub(1, Ordering::AcqRel);
-        if previous == 0 {
-            std::process::abort();
-        }
-
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
-
-        if previous == 1 {
-            self.notify_if_quiescent();
-        }
-    }
-
-    fn enter_free(self: &Arc<Self>) -> ReturnFreeGuard {
-        let previous = self.free_operations.fetch_add(1, Ordering::AcqRel);
-        if previous == usize::MAX {
-            std::process::abort();
-        }
-
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
-
-        ReturnFreeGuard {
-            tracker: Arc::clone(self),
-        }
-    }
-
-    fn leave_free(&self) {
-        let previous = self.free_operations.fetch_sub(1, Ordering::AcqRel);
-        if previous == 0 {
-            std::process::abort();
-        }
-
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
-
-        if previous == 1 {
+        if obligations == 1 {
             self.notify_if_quiescent();
         }
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
-        let producer_state = self.producer_state.load(Ordering::Acquire);
-
-        producer_state & RETURN_PRODUCER_MASK == 0
-            && self.blocks.load(Ordering::Acquire) == 0
-            && self.free_operations.load(Ordering::Acquire) == 0
+        self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK == 0
     }
 
     pub(crate) fn admission_closed(&self) -> bool {
-        self.producer_state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
+        self.state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
     }
 
     pub(crate) fn wait_for_quiescence(&self) {
@@ -294,26 +248,45 @@ impl ReturnTracker {
             self.quiescent.notify_all();
         }
     }
-}
 
-pub(crate) struct ReturnProducerGuard<'tracker> {
-    tracker: &'tracker Arc<ReturnTracker>,
-}
-
-impl ReturnProducerGuard<'_> {
-    fn tracker(&self) -> &Arc<ReturnTracker> {
-        self.tracker
+    #[cfg(test)]
+    fn outstanding_obligations(&self) -> usize {
+        self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK
     }
 }
 
-impl Drop for ReturnProducerGuard<'_> {
-    fn drop(&mut self) {
-        self.tracker.leave_producer();
+pub(crate) struct ReturnProducerGuard {
+    obligation: Option<ReturnObligation>,
+}
+
+impl ReturnProducerGuard {
+    fn transfer_to_block(&mut self) -> ReturnObligation {
+        let _obligation = self
+            .obligation
+            .as_ref()
+            .expect("return obligation is transferred exactly once");
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        _obligation
+            .tracker()
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
+
+        self.obligation
+            .take()
+            .expect("return obligation is transferred exactly once")
+    }
+
+    fn is_armed(&self) -> bool {
+        self.obligation.is_some()
     }
 }
 
 struct ReturnFreeGuard {
-    tracker: Arc<ReturnTracker>,
+    #[allow(
+        dead_code,
+        reason = "RAII obligation field held for lifecycle accounting"
+    )]
+    obligation: ReturnObligation,
 }
 
 /// Keeps one generated `xlAutoFree12` callback visible to terminal shutdown.
@@ -324,7 +297,10 @@ pub struct ReturnFreeBoundaryGuard {
 
 impl Drop for ReturnFreeGuard {
     fn drop(&mut self) {
-        self.tracker.leave_free();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.obligation
+            .tracker()
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
     }
 }
 
@@ -440,7 +416,7 @@ const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
 enum ReturnOwnership {
-    Excel(Arc<ReturnTracker>),
+    Excel(Option<ReturnObligation>),
     #[cfg(any(feature = "async", test))]
     Local,
 }
@@ -456,25 +432,20 @@ struct ReturnBlock {
     magic: u64,
 }
 
-impl ReturnBlock {
-    fn build_excel(value: OwnedExcelValue, tracker: Arc<ReturnTracker>) -> XllResult<Box<Self>> {
-        Self::build_with_ownership(value, ReturnOwnership::Excel(tracker))
-    }
+#[derive(Debug)]
+struct PreparedReturn {
+    oper: XLOPER12,
+    strings: Box<[Box<[u16]>]>,
+    array: Option<Box<[XLOPER12]>>,
+}
 
-    #[cfg(any(feature = "async", test))]
-    fn build_local(value: OwnedExcelValue) -> XllResult<Box<Self>> {
-        Self::build_with_ownership(value, ReturnOwnership::Local)
-    }
-
-    fn build_with_ownership(
-        value: OwnedExcelValue,
-        ownership: ReturnOwnership,
-    ) -> XllResult<Box<Self>> {
+impl PreparedReturn {
+    fn encode(value: OwnedExcelValue) -> XllResult<Self> {
         let (array_cells, string_count) = allocation_shape(&value);
         let mut allocation_bytes = base_allocation_payload_bytes(array_cells, string_count)?;
         enforce_return_limit(allocation_bytes)?;
         let mut strings = Vec::with_capacity(string_count);
-        let (mut oper, array) = match value {
+        let (oper, array) = match value {
             OwnedExcelValue::Matrix(matrix) => {
                 let rows = i32::try_from(matrix.rows()).map_err(|_| XllError::Domain {
                     code: crate::DomainErrorCode::Overflow,
@@ -531,28 +502,57 @@ impl ReturnBlock {
                 None,
             ),
         };
-        if matches!(&ownership, ReturnOwnership::Excel(_)) {
-            oper.xltype |= XLBIT_DLL_FREE;
-        }
-
-        #[cfg(test)]
-        LIVE_BLOCKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        match &ownership {
-            ReturnOwnership::Excel(tracker) => tracker.register_block(),
-            #[cfg(any(feature = "async", test))]
-            ReturnOwnership::Local => {}
-        }
-
-        Ok(Box::new(Self {
+        Ok(Self {
             oper,
             strings: strings.into_boxed_slice(),
             array,
-            ownership,
-            magic: RETURN_MAGIC,
-        }))
+        })
     }
 
+    fn error(error: &XllError) -> Self {
+        Self {
+            oper: XLOPER12::error(error.excel_error().code()),
+            strings: Box::default(),
+            array: None,
+        }
+    }
+
+    fn publish_excel(mut self, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
+        let obligation = producer.transfer_to_block();
+        self.oper.xltype |= XLBIT_DLL_FREE;
+
+        let block = Box::new(ReturnBlock {
+            oper: self.oper,
+            strings: self.strings,
+            array: self.array,
+            ownership: ReturnOwnership::Excel(Some(obligation)),
+            magic: RETURN_MAGIC,
+        });
+
+        #[cfg(test)]
+        LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
+
+        ReturnBlock::into_non_null(block).as_ptr()
+    }
+
+    #[cfg(any(feature = "async", test))]
+    fn publish_local(self) -> NonNull<XLOPER12> {
+        let block = Box::new(ReturnBlock {
+            oper: self.oper,
+            strings: self.strings,
+            array: self.array,
+            ownership: ReturnOwnership::Local,
+            magic: RETURN_MAGIC,
+        });
+
+        #[cfg(test)]
+        LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
+
+        ReturnBlock::into_non_null(block)
+    }
+}
+
+impl ReturnBlock {
     fn into_non_null(block: Box<Self>) -> NonNull<XLOPER12> {
         let pointer = Box::into_raw(block);
         // SAFETY: Box::into_raw always returns a non-null, properly aligned pointer.
@@ -596,16 +596,6 @@ fn base_allocation_payload_bytes(array_cells: usize, string_count: usize) -> Xll
 impl Drop for ReturnBlock {
     fn drop(&mut self) {
         debug_assert_eq!(self.magic, RETURN_MAGIC);
-        match &self.ownership {
-            ReturnOwnership::Excel(tracker) => {
-                // This runs before field drop glue. The matching free-operation
-                // guard remains active until the complete block, including every
-                // UTF-16 buffer and array cell, has been released.
-                tracker.release_block();
-            }
-            #[cfg(any(feature = "async", test))]
-            ReturnOwnership::Local => {}
-        }
         #[cfg(test)]
         LIVE_BLOCKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -681,25 +671,19 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 
 fn allocate_excel_owned(
     value: OwnedExcelValue,
-    tracker: &Arc<ReturnTracker>,
+    producer: &mut ReturnProducerGuard,
 ) -> XllResult<*mut XLOPER12> {
-    ReturnBlock::build_excel(value, Arc::clone(tracker))
-        .map(|block| ReturnBlock::into_non_null(block).as_ptr())
+    let prepared = PreparedReturn::encode(value)?;
+    Ok(prepared.publish_excel(producer))
 }
 
 #[cfg(any(feature = "async", test))]
 pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
-    ReturnBlock::build_local(value).map(ReturnBlock::into_non_null)
+    PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
 
-fn allocate_excel_error(error: &XllError, tracker: &Arc<ReturnTracker>) -> *mut XLOPER12 {
-    // Encoding an Excel error is allocation-only and cannot fail except for
-    // process-wide OOM, which Rust defines as aborting.
-    allocate_excel_owned(
-        OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())),
-        tracker,
-    )
-    .unwrap_or(ptr::null_mut())
+fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
+    PreparedReturn::error(error).publish_excel(producer)
 }
 
 static CLOSING_ERROR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -781,20 +765,22 @@ where
             return closing_error_pointer();
         }
     };
-    let Some(producer) = runtime.enter_return_producer() else {
+    let Some(mut producer) = runtime.enter_return_producer() else {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
         return closing_error_pointer();
     };
-    let tracker = producer.tracker();
     let result = match catch_unwind(AssertUnwindSafe(|| {
         let value = operation()?;
         let value = value.into_excel_value()?;
-        allocate_excel_owned(value, tracker)
+        allocate_excel_owned(value, &mut producer)
     })) {
         Ok(Ok(pointer)) => pointer,
-        Ok(Err(error)) => allocate_excel_error(&error, tracker),
-        Err(_) => allocate_excel_error(&XllError::Panic, tracker),
+        Ok(Err(error)) => allocate_excel_error(&error, &mut producer),
+        Err(_) => {
+            debug_assert!(producer.is_armed());
+            allocate_excel_error(&XllError::Panic, &mut producer)
+        }
     };
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
@@ -847,17 +833,21 @@ where
     if !accepted {
         return closing_error_pointer();
     }
-    let Some(producer) = runtime.enter_return_producer() else {
+    let Some(mut producer) = runtime.enter_return_producer() else {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
         return closing_error_pointer();
     };
-    let tracker = producer.tracker();
     let result = match catch_unwind(AssertUnwindSafe(|| {
-        udf_boundary_named_inner(runtime, tracker, udf_id, excel_name, operation)
+        udf_boundary_named_inner(runtime, &mut producer, udf_id, excel_name, operation)
     })) {
         Ok(pointer) => pointer,
-        Err(_) => allocate_excel_error(&XllError::Panic, tracker),
+        Err(_) => {
+            if !producer.is_armed() {
+                std::process::abort();
+            }
+            allocate_excel_error(&XllError::Panic, &mut producer)
+        }
     };
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
@@ -866,7 +856,7 @@ where
 
 fn udf_boundary_named_inner<S, F, T>(
     runtime: &Runtime<S>,
-    tracker: &Arc<ReturnTracker>,
+    producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -897,17 +887,18 @@ where
                     crate::diagnostics::report_no_unwind(udf_id, &error);
                     let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
                     crate::execution::trace(&metadata, &outcome);
-                    return allocate_excel_error(&error, tracker);
+                    return allocate_excel_error(&error, producer);
                 }
             };
-            let result = catch_unwind(AssertUnwindSafe(|| {
+            let prepared = catch_unwind(AssertUnwindSafe(|| {
                 let value = operation(guard.state())?;
                 let value = value.into_excel_value()?;
-                allocate_excel_owned(value, tracker)
+                PreparedReturn::encode(value)
             }))
             .unwrap_or(Err(XllError::Panic));
-            let pointer = match result {
-                Ok(pointer) => {
+
+            let pointer = match prepared {
+                Ok(prepared) => {
                     let outcome = CallOutcome {
                         result: UdfResultKind::Success,
                         error: None,
@@ -916,14 +907,14 @@ where
                     };
                     layers.exit(&outcome);
                     crate::execution::trace(&metadata, &outcome);
-                    pointer
+                    prepared.publish_excel(producer)
                 }
                 Err(error) => {
                     crate::diagnostics::report_no_unwind(udf_id, &error);
                     let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
                     layers.exit(&outcome);
                     crate::execution::trace(&metadata, &outcome);
-                    allocate_excel_error(&error, tracker)
+                    PreparedReturn::error(&error).publish_excel(producer)
                 }
             };
             drop(guard);
@@ -941,7 +932,7 @@ where
             };
             let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
             crate::execution::trace(&metadata, &outcome);
-            allocate_excel_error(&error, tracker)
+            allocate_excel_error(&error, producer)
         }
     }
 }
@@ -953,10 +944,10 @@ where
 /// `pointer` must be null or the exact live pointer returned by this crate.
 /// It must be freed exactly once.
 pub unsafe fn free_return(pointer: *mut XLOPER12) {
-    // SAFETY: This function forwards its caller's ownership contract.
-    let _operation = unsafe { enter_return_free_operation(pointer) };
-    // SAFETY: This function forwards its caller's ownership contract.
-    unsafe { free_return_block(pointer) };
+    // SAFETY: caller contract guarantees pointer is a live return pointer or null.
+    let operation = unsafe { enter_return_free_operation(pointer) };
+    // SAFETY: caller contract guarantees pointer is a live return pointer or null.
+    unsafe { free_return_block(pointer, operation.as_ref()) };
 }
 
 /// Runs DLL-owned return cleanup behind a no-unwind Excel ABI boundary.
@@ -966,14 +957,11 @@ pub unsafe fn free_return(pointer: *mut XLOPER12) {
 /// The pointer must satisfy `free_return`'s ownership contract.
 #[must_use = "the guard must remain live until the generated xlAutoFree12 callback returns"]
 pub unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundaryGuard {
-    // SAFETY: the caller guarantees a live ReturnBlock or null pointer. Clone
-    // its tracker before releasing the allocation so the callback remains
-    // counted through the generated ABI wrapper's epilogue.
+    // SAFETY: caller contract guarantees pointer is a live return pointer or null.
     let operation = unsafe { enter_return_free_operation(pointer) };
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: This function forwards its caller's ownership contract. The
-        // outer operation guard already covers the complete block teardown.
-        unsafe { free_return_block(pointer) };
+        // SAFETY: caller contract guarantees pointer is a live return pointer or null.
+        unsafe { free_return_block(pointer, operation.as_ref()) };
     }));
     ReturnFreeBoundaryGuard {
         _operation: operation,
@@ -990,25 +978,56 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     if pointer.is_null() || is_detached_error_pointer(pointer) {
         return None;
     }
-    let block_pointer = pointer.cast::<ReturnBlock>();
-    // SAFETY: the caller contract guarantees a live ReturnBlock. Cloning the
-    // tracker does not transfer or mutate ownership of the block itself.
-    let ownership = unsafe { &(*block_pointer).ownership };
+    let block = pointer.cast::<ReturnBlock>();
+    // SAFETY: caller contract guarantees pointer points to a valid live ReturnBlock.
+    let ownership = unsafe { &mut (*block).ownership };
     match ownership {
-        ReturnOwnership::Excel(tracker) => Some(tracker.enter_free()),
+        ReturnOwnership::Excel(slot) => {
+            let _obligation = slot
+                .as_ref()
+                .expect("Excel return obligation is taken exactly once");
+
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            _obligation
+                .tracker()
+                .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
+
+            Some(ReturnFreeGuard {
+                obligation: slot
+                    .take()
+                    .expect("Excel return obligation is taken exactly once"),
+            })
+        }
         #[cfg(any(feature = "async", test))]
         ReturnOwnership::Local => None,
     }
 }
 
-unsafe fn free_return_block(pointer: *mut XLOPER12) {
+unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
     if pointer.is_null() || is_detached_error_pointer(pointer) {
         return;
     }
     let block_pointer = pointer.cast::<ReturnBlock>();
-    // SAFETY: The caller contract guarantees this is a unique ReturnBlock.
+    // SAFETY: caller contract guarantees pointer was allocated via Box::into_raw in publish_excel.
     let block = unsafe { Box::from_raw(block_pointer) };
     debug_assert_eq!(block.magic, RETURN_MAGIC);
+
+    match &block.ownership {
+        ReturnOwnership::Excel(slot) => {
+            debug_assert!(slot.is_none());
+            let _operation = operation.expect("Excel return destruction owns a free guard");
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            _operation
+                .obligation
+                .tracker()
+                .record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
+        }
+        #[cfg(any(feature = "async", test))]
+        ReturnOwnership::Local => {
+            debug_assert!(operation.is_none());
+        }
+    }
+
     destroy_return_block(block);
 }
 
@@ -1065,7 +1084,7 @@ mod tests {
     }
 
     fn allocate_local_for_test(value: OwnedExcelValue) -> XllResult<*mut XLOPER12> {
-        ReturnBlock::build_local(value).map(|block| ReturnBlock::into_non_null(block).as_ptr())
+        PreparedReturn::encode(value).map(|prep| prep.publish_local().as_ptr())
     }
 
     #[test]
@@ -1503,34 +1522,105 @@ mod tests {
 
     #[test]
     fn quiescent_lost_wakeup_stress_test() {
+        let _test = test_lock();
         for _ in 0..200 {
-            let tracker = Arc::new(ReturnTracker::new_closed());
-            tracker.reopen_admission().unwrap();
+            let runtime = Arc::new(open_test_runtime());
 
             let barrier = Arc::new(Barrier::new(2));
-            let tracker_waiter = Arc::clone(&tracker);
+            let runtime_waiter = Arc::clone(&runtime);
             let barrier_waiter = Arc::clone(&barrier);
             let waiter_handle = std::thread::spawn(move || {
                 barrier_waiter.wait();
-                tracker_waiter.wait_for_quiescence();
+                runtime_waiter.wait_for_returns();
             });
 
-            let tracker_prod = Arc::clone(&tracker);
+            let runtime_prod = Arc::clone(&runtime);
             let producer_handle = std::thread::spawn(move || {
-                if let Some(guard) = tracker_prod.try_enter_producer() {
-                    tracker_prod.register_block();
-                    let free_guard = tracker_prod.enter_free();
-                    drop(guard);
-                    tracker_prod.release_block();
-                    drop(free_guard);
-                }
+                let ptr = ffi_boundary(&runtime_prod, || Ok(42.0));
+                // SAFETY: ptr is a live return pointer produced by ffi_boundary above.
+                let free_guard = unsafe { free_return_boundary(ptr) };
+                drop(free_guard);
             });
 
             producer_handle.join().unwrap();
-            tracker.close_admission();
+            runtime.return_tracker().close_admission();
             barrier.wait();
             waiter_handle.join().unwrap();
-            assert!(tracker.is_quiescent());
+            assert!(runtime.returns_are_quiescent());
         }
+    }
+
+    #[test]
+    fn obligation_transfer_does_not_change_count() {
+        let tracker = Arc::new(ReturnTracker::new_closed());
+        tracker.reopen_admission().unwrap();
+
+        let mut producer = tracker.try_enter_producer().unwrap();
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        let ptr = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+            .unwrap()
+            .publish_excel(&mut producer);
+        assert_eq!(tracker.outstanding_obligations(), 1);
+        drop(producer);
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        // SAFETY: ptr is a live ReturnBlock produced by publish_excel above.
+        let free_guard = unsafe { enter_return_free_operation(ptr) }.unwrap();
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        // SAFETY: ptr is a live ReturnBlock and free_guard matches its active free operation.
+        unsafe { free_return_block(ptr, Some(&free_guard)) };
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        drop(free_guard);
+        assert_eq!(tracker.outstanding_obligations(), 0);
+    }
+
+    #[test]
+    fn failed_encoding_reuses_same_obligation() {
+        let tracker = Arc::new(ReturnTracker::new_closed());
+        tracker.reopen_admission().unwrap();
+
+        let mut producer = tracker.try_enter_producer().unwrap();
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        let err_res = PreparedReturn::encode(OwnedExcelValue::Number(f64::NAN));
+        let err = match err_res {
+            Ok(_) => panic!("expected encoding failure"),
+            Err(e) => e,
+        };
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        let ptr = allocate_excel_error(&err, &mut producer);
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        // SAFETY: ptr is a live error ReturnBlock produced by allocate_excel_error above.
+        let free_guard = unsafe { free_return_boundary(ptr) };
+        assert_eq!(tracker.outstanding_obligations(), 1);
+        drop(free_guard);
+        assert_eq!(tracker.outstanding_obligations(), 0);
+    }
+
+    #[test]
+    fn panic_error_uses_same_obligation() {
+        let _test = test_lock();
+        let runtime = open_test_runtime();
+
+        let ptr = udf_boundary_named(
+            &runtime,
+            "test_panic_obligation",
+            "TEST.PANIC_OBLIGATION",
+            |_| -> XllResult<f64> { panic!("injected UDF panic") },
+        );
+
+        let tracker = runtime.return_tracker();
+        assert_eq!(tracker.outstanding_obligations(), 1);
+
+        // SAFETY: ptr is a live panic error ReturnBlock produced by udf_boundary_named above.
+        let free_guard = unsafe { free_return_boundary(ptr) };
+        assert_eq!(tracker.outstanding_obligations(), 1);
+        drop(free_guard);
+        assert_eq!(tracker.outstanding_obligations(), 0);
     }
 }
