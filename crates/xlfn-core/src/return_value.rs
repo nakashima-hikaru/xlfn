@@ -1,7 +1,7 @@
 use crate::host_callback::HostCallbackSession;
 use crate::{
     CallId, CallMetadata, CallOutcome, ExcelErrorValue, IntoExcelValue, OwnedExcelValue, Runtime,
-    UdfResultKind, XllError, XllResult,
+    UdfResultKind, XlArrayOutput, XllError, XllResult,
 };
 use parking_lot::{Condvar, Mutex};
 use std::marker::PhantomData;
@@ -443,10 +443,51 @@ struct PreparedReturn {
 
 impl PreparedReturn {
     fn encode(value: OwnedExcelValue) -> XllResult<Self> {
-        let (array_cells, string_count) = allocation_shape(&value);
-        let mut allocation_bytes = base_allocation_payload_bytes(array_cells, string_count)?;
-        enforce_return_limit(allocation_bytes)?;
-        let mut strings = Vec::with_capacity(string_count);
+        match value {
+            OwnedExcelValue::ArrayOutput(encoded) => Self::from_array_output(encoded),
+            other => Self::encode_dynamic(other),
+        }
+    }
+
+    fn from_array_output(encoded: XlArrayOutput) -> XllResult<Self> {
+        let total_bytes = encoded
+            .payload_bytes
+            .checked_add(std::mem::size_of::<ReturnBlock>())
+            .ok_or(XllError::Domain {
+                code: crate::DomainErrorCode::Overflow,
+            })?;
+
+        enforce_return_limit(total_bytes)?;
+
+        let rows = i32::try_from(encoded.rows).map_err(|_| XllError::Domain {
+            code: crate::DomainErrorCode::Overflow,
+        })?;
+
+        let columns = i32::try_from(encoded.columns).map_err(|_| XllError::Domain {
+            code: crate::DomainErrorCode::Overflow,
+        })?;
+
+        let mut cells = encoded.cells;
+        let pointer = cells.as_mut_ptr();
+
+        Ok(Self {
+            oper: XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: pointer,
+                        rows,
+                        columns,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            },
+            strings: encoded.strings,
+            array: Some(cells),
+        })
+    }
+
+    fn encode_dynamic(value: OwnedExcelValue) -> XllResult<Self> {
+        let mut strings = Vec::new();
         let (oper, array) = match value {
             OwnedExcelValue::Matrix(matrix) => {
                 let rows = i32::try_from(matrix.rows()).map_err(|_| XllError::Domain {
@@ -456,6 +497,7 @@ impl PreparedReturn {
                     code: crate::DomainErrorCode::Overflow,
                 })?;
                 let values = matrix.into_vec();
+                let mut allocation_bytes = base_allocation_payload_bytes(values.len())?;
                 let mut cells = values
                     .into_iter()
                     .map(|cell| encode_scalar(cell, &mut strings, &mut allocation_bytes))
@@ -477,32 +519,13 @@ impl PreparedReturn {
                 )
             }
             OwnedExcelValue::ArrayOutput(encoded) => {
-                let rows = i32::try_from(encoded.rows).map_err(|_| XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
-                })?;
-                let columns = i32::try_from(encoded.columns).map_err(|_| XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
-                })?;
-                let mut cells = encoded.cells;
-                let pointer = cells.as_mut_ptr();
-                (
-                    XLOPER12 {
-                        value: XLOPER12Value {
-                            array: XLOPER12Array {
-                                values: pointer,
-                                rows,
-                                columns,
-                            },
-                        },
-                        xltype: XLTYPE_MULTI,
-                    },
-                    Some(cells),
-                )
+                return Self::from_array_output(encoded);
             }
-            scalar => (
-                encode_scalar(scalar, &mut strings, &mut allocation_bytes)?,
-                None,
-            ),
+            scalar => {
+                let mut allocation_bytes = base_allocation_payload_bytes(0)?;
+                let oper = encode_scalar(scalar, &mut strings, &mut allocation_bytes)?;
+                (oper, None)
+            }
         };
         Ok(Self {
             oper,
@@ -562,34 +585,13 @@ impl ReturnBlock {
     }
 }
 
-fn allocation_shape(value: &OwnedExcelValue) -> (usize, usize) {
-    match value {
-        OwnedExcelValue::Matrix(matrix) => (
-            matrix.as_slice().len(),
-            matrix
-                .as_slice()
-                .iter()
-                .filter(|cell| matches!(cell, OwnedExcelValue::String(_)))
-                .count(),
-        ),
-        OwnedExcelValue::String(_) => (0, 1),
-        OwnedExcelValue::ArrayOutput(array) => (array.cells.len(), 0),
-        _ => (0, 0),
-    }
-}
-
 /// Total payload requested from the allocator before UTF-16 buffers are added.
 /// `ReturnBlock` includes the root XLOPER12 and collection control structures;
-/// the other terms cover the separately allocated array and string-owner slots.
-fn base_allocation_payload_bytes(array_cells: usize, string_count: usize) -> XllResult<usize> {
+/// the other terms cover the separately allocated array slots.
+fn base_allocation_payload_bytes(array_cells: usize) -> XllResult<usize> {
     array_cells
         .checked_mul(std::mem::size_of::<XLOPER12>())
         .and_then(|array_bytes| array_bytes.checked_add(std::mem::size_of::<ReturnBlock>()))
-        .and_then(|bytes| {
-            string_count
-                .checked_mul(std::mem::size_of::<Box<[u16]>>())
-                .and_then(|string_slots| bytes.checked_add(string_slots))
-        })
         .ok_or(XllError::Domain {
             code: crate::DomainErrorCode::Overflow,
         })
@@ -631,9 +633,14 @@ fn encode_scalar(
                 .ok_or(XllError::Domain {
                     code: crate::DomainErrorCode::Overflow,
                 })?;
+            let additional = std::mem::size_of::<Box<[u16]>>()
+                .checked_add(string_bytes)
+                .ok_or(XllError::Domain {
+                    code: crate::DomainErrorCode::Overflow,
+                })?;
             *allocation_bytes =
                 allocation_bytes
-                    .checked_add(string_bytes)
+                    .checked_add(additional)
                     .ok_or(XllError::Domain {
                         code: crate::DomainErrorCode::Overflow,
                     })?;
@@ -646,11 +653,7 @@ fn encode_scalar(
                 xltype: XLTYPE_STR,
             })
         }
-        OwnedExcelValue::Matrix(_) => Err(XllError::input(
-            "<return>",
-            crate::InputError::Malformed("nested return arrays are not supported"),
-        )),
-        OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
+        OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
             "<return>",
             crate::InputError::Malformed("nested return arrays are not supported"),
         )),
@@ -1161,34 +1164,15 @@ mod tests {
 
     #[test]
     fn return_limit_accounts_for_all_owned_allocation_payloads() {
-        let scalar = OwnedExcelValue::String("x".to_owned());
-        let (cells, strings) = allocation_shape(&scalar);
-        assert_eq!((cells, strings), (0, 1));
         assert_eq!(
-            base_allocation_payload_bytes(cells, strings).unwrap(),
-            std::mem::size_of::<ReturnBlock>() + std::mem::size_of::<Box<[u16]>>()
-        );
-
-        let matrix = OwnedExcelValue::Matrix(
-            Matrix::new(
-                1,
-                2,
-                vec![
-                    OwnedExcelValue::String("x".to_owned()),
-                    OwnedExcelValue::Number(1.0),
-                ],
-            )
-            .unwrap(),
-        );
-        let (cells, strings) = allocation_shape(&matrix);
-        assert_eq!((cells, strings), (2, 1));
-        assert_eq!(
-            base_allocation_payload_bytes(cells, strings).unwrap(),
+            base_allocation_payload_bytes(0).unwrap(),
             std::mem::size_of::<ReturnBlock>()
-                + 2 * std::mem::size_of::<XLOPER12>()
-                + std::mem::size_of::<Box<[u16]>>()
         );
-        assert!(base_allocation_payload_bytes(usize::MAX, 0).is_err());
+        assert_eq!(
+            base_allocation_payload_bytes(2).unwrap(),
+            std::mem::size_of::<ReturnBlock>() + 2 * std::mem::size_of::<XLOPER12>()
+        );
+        assert!(base_allocation_payload_bytes(usize::MAX).is_err());
     }
 
     #[test]
@@ -1622,5 +1606,27 @@ mod tests {
         assert_eq!(tracker.outstanding_obligations(), 1);
         drop(free_guard);
         assert_eq!(tracker.outstanding_obligations(), 0);
+    }
+
+    #[test]
+    fn string_backing_survives_in_matrix_return() {
+        let matrix = Matrix::new(1, 2, vec!["hello".to_string(), "world".to_string()]).unwrap();
+        let value = matrix.into_excel_value().unwrap();
+        assert!(matches!(value, OwnedExcelValue::ArrayOutput(_)));
+
+        let prepared = PreparedReturn::encode(value).unwrap();
+        assert_eq!(prepared.strings.len(), 2);
+        let cells = prepared.array.as_ref().unwrap();
+        // SAFETY: array values pointer is non-null and valid.
+        unsafe {
+            let str0 = cells[0].value.string;
+            let str1 = cells[1].value.string;
+            let len0 = *str0 as usize;
+            let len1 = *str1 as usize;
+            let s0 = String::from_utf16(std::slice::from_raw_parts(str0.add(1), len0)).unwrap();
+            let s1 = String::from_utf16(std::slice::from_raw_parts(str1.add(1), len1)).unwrap();
+            assert_eq!(s0, "hello");
+            assert_eq!(s1, "world");
+        }
     }
 }

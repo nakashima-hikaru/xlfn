@@ -945,12 +945,39 @@ pub enum OwnedExcelValue {
 /// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
 /// adopts the cell allocation instead of materializing an intermediate
 /// `Vec<OwnedExcelValue>` and encoding it into another array.
+/// An Excel array whose cells are already encoded in their final ABI form.
+///
+/// Equality compares shape and semantic values for the supported scalar cell
+/// types. The numeric builder rejects NaN and infinities, so numeric equality
+/// is well-defined.
+///
+/// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
+/// adopts the cell allocation instead of materializing an intermediate
+/// `Vec<OwnedExcelValue>` and encoding it into another array.
 #[doc(hidden)]
-#[derive(Clone)]
 pub struct XlArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
     pub(crate) cells: Box<[XLOPER12]>,
+    pub(crate) strings: Box<[Box<[u16]>]>,
+    pub(crate) payload_bytes: usize,
+}
+
+impl Clone for XlArrayOutput {
+    fn clone(&self) -> Self {
+        let mut builder = XlArrayBuilder::for_matrix(self.rows, self.columns)
+            .expect("validated XlArrayOutput shape");
+
+        for cell in self.cells.iter() {
+            builder
+                .push_cloned_cell(cell)
+                .expect("validated XlArrayOutput cell");
+        }
+
+        builder
+            .finish()
+            .expect("cloning a valid XlArrayOutput must succeed")
+    }
 }
 
 impl std::fmt::Debug for XlArrayOutput {
@@ -1028,60 +1055,198 @@ impl PartialEq for XlArrayOutput {
 pub struct XlArrayBuilder {
     rows: usize,
     columns: usize,
-    cells: Box<[XLOPER12]>,
+    cells: Box<[std::mem::MaybeUninit<XLOPER12>]>,
     initialized: usize,
+    strings: Vec<Box<[u16]>>,
+    payload_bytes: usize,
 }
 
 impl XlArrayBuilder {
-    pub fn numbers(rows: usize, columns: usize) -> XllResult<Self> {
-        validate_matrix_dimensions(
-            rows,
-            columns,
-            rows.checked_mul(columns).ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?,
-        )?;
-        let len = rows * columns;
-        let bytes = len
+    fn for_matrix(rows: usize, columns: usize) -> XllResult<Self> {
+        let len = rows.checked_mul(columns).ok_or(XllError::Domain {
+            code: DomainErrorCode::Overflow,
+        })?;
+
+        validate_matrix_dimensions(rows, columns, len)?;
+
+        let cell_bytes = len
             .checked_mul(std::mem::size_of::<XLOPER12>())
             .ok_or(XllError::Domain {
                 code: DomainErrorCode::Overflow,
             })?;
-        if bytes > MAX_ARRAY_BYTES {
+
+        if cell_bytes > MAX_ARRAY_BYTES {
             return Err(XllError::input(
                 "<array output>",
                 InputError::TooLarge {
                     limit: MAX_ARRAY_BYTES,
-                    actual: bytes,
+                    actual: cell_bytes,
                 },
             ));
         }
+
         Ok(Self {
             rows,
             columns,
-            cells: vec![XLOPER12::error(crate::ExcelError::NotAvailable.code()); len]
-                .into_boxed_slice(),
+            cells: Box::<[XLOPER12]>::new_uninit_slice(len),
             initialized: 0,
+            strings: Vec::new(),
+            payload_bytes: cell_bytes,
         })
     }
 
-    pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
-        if !value.is_finite() {
-            return Err(XllError::input("<array output>", InputError::NonFinite));
-        }
+    pub fn numbers(rows: usize, columns: usize) -> XllResult<Self> {
+        Self::for_matrix(rows, columns)
+    }
+
+    fn push_oper(&mut self, oper: XLOPER12) -> XllResult<()> {
         if self.initialized == self.cells.len() {
             return Err(XllError::input(
                 "<array output>",
                 InputError::Malformed("too many array cells"),
             ));
         }
-        self.cells[self.initialized] = XLOPER12::number(value);
+
+        self.cells[self.initialized].write(oper);
         self.initialized += 1;
+
         Ok(())
+    }
+
+    pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
+        if !value.is_finite() {
+            return Err(XllError::input("<array output>", InputError::NonFinite));
+        }
+        self.push_oper(XLOPER12::number(value))
+    }
+
+    fn push_string(&mut self, text: String) -> XllResult<()> {
+        let counted = crate::utf16::encode_counted(
+            &text,
+            "<array output>",
+            crate::utf16::EXCEL_STRING_LIMIT,
+        )?;
+
+        let string_bytes = counted
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?;
+
+        let additional = std::mem::size_of::<Box<[u16]>>()
+            .checked_add(string_bytes)
+            .ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?;
+
+        let next_bytes = self
+            .payload_bytes
+            .checked_add(additional)
+            .ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?;
+
+        if next_bytes > MAX_ARRAY_BYTES {
+            return Err(XllError::input(
+                "<array output>",
+                InputError::TooLarge {
+                    limit: MAX_ARRAY_BYTES,
+                    actual: next_bytes,
+                },
+            ));
+        }
+
+        let mut counted = counted.into_boxed_slice();
+        let pointer = counted.as_mut_ptr();
+
+        self.strings.push(counted);
+        self.push_oper(XLOPER12 {
+            value: xlfn_sys::XLOPER12Value { string: pointer },
+            xltype: XLTYPE_STR,
+        })?;
+
+        self.payload_bytes = next_bytes;
+        Ok(())
+    }
+
+    fn push_cloned_cell(&mut self, cell: &XLOPER12) -> XllResult<()> {
+        let cell_type = cell.base_type();
+        match cell_type {
+            XLTYPE_NUM => {
+                // SAFETY: XLTYPE_NUM selects the number member.
+                unsafe { self.push_oper(XLOPER12::number(cell.value.number)) }
+            }
+            XLTYPE_INT => {
+                // SAFETY: XLTYPE_INT selects the integer member.
+                unsafe { self.push_oper(XLOPER12::integer(cell.value.integer)) }
+            }
+            XLTYPE_BOOL => {
+                // SAFETY: XLTYPE_BOOL selects the boolean member.
+                unsafe { self.push_oper(XLOPER12::boolean(cell.value.boolean != 0)) }
+            }
+            XLTYPE_ERR => {
+                // SAFETY: XLTYPE_ERR selects the error member.
+                unsafe { self.push_oper(XLOPER12::error(cell.value.error)) }
+            }
+            XLTYPE_NIL => self.push_oper(XLOPER12::nil()),
+            XLTYPE_MISSING => self.push_oper(XLOPER12::missing()),
+            XLTYPE_STR => {
+                // SAFETY: XLTYPE_STR selects string.
+                unsafe {
+                    let ptr = cell.value.string;
+                    if ptr.is_null() {
+                        self.push_oper(XLOPER12 {
+                            value: xlfn_sys::XLOPER12Value { string: std::ptr::null_mut() },
+                            xltype: XLTYPE_STR,
+                        })
+                    } else {
+                        let len = *ptr as usize;
+                        let slice = std::slice::from_raw_parts(ptr.add(1), len);
+                        let text = String::from_utf16(slice).map_err(|_| XllError::input("<array cell>", InputError::InvalidUtf16))?;
+                        self.push_string(text)
+                    }
+                }
+            }
+            _ => Err(XllError::input("<array cell>", InputError::Malformed("unsupported cell type"))),
+        }
+    }
+
+    fn push_owned(&mut self, value: OwnedExcelValue) -> XllResult<()> {
+        match value {
+            OwnedExcelValue::Number(value) if value.is_finite() => {
+                self.push_oper(XLOPER12::number(value))
+            }
+            OwnedExcelValue::Number(_) => {
+                Err(XllError::input("<return>", InputError::NonFinite))
+            }
+            OwnedExcelValue::Boolean(value) => {
+                self.push_oper(XLOPER12::boolean(value))
+            }
+            OwnedExcelValue::Integer(value) => {
+                self.push_oper(XLOPER12::integer(value))
+            }
+            OwnedExcelValue::Error(ExcelErrorValue(error)) => {
+                self.push_oper(XLOPER12::error(error.code()))
+            }
+            OwnedExcelValue::Missing | OwnedExcelValue::Blank => {
+                self.push_oper(XLOPER12::error(ExcelError::NotAvailable.code()))
+            }
+            OwnedExcelValue::String(value) => {
+                self.push_string(value)
+            }
+            OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => {
+                Err(XllError::input(
+                    "<return>",
+                    InputError::Malformed("nested return arrays are not supported"),
+                ))
+            }
+        }
     }
 
     pub fn finish(self) -> XllResult<XlArrayOutput> {
         let expected = self.rows * self.columns;
+
         if self.initialized != expected {
             return Err(XllError::ElementCountMismatch {
                 rows: self.rows,
@@ -1090,10 +1255,16 @@ impl XlArrayBuilder {
                 actual: self.initialized,
             });
         }
+
+        // SAFETY: initialized == cells.len() so every element is written.
+        let cells = unsafe { self.cells.assume_init() };
+
         Ok(XlArrayOutput {
             rows: self.rows,
             columns: self.columns,
-            cells: self.cells,
+            cells,
+            strings: self.strings.into_boxed_slice(),
+            payload_bytes: self.payload_bytes,
         })
     }
 }
@@ -1676,12 +1847,14 @@ where
     fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
         let rows = self.rows;
         let columns = self.columns;
-        let data = self
-            .data
-            .into_iter()
-            .map(IntoExcelValue::into_excel_value)
-            .collect::<XllResult<Vec<_>>>()?;
-        Matrix::new(rows, columns, data).map(OwnedExcelValue::Matrix)
+        let mut builder = XlArrayBuilder::for_matrix(rows, columns)?;
+
+        for value in self.data {
+            let value = value.into_excel_value()?;
+            builder.push_owned(value)?;
+        }
+
+        Ok(OwnedExcelValue::ArrayOutput(builder.finish()?))
     }
 }
 
@@ -2132,6 +2305,8 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
+            strings: Box::default(),
+            payload_bytes: 0,
         };
         let right = XlArrayOutput {
             rows: 1,
@@ -2149,6 +2324,8 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
+            strings: Box::default(),
+            payload_bytes: 0,
         };
         assert_eq!(left, right);
     }
@@ -2198,6 +2375,66 @@ mod tests {
                     ..
                 }) if error_limit == limit && error_actual == actual
             ));
+        }
+    }
+
+    #[test]
+    fn matrix_number_return_uses_encoded_array_output() {
+        let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
+        let value = matrix.into_excel_value().unwrap();
+        assert!(matches!(value, OwnedExcelValue::ArrayOutput(_)));
+    }
+
+    #[test]
+    fn element_conversion_is_called_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountedCell<'a> {
+            conversions: &'a AtomicUsize,
+            value: f64,
+        }
+
+        impl IntoExcelValue for CountedCell<'_> {
+            fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+                self.conversions.fetch_add(1, Ordering::Relaxed);
+                self.value.into_excel_value()
+            }
+        }
+
+        let conversions = AtomicUsize::new(0);
+        let data: Vec<_> = (0..1000)
+            .map(|i| CountedCell {
+                conversions: &conversions,
+                value: i as f64,
+            })
+            .collect();
+        let matrix = Matrix::new(10, 100, data).unwrap();
+        let _value = matrix.into_excel_value().unwrap();
+        assert_eq!(conversions.load(Ordering::Relaxed), 1000);
+    }
+
+    #[test]
+    fn partial_failure_during_matrix_conversion_cleans_up_safely() {
+        let data = vec![1.0, 2.0, f64::NAN, 4.0];
+        let matrix = Matrix::new(2, 2, data).unwrap();
+        let result = matrix.into_excel_value();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn array_output_clone_rebases_string_pointers() {
+        let mut builder = XlArrayBuilder::for_matrix(1, 1).unwrap();
+        builder.push_string("test".to_string()).unwrap();
+        let original = builder.finish().unwrap();
+
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+
+        // SAFETY: both original and cloned cells are valid non-null strings.
+        unsafe {
+            let orig_ptr = original.cells[0].value.string;
+            let clone_ptr = cloned.cells[0].value.string;
+            assert_ne!(orig_ptr, clone_ptr);
         }
     }
 }
