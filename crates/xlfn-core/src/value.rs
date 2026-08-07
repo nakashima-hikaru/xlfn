@@ -1069,11 +1069,11 @@ impl XlArrayBuilder {
 
         validate_matrix_dimensions(rows, columns, len)?;
 
-        let cell_bytes = len
-            .checked_mul(std::mem::size_of::<XLOPER12>())
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
+        let cell_bytes =
+            len.checked_mul(std::mem::size_of::<XLOPER12>())
+                .ok_or(XllError::Domain {
+                    code: DomainErrorCode::Overflow,
+                })?;
 
         if cell_bytes > MAX_ARRAY_BYTES {
             return Err(XllError::input(
@@ -1197,18 +1197,25 @@ impl XlArrayBuilder {
                     let ptr = cell.value.string;
                     if ptr.is_null() {
                         self.push_oper(XLOPER12 {
-                            value: xlfn_sys::XLOPER12Value { string: std::ptr::null_mut() },
+                            value: xlfn_sys::XLOPER12Value {
+                                string: std::ptr::null_mut(),
+                            },
                             xltype: XLTYPE_STR,
                         })
                     } else {
                         let len = *ptr as usize;
                         let slice = std::slice::from_raw_parts(ptr.add(1), len);
-                        let text = String::from_utf16(slice).map_err(|_| XllError::input("<array cell>", InputError::InvalidUtf16))?;
+                        let text = String::from_utf16(slice).map_err(|_| {
+                            XllError::input("<array cell>", InputError::InvalidUtf16)
+                        })?;
                         self.push_string(text)
                     }
                 }
             }
-            _ => Err(XllError::input("<array cell>", InputError::Malformed("unsupported cell type"))),
+            _ => Err(XllError::input(
+                "<array cell>",
+                InputError::Malformed("unsupported cell type"),
+            )),
         }
     }
 
@@ -1217,30 +1224,20 @@ impl XlArrayBuilder {
             OwnedExcelValue::Number(value) if value.is_finite() => {
                 self.push_oper(XLOPER12::number(value))
             }
-            OwnedExcelValue::Number(_) => {
-                Err(XllError::input("<return>", InputError::NonFinite))
-            }
-            OwnedExcelValue::Boolean(value) => {
-                self.push_oper(XLOPER12::boolean(value))
-            }
-            OwnedExcelValue::Integer(value) => {
-                self.push_oper(XLOPER12::integer(value))
-            }
+            OwnedExcelValue::Number(_) => Err(XllError::input("<return>", InputError::NonFinite)),
+            OwnedExcelValue::Boolean(value) => self.push_oper(XLOPER12::boolean(value)),
+            OwnedExcelValue::Integer(value) => self.push_oper(XLOPER12::integer(value)),
             OwnedExcelValue::Error(ExcelErrorValue(error)) => {
                 self.push_oper(XLOPER12::error(error.code()))
             }
             OwnedExcelValue::Missing | OwnedExcelValue::Blank => {
                 self.push_oper(XLOPER12::error(ExcelError::NotAvailable.code()))
             }
-            OwnedExcelValue::String(value) => {
-                self.push_string(value)
-            }
-            OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => {
-                Err(XllError::input(
-                    "<return>",
-                    InputError::Malformed("nested return arrays are not supported"),
-                ))
-            }
+            OwnedExcelValue::String(value) => self.push_string(value),
+            OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
+                "<return>",
+                InputError::Malformed("nested return arrays are not supported"),
+            )),
         }
     }
 
