@@ -152,8 +152,8 @@ impl AsyncManager {
                     cancel_source_no_unwind(&rejection.cancellation);
                 }
                 // Rejected futures and their captured user values must be
-                // dropped after releasing the manager state and registry
-                // mutexes: Drop may legitimately re-enter runtime APIs.
+                // dropped after releasing all manager/lifecycle synchronization;
+                // Drop may legitimately re-enter runtime APIs.
                 drop(rejection.future);
                 Err(rejection.error)
             }
@@ -416,14 +416,27 @@ struct ExecutorHandle {
     sender: Sender<Runnable>,
 }
 
+/// Inner state of `Executor`.
+///
+/// Invariants:
+/// I1. `current`'s `GenerationState` always exists in `control.generations` until `ControlPhase::Closing`.
+/// I2. When `control.phase == ControlPhase::Running`, `current.admission` is the admission authority for the current generation.
+/// I3. When `control.phase == ControlPhase::Advancing { from, to }`, `current.id == from` and `current.admission` is closed.
+/// I4. After `control.phase == ControlPhase::Closing`, no new `GenerationState` is ever published to `current`.
+/// I5. A `GenerationState` may be removed from `control.generations` only when `generation != next` and `task_count == 0`.
 struct ExecutorInner {
     next_id: AtomicU64,
     active: AtomicUsize,
     live_workers: AtomicUsize,
     fatal_worker_failure: AtomicBool,
+    /// Monotonic fast-path mirror of `ExecutorControl::phase == ControlPhase::Closing`.
+    ///
+    /// Lifecycle transitions are authoritative under `control`;
+    /// spawn reads only this atomic.
     closing: AtomicBool,
     current: ArcSwap<GenerationState>,
-    registry: Mutex<TaskRegistry>,
+    /// Cold lifecycle state. Never acquired by spawn/completion.
+    control: Mutex<ExecutorControl>,
     wait_lock: Mutex<()>,
     idle: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -437,8 +450,9 @@ struct ExecutorInner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExecutorPhase {
+enum ControlPhase {
     Running,
+    Advancing { from: u64, to: u64 },
     Closing,
 }
 
@@ -531,7 +545,6 @@ impl Drop for AdmissionPermit<'_> {
 struct GenerationState {
     id: u64,
     admission: GenerationAdmission,
-    cancelled: AtomicBool,
     task_count: AtomicUsize,
     shards: Box<[TaskShard]>,
 }
@@ -547,7 +560,6 @@ impl GenerationState {
         Self {
             id,
             admission: GenerationAdmission::new(),
-            cancelled: AtomicBool::new(false),
             task_count: AtomicUsize::new(0),
             shards,
         }
@@ -579,8 +591,8 @@ impl GenerationState {
     }
 }
 
-struct TaskRegistry {
-    phase: ExecutorPhase,
+struct ExecutorControl {
+    phase: ControlPhase,
     generations: HashMap<u64, Arc<GenerationState>>,
 }
 
@@ -648,8 +660,8 @@ impl Executor {
             fatal_worker_failure: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             current: ArcSwap::from(Arc::clone(&initial_generation)),
-            registry: Mutex::new(TaskRegistry {
-                phase: ExecutorPhase::Running,
+            control: Mutex::new(ExecutorControl {
+                phase: ControlPhase::Running,
                 generations: HashMap::from([(generation, initial_generation)]),
             }),
             wait_lock: Mutex::new(()),
@@ -852,12 +864,11 @@ impl ExecutorHandle {
 
     fn cancel_generation(&self, generation: u64) -> Vec<TaskControl> {
         let generation_arc = {
-            let registry = self.inner.registry.lock();
-            let Some(state) = registry.generations.get(&generation) else {
+            let control = self.inner.control.lock();
+            let Some(state) = control.generations.get(&generation) else {
                 return Vec::new();
             };
             debug_assert_eq!(state.id, generation);
-            state.cancelled.store(true, Ordering::Release);
             state.admission.close();
             Arc::clone(state)
         };
@@ -866,16 +877,39 @@ impl ExecutorHandle {
     }
 
     fn advance_generation(&self, next: u64) -> bool {
-        let mut registry = self.inner.registry.lock();
-        if registry.phase == ExecutorPhase::Closing {
-            return false;
-        }
+        let old = {
+            let mut control = self.inner.control.lock();
+            match control.phase {
+                ControlPhase::Running => {}
+                ControlPhase::Closing => return false,
+                ControlPhase::Advancing { .. } => {
+                    debug_assert!(false, "concurrent executor generation transition");
+                    return false;
+                }
+            }
 
-        let old = self.inner.current.load_full();
-        old.admission.close();
+            let old = self.inner.current.load_full();
+            old.admission.close();
+            control.phase = ControlPhase::Advancing {
+                from: old.id,
+                to: next,
+            };
+            old
+        };
+
         old.admission.wait_for_idle();
 
-        let next_generation = registry
+        let mut control = self.inner.control.lock();
+        match control.phase {
+            ControlPhase::Closing => return false,
+            ControlPhase::Advancing { from, to } if from == old.id && to == next => {}
+            ControlPhase::Running | ControlPhase::Advancing { .. } => {
+                debug_assert!(false, "executor generation transition state diverged");
+                return false;
+            }
+        }
+
+        let next_generation = control
             .generations
             .entry(next)
             .or_insert_with(|| Arc::new(GenerationState::new(next)))
@@ -883,18 +917,26 @@ impl ExecutorHandle {
 
         self.inner.current.store(Arc::clone(&next_generation));
 
-        registry.generations.retain(|generation, state| {
+        control.generations.retain(|generation, state| {
             *generation == next || state.task_count.load(Ordering::Acquire) != 0
         });
+
+        control.phase = ControlPhase::Running;
         true
     }
 
     fn request_close(&self) -> Vec<TaskControl> {
         let generations = {
-            let mut registry = self.inner.registry.lock();
-            registry.phase = ExecutorPhase::Closing;
+            let mut control = self.inner.control.lock();
+
+            if matches!(control.phase, ControlPhase::Closing) {
+                return Vec::new();
+            }
+
             self.inner.closing.store(true, Ordering::Release);
-            let generations = registry.generations.values().cloned().collect::<Vec<_>>();
+            control.phase = ControlPhase::Closing;
+
+            let generations = control.generations.values().cloned().collect::<Vec<_>>();
             for generation in &generations {
                 generation.admission.close();
             }
@@ -2076,7 +2118,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_and_cancel_are_linearized_by_the_generation_registry() {
+    fn spawn_and_cancel_are_linearized_by_generation_admission() {
         let manager = Arc::new(AsyncManager::new());
         manager.start(1).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -3086,5 +3128,144 @@ mod tests {
         ));
         assert!(token.is_cancelled());
         assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("admission hook should be released");
+        })));
+
+        let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let spawning = std::thread::spawn(move || {
+            spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source)
+        });
+
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("task should be admitted");
+
+        let advancing_manager = Arc::clone(&manager);
+        let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
+        let advancing = std::thread::spawn(move || {
+            advance_done_tx
+                .send(advancing_manager.advance_generation())
+                .unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let executor_inner = match &*manager.state.lock() {
+            ExecutorState::Running(executor) => Arc::clone(&executor.handle.inner),
+            _ => panic!("executor should be running"),
+        };
+
+        assert!(
+            executor_inner.control.try_lock().is_some(),
+            "advance_generation must release control mutex while waiting for admission idle"
+        );
+
+        release_tx.send(()).unwrap();
+        assert!(
+            advance_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        );
+
+        spawning.join().unwrap().unwrap();
+        advancing.join().unwrap();
+        manager.set_after_generation_admission_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn close_preempts_in_progress_advance_generation() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("admission hook should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let spawning = std::thread::spawn(move || {
+            spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source)
+        });
+
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("task should be admitted");
+
+        let advancing_manager = Arc::clone(&manager);
+        let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
+        let advancing = std::thread::spawn(move || {
+            advance_done_tx
+                .send(advancing_manager.advance_generation())
+                .unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let closing_manager = Arc::clone(&manager);
+        let (close_done_tx, close_done_rx) = std::sync::mpsc::sync_channel(1);
+        let closing = std::thread::spawn(move || {
+            close_done_tx.send(closing_manager.close()).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let executor_inner = match &*manager.state.lock() {
+            ExecutorState::Closing(executor) => {
+                executor.as_ref().map(|exec| Arc::clone(&exec.handle.inner))
+            }
+            _ => None,
+        };
+
+        if let Some(inner) = executor_inner {
+            assert!(
+                inner.closing.load(Ordering::Acquire),
+                "close must set closing atomic mirror even while advance is waiting"
+            );
+        }
+
+        release_tx.send(()).unwrap();
+
+        assert!(
+            !advance_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        );
+
+        let close_report = close_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(close_report.issues.is_empty());
+        assert!(token.is_cancelled());
+
+        spawning.join().unwrap().unwrap();
+        advancing.join().unwrap();
+        closing.join().unwrap();
+        manager.set_after_generation_admission_hook(None);
     }
 }
