@@ -150,6 +150,7 @@ impl CallbackGate {
         }
     }
 
+    #[cfg(test)]
     fn blocked_status(&self) -> Option<ExcelCallbackStatus> {
         callback_blocked_status(&self.state.lock())
     }
@@ -169,6 +170,7 @@ impl CallbackGatePermit<'_> {
     }
 }
 
+#[cfg(test)]
 fn callback_blocked_status(state: &RefCell<CallbackGateState>) -> Option<ExcelCallbackStatus> {
     let gate = state.borrow();
     match gate.lifecycle {
@@ -280,11 +282,6 @@ pub(crate) fn enter_cleanup<'a>(
     invocation: Option<&'a CallbackInvocationToken>,
 ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
     MODULE_CALLBACK_GATE.enter_cleanup(invocation)
-}
-
-#[allow(dead_code, reason = "Internal inspection helper for tests")]
-pub(crate) fn blocked_status() -> Option<ExcelCallbackStatus> {
-    MODULE_CALLBACK_GATE.blocked_status()
 }
 
 #[cfg(test)]

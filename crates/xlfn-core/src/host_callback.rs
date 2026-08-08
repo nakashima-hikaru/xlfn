@@ -34,7 +34,7 @@ impl HostCallbackShared {
         }
     }
 
-    #[allow(dead_code, reason = "Explicit closing helper for tests")]
+    #[cfg(test)]
     pub(crate) fn close(&self) {
         if matches!(self.state.get(), HostCallbackState::Available) {
             self.state.set(HostCallbackState::Closed);
@@ -71,7 +71,7 @@ impl HostCallbackSession {
         self.shared.terminal_status()
     }
 
-    #[allow(dead_code, reason = "Explicit closing helper for tests")]
+    #[cfg(test)]
     pub(crate) fn close(&self) {
         self.shared.close();
     }
