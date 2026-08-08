@@ -7,7 +7,7 @@ use crate::{
     CallId, CallMetadata, CallOutcome, CancellationGuarantee, CancellationToken, IntoExcelValue,
     Runtime, UdfResultKind, XllError, XllResult,
 };
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_channel::{Receiver, Sender};
 use async_task::Runnable;
 use futures_util::FutureExt;
@@ -32,6 +32,11 @@ const MAX_PENDING: usize = 4096;
 const MAX_ASYNC_HANDLE_BYTES: usize = 1024 * 1024;
 pub(crate) struct AsyncManager {
     state: Mutex<ExecutorState>,
+    /// Lock-free snapshot used by the async-UDF spawn hot path.
+    ///
+    /// `Some` while an executor is published for new spawns.
+    /// `None` while stopped or closing.
+    published_handle: ArcSwapOption<ExecutorHandle>,
     state_changed: Condvar,
     generation_transition: Mutex<()>,
     current_generation: AtomicU64,
@@ -57,6 +62,7 @@ impl AsyncManager {
     pub(crate) const fn new() -> Self {
         Self {
             state: Mutex::new(ExecutorState::Stopped),
+            published_handle: ArcSwapOption::const_empty(),
             state_changed: Condvar::new(),
             generation_transition: Mutex::new(()),
             current_generation: AtomicU64::new(1),
@@ -86,7 +92,9 @@ impl AsyncManager {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             executor.set_ghost(ghost);
         }
+        let published_handle = Arc::clone(&executor.handle);
         *state = ExecutorState::Running(executor);
+        self.published_handle.store(Some(published_handle));
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
@@ -111,6 +119,24 @@ impl AsyncManager {
         self.current_generation.load(Ordering::Acquire)
     }
 
+    fn snapshot_spawn_handle(&self) -> Result<Arc<ExecutorHandle>, (XllError, bool)> {
+        if let Some(handle) = self.published_handle.load_full() {
+            return Ok(handle);
+        }
+
+        let state = self.state.lock();
+        match &*state {
+            ExecutorState::Running(executor) => {
+                debug_assert!(
+                    self.published_handle.load().is_some(),
+                    "running executor must have a published spawn handle"
+                );
+                Ok(Arc::clone(&executor.handle))
+            }
+            ExecutorState::Stopped | ExecutorState::Closing(_) => Err((XllError::Closing, false)),
+        }
+    }
+
     pub(crate) fn spawn<F>(
         &self,
         generation: u64,
@@ -120,15 +146,7 @@ impl AsyncManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let target: Result<ExecutorHandle, (XllError, bool)> = {
-            let state = self.state.lock();
-            match &*state {
-                ExecutorState::Running(executor) => Ok(executor.handle.clone()),
-                ExecutorState::Stopped | ExecutorState::Closing(_) => {
-                    Err((XllError::Closing, false))
-                }
-            }
-        };
+        let target = self.snapshot_spawn_handle();
         #[cfg(test)]
         if target.is_ok() {
             let hook = self.after_spawn_handle_snapshot_hook.lock().clone();
@@ -221,7 +239,7 @@ impl AsyncManager {
                     let state = self.state.lock();
                     match &*state {
                         ExecutorState::Running(executor)
-                            if Arc::ptr_eq(&executor.handle.inner, &handle.inner) =>
+                            if Arc::ptr_eq(&executor.handle, &handle) =>
                         {
                             self.current_generation
                                 .compare_exchange(
@@ -359,6 +377,7 @@ impl AsyncManager {
             match &*state {
                 ExecutorState::Stopped => return None,
                 ExecutorState::Running(_) | ExecutorState::Closing(Some(_)) => {
+                    self.published_handle.store(None);
                     let previous = std::mem::replace(&mut *state, ExecutorState::Closing(None));
                     self.state_changed.notify_all();
                     return match previous {
@@ -392,6 +411,10 @@ impl AsyncManager {
     fn restore_closing_executor(&self, executor: Executor) {
         let mut state = self.state.lock();
         debug_assert!(matches!(*state, ExecutorState::Closing(None)));
+        debug_assert!(
+            self.published_handle.load().is_none(),
+            "closing executor must not be published for spawning"
+        );
         *state = ExecutorState::Closing(Some(executor));
         self.state_changed.notify_all();
     }
@@ -399,13 +422,17 @@ impl AsyncManager {
     fn finish_close(&self) {
         let mut state = self.state.lock();
         debug_assert!(matches!(*state, ExecutorState::Closing(None)));
+        debug_assert!(
+            self.published_handle.load().is_none(),
+            "closed executor must not be published for spawning"
+        );
         *state = ExecutorState::Stopped;
         self.state_changed.notify_all();
     }
 }
 
 struct Executor {
-    handle: ExecutorHandle,
+    handle: Arc<ExecutorHandle>,
     receiver: Receiver<Runnable>,
     workers: Vec<JoinHandle<()>>,
 }
@@ -711,10 +738,10 @@ impl Executor {
             workers.push(worker);
         }
         let workers = scopeguard::ScopeGuard::into_inner(workers);
-        let handle = ExecutorHandle {
+        let handle = Arc::new(ExecutorHandle {
             inner: Arc::clone(&inner),
             sender: sender.clone(),
-        };
+        });
         Ok(Self {
             handle,
             receiver,
@@ -3358,5 +3385,36 @@ mod tests {
             "async_udf_boundary_named must catch panics at the FFI boundary"
         );
         assert!(runtime.close_async().issues.is_empty());
+    }
+
+    #[test]
+    fn spawn_fast_path_does_not_wait_for_manager_state() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+
+        // Deliberately hold the cold lifecycle mutex.
+        let state_guard = manager.state.lock();
+
+        let spawning_manager = Arc::clone(&manager);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+        let thread = std::thread::spawn(move || {
+            let (source, _token) =
+                CancellationSource::new(CancellationGuarantee::CalculationScoped);
+            let result =
+                spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+            tx.send(result).unwrap();
+        });
+
+        // spawn must complete while `state` remains locked.
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("spawn must not wait for manager state")
+                .is_ok()
+        );
+
+        drop(state_guard);
+        thread.join().unwrap();
+        assert!(manager.close().issues.is_empty());
     }
 }
