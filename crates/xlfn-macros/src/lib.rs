@@ -920,9 +920,7 @@ fn expand_excel_function(
                 #(#raw_names: *mut ::xlfn::sys::XLOPER12,)*
                 __async_handle: *mut ::xlfn::sys::XLOPER12,
             ) {
-                ::xlfn::__private::ffi_boundary_void(&crate::__XLFN_RUNTIME, || {
-                    #boundary
-                })
+                #boundary
             }
         }
     } else {
@@ -1671,6 +1669,7 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(expanded.contains("async_udf_boundary_named"));
+        assert!(!expanded.contains("ffi_boundary_void"));
         assert!(expanded.contains("ResultAbi :: AsyncVoid"));
         assert!(expanded.contains("__async_handle"));
         assert!(expanded.contains("thread_safe : true"));

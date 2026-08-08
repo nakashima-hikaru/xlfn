@@ -1298,18 +1298,58 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: IntoExcelValue + Send + 'static,
 {
-    let call_id = runtime.next_call_id();
-    let timer = crate::execution::CallTimer::start();
-    let started_at = std::time::SystemTime::now();
-    let guard = match runtime.enter() {
-        Ok(guard) => guard,
-        Err(error) => {
-            crate::diagnostics::report_no_unwind(udf_id, &error);
-            // SAFETY: forwarded from this function's raw-handle contract.
-            unsafe { return_error(udf_id, raw_handle, &error) };
+    let (_export_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
+
+    if !accepted {
+        return;
+    }
+
+    let call = match runtime.enter() {
+        Ok(call) => call,
+        Err(_) => {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
             return;
         }
     };
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: forwarded from this function's raw-handle contract.
+        unsafe {
+            async_udf_boundary_named_inner(runtime, &call, udf_id, excel_name, raw_handle, start);
+        }
+    }));
+
+    if result.is_err() {
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+    }
+
+    drop(call);
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
+}
+
+unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
+    runtime: &'static Runtime<S>,
+    guard: &crate::runtime::CallGuard<'_, S>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    raw_handle: *mut XLOPER12,
+    start: Start,
+) where
+    S: Send + Sync + 'static,
+    Start: FnOnce(Arc<S>, CancellationToken) -> XllResult<Fut>,
+    Fut: Future<Output = XllResult<T>> + Send + 'static,
+    T: IntoExcelValue + Send + 'static,
+{
+    let call_id = runtime.next_call_id();
+    let timer = crate::execution::CallTimer::start();
+    let started_at = std::time::SystemTime::now();
+
     let concurrent_calls = guard.concurrent_calls();
     let metadata = CallMetadata {
         udf_id,
@@ -3267,5 +3307,56 @@ mod tests {
         advancing.join().unwrap();
         closing.join().unwrap();
         manager.set_after_generation_admission_hook(None);
+    }
+
+    #[test]
+    fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
+        struct PanickingLayer;
+
+        impl crate::execution::UdfLayer for PanickingLayer {
+            fn enter(
+                &self,
+                _: &CallMetadata,
+            ) -> XllResult<Box<dyn crate::execution::UdfLayerGuard>> {
+                panic!("injected layer panic in outer boundary");
+            }
+        }
+
+        let runtime = Box::leak(Box::new(Runtime::new()));
+        let _guard = test_lock_for_runtime(runtime);
+        let mut open_attempt = runtime.begin_open().unwrap();
+        runtime.publish(1_u32, vec![Arc::new(PanickingLayer)]);
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        runtime.start_async(1).unwrap();
+
+        let mut bytes = vec![1_u8, 2, 3, 4];
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: bytes.as_mut_ptr(),
+                    },
+                    byte_count: bytes.len() as i32,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+
+        // SAFETY: handle is a valid, stack-local XLOPER12 constructed above.
+        let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+            async_udf_boundary_named(
+                runtime,
+                "test_async_panic_boundary",
+                "TEST.ASYNC.PANIC",
+                &mut handle,
+                |_, _| Ok(async { Ok::<_, XllError>(42.0) }),
+            );
+        }));
+
+        assert!(
+            result.is_ok(),
+            "async_udf_boundary_named must catch panics at the FFI boundary"
+        );
+        assert!(runtime.close_async().issues.is_empty());
     }
 }
