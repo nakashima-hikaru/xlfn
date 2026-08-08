@@ -282,7 +282,7 @@ pub(crate) fn enter_cleanup<'a>(
     MODULE_CALLBACK_GATE.enter_cleanup(invocation)
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "Internal inspection helper for tests")]
 pub(crate) fn blocked_status() -> Option<ExcelCallbackStatus> {
     MODULE_CALLBACK_GATE.blocked_status()
 }
