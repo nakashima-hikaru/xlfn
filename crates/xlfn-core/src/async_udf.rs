@@ -415,16 +415,69 @@ enum ExecutorPhase {
     Closing,
 }
 
+const TASK_SHARDS: usize = 32;
+
+fn task_shard(id: u64) -> usize {
+    (id as usize) & (TASK_SHARDS - 1)
+}
+
+struct TaskShard {
+    tasks: Mutex<HashMap<u64, TaskControl>>,
+}
+
+struct GenerationState {
+    id: u64,
+    cancelled: AtomicBool,
+    task_count: AtomicUsize,
+    shards: Box<[TaskShard]>,
+}
+
+impl GenerationState {
+    fn new(id: u64) -> Self {
+        let shards = (0..TASK_SHARDS)
+            .map(|_| TaskShard {
+                tasks: Mutex::new(HashMap::new()),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            id,
+            cancelled: AtomicBool::new(false),
+            task_count: AtomicUsize::new(0),
+            shards,
+        }
+    }
+
+    fn remove_task(&self, id: u64) -> bool {
+        let index = task_shard(id);
+        let mut tasks = self.shards[index].tasks.lock();
+        if tasks.remove(&id).is_some() {
+            self.task_count.fetch_sub(1, Ordering::AcqRel);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drain_tasks(&self) -> Vec<TaskControl> {
+        let mut result = Vec::new();
+        for shard in self.shards.iter() {
+            let mut tasks = shard.tasks.lock();
+            let count = tasks.len();
+            let drained = tasks.drain().map(|(_, task)| task).collect::<Vec<_>>();
+            result.extend(drained);
+            if count != 0 {
+                self.task_count.fetch_sub(count, Ordering::AcqRel);
+            }
+        }
+        result
+    }
+}
+
 struct TaskRegistry {
     phase: ExecutorPhase,
     current_generation: u64,
-    generations: HashMap<u64, CalculationGeneration>,
-}
-
-struct CalculationGeneration {
-    id: u64,
-    cancelled: bool,
-    tasks: HashMap<u64, TaskControl>,
+    generations: HashMap<u64, Arc<GenerationState>>,
 }
 
 struct TaskControl {
@@ -456,7 +509,7 @@ impl ActiveReservation {
         Some(Self { inner, armed: true })
     }
 
-    fn commit(mut self, generation: u64, id: u64) -> CompletionGuard {
+    fn commit(mut self, generation: Arc<GenerationState>, id: u64) -> CompletionGuard {
         self.armed = false;
 
         CompletionGuard {
@@ -493,11 +546,7 @@ impl Executor {
                 current_generation: generation,
                 generations: HashMap::from([(
                     generation,
-                    CalculationGeneration {
-                        id: generation,
-                        cancelled: false,
-                        tasks: HashMap::new(),
-                    },
+                    Arc::new(GenerationState::new(generation)),
                 )]),
             }),
             wait_lock: Mutex::new(()),
@@ -573,8 +622,8 @@ impl ExecutorHandle {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (abort, registration) = AbortHandle::new_pair();
 
-        let reservation = {
-            let mut registry = self.inner.registry.lock();
+        let (reservation, current_gen) = {
+            let registry = self.inner.registry.lock();
 
             if registry.phase == ExecutorPhase::Closing {
                 return Err(SpawnRejection {
@@ -594,7 +643,7 @@ impl ExecutorHandle {
                 });
             }
 
-            let Some(current) = registry.generations.get_mut(&generation) else {
+            let Some(current) = registry.generations.get(&generation) else {
                 return Err(SpawnRejection {
                     error: XllError::Internal {
                         diagnostic_id: 0x4153_594e_4745_4e4d,
@@ -605,7 +654,7 @@ impl ExecutorHandle {
                 });
             };
 
-            if current.cancelled {
+            if current.cancelled.load(Ordering::Acquire) {
                 return Err(SpawnRejection {
                     error: cancelled_calculation_error(),
                     future,
@@ -623,22 +672,24 @@ impl ExecutorHandle {
                 });
             };
 
-            current.tasks.insert(
+            let index = task_shard(id);
+            current.shards[index].tasks.lock().insert(
                 id,
                 TaskControl {
                     abort,
                     cancellation,
                 },
             );
+            current.task_count.fetch_add(1, Ordering::AcqRel);
 
-            reservation
+            (reservation, Arc::clone(current))
         };
 
         #[allow(
             unused_mut,
             reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
         )]
-        let mut completion = reservation.commit(generation, id);
+        let mut completion = reservation.commit(current_gen, id);
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
@@ -679,13 +730,16 @@ impl ExecutorHandle {
     }
 
     fn cancel_generation(&self, generation: u64) -> Vec<TaskControl> {
-        let mut registry = self.inner.registry.lock();
-        let Some(state) = registry.generations.get_mut(&generation) else {
-            return Vec::new();
+        let generation_arc = {
+            let registry = self.inner.registry.lock();
+            let Some(state) = registry.generations.get(&generation) else {
+                return Vec::new();
+            };
+            debug_assert_eq!(state.id, generation);
+            state.cancelled.store(true, Ordering::Release);
+            Arc::clone(state)
         };
-        debug_assert_eq!(state.id, generation);
-        state.cancelled = true;
-        state.tasks.drain().map(|(_, task)| task).collect()
+        generation_arc.drain_tasks()
     }
 
     fn advance_generation(&self, next: u64) -> bool {
@@ -696,26 +750,25 @@ impl ExecutorHandle {
         registry
             .generations
             .entry(next)
-            .or_insert_with(|| CalculationGeneration {
-                id: next,
-                cancelled: false,
-                tasks: HashMap::new(),
-            });
+            .or_insert_with(|| Arc::new(GenerationState::new(next)));
         registry.current_generation = next;
-        registry
-            .generations
-            .retain(|generation, state| *generation == next || !state.tasks.is_empty());
+        registry.generations.retain(|generation, state| {
+            *generation == next || state.task_count.load(Ordering::Acquire) != 0
+        });
         true
     }
 
     fn request_close(&self) -> Vec<TaskControl> {
-        let mut registry = self.inner.registry.lock();
-        registry.phase = ExecutorPhase::Closing;
-        registry
-            .generations
-            .values_mut()
-            .flat_map(|generation| generation.tasks.drain().map(|(_, task)| task))
-            .collect()
+        let generations = {
+            let mut registry = self.inner.registry.lock();
+            registry.phase = ExecutorPhase::Closing;
+            registry.generations.values().cloned().collect::<Vec<_>>()
+        };
+        let mut tasks = Vec::new();
+        for generation in generations {
+            tasks.extend(generation.drain_tasks());
+        }
+        tasks
     }
 }
 
@@ -810,7 +863,7 @@ fn release_active(inner: &ExecutorInner) {
 
 struct CompletionGuard {
     inner: Arc<ExecutorInner>,
-    generation: u64,
+    generation: Arc<GenerationState>,
     id: u64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     completion: Mutex<crate::shutdown_refinement::Completion>,
@@ -820,11 +873,7 @@ struct CompletionGuard {
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        let mut registry = self.inner.registry.lock();
-        if let Some(generation) = registry.generations.get_mut(&self.generation) {
-            generation.tasks.remove(&self.id);
-        }
-        drop(registry);
+        self.generation.remove_task(self.id);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.ghost.as_ref() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::EndAsyncTask(
@@ -2663,5 +2712,36 @@ mod tests {
 
             assert!(manager.close().issues.is_empty());
         }
+    }
+
+    #[test]
+    fn test_generation_state_sharded_removal_and_task_count() {
+        let state = GenerationState::new(1);
+        let (abort, _) = AbortHandle::new_pair();
+        for id in 1..=100 {
+            let index = task_shard(id);
+            let (cancellation, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
+            state.shards[index].tasks.lock().insert(
+                id,
+                TaskControl {
+                    abort: abort.clone(),
+                    cancellation,
+                },
+            );
+            state.task_count.fetch_add(1, Ordering::AcqRel);
+        }
+
+        assert_eq!(state.task_count.load(Ordering::Acquire), 100);
+
+        // Remove 40 tasks via remove_task
+        for id in 1..=40 {
+            assert!(state.remove_task(id));
+        }
+        assert_eq!(state.task_count.load(Ordering::Acquire), 60);
+
+        // Drain remaining 60 tasks
+        let drained = state.drain_tasks();
+        assert_eq!(drained.len(), 60);
+        assert_eq!(state.task_count.load(Ordering::Acquire), 0);
     }
 }
