@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 #[cfg(any(target_os = "windows", test))]
 use std::sync::Weak;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::ThreadId;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
@@ -106,21 +106,27 @@ impl<T: ExcelHandleObject> crate::value::MainThreadReturn for Handle<T> {}
 impl<T: ExcelHandleObject> crate::value::VolatileReturn for Handle<T> {}
 
 struct HandleLeaseState {
-    active: Mutex<usize>,
+    active: AtomicUsize,
+    wait_lock: Mutex<()>,
     idle: Condvar,
     cleanup_failure: Mutex<Option<XllError>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    #[cfg(test)]
+    before_idle_wait_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleLeaseState {
     fn new() -> Self {
         Self {
-            active: Mutex::new(0),
+            active: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             cleanup_failure: Mutex::new(None),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
+            #[cfg(test)]
+            before_idle_wait_hook: Mutex::new(None),
         }
     }
 
@@ -137,22 +143,28 @@ impl HandleLeaseState {
     }
 
     fn acquire(self: &Arc<Self>) -> HandleLease {
-        let mut active = self.active.lock();
-        *active = active
-            .checked_add(1)
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
             .expect("handle lease count cannot overflow");
-        drop(active);
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
+
         HandleLease {
             state: Arc::clone(self),
         }
     }
 
     fn wait_for_idle(&self) {
-        let mut active = self.active.lock();
-        while *active != 0 {
-            self.idle.wait(&mut active);
+        let mut guard = self.wait_lock.lock();
+        while self.active.load(Ordering::Acquire) != 0 {
+            #[cfg(test)]
+            if let Some(hook) = self.before_idle_wait_hook.lock().as_ref().cloned() {
+                hook();
+            }
+            self.idle.wait(&mut guard);
         }
     }
 
@@ -173,7 +185,7 @@ impl HandleLeaseState {
 
     #[cfg(test)]
     fn active(&self) -> usize {
-        *self.active.lock()
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -195,12 +207,19 @@ impl Clone for HandleLease {
 
 impl Drop for HandleLease {
     fn drop(&mut self) {
-        let mut active = self.state.active.lock();
-        *active = active
-            .checked_sub(1)
+        let previous = self
+            .state
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_sub(1)
+            })
             .expect("handle lease count remains balanced");
-        self.state.idle.notify_all();
-        drop(active);
+
+        if previous == 1 {
+            let _wait_guard = self.state.wait_lock.lock();
+            self.state.idle.notify_all();
+        }
+
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.state
             .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
@@ -2738,5 +2757,102 @@ mod tests {
 
         runtime.registry.close_with_leases(&runtime.leases).unwrap();
         assert_eq!(runtime.leases.active(), 0);
+    }
+
+    #[test]
+    fn handle_lease_waiter_is_woken_by_last_release() {
+        let leases = Arc::new(HandleLeaseState::new());
+        let lease = leases.acquire();
+
+        let waiting = Arc::clone(&leases);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiting.wait_for_idle();
+        });
+
+        started_rx.recv().unwrap();
+
+        drop(lease);
+
+        waiter.join().unwrap();
+        assert_eq!(leases.active(), 0);
+    }
+
+    #[test]
+    fn handle_lease_waiter_synchronization_prevents_lost_wakeup() {
+        use std::sync::Barrier;
+
+        let leases = Arc::new(HandleLeaseState::new());
+        let lease = leases.acquire();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_hook = Arc::clone(&barrier);
+        *leases.before_idle_wait_hook.lock() = Some(Arc::new(move || {
+            barrier_hook.wait();
+        }));
+
+        let waiting = Arc::clone(&leases);
+        let waiter = std::thread::spawn(move || {
+            waiting.wait_for_idle();
+        });
+
+        barrier.wait();
+
+        drop(lease);
+
+        waiter.join().unwrap();
+        assert_eq!(leases.active(), 0);
+    }
+
+    #[test]
+    fn registry_close_with_leases_waits_for_active_handle_and_blocks_new_lookups() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct TestObj;
+        impl ExcelHandleObject for TestObj {}
+
+        let registry = Arc::new(HandleRegistry::new(8));
+        let leases = Arc::new(HandleLeaseState::new());
+
+        let (token, _) = registry
+            .insert_pending(&mut Some(Arc::new(TestObj)))
+            .map(|t| (t, ()))
+            .unwrap();
+
+        let handle: Handle<TestObj> = registry.lookup_handle(&token, &leases).unwrap();
+        assert_eq!(leases.active(), 1);
+
+        let closing_registry = Arc::clone(&registry);
+        let closing_leases = Arc::clone(&leases);
+        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+
+        let closer = std::thread::spawn(move || {
+            closed_tx
+                .send(closing_registry.close_with_leases(&closing_leases))
+                .unwrap();
+        });
+
+        while !registry.state.read().closed {
+            std::thread::yield_now();
+        }
+
+        assert!(matches!(
+            registry.lookup_handle::<TestObj>(&token, &leases),
+            Err(XllError::Closing)
+        ));
+
+        assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+        drop(handle);
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        closer.join().unwrap();
+        assert_eq!(leases.active(), 0);
     }
 }
