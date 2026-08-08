@@ -7,6 +7,7 @@ use crate::{
     CallId, CallMetadata, CallOutcome, CancellationGuarantee, CancellationToken, IntoExcelValue,
     Runtime, UdfResultKind, XllError, XllResult,
 };
+use arc_swap::ArcSwap;
 use async_channel::{Receiver, Sender};
 use async_task::Runnable;
 use futures_util::FutureExt;
@@ -267,6 +268,26 @@ impl AsyncManager {
     }
 
     #[cfg(test)]
+    fn set_after_generation_snapshot_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let state = self.state.lock();
+        if let ExecutorState::Running(executor) = &*state {
+            *executor.handle.inner.after_generation_snapshot_hook.lock() = hook;
+        } else if hook.is_some() {
+            panic!("async executor must be running when installing a test hook");
+        }
+    }
+
+    #[cfg(test)]
+    fn set_after_generation_admission_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let state = self.state.lock();
+        if let ExecutorState::Running(executor) = &*state {
+            *executor.handle.inner.after_generation_admission_hook.lock() = hook;
+        } else if hook.is_some() {
+            panic!("async executor must be running when installing a test hook");
+        }
+    }
+
+    #[cfg(test)]
     fn set_before_task_schedule_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         let state = self.state.lock();
         if let ExecutorState::Running(executor) = &*state {
@@ -400,6 +421,8 @@ struct ExecutorInner {
     active: AtomicUsize,
     live_workers: AtomicUsize,
     fatal_worker_failure: AtomicBool,
+    closing: AtomicBool,
+    current: ArcSwap<GenerationState>,
     registry: Mutex<TaskRegistry>,
     wait_lock: Mutex<()>,
     idle: Condvar,
@@ -407,6 +430,10 @@ struct ExecutorInner {
     ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_generation_snapshot_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_generation_admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,8 +452,85 @@ struct TaskShard {
     tasks: Mutex<HashMap<u64, TaskControl>>,
 }
 
+const ADMISSION_CLOSED: usize = 1usize << (usize::BITS - 1);
+const ADMISSION_COUNT_MASK: usize = ADMISSION_CLOSED - 1;
+
+struct GenerationAdmission {
+    state: AtomicUsize,
+    wait_lock: Mutex<()>,
+    idle: Condvar,
+}
+
+impl GenerationAdmission {
+    const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
+            idle: Condvar::new(),
+        }
+    }
+
+    fn try_enter(&self) -> Option<AdmissionPermit<'_>> {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+
+            if state & ADMISSION_CLOSED != 0 {
+                return None;
+            }
+
+            let active = state & ADMISSION_COUNT_MASK;
+            if active == ADMISSION_COUNT_MASK {
+                std::process::abort();
+            }
+
+            let next = state + 1;
+
+            if self
+                .state
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(AdmissionPermit { admission: self });
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.state.fetch_or(ADMISSION_CLOSED, Ordering::AcqRel);
+    }
+
+    fn wait_for_idle(&self) {
+        let mut guard = self.wait_lock.lock();
+        while self.state.load(Ordering::Acquire) & ADMISSION_COUNT_MASK != 0 {
+            self.idle.wait(&mut guard);
+        }
+    }
+}
+
+struct AdmissionPermit<'a> {
+    admission: &'a GenerationAdmission,
+}
+
+impl Drop for AdmissionPermit<'_> {
+    fn drop(&mut self) {
+        let previous = self.admission.state.fetch_sub(1, Ordering::AcqRel);
+
+        debug_assert_ne!(
+            previous & ADMISSION_COUNT_MASK,
+            0,
+            "generation admission count must remain balanced"
+        );
+
+        if previous & ADMISSION_CLOSED != 0 && previous & ADMISSION_COUNT_MASK == 1 {
+            let _guard = self.admission.wait_lock.lock();
+            self.admission.idle.notify_all();
+        }
+    }
+}
+
 struct GenerationState {
     id: u64,
+    admission: GenerationAdmission,
     cancelled: AtomicBool,
     task_count: AtomicUsize,
     shards: Box<[TaskShard]>,
@@ -442,6 +546,7 @@ impl GenerationState {
             .into_boxed_slice();
         Self {
             id,
+            admission: GenerationAdmission::new(),
             cancelled: AtomicBool::new(false),
             task_count: AtomicUsize::new(0),
             shards,
@@ -476,7 +581,6 @@ impl GenerationState {
 
 struct TaskRegistry {
     phase: ExecutorPhase,
-    current_generation: u64,
     generations: HashMap<u64, Arc<GenerationState>>,
 }
 
@@ -536,18 +640,17 @@ impl Executor {
     fn start(worker_count: usize, generation: u64) -> XllResult<Self> {
         let worker_count = worker_count.clamp(1, 32);
         let (sender, receiver) = async_channel::unbounded::<Runnable>();
+        let initial_generation = Arc::new(GenerationState::new(generation));
         let inner = Arc::new(ExecutorInner {
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             live_workers: AtomicUsize::new(0),
             fatal_worker_failure: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            current: ArcSwap::from(Arc::clone(&initial_generation)),
             registry: Mutex::new(TaskRegistry {
                 phase: ExecutorPhase::Running,
-                current_generation: generation,
-                generations: HashMap::from([(
-                    generation,
-                    Arc::new(GenerationState::new(generation)),
-                )]),
+                generations: HashMap::from([(generation, initial_generation)]),
             }),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
@@ -555,6 +658,10 @@ impl Executor {
             ghost: Mutex::new(None),
             #[cfg(test)]
             before_task_schedule_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_generation_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_generation_admission_hook: Mutex::new(None),
         });
         let mut workers = scopeguard::guard(
             Vec::<JoinHandle<()>>::with_capacity(worker_count),
@@ -619,77 +726,91 @@ impl ExecutorHandle {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(SpawnRejection {
+                error: XllError::Closing,
+                future,
+                cancellation,
+                cancel: true,
+            });
+        }
+
+        let current = self.inner.current.load_full();
+
+        #[cfg(test)]
+        {
+            let hook = self.inner.after_generation_snapshot_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
+        if current.id != generation {
+            return Err(SpawnRejection {
+                error: cancelled_calculation_error(),
+                future,
+                cancellation,
+                cancel: true,
+            });
+        }
+
+        let Some(admission) = current.admission.try_enter() else {
+            let error = if self.inner.closing.load(Ordering::Acquire) {
+                XllError::Closing
+            } else {
+                cancelled_calculation_error()
+            };
+
+            return Err(SpawnRejection {
+                error,
+                future,
+                cancellation,
+                cancel: true,
+            });
+        };
+
+        #[cfg(test)]
+        {
+            let hook = self.inner.after_generation_admission_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
+        let Some(reservation) = ActiveReservation::try_acquire(Arc::clone(&self.inner)) else {
+            drop(admission);
+            return Err(SpawnRejection {
+                error: XllError::Overloaded,
+                future,
+                cancellation,
+                cancel: false,
+            });
+        };
+
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (abort, registration) = AbortHandle::new_pair();
 
-        let (reservation, current_gen) = {
-            let registry = self.inner.registry.lock();
-
-            if registry.phase == ExecutorPhase::Closing {
-                return Err(SpawnRejection {
-                    error: XllError::Closing,
-                    future,
-                    cancellation,
-                    cancel: true,
-                });
-            }
-
-            if generation != registry.current_generation {
-                return Err(SpawnRejection {
-                    error: cancelled_calculation_error(),
-                    future,
-                    cancellation,
-                    cancel: true,
-                });
-            }
-
-            let Some(current) = registry.generations.get(&generation) else {
-                return Err(SpawnRejection {
-                    error: XllError::Internal {
-                        diagnostic_id: 0x4153_594e_4745_4e4d,
-                    },
-                    future,
-                    cancellation,
-                    cancel: true,
-                });
-            };
-
-            if current.cancelled.load(Ordering::Acquire) {
-                return Err(SpawnRejection {
-                    error: cancelled_calculation_error(),
-                    future,
-                    cancellation,
-                    cancel: true,
-                });
-            }
-
-            let Some(reservation) = ActiveReservation::try_acquire(Arc::clone(&self.inner)) else {
-                return Err(SpawnRejection {
-                    error: XllError::Overloaded,
-                    future,
-                    cancellation,
-                    cancel: false,
-                });
-            };
-
-            let index = task_shard(id);
-            current.shards[index].tasks.lock().insert(
+        let index = task_shard(id);
+        {
+            let mut tasks = current.shards[index].tasks.lock();
+            let previous = tasks.insert(
                 id,
                 TaskControl {
                     abort,
                     cancellation,
                 },
             );
+            debug_assert!(previous.is_none(), "task ID must be unique per generation");
             current.task_count.fetch_add(1, Ordering::AcqRel);
-
-            (reservation, Arc::clone(current))
-        };
+        }
 
         #[allow(
             unused_mut,
             reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
         )]
-        let mut completion = reservation.commit(current_gen, id);
+        let mut completion = reservation.commit(Arc::clone(&current), id);
+
+        drop(admission);
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.inner.ghost.lock().as_ref().cloned() {
@@ -737,8 +858,10 @@ impl ExecutorHandle {
             };
             debug_assert_eq!(state.id, generation);
             state.cancelled.store(true, Ordering::Release);
+            state.admission.close();
             Arc::clone(state)
         };
+        generation_arc.admission.wait_for_idle();
         generation_arc.drain_tasks()
     }
 
@@ -747,11 +870,19 @@ impl ExecutorHandle {
         if registry.phase == ExecutorPhase::Closing {
             return false;
         }
-        registry
+
+        let old = self.inner.current.load_full();
+        old.admission.close();
+        old.admission.wait_for_idle();
+
+        let next_generation = registry
             .generations
             .entry(next)
-            .or_insert_with(|| Arc::new(GenerationState::new(next)));
-        registry.current_generation = next;
+            .or_insert_with(|| Arc::new(GenerationState::new(next)))
+            .clone();
+
+        self.inner.current.store(Arc::clone(&next_generation));
+
         registry.generations.retain(|generation, state| {
             *generation == next || state.task_count.load(Ordering::Acquire) != 0
         });
@@ -762,8 +893,18 @@ impl ExecutorHandle {
         let generations = {
             let mut registry = self.inner.registry.lock();
             registry.phase = ExecutorPhase::Closing;
-            registry.generations.values().cloned().collect::<Vec<_>>()
+            self.inner.closing.store(true, Ordering::Release);
+            let generations = registry.generations.values().cloned().collect::<Vec<_>>();
+            for generation in &generations {
+                generation.admission.close();
+            }
+            generations
         };
+
+        for generation in &generations {
+            generation.admission.wait_for_idle();
+        }
+
         let mut tasks = Vec::new();
         for generation in generations {
             tasks.extend(generation.drain_tasks());
@@ -2743,5 +2884,207 @@ mod tests {
         let drained = state.drain_tasks();
         assert_eq!(drained.len(), 60);
         assert_eq!(state.task_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        manager.set_after_generation_snapshot_hook(Some(Arc::new(move || {
+            snapshot_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("snapshot hook should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+                .unwrap();
+        });
+
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should snapshot current generation");
+
+        let advancing_manager = Arc::clone(&manager);
+        let (advance_result_tx, advance_result_rx) = std::sync::mpsc::sync_channel(1);
+        let advancing = std::thread::spawn(move || {
+            advance_result_tx
+                .send(advancing_manager.advance_generation())
+                .unwrap();
+        });
+
+        assert!(
+            advance_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        );
+        release_tx.send(()).unwrap();
+
+        let spawn_res = spawn_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            spawn_res,
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+        assert!(token.is_cancelled());
+
+        spawning.join().unwrap();
+        advancing.join().unwrap();
+        manager.set_after_generation_snapshot_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn spawn_and_advance_linearization_case_b_admission_holds_advance() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("admission hook should be released");
+        })));
+
+        let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+                .unwrap();
+        });
+
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should enter admission");
+
+        let advancing_manager = Arc::clone(&manager);
+        let (advance_result_tx, advance_result_rx) = std::sync::mpsc::sync_channel(1);
+        let advancing = std::thread::spawn(move || {
+            advance_result_tx
+                .send(advancing_manager.advance_generation())
+                .unwrap();
+        });
+
+        // advance_generation should block on wait_for_idle while admission is held
+        assert!(
+            advance_result_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        release_tx.send(()).unwrap();
+        assert!(
+            spawn_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            advance_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        );
+
+        spawning.join().unwrap();
+        advancing.join().unwrap();
+        manager.set_after_generation_admission_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn spawn_and_cancel_linearization_case_a_spawn_admitted_first() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+            admitted_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("admission hook should be released");
+        })));
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+        let spawning_manager = Arc::clone(&manager);
+        let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
+        let spawning = std::thread::spawn(move || {
+            spawn_result_tx
+                .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+                .unwrap();
+        });
+
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should enter admission");
+
+        let cancelling_manager = Arc::clone(&manager);
+        let (cancel_result_tx, cancel_result_rx) = std::sync::mpsc::sync_channel(1);
+        let cancelling = std::thread::spawn(move || {
+            cancelling_manager.cancel_generation(TEST_GENERATION);
+            cancel_result_tx.send(()).unwrap();
+        });
+
+        // cancel_generation should block waiting for admission idle
+        assert!(
+            cancel_result_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        release_tx.send(()).unwrap();
+        assert!(
+            spawn_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        cancel_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        spawning.join().unwrap();
+        cancelling.join().unwrap();
+        assert!(token.is_cancelled());
+        manager.set_after_generation_admission_hook(None);
+        assert!(manager.close().issues.is_empty());
+    }
+
+    #[test]
+    fn spawn_and_cancel_linearization_case_b_cancel_closed_first() {
+        let manager = Arc::new(AsyncManager::new());
+        manager.start(1).unwrap();
+        manager.cancel_generation(TEST_GENERATION);
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+        let res = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+        assert!(matches!(
+            res,
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+        assert!(token.is_cancelled());
+        assert!(manager.close().issues.is_empty());
     }
 }
