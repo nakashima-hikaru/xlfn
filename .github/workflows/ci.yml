@@ -75,8 +75,12 @@ jobs:
                   --
                   --ignored
 
-            - name: Compile-test the RTD guide fixture
-              run: cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
+            - name: Check and lint standalone examples
+              run: |
+                  cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
+                  cargo clippy --manifest-path examples/basic-xll/Cargo.toml --all-targets --locked -- -D warnings
+                  cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
+                  cargo clippy --manifest-path examples/rtd-source/Cargo.toml --all-targets --locked -- -D warnings
 
             - name: Install mdBook
               uses: peaceiris/actions-mdbook@062dc9e3eab0bad35531417c6bb6c6a7a184764f # v2
