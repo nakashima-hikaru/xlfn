@@ -17,13 +17,18 @@ async = [
     "dep:async-task",
     "dep:futures-util",
 ]
-bench-internals = ["async"]
+bench-internals = []
 
 [lib]
 bench = false
 
 [[bench]]
 name = "async_spawn"
+harness = false
+required-features = ["bench-internals", "async"]
+
+[[bench]]
+name = "sync_boundary"
 harness = false
 required-features = ["bench-internals"]
 

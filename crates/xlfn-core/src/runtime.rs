@@ -5,7 +5,7 @@ use arc_swap::ArcSwapOption;
 use parking_lot::MutexGuard;
 use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,13 +42,12 @@ pub struct Runtime<S> {
     metadata_debt:
         Mutex<BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>>>,
     event_registrations: Mutex<Vec<crate::registration::EventRegistration>>,
-    active_calls: AtomicUsize,
     returns: OnceLock<Arc<crate::return_value::ReturnTracker>>,
     next_call_id: AtomicU64,
     #[cfg(not(feature = "async"))]
     calculation_id: AtomicU64,
     wait_lock: Mutex<()>,
-    no_active_calls: Condvar,
+    lifecycle_changed: Condvar,
     close_attempt_active: AtomicBool,
     registration_state_unknown: AtomicBool,
     handles: Mutex<Option<XllResult<Arc<crate::handle::HandleRuntime>>>>,
@@ -58,8 +57,6 @@ pub struct Runtime<S> {
     async_manager: crate::async_udf::AsyncManager,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: OnceLock<crate::shutdown_refinement::GhostHandle>,
-    #[cfg(test)]
-    zero_active_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -83,13 +80,12 @@ impl<S> Runtime<S> {
             registrations: Mutex::new(Vec::new()),
             metadata_debt: Mutex::new(BTreeMap::new()),
             event_registrations: Mutex::new(Vec::new()),
-            active_calls: AtomicUsize::new(0),
             returns: OnceLock::new(),
             next_call_id: AtomicU64::new(1),
             #[cfg(not(feature = "async"))]
             calculation_id: AtomicU64::new(1),
             wait_lock: Mutex::new(()),
-            no_active_calls: Condvar::new(),
+            lifecycle_changed: Condvar::new(),
             close_attempt_active: AtomicBool::new(false),
             registration_state_unknown: AtomicBool::new(false),
             handles: Mutex::new(None),
@@ -99,8 +95,6 @@ impl<S> Runtime<S> {
             async_manager: crate::async_udf::AsyncManager::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: OnceLock::new(),
-            #[cfg(test)]
-            zero_active_hook: Mutex::new(None),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
@@ -207,7 +201,8 @@ impl<S> Runtime<S> {
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
         let _wait_guard = self.wait_lock.lock();
-        if !attempt.active || self.open_attempt_id.load(Ordering::Acquire) != attempt.attempt_id {
+        self.lifecycle_changed.notify_all();
+        if self.open_attempt_id.load(Ordering::Acquire) != attempt.attempt_id {
             attempt.active = false;
             return Err(XllError::Closing);
         }
@@ -278,7 +273,6 @@ impl<S> Runtime<S> {
         }
         self.open_attempt_id.store(0, Ordering::Release);
         attempt.active = false;
-        self.no_active_calls.notify_all();
 
         if can_commit {
             Ok(())
@@ -337,70 +331,33 @@ impl<S> Runtime<S> {
             LifecyclePhase::OpenRollbackPending => true,
             LifecyclePhase::Closed | LifecyclePhase::Open | LifecyclePhase::Closing => false,
         };
-        self.no_active_calls.notify_all();
+        self.lifecycle_changed.notify_all();
         should_rollback
     }
 
     pub fn enter(&self) -> XllResult<CallGuard<'_, S>> {
-        let (result, release_admission) =
-            crate::ingress::global_ingress().with_linearization(|| {
-                if self.phase() != LifecyclePhase::Open {
-                    return (Err(XllError::Closing), false);
-                }
-
-                let concurrent_calls = self.active_calls.fetch_add(1, Ordering::AcqRel) + 1;
-                if self.phase() != LifecyclePhase::Open {
-                    return (Err(XllError::Closing), true);
-                }
-
-                let state = self.state.load_full();
-                match state {
-                    Some(state) => {
-                        #[cfg(any(test, feature = "shutdown-refinement"))]
-                        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
-                        (
-                            Ok(CallGuard {
-                                runtime: self,
-                                state: Some(state),
-                                concurrent_calls,
-                            }),
-                            false,
-                        )
-                    }
-                    None => (
-                        Err(XllError::Internal {
-                            diagnostic_id: 0x4d49_5353_5354_4154,
-                        }),
-                        true,
-                    ),
-                }
-            });
-        if release_admission {
-            self.leave(false);
-        }
-        result
-    }
-
-    fn leave(&self, record_ghost: bool) {
-        let was_last = crate::ingress::global_ingress().with_linearization(|| {
-            let previous = self.active_calls.fetch_sub(1, Ordering::AcqRel);
-            if previous == 0 {
-                std::process::abort();
+        let concurrent_calls = crate::ingress::global_ingress().active_udfs();
+        crate::ingress::global_ingress().with_linearization(|| {
+            if self.phase() != LifecyclePhase::Open {
+                return Err(XllError::Closing);
             }
-            if record_ghost {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
-                self.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveCall);
+
+            let state = self.state.load_full();
+            match state {
+                Some(state) => {
+                    #[cfg(any(test, feature = "shutdown-refinement"))]
+                    self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
+                    Ok(CallGuard {
+                        runtime: self,
+                        state,
+                        concurrent_calls,
+                    })
+                }
+                None => Err(XllError::Internal {
+                    diagnostic_id: 0x4d49_5353_5354_4154,
+                }),
             }
-            previous == 1
-        });
-        if was_last {
-            #[cfg(test)]
-            if let Some(hook) = self.zero_active_hook.lock().as_ref().cloned() {
-                hook();
-            }
-            let _guard = self.wait_lock.lock();
-            self.no_active_calls.notify_all();
-        }
+        })
     }
 
     #[cfg(test)]
@@ -469,7 +426,7 @@ impl<S> Runtime<S> {
             match decision {
                 Some(true) => return Some(CloseAttemptGuard { runtime: self }),
                 Some(false) => return None,
-                None => self.no_active_calls.wait(&mut wait_guard),
+                None => self.lifecycle_changed.wait(&mut wait_guard),
             }
         }
     }
@@ -488,7 +445,7 @@ impl<S> Runtime<S> {
                 self.close_attempt_active.store(true, Ordering::Release);
                 return Some(CloseAttemptGuard { runtime: self });
             }
-            self.no_active_calls.wait(&mut wait_guard);
+            self.lifecycle_changed.wait(&mut wait_guard);
         }
     }
 
@@ -549,13 +506,6 @@ impl<S> Runtime<S> {
         failed: Vec<(crate::registration::EventRegistration, XllError)>,
     ) {
         *self.event_registrations.lock() = failed.into_iter().map(|(entry, _)| entry).collect();
-    }
-
-    pub(crate) fn wait_for_calls(&self) {
-        let mut guard = self.wait_lock.lock();
-        while self.active_calls.load(Ordering::Acquire) != 0 {
-            self.no_active_calls.wait(&mut guard);
-        }
     }
 
     pub(crate) fn return_tracker(&self) -> &Arc<crate::return_value::ReturnTracker> {
@@ -825,7 +775,6 @@ impl<S> Runtime<S> {
             LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
         ) && self.open_attempt_id.load(Ordering::Acquire) == 0
             && self.close_attempt_active.load(Ordering::Acquire)
-            && self.active_calls.load(Ordering::Acquire) == 0
             && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
@@ -876,7 +825,7 @@ impl<S> Runtime<S> {
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
         crate::callback_gate::close_from_runtime();
-        self.no_active_calls.notify_all();
+        self.lifecycle_changed.notify_all();
         crate::rtd::certify_module_unload();
         #[cfg(test)]
         drop(self.test_module_lease.lock().take());
@@ -897,7 +846,6 @@ impl<S> Runtime<S> {
         let certified = self.phase() == LifecyclePhase::Closing
             && self.open_attempt_id.load(Ordering::Acquire) == 0
             && self.close_attempt_active.load(Ordering::Acquire)
-            && self.active_calls.load(Ordering::Acquire) == 0
             && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
@@ -956,7 +904,7 @@ impl<S> Runtime<S> {
         crate::callback_gate::close_from_runtime();
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
-        self.no_active_calls.notify_all();
+        self.lifecycle_changed.notify_all();
         crate::rtd::certify_module_unload();
         #[cfg(test)]
         drop(self.test_module_lease.lock().take());
@@ -1104,11 +1052,6 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(test)]
-    fn set_zero_active_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
-        *self.zero_active_hook.lock() = Some(hook);
-    }
-
-    #[cfg(test)]
     pub(crate) fn release_test_module_lease(&self) {
         drop(self.test_module_lease.lock().take());
     }
@@ -1149,7 +1092,7 @@ impl<S> Drop for CloseAttemptGuard<'_, S> {
         self.runtime
             .close_attempt_active
             .store(false, Ordering::Release);
-        self.runtime.no_active_calls.notify_all();
+        self.runtime.lifecycle_changed.notify_all();
     }
 }
 
@@ -1186,17 +1129,19 @@ impl<S> Drop for OpenAttemptGuard<'_, S> {
 }
 
 pub struct CallGuard<'runtime, S> {
+    #[allow(
+        dead_code,
+        reason = "Runtime reference used for shutdown refinement ghost event recording"
+    )]
     runtime: &'runtime Runtime<S>,
-    state: Option<Arc<S>>,
+    state: Arc<S>,
     concurrent_calls: usize,
 }
 
 impl<S> CallGuard<'_, S> {
     #[must_use]
     pub fn state(&self) -> &S {
-        self.state
-            .as_deref()
-            .expect("CallGuard state is available before drop")
+        &self.state
     }
 
     #[must_use]
@@ -1207,20 +1152,15 @@ impl<S> CallGuard<'_, S> {
     #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn state_arc(&self) -> Arc<S> {
-        self.state
-            .as_ref()
-            .expect("CallGuard state is available before drop")
-            .clone()
+        Arc::clone(&self.state)
     }
 }
 
 impl<S> Drop for CallGuard<'_, S> {
     fn drop(&mut self) {
-        // Closing is allowed to take and unwrap the runtime's root Arc as soon
-        // as active_calls reaches zero. Release this call's ownership first so
-        // that observation cannot race the compiler-generated field drops.
-        drop(self.state.take());
-        self.runtime.leave(true);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.runtime
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveCall);
     }
 }
 
@@ -1310,7 +1250,6 @@ pub(crate) mod tests {
             .unwrap();
 
         let close_attempt = runtime.begin_final_close().unwrap();
-        runtime.wait_for_calls();
         runtime.close_handles().unwrap();
         assert_eq!(*runtime.take_state().unwrap(), 1);
         finish_test_close(&runtime);
@@ -1455,7 +1394,6 @@ pub(crate) mod tests {
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let close_attempt = runtime.begin_final_close().unwrap();
-        runtime.wait_for_calls();
         runtime.wait_for_returns();
         runtime.close_handles().unwrap();
         runtime.close_subscriptions().unwrap();
@@ -1498,54 +1436,24 @@ pub(crate) mod tests {
         runtime.publish(7_u32, Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
+        let (_export_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {});
+        assert!(accepted);
         let guard = runtime.enter().unwrap();
         assert!(runtime.begin_close());
+        crate::ingress::global_ingress().begin_close_with(|| {});
         assert!(matches!(runtime.enter(), Err(XllError::Closing)));
 
         let (sender, receiver) = mpsc::channel();
-        let closer = Arc::clone(&runtime);
         let handle = thread::spawn(move || {
-            closer.wait_for_calls();
+            let _ = crate::ingress::global_ingress().seal_and_drain();
             sender.send(()).unwrap();
         });
 
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
         drop(guard);
+        drop(_export_guard);
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         handle.join().unwrap();
-    }
-
-    #[test]
-    fn zero_active_calls_implies_no_guard_owns_state() {
-        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Arc::new(Runtime::new());
-        let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(7_u32, Vec::new());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-
-        let guard = runtime.enter().unwrap();
-        assert!(runtime.begin_close());
-        let state = runtime
-            .state
-            .load_full()
-            .as_ref()
-            .map(Arc::downgrade)
-            .unwrap();
-        runtime.set_zero_active_hook(Arc::new(move || {
-            assert_eq!(
-                state.strong_count(),
-                1,
-                "active_calls reached zero while a CallGuard still owned state"
-            );
-        }));
-        let closer = Arc::clone(&runtime);
-        let handle = thread::spawn(move || {
-            closer.wait_for_calls();
-            Arc::try_unwrap(closer.take_state().unwrap())
-        });
-
-        drop(guard);
-        assert_eq!(handle.join().unwrap(), Ok(7));
     }
 
     #[test]

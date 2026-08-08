@@ -833,10 +833,11 @@ where
     F: FnOnce(&S) -> XllResult<T>,
     T: IntoExcelValue,
 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
-    });
+    let (_guard, accepted, _concurrent_calls) =
+        crate::ingress::global_ingress().enter_udf_with(|| {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+        });
     if !accepted {
         return closing_error_pointer();
     }
@@ -1351,10 +1352,10 @@ mod tests {
 
         converting_rx.recv().unwrap();
         assert!(runtime.begin_close());
+        crate::ingress::global_ingress().begin_close_with(|| {});
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
-        let closer_runtime = Arc::clone(&runtime);
         let closer = std::thread::spawn(move || {
-            closer_runtime.wait_for_calls();
+            let _ = crate::ingress::global_ingress().seal_and_drain();
             closed_tx.send(()).unwrap();
         });
         assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());

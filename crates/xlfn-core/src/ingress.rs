@@ -11,7 +11,16 @@ pub const PHASE_CLOSING: u8 = 2;
 pub const PHASE_CLOSED: u8 = 3;
 
 const PHASE_SHIFT: u32 = 62;
+const EXPORT_SHIFT: u32 = 32;
+const EXPORT_BITS: u32 = 30;
+const UDF_BITS: u32 = 32;
+
+const UDF_MASK: u64 = (1_u64 << UDF_BITS) - 1;
+const EXPORT_MASK: u64 = ((1_u64 << EXPORT_BITS) - 1) << EXPORT_SHIFT;
 const ACTIVE_MASK: u64 = (1_u64 << PHASE_SHIFT) - 1;
+
+const EXPORT_ONE: u64 = 1_u64 << EXPORT_SHIFT;
+const UDF_ONE: u64 = 1_u64;
 
 #[cfg(test)]
 struct TestEpochGate {
@@ -89,6 +98,14 @@ const fn pack_state(phase: u8, active: u64) -> u64 {
 
 const fn phase_of(state: u64) -> u8 {
     (state >> PHASE_SHIFT) as u8
+}
+
+const fn active_exports_of(state: u64) -> u64 {
+    (state & EXPORT_MASK) >> EXPORT_SHIFT
+}
+
+const fn active_udfs_of(state: u64) -> u64 {
+    state & UDF_MASK
 }
 
 const fn active_of(state: u64) -> u64 {
@@ -243,7 +260,7 @@ impl ExportIngress {
             .wait_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        while active_of(self.state.load(Ordering::Acquire)) != 0 {
+        while active_exports_of(self.state.load(Ordering::Acquire)) != 0 {
             wait_guard = self
                 .idle
                 .wait(wait_guard)
@@ -296,17 +313,17 @@ impl ExportIngress {
                     ExportCallGuard {
                         ingress: self,
                         epoch: self.epoch.load(Ordering::Acquire),
-                        counted: false,
+                        decrement: 0,
                     },
                     false,
                 );
             }
 
-            let active = active_of(observed);
-            if active == ACTIVE_MASK {
+            let active_exports = active_exports_of(observed);
+            if active_exports == ((1_u64 << EXPORT_BITS) - 1) {
                 std::process::abort();
             }
-            let next = observed + 1;
+            let next = observed + EXPORT_ONE;
             match self.state.compare_exchange_weak(
                 observed,
                 next,
@@ -325,9 +342,79 @@ impl ExportIngress {
                         ExportCallGuard {
                             ingress: self,
                             epoch: self.epoch.load(Ordering::Acquire),
-                            counted: true,
+                            decrement: EXPORT_ONE,
                         },
                         accepted,
+                    );
+                }
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
+    /// refinement linearization point as the accepting state transition.
+    /// Returns `(guard, accepted, concurrent_calls)`.
+    pub fn enter_udf_with<F>(&self, on_accepted: F) -> (ExportCallGuard<'_>, bool, usize)
+    where
+        F: FnOnce(),
+    {
+        let observed_phase = phase_of(self.state.load(Ordering::Acquire));
+        let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
+            self.opening_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let _linearization_guard = self
+            .linearization_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut on_accepted = Some(on_accepted);
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            let phase = phase_of(observed);
+            if phase == PHASE_CLOSED {
+                return (
+                    ExportCallGuard {
+                        ingress: self,
+                        epoch: self.epoch.load(Ordering::Acquire),
+                        decrement: 0,
+                    },
+                    false,
+                    0,
+                );
+            }
+
+            let active_exports = active_exports_of(observed);
+            let active_udfs = active_udfs_of(observed);
+            if active_exports == ((1_u64 << EXPORT_BITS) - 1) || active_udfs == UDF_MASK {
+                std::process::abort();
+            }
+            let next = observed + EXPORT_ONE + UDF_ONE;
+            match self.state.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let accepted = phase == PHASE_OPEN;
+                    if accepted {
+                        let hook = on_accepted
+                            .take()
+                            .expect("ingress acceptance hook called once");
+                        hook();
+                    }
+                    let concurrent_calls = active_udfs_of(next) as usize;
+                    return (
+                        ExportCallGuard {
+                            ingress: self,
+                            epoch: self.epoch.load(Ordering::Acquire),
+                            decrement: EXPORT_ONE + UDF_ONE,
+                        },
+                        accepted,
+                        concurrent_calls,
                     );
                 }
                 Err(current) => observed = current,
@@ -433,7 +520,7 @@ impl ExportIngress {
         let mut wait_guard = self.wait_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut before_close = Some(before_close);
         loop {
-            while active_of(self.state.load(Ordering::Acquire)) != 0 {
+            while active_exports_of(self.state.load(Ordering::Acquire)) != 0 {
                 wait_guard = self
                     .idle
                     .wait(wait_guard)
@@ -486,19 +573,23 @@ impl ExportIngress {
     }
 
     pub fn active_calls(&self) -> usize {
-        active_of(self.state.load(Ordering::Acquire)) as usize
+        active_exports_of(self.state.load(Ordering::Acquire)) as usize
+    }
+
+    pub fn active_udfs(&self) -> usize {
+        active_udfs_of(self.state.load(Ordering::Acquire)) as usize
     }
 }
 
 pub struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
-    counted: bool,
+    decrement: u64,
 }
 
 impl Drop for ExportCallGuard<'_> {
     fn drop(&mut self) {
-        if !self.counted {
+        if self.decrement == 0 {
             return;
         }
         assert_eq!(
@@ -506,12 +597,15 @@ impl Drop for ExportCallGuard<'_> {
             self.epoch,
             "export guard crossed ingress epochs"
         );
-        let previous = self.ingress.state.fetch_sub(1, Ordering::Release);
-        let active = active_of(previous);
-        if active == 0 {
+        let previous = self
+            .ingress
+            .state
+            .fetch_sub(self.decrement, Ordering::Release);
+        let active_exports = active_exports_of(previous);
+        if active_exports == 0 {
             std::process::abort();
         }
-        if active == 1 {
+        if active_exports == 1 {
             // Acquiring this lock only for the final active call closes the
             // notify/wait race without putting a mutex on the UDF entry path.
             let _wait_guard = self

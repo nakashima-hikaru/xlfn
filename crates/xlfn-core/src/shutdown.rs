@@ -38,6 +38,7 @@ impl CloseReport {
         });
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn extend(&mut self, issues: impl IntoIterator<Item = CleanupIssue>) {
         self.issues.extend(issues);
     }

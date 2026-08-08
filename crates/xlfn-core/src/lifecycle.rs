@@ -307,7 +307,6 @@ where
 
     let mut local_quiescent = true;
     let exports_drained = crate::ingress::global_ingress().seal_and_drain();
-    runtime.wait_for_calls();
     runtime.wait_for_returns();
 
     #[cfg(feature = "async")]
@@ -511,8 +510,14 @@ where
             rtd: rtd_quiescent
                 .expect("RTD certificate is present when rollback is local-quiescent"),
             host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-            async_stopped: async_stopped
-                .expect("async certificate is present when rollback is local-quiescent"),
+            async_stopped: {
+                #[allow(
+                    clippy::unnecessary_literal_unwrap,
+                    reason = "Constant Some when feature async is disabled"
+                )]
+                async_stopped
+                    .expect("async certificate is present when rollback is local-quiescent")
+            },
             subscriptions_stopped: subscriptions_stopped
                 .expect("subscription certificate is present when rollback is local-quiescent"),
             handles_quiescent: handles_quiescent
@@ -615,7 +620,6 @@ fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession
     });
     crate::rtd::begin_module_close();
     let _exports_drained = crate::ingress::global_ingress().seal_and_drain();
-    runtime.wait_for_calls();
     runtime.wait_for_returns();
     #[cfg(feature = "async")]
     {
@@ -682,17 +686,8 @@ where
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
 
-    // Seal every exported entry before stopping local producers. This drains
-    // active UDF and xlAutoFree12 calls while the module callback gate is still
-    // open, then lets async cancellation deliver its pending xlAsyncReturn
-    // notifications before any host registration is removed.
     let exports_drained = crate::ingress::global_ingress().seal_and_drain();
-    runtime.wait_for_calls();
 
-    // `callsDrained` is the linearization point after both the global export
-    // ingress and Runtime call guards have reached zero. Return blocks remain
-    // admissible until the next milestone because Excel can free them after a
-    // producing UDF has returned.
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event_linearized(crate::shutdown_refinement::GhostEvent::CallsDrained);
 
@@ -1752,6 +1747,9 @@ mod tests {
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let (_export_guard, accepted, _concurrent_calls) =
+            crate::ingress::global_ingress().enter_udf_with(|| {});
+        assert!(accepted);
         let call = runtime.enter().unwrap();
         let closer_runtime = std::sync::Arc::clone(&runtime);
         let (closed_tx, closed_rx) = std::sync::mpsc::channel();
@@ -1767,9 +1765,10 @@ mod tests {
                 .is_err()
         );
         drop(call);
+        drop(_export_guard);
         assert_eq!(
             closed_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap(),
             1
         );

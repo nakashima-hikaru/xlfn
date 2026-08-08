@@ -56,14 +56,9 @@ jobs:
                   cargo check --package xlfn --features async --locked
 
             - name: Check benchmark compilation
-              run: >-
-                  cargo clippy
-                  --package xlfn-core
-                  --bench async_spawn
-                  --features bench-internals
-                  --locked
-                  --
-                  -D warnings
+              run: |
+                  cargo clippy --package xlfn-core --bench async_spawn --features "bench-internals async" --locked -- -D warnings
+                  cargo clippy --package xlfn-core --bench sync_boundary --features bench-internals --locked -- -D warnings
 
             - name: Run Rust tests
               run: >-
