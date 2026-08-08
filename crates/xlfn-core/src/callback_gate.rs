@@ -1,19 +1,61 @@
 use crate::ExcelCallbackStatus;
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use xlfn_sys::XLRET_FAILED;
 
-/// Module-wide admission state for every direct Excel C API callback.
-///
-/// The state is intentionally independent from a call-scoped
-/// [`crate::host_callback::HostCallbackSession`]. A terminal result from one
-/// lifecycle operation suppresses callbacks from every other execution source,
-/// including worker-thread async completions.
+#[cfg(test)]
+static GATE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static GATES: parking_lot::Mutex<Option<HashMap<u64, &'static CallbackGate>>> =
+    parking_lot::Mutex::new(None);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExcelCallbackGate {
+pub(crate) enum CallbackGateLifecycle {
     Open,
-    Terminal(ExcelCallbackStatus),
     Closed,
+}
+
+#[derive(Debug)]
+pub(crate) struct CallbackGateState {
+    pub(crate) lifecycle: CallbackGateLifecycle,
+    pub(crate) abort_scopes: usize,
+    pub(crate) uncalced_scopes: usize,
+}
+
+impl CallbackGateState {
+    const fn new(lifecycle: CallbackGateLifecycle) -> Self {
+        Self {
+            lifecycle,
+            abort_scopes: 0,
+            uncalced_scopes: 0,
+        }
+    }
+}
+
+pub(crate) struct CallbackInvocationToken {
+    terminal: Cell<Option<ExcelCallbackStatus>>,
+    gate_id: Cell<Option<u64>>,
+}
+
+impl CallbackInvocationToken {
+    pub(crate) fn new() -> Self {
+        Self {
+            terminal: Cell::new(None),
+            gate_id: Cell::new(None),
+        }
+    }
+
+    pub(crate) fn finish(&self) {
+        finish_invocation(self);
+    }
+}
+
+impl Drop for CallbackInvocationToken {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,78 +64,188 @@ pub(crate) struct CallbackGateSuppressed {
 }
 
 pub(crate) struct CallbackGate {
-    state: ReentrantMutex<RefCell<ExcelCallbackGate>>,
+    id: u64,
+    state: ReentrantMutex<RefCell<CallbackGateState>>,
 }
 
 impl CallbackGate {
-    const fn new(initial: ExcelCallbackGate) -> Self {
+    const fn new(initial: CallbackGateLifecycle) -> Self {
         Self {
-            state: ReentrantMutex::new(RefCell::new(initial)),
+            id: 0,
+            state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
         }
     }
 
+    #[cfg(test)]
+    fn new_test(initial: CallbackGateLifecycle) -> &'static Self {
+        let id = GATE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let gate = Box::leak(Box::new(Self {
+            id,
+            state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
+        }));
+        GATES.lock().get_or_insert_with(HashMap::new).insert(id, gate);
+        gate
+    }
+
     fn reset(&self) {
-        *self.state.lock().borrow_mut() = ExcelCallbackGate::Open;
+        self.state.lock().borrow_mut().lifecycle = CallbackGateLifecycle::Open;
     }
 
     fn close(&self) {
-        *self.state.lock().borrow_mut() = ExcelCallbackGate::Closed;
+        self.state.lock().borrow_mut().lifecycle = CallbackGateLifecycle::Closed;
     }
 
-    fn enter(&self) -> Result<CallbackGatePermit<'_>, CallbackGateSuppressed> {
+    fn enter_callback<'a>(
+        &'a self,
+        invocation: &'a CallbackInvocationToken,
+    ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
         let lock = self.state.lock();
-        let state = *lock.borrow();
-        match state {
-            ExcelCallbackGate::Open => Ok(CallbackGatePermit { lock }),
-            ExcelCallbackGate::Terminal(status) => Err(CallbackGateSuppressed { status }),
-            ExcelCallbackGate::Closed => Err(CallbackGateSuppressed {
+        let state = lock.borrow();
+        match state.lifecycle {
+            CallbackGateLifecycle::Closed => Err(CallbackGateSuppressed {
                 status: ExcelCallbackStatus::Failed(XLRET_FAILED),
             }),
+            CallbackGateLifecycle::Open => {
+                if state.abort_scopes != 0 {
+                    Err(CallbackGateSuppressed {
+                        status: ExcelCallbackStatus::Abort,
+                    })
+                } else if state.uncalced_scopes != 0 {
+                    Err(CallbackGateSuppressed {
+                        status: ExcelCallbackStatus::Uncalced,
+                    })
+                } else {
+                    drop(state);
+                    Ok(CallbackGatePermit {
+                        gate: self,
+                        _guard: lock,
+                        invocation: Some(invocation),
+                    })
+                }
+            }
+        }
+    }
+
+    fn enter_cleanup<'a>(
+        &'a self,
+        invocation: Option<&'a CallbackInvocationToken>,
+    ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
+        let lock = self.state.lock();
+        let state = lock.borrow();
+        match state.lifecycle {
+            CallbackGateLifecycle::Closed => Err(CallbackGateSuppressed {
+                status: ExcelCallbackStatus::Failed(XLRET_FAILED),
+            }),
+            CallbackGateLifecycle::Open => {
+                drop(state);
+                Ok(CallbackGatePermit {
+                    gate: self,
+                    _guard: lock,
+                    invocation,
+                })
+            }
         }
     }
 
     fn blocked_status(&self) -> Option<ExcelCallbackStatus> {
         callback_blocked_status(&self.state.lock())
     }
-
-    #[cfg(test)]
-    fn observe(&self, status: ExcelCallbackStatus) {
-        observe_state(&self.state.lock(), status);
-    }
 }
 
-/// Keeps the module callback gate held across one direct Excel C API call.
-/// Reentrant acquisition is allowed for host callbacks that synchronously
-/// re-enter this XLL on the same thread; callbacks from other threads wait.
 pub(crate) struct CallbackGatePermit<'a> {
-    lock: ReentrantMutexGuard<'a, RefCell<ExcelCallbackGate>>,
+    gate: &'a CallbackGate,
+    _guard: ReentrantMutexGuard<'a, RefCell<CallbackGateState>>,
+    invocation: Option<&'a CallbackInvocationToken>,
 }
 
 impl CallbackGatePermit<'_> {
     pub(crate) fn observe(&self, status: ExcelCallbackStatus) {
-        observe_state(&self.lock, status);
+        if let Some(invocation) = self.invocation {
+            observe_terminal(self.gate, invocation, status);
+        }
     }
 }
 
-fn callback_blocked_status(state: &RefCell<ExcelCallbackGate>) -> Option<ExcelCallbackStatus> {
-    match *state.borrow() {
-        ExcelCallbackGate::Open => None,
-        ExcelCallbackGate::Terminal(status) => Some(status),
-        ExcelCallbackGate::Closed => Some(ExcelCallbackStatus::Failed(XLRET_FAILED)),
+fn callback_blocked_status(state: &RefCell<CallbackGateState>) -> Option<ExcelCallbackStatus> {
+    let gate = state.borrow();
+    match gate.lifecycle {
+        CallbackGateLifecycle::Closed => Some(ExcelCallbackStatus::Failed(XLRET_FAILED)),
+        CallbackGateLifecycle::Open => {
+            if gate.abort_scopes != 0 {
+                Some(ExcelCallbackStatus::Abort)
+            } else if gate.uncalced_scopes != 0 {
+                Some(ExcelCallbackStatus::Uncalced)
+            } else {
+                None
+            }
+        }
     }
 }
 
-fn observe_state(state: &RefCell<ExcelCallbackGate>, status: ExcelCallbackStatus) {
-    if !status.is_terminal() {
+fn observe_terminal(
+    gate: &CallbackGate,
+    invocation: &CallbackInvocationToken,
+    status: ExcelCallbackStatus,
+) {
+    if !status.is_terminal() || invocation.terminal.get().is_some() {
         return;
     }
-    let mut gate = state.borrow_mut();
-    if matches!(*gate, ExcelCallbackGate::Open) {
-        *gate = ExcelCallbackGate::Terminal(status);
+    invocation.gate_id.set(Some(gate.id));
+    invocation.terminal.set(Some(status));
+    let lock = gate.state.lock();
+    let mut state = lock.borrow_mut();
+    match status {
+        ExcelCallbackStatus::Abort => {
+            state.abort_scopes += 1;
+        }
+        ExcelCallbackStatus::Uncalced => {
+            state.uncalced_scopes += 1;
+        }
+        _ => unreachable!(),
     }
 }
 
-static MODULE_CALLBACK_GATE: CallbackGate = CallbackGate::new(ExcelCallbackGate::Closed);
+fn finish_invocation(invocation: &CallbackInvocationToken) {
+    let Some(status) = invocation.terminal.take() else {
+        return;
+    };
+    let gate_id = invocation.gate_id.take().unwrap_or(0);
+    if gate_id == 0 {
+        decrement_scope(&MODULE_CALLBACK_GATE.state, status);
+    } else {
+        let map = GATES.lock();
+        if let Some(map) = map.as_ref()
+            && let Some(gate) = map.get(&gate_id)
+        {
+            decrement_scope(&gate.state, status);
+        }
+    }
+}
+
+fn decrement_scope(
+    state: &ReentrantMutex<RefCell<CallbackGateState>>,
+    status: ExcelCallbackStatus,
+) {
+    let lock = state.lock();
+    let mut gate = lock.borrow_mut();
+    match status {
+        ExcelCallbackStatus::Abort => {
+            gate.abort_scopes = gate
+                .abort_scopes
+                .checked_sub(1)
+                .expect("balanced terminal callback scope");
+        }
+        ExcelCallbackStatus::Uncalced => {
+            gate.uncalced_scopes = gate
+                .uncalced_scopes
+                .checked_sub(1)
+                .expect("balanced terminal callback scope");
+        }
+        _ => unreachable!(),
+    }
+}
+
+static MODULE_CALLBACK_GATE: CallbackGate = CallbackGate::new(CallbackGateLifecycle::Closed);
 
 pub(crate) fn reset() {
     MODULE_CALLBACK_GATE.reset();
@@ -102,9 +254,6 @@ pub(crate) fn reset() {
 pub(crate) fn reset_from_runtime() {
     #[cfg(test)]
     let Some(_test_guard) = crate::test_callback::try_lock() else {
-        // A callback fixture owned by another test has the module gate as its
-        // sole test process state. Unrelated Runtime fixtures must not mutate
-        // that state while the fixture is active.
         return;
     };
     reset();
@@ -113,17 +262,24 @@ pub(crate) fn reset_from_runtime() {
 pub(crate) fn close_from_runtime() {
     #[cfg(test)]
     let Some(_test_guard) = crate::test_callback::try_lock() else {
-        // See `reset_from_runtime`: unrelated test Runtime instances must not
-        // mutate a callback fixture's process-wide gate.
         return;
     };
     MODULE_CALLBACK_GATE.close();
 }
 
-pub(crate) fn enter() -> Result<CallbackGatePermit<'static>, CallbackGateSuppressed> {
-    MODULE_CALLBACK_GATE.enter()
+pub(crate) fn enter_callback<'a>(
+    invocation: &'a CallbackInvocationToken,
+) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
+    MODULE_CALLBACK_GATE.enter_callback(invocation)
 }
 
+pub(crate) fn enter_cleanup<'a>(
+    invocation: Option<&'a CallbackInvocationToken>,
+) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
+    MODULE_CALLBACK_GATE.enter_cleanup(invocation)
+}
+
+#[allow(dead_code)]
 pub(crate) fn blocked_status() -> Option<ExcelCallbackStatus> {
     MODULE_CALLBACK_GATE.blocked_status()
 }
@@ -139,20 +295,26 @@ mod tests {
     fn runtime_transitions_update_the_module_gate() {
         let _test_guard = crate::test_callback::lock();
         reset_from_runtime();
-        assert!(enter().is_ok());
+        let token = CallbackInvocationToken::new();
+        assert!(enter_callback(&token).is_ok());
         close_from_runtime();
-        assert!(matches!(enter(), Err(CallbackGateSuppressed { .. })));
+        assert!(matches!(enter_callback(&token), Err(CallbackGateSuppressed { .. })));
     }
 
     #[test]
-    fn terminal_status_is_module_wide_and_close_is_final() {
-        let gate = CallbackGate::new(ExcelCallbackGate::Closed);
+    fn terminal_status_is_module_wide_only_while_owner_is_active() {
+        let gate = CallbackGate::new_test(CallbackGateLifecycle::Closed);
         gate.reset();
-        let permit = gate.enter().unwrap();
 
-        permit.observe(ExcelCallbackStatus::from_raw(XLRET_ABORT));
-        drop(permit);
-        let suppressed = match gate.enter() {
+        let token_a = CallbackInvocationToken::new();
+        let token_b = CallbackInvocationToken::new();
+
+        let permit_a = gate.enter_callback(&token_a).unwrap();
+        permit_a.observe(ExcelCallbackStatus::from_raw(XLRET_ABORT));
+        drop(permit_a);
+
+        // B's normal callback is suppressed while A is active
+        let suppressed = match gate.enter_callback(&token_b) {
             Ok(_) => panic!("terminal gate unexpectedly admitted a callback"),
             Err(suppressed) => suppressed,
         };
@@ -163,11 +325,37 @@ mod tests {
             }
         );
 
-        // A later terminal status cannot replace the first one, preserving the
-        // status that caused the module-wide suppression.
-        gate.observe(ExcelCallbackStatus::from_raw(XLRET_UNCALCED));
-        assert_eq!(gate.blocked_status(), Some(ExcelCallbackStatus::Abort));
+        // While A is active, cleanup callback STILL succeeds!
+        assert!(gate.enter_cleanup(Some(&token_b)).is_ok());
 
+        // When A finishes (token_a dropped), B's normal callback becomes allowed again
+        drop(token_a);
+        assert!(gate.enter_callback(&token_b).is_ok());
+
+        // If both A and B enter terminal state:
+        let token_a2 = CallbackInvocationToken::new();
+        let token_b2 = CallbackInvocationToken::new();
+        let permit_a2 = gate.enter_callback(&token_a2).unwrap();
+        permit_a2.observe(ExcelCallbackStatus::from_raw(XLRET_ABORT));
+        drop(permit_a2);
+
+        let permit_b2 = gate.enter_cleanup(Some(&token_b2)).unwrap();
+        permit_b2.observe(ExcelCallbackStatus::from_raw(XLRET_UNCALCED));
+        drop(permit_b2);
+
+        // A2 finishes
+        drop(token_a2);
+        // B2 is still active with Uncalced, so normal callback is still suppressed
+        assert_eq!(gate.blocked_status(), Some(ExcelCallbackStatus::Uncalced));
+        let token_c = CallbackInvocationToken::new();
+        assert!(gate.enter_callback(&token_c).is_err());
+
+        // B2 finishes
+        drop(token_b2);
+        assert_eq!(gate.blocked_status(), None);
+        assert!(gate.enter_callback(&token_c).is_ok());
+
+        // Closed is final and won't reopen on token drop
         gate.close();
         assert_eq!(
             gate.blocked_status(),
@@ -177,14 +365,15 @@ mod tests {
 
     #[test]
     fn permit_serializes_callbacks_until_terminal_status_is_observed() {
-        let gate: &'static CallbackGate =
-            Box::leak(Box::new(CallbackGate::new(ExcelCallbackGate::Open)));
-        let first = gate.enter().unwrap();
+        let gate = CallbackGate::new_test(CallbackGateLifecycle::Open);
+        let token_a = CallbackInvocationToken::new();
+        let first = gate.enter_callback(&token_a).unwrap();
         let (started_tx, started_rx) = mpsc::channel();
         let (entered_tx, entered_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
+            let token_b = CallbackInvocationToken::new();
             started_tx.send(()).unwrap();
-            let suppressed = match gate.enter() {
+            let suppressed = match gate.enter_callback(&token_b) {
                 Ok(_) => panic!("terminal gate unexpectedly admitted a callback"),
                 Err(suppressed) => suppressed,
             };

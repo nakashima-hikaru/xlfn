@@ -1,7 +1,6 @@
-use crate::host_callback::{HostCallbackState, observe_shared};
+use crate::host_callback::{HostCallbackShared, HostCallbackState, observe_shared};
 use crate::{CallbackCleanupDebt, ExcelCallbackStatus, XlValueRef, XllError, XllResult};
 use parking_lot::Mutex;
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -56,16 +55,16 @@ fn state_after_call(
 /// Owns one result returned by an Excel callback for the rest of its call scope.
 ///
 /// A live Excel-owned value gets at most one `xlFree` attempt. Terminal callback
-/// statuses suppress cleanup completely because Excel forbids further C API
-/// calls after `xlretAbort` and `xlretUncalced`. Once cleanup is indeterminate,
-/// the value can neither be read nor released again.
+/// statuses suppress read access but still allow `xlFree` cleanup once per value
+/// during the active invocation lifetime. Once cleanup is indeterminate or the
+/// scope is closed, Excel is no longer called.
 pub struct ExcelCallbackValue {
     raw: XLOPER12,
     release_required: bool,
     audit_failures: bool,
     release_callback: ReleaseCallback,
     state: CallbackValueReleaseState,
-    session: Option<Rc<Cell<HostCallbackState>>>,
+    session: Option<Rc<HostCallbackShared>>,
     module_gate: bool,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -99,7 +98,7 @@ impl ExcelCallbackValue {
         raw: XLOPER12,
         status: ExcelCallbackStatus,
         release_callback: ReleaseCallback,
-        session: Option<Rc<Cell<HostCallbackState>>>,
+        session: Option<Rc<HostCallbackShared>>,
     ) -> Self {
         Self {
             raw,
@@ -116,16 +115,16 @@ impl ExcelCallbackValue {
     pub(crate) unsafe fn call_with_session(
         function: i32,
         arguments: &[NonNull<XLOPER12>],
-        session: Rc<Cell<HostCallbackState>>,
+        session: Rc<HostCallbackShared>,
     ) -> Result<(i32, Self), crate::callback_gate::CallbackGateSuppressed> {
-        let callback_gate = crate::callback_gate::enter()?;
+        let callback_gate = crate::callback_gate::enter_callback(&session.invocation)?;
         // SAFETY: The caller supplies live callback arguments.
         let (status, raw, callback_invoked) =
             unsafe { excel12_with_invocation(function, arguments) };
         let callback_status = ExcelCallbackStatus::from_raw(status);
         callback_gate.observe(callback_status);
         drop(callback_gate);
-        observe_shared(&session, callback_status);
+        observe_shared(&session.state, callback_status);
         let state = state_after_call(callback_invoked, callback_status);
         Ok((
             status,
@@ -183,21 +182,21 @@ impl ExcelCallbackValue {
 
     /// Attempts cleanup once.
     ///
-    /// Terminal results are intentionally treated as already suppressed. A
+    /// Terminal results suppress read operations but permit `xlFree` cleanup. A
     /// failed `xlFree` is returned as an error and permanently changes the
     /// state to `Indeterminate`; neither `Drop` nor a later explicit call can
     /// retry it.
     pub fn try_release(&mut self) -> XllResult<()> {
         match self.state {
-            CallbackValueReleaseState::Released
-            | CallbackValueReleaseState::TerminalSuppressed { .. } => return Ok(()),
+            CallbackValueReleaseState::Released => return Ok(()),
             CallbackValueReleaseState::Indeterminate { status } => {
                 return Err(XllError::ExcelApi {
                     function: "xlFree(indeterminate callback result)",
                     code: status.raw_code(),
                 });
             }
-            CallbackValueReleaseState::Live => {}
+            CallbackValueReleaseState::Live
+            | CallbackValueReleaseState::TerminalSuppressed { .. } => {}
         }
 
         if !self.release_required {
@@ -205,18 +204,16 @@ impl ExcelCallbackValue {
             return Ok(());
         }
 
-        if let Some(session) = &self.session
-            && let Some(status) = session.get().blocked_status()
-        {
-            self.state = CallbackValueReleaseState::TerminalSuppressed { status };
-            return Ok(());
-        }
-
-        if self.module_gate
-            && let Some(status) = crate::callback_gate::blocked_status()
-        {
-            self.state = CallbackValueReleaseState::TerminalSuppressed { status };
-            return Ok(());
+        if let Some(session) = &self.session {
+            match session.state() {
+                HostCallbackState::Available | HostCallbackState::Suppressed(_) => {}
+                HostCallbackState::Closed => {
+                    self.state = CallbackValueReleaseState::TerminalSuppressed {
+                        status: ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                    };
+                    return Ok(());
+                }
+            }
         }
 
         // Transition before invoking the host so unwinding can never leave the
@@ -224,10 +221,10 @@ impl ExcelCallbackValue {
         self.state = CallbackValueReleaseState::Indeterminate {
             status: ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
         };
-        // SAFETY: `Live` plus `release_required` means this exact XLOPER12 was
-        // supplied as result storage to one completed, non-terminal callback.
+
         let raw_status = if self.module_gate {
-            let callback_gate = match crate::callback_gate::enter() {
+            let invocation = self.session.as_ref().map(|s| &s.invocation);
+            let callback_gate = match crate::callback_gate::enter_cleanup(invocation) {
                 Ok(callback_gate) => callback_gate,
                 Err(suppressed) => {
                     self.state = CallbackValueReleaseState::TerminalSuppressed {
@@ -236,10 +233,11 @@ impl ExcelCallbackValue {
                     return Ok(());
                 }
             };
-            // SAFETY: `Live` plus `release_required` means this exact XLOPER12
+            // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
             // was supplied as result storage to one completed callback.
             let raw_status = unsafe { (self.release_callback)(&mut self.raw) };
-            callback_gate.observe(ExcelCallbackStatus::from_raw(raw_status));
+            let status = ExcelCallbackStatus::from_raw(raw_status);
+            callback_gate.observe(status);
             drop(callback_gate);
             raw_status
         } else {
@@ -249,7 +247,7 @@ impl ExcelCallbackValue {
         };
         let status = ExcelCallbackStatus::from_raw(raw_status);
         if let Some(session) = &self.session {
-            observe_shared(session, status);
+            observe_shared(&session.state, status);
         }
 
         if status == ExcelCallbackStatus::Success {
@@ -308,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_statuses_never_call_xl_free() {
+    fn terminal_statuses_call_xl_free_exactly_once() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         for status in [XLRET_ABORT, XLRET_UNCALCED] {
             FREE_CALLS.store(0, Ordering::Relaxed);
@@ -325,8 +323,9 @@ mod tests {
             assert!(value.raw().is_err());
             assert!(value.raw_pointer().is_err());
             value.try_release().unwrap();
+            assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
             drop(value);
-            assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 0);
+            assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
         }
     }
 
@@ -366,7 +365,7 @@ mod tests {
             XLOPER12::number(42.0),
             ExcelCallbackStatus::Success,
             aborting_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         assert!(register_result.try_release().is_err());
 
@@ -392,7 +391,7 @@ mod tests {
             XLOPER12::boolean(true),
             ExcelCallbackStatus::Success,
             uncalced_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         assert!(unregister_result.try_release().is_err());
 
@@ -410,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn xlf_caller_value_drop_is_suppressed_after_nested_terminal_callback() {
+    fn xlf_caller_value_drop_is_allowed_after_nested_terminal_callback() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
@@ -418,11 +417,11 @@ mod tests {
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         session.suppress_for_test(ExcelCallbackStatus::Abort);
         drop(caller);
-        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -434,7 +433,7 @@ mod tests {
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         session.close();
 
@@ -450,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_xl_free_suppresses_cleanup_of_other_live_values() {
+    fn terminal_xl_free_allows_cleanup_of_other_live_values() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
@@ -458,19 +457,19 @@ mod tests {
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             aborting_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         let second = ExcelCallbackValue::from_callback_for_test_with_session(
             XLOPER12::integer(2),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
         let third = ExcelCallbackValue::from_callback_for_test_with_session(
             XLOPER12::integer(3),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_state()),
+            Some(session.shared_handle()),
         );
 
         assert!(first.try_release().is_err());
@@ -478,6 +477,6 @@ mod tests {
         drop(first);
         drop(second);
         drop(third);
-        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 3);
     }
 }

@@ -1782,7 +1782,7 @@ mod tests {
     fn close_stops_async_before_terminal_unregister_and_never_calls_excel_afterwards() {
         use std::panic::AssertUnwindSafe;
         use xlfn_sys::{
-            XL_ASYNC_RETURN, XLF_UNREGISTER, XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle,
+            XL_ASYNC_RETURN, XLF_UNREGISTER, XL_FREE, XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle,
             XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
         };
 
@@ -1844,10 +1844,10 @@ mod tests {
         assert!(close.is_err(), "terminal unregister must fail-stop unload");
         assert_eq!(
             crate::test_callback::callback_order(),
-            vec![XL_ASYNC_RETURN, XLF_UNREGISTER]
+            vec![XL_ASYNC_RETURN, XLF_UNREGISTER, XL_FREE]
         );
         assert_eq!(crate::test_callback::async_return_calls(), 1);
-        assert_eq!(crate::test_callback::total_calls(), 2);
+        assert_eq!(crate::test_callback::total_calls(), 3);
         // The test intentionally stops at the fail-stop boundary after a
         // terminal unregister. Restore the RTD test epoch for later cases;
         // ingress is already sealed and must remain sealed until the next

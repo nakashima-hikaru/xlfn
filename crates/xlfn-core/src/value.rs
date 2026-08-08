@@ -564,28 +564,16 @@ impl<'call> CallScope<'call> {
     }
 }
 
-struct CallScopeGuard(HostCallbackSession);
-
-impl Drop for CallScopeGuard {
-    fn drop(&mut self) {
-        self.0.close();
-    }
-}
-
 /// Runs an operation under a fresh lifetime that cannot escape in its result.
 #[doc(hidden)]
 pub fn with_excel_call_scope<R>(
     operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
 ) -> R {
-    let callbacks = HostCallbackSession::new();
     let scope = CallScope {
-        callbacks,
+        callbacks: HostCallbackSession::new(),
         lifetime: PhantomData,
     };
-    let guard = CallScopeGuard(scope.callbacks.clone());
-    let result = operation(&scope);
-    drop(guard);
-    result
+    operation(&scope)
 }
 
 #[doc(hidden)]

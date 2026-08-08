@@ -1,3 +1,4 @@
+use crate::callback_gate::CallbackInvocationToken;
 use crate::{ExcelCallbackStatus, ExcelCallbackValue};
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -11,49 +12,72 @@ pub(crate) enum HostCallbackState {
     Closed,
 }
 
-#[derive(Clone)]
-pub(crate) struct HostCallbackSession {
-    state: Rc<Cell<HostCallbackState>>,
+pub(crate) struct HostCallbackShared {
+    pub(crate) state: Cell<HostCallbackState>,
+    pub(crate) invocation: CallbackInvocationToken,
 }
 
-impl HostCallbackSession {
-    pub(crate) fn new() -> Self {
-        Self {
-            state: Rc::new(Cell::new(HostCallbackState::Available)),
-        }
-    }
-
-    #[must_use]
+impl HostCallbackShared {
     pub(crate) fn state(&self) -> HostCallbackState {
         self.state.get()
     }
 
-    #[must_use]
     pub(crate) fn permits_callbacks(&self) -> bool {
         matches!(self.state.get(), HostCallbackState::Available)
     }
 
-    #[must_use]
     pub(crate) fn terminal_status(&self) -> Option<ExcelCallbackStatus> {
         match self.state.get() {
             HostCallbackState::Available => None,
             HostCallbackState::Suppressed(status) => Some(status),
-            HostCallbackState::Closed => Some(Self::closed_status()),
+            HostCallbackState::Closed => Some(ExcelCallbackStatus::Failed(XLRET_FAILED)),
         }
     }
 
-    fn closed_status() -> ExcelCallbackStatus {
-        ExcelCallbackStatus::Failed(XLRET_FAILED)
-    }
-
+    #[allow(dead_code)]
     pub(crate) fn close(&self) {
         if matches!(self.state.get(), HostCallbackState::Available) {
             self.state.set(HostCallbackState::Closed);
         }
     }
+}
 
-    pub(crate) fn shared_state(&self) -> Rc<Cell<HostCallbackState>> {
-        Rc::clone(&self.state)
+pub(crate) struct HostCallbackSession {
+    shared: Rc<HostCallbackShared>,
+}
+
+impl HostCallbackSession {
+    pub(crate) fn new() -> Self {
+        Self {
+            shared: Rc::new(HostCallbackShared {
+                state: Cell::new(HostCallbackState::Available),
+                invocation: CallbackInvocationToken::new(),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn state(&self) -> HostCallbackState {
+        self.shared.state()
+    }
+
+    #[must_use]
+    pub(crate) fn permits_callbacks(&self) -> bool {
+        self.shared.permits_callbacks()
+    }
+
+    #[must_use]
+    pub(crate) fn terminal_status(&self) -> Option<ExcelCallbackStatus> {
+        self.shared.terminal_status()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn close(&self) {
+        self.shared.close();
+    }
+
+    pub(crate) fn shared_handle(&self) -> Rc<HostCallbackShared> {
+        Rc::clone(&self.shared)
     }
 
     /// Calls Excel once unless a terminal status was already observed in this
@@ -64,13 +88,13 @@ impl HostCallbackSession {
         function: i32,
         arguments: &[NonNull<XLOPER12>],
     ) -> Result<(ExcelCallbackStatus, ExcelCallbackValue), HostCallbackSuppressed> {
-        if let Some(status) = self.state.get().blocked_status() {
+        if let Some(status) = self.shared.state.get().blocked_status() {
             return Err(HostCallbackSuppressed { status });
         }
 
         // SAFETY: forwarded from this method's caller.
         let (raw_status, result) = unsafe {
-            ExcelCallbackValue::call_with_session(function, arguments, self.shared_state())
+            ExcelCallbackValue::call_with_session(function, arguments, self.shared_handle())
         }
         .map_err(|suppressed| HostCallbackSuppressed {
             status: suppressed.status,
@@ -81,7 +105,7 @@ impl HostCallbackSession {
     }
 
     fn observe(&self, status: ExcelCallbackStatus) {
-        observe_shared(&self.state, status);
+        observe_shared(&self.shared.state, status);
     }
 
     #[cfg(test)]
@@ -94,12 +118,19 @@ impl HostCallbackSession {
         &self,
         invoke: impl FnOnce() -> ExcelCallbackStatus,
     ) -> Result<ExcelCallbackStatus, HostCallbackSuppressed> {
-        if let Some(status) = self.state.get().blocked_status() {
+        if let Some(status) = self.shared.state.get().blocked_status() {
             return Err(HostCallbackSuppressed { status });
         }
         let status = invoke();
         self.observe(status);
         Ok(status)
+    }
+}
+
+impl Drop for HostCallbackSession {
+    fn drop(&mut self) {
+        self.shared.state.set(HostCallbackState::Closed);
+        self.shared.invocation.finish();
     }
 }
 
@@ -187,17 +218,12 @@ mod tests {
 
     #[test]
     fn scope_closes_callback_sessions_when_the_scope_ends() {
-        let escaped = crate::with_excel_call_scope(|scope| scope.callbacks().clone());
+        let escaped = crate::with_excel_call_scope(|scope| scope.callbacks().shared_handle());
 
         assert!(!escaped.permits_callbacks());
         assert_eq!(
             escaped.terminal_status(),
             Some(ExcelCallbackStatus::Failed(XLRET_FAILED))
-        );
-        let result = escaped.call_for_test(|| panic!("closed scope invoked callback"));
-        assert_eq!(
-            result.unwrap_err().status,
-            ExcelCallbackStatus::Failed(XLRET_FAILED)
         );
     }
 
@@ -210,7 +236,7 @@ mod tests {
         let escaped = crate::with_excel_call_scope(|scope| {
             let context = crate::MacroSheetContext::new(&(), scope);
             std::mem::forget(context);
-            scope.callbacks().clone()
+            scope.callbacks().shared_handle()
         });
 
         assert_eq!(

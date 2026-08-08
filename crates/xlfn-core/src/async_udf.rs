@@ -1209,7 +1209,8 @@ unsafe fn return_error(udf_id: &'static str, handle: *mut XLOPER12, error: &XllE
 }
 
 unsafe fn async_return(handle: NonNull<XLOPER12>, result: NonNull<XLOPER12>) -> XllResult<()> {
-    let callback_gate = crate::callback_gate::enter().map_err(|suppressed| XllError::ExcelApi {
+    let invocation = crate::callback_gate::CallbackInvocationToken::new();
+    let callback_gate = crate::callback_gate::enter_callback(&invocation).map_err(|suppressed| XllError::ExcelApi {
         function: "xlAsyncReturn(suppressed)",
         code: suppressed.status.raw_code(),
     })?;
@@ -2364,7 +2365,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("terminal-gate task did not start");
 
-        let callback_gate = crate::callback_gate::enter().unwrap();
+        let invocation = crate::callback_gate::CallbackInvocationToken::new();
+        let callback_gate = crate::callback_gate::enter_callback(&invocation).unwrap();
         callback_gate.observe(crate::ExcelCallbackStatus::Abort);
         drop(callback_gate);
         let callbacks_before_cancel = crate::test_callback::async_return_calls();
@@ -2373,8 +2375,12 @@ mod tests {
         assert_eq!(
             crate::test_callback::async_return_calls(),
             callbacks_before_cancel,
-            "terminal callback gate must suppress async cancellation fallback"
+            "terminal callback gate must suppress async cancellation fallback while token is active"
         );
+        drop(invocation);
+
+        let next_token = crate::callback_gate::CallbackInvocationToken::new();
+        assert!(crate::callback_gate::enter_callback(&next_token).is_ok());
     }
 
     #[test]
