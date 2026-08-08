@@ -8,8 +8,8 @@ Run on every change:
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --workspace --exclude excel-abi-probe --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --exclude excel-abi-probe --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 Also build the feature combinations your consumers use, including the no-default-feature facade:
@@ -60,8 +60,8 @@ For the repository's Excel SDK probe on Windows:
 
 ```powershell
 $env:XLFN_SDK_INCLUDE = "C:\path\to\XlFnSdk\include"
-cargo test --package excel-abi-probe --features sdk-bindgen --target x86_64-pc-windows-msvc --locked
-cargo test --package excel-abi-probe --features sdk-bindgen --target i686-pc-windows-msvc --locked
+cargo test --manifest-path probes/excel-abi-probe/Cargo.toml --features sdk-bindgen --target x86_64-pc-windows-msvc --locked
+cargo test --manifest-path probes/excel-abi-probe/Cargo.toml --features sdk-bindgen --target i686-pc-windows-msvc --locked
 ```
 
 An in-process binary adapter should have an equivalent probe for every shared structure, calling convention, ownership rule, and critical callback. Check `sizeof`, alignment, offsets, architecture-specific types, and a live trampoline call where possible. The commands above run those checks from the Rust test harness; a plain `cargo test` without `sdk-bindgen` is intentionally rejected rather than treated as a successful ABI check.

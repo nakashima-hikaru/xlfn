@@ -44,7 +44,6 @@ jobs:
               run: >-
                   cargo clippy
                   --workspace
-                  --exclude excel-abi-probe
                   --all-targets
                   --all-features
                   --locked
@@ -60,7 +59,6 @@ jobs:
               run: >-
                   cargo test
                   --workspace
-                  --exclude excel-abi-probe
                   --all-targets
                   --all-features
                   --locked
@@ -75,12 +73,14 @@ jobs:
                   --
                   --ignored
 
-            - name: Check and lint standalone examples
+            - name: Check and lint standalone consumers
               run: |
                   cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
                   cargo clippy --manifest-path examples/basic-xll/Cargo.toml --all-targets --locked -- -D warnings
                   cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
                   cargo clippy --manifest-path examples/rtd-source/Cargo.toml --all-targets --locked -- -D warnings
+                  cargo check --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked
+                  cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked -- -D warnings
 
             - name: Install mdBook
               uses: peaceiris/actions-mdbook@062dc9e3eab0bad35531417c6bb6c6a7a184764f # v2
@@ -124,7 +124,6 @@ jobs:
               run: |
                   cargo test `
                     --workspace `
-                    --exclude excel-abi-probe `
                     --all-targets `
                     --all-features `
                     --target ${{ matrix.target }} `
@@ -208,7 +207,7 @@ jobs:
               shell: pwsh
               run: >
                   cargo test
-                  --package excel-abi-probe
+                  --manifest-path probes/excel-abi-probe/Cargo.toml
                   --features sdk-bindgen
                   --target ${{ matrix.target }}
                   --locked

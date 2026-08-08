@@ -8,11 +8,8 @@ members = [
     "crates/cargo-xlfn",
     "tools/windows-bindings",
     "crates/xlfn",
-    "tests/xlfn-e2e-fixture",
-    "probes/excel-abi-probe",
 ]
 exclude = [
-    "examples/*",
     "formal/_nanoda_lib",
 ]
 resolver = "3"
@@ -43,7 +40,6 @@ async-task = "4.7.1"
 bindgen = "0.72.1"
 blake3 = { version = "1.8.5", features = ["pure"] }
 cargo_metadata = "0.23.1"
-cc = "1.2.57"
 clap = { version = "4.6.5", features = ["derive"] }
 constant_time_eq = "0.5.0"
 fs-err = "3.3.1"
