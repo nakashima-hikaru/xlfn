@@ -27,6 +27,9 @@ pub(crate) mod win32;
 mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod benchmark_support;
 mod cache;
 mod callback_gate;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]

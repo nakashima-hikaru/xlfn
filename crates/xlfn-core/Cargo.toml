@@ -17,6 +17,15 @@ async = [
     "dep:async-task",
     "dep:futures-util",
 ]
+bench-internals = ["async"]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "async_spawn"
+harness = false
+required-features = ["bench-internals"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -39,6 +48,7 @@ tracing.workspace = true
 xlfn-common.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 futures-util.workspace = true
 proptest.workspace = true
 static_assertions.workspace = true
