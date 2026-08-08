@@ -1782,8 +1782,8 @@ mod tests {
     fn close_stops_async_before_terminal_unregister_and_never_calls_excel_afterwards() {
         use std::panic::AssertUnwindSafe;
         use xlfn_sys::{
-            XL_ASYNC_RETURN, XLF_UNREGISTER, XL_FREE, XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle,
-            XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
+            XL_ASYNC_RETURN, XL_FREE, XLF_UNREGISTER, XLOPER12, XLOPER12BigData,
+            XLOPER12BigDataHandle, XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
         };
 
         let runtime = Box::leak(Box::new(Runtime::new()));

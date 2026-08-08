@@ -465,7 +465,10 @@ mod tests {
             let _ = context.coerce(&reference);
             assert_eq!(crate::test_callback::total_calls(), 2);
             assert_eq!(crate::test_callback::free_calls(), 1);
-            assert_eq!(crate::test_callback::total_calls() - crate::test_callback::free_calls(), 1);
+            assert_eq!(
+                crate::test_callback::total_calls() - crate::test_callback::free_calls(),
+                1
+            );
         });
     }
 

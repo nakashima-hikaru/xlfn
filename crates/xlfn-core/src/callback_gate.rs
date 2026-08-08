@@ -83,7 +83,10 @@ impl CallbackGate {
             id,
             state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
         }));
-        GATES.lock().get_or_insert_with(HashMap::new).insert(id, gate);
+        GATES
+            .lock()
+            .get_or_insert_with(HashMap::new)
+            .insert(id, gate);
         gate
     }
 
@@ -298,7 +301,10 @@ mod tests {
         let token = CallbackInvocationToken::new();
         assert!(enter_callback(&token).is_ok());
         close_from_runtime();
-        assert!(matches!(enter_callback(&token), Err(CallbackGateSuppressed { .. })));
+        assert!(matches!(
+            enter_callback(&token),
+            Err(CallbackGateSuppressed { .. })
+        ));
     }
 
     #[test]

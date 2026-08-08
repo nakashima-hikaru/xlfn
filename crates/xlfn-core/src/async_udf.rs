@@ -1210,10 +1210,13 @@ unsafe fn return_error(udf_id: &'static str, handle: *mut XLOPER12, error: &XllE
 
 unsafe fn async_return(handle: NonNull<XLOPER12>, result: NonNull<XLOPER12>) -> XllResult<()> {
     let invocation = crate::callback_gate::CallbackInvocationToken::new();
-    let callback_gate = crate::callback_gate::enter_callback(&invocation).map_err(|suppressed| XllError::ExcelApi {
-        function: "xlAsyncReturn(suppressed)",
-        code: suppressed.status.raw_code(),
-    })?;
+    let callback_gate =
+        crate::callback_gate::enter_callback(&invocation).map_err(|suppressed| {
+            XllError::ExcelApi {
+                function: "xlAsyncReturn(suppressed)",
+                code: suppressed.status.raw_code(),
+            }
+        })?;
     // SAFETY: both XLOPER12 pointers are live for this call. The specialized
     // raw wrapper intentionally does not expose the worker-thread-forbidden
     // xlFree cleanup path.

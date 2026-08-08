@@ -13,8 +13,6 @@ members = [
 ]
 exclude = [
     "examples/*",
-    "examples/basic-xll",
-    "examples/rtd-source",
     "formal/_nanoda_lib",
 ]
 resolver = "3"
