@@ -5,10 +5,10 @@
 
 use crate::{ExcelErrorValue, XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 const DEFAULT_MAX_RTD_TOPIC_PARTS: usize = 253;
@@ -834,14 +834,15 @@ struct ActiveSubscription {
     generation: ConnectionGeneration,
     subscription: Option<Box<dyn RtdSubscription>>,
     committed: bool,
-    latest: RtdValue,
+    latest: Arc<RtdValue>,
     _permit: QuotaPermit,
 }
 
 struct QueuedUpdate {
+    topic_id: TopicId,
     connection_generation: ConnectionGeneration,
     sequence: u64,
-    value: RtdValue,
+    value: Arc<RtdValue>,
     _permit: QuotaPermit,
 }
 
@@ -892,14 +893,21 @@ impl Default for DeliveryPhase {
     }
 }
 
+const TOPIC_SHARDS: usize = 32;
+
+fn shard_index(topic_id: TopicId) -> usize {
+    (topic_id.0 as usize) & (TOPIC_SHARDS - 1)
+}
+
+const SERVER_LIFECYCLE_OPEN: u8 = 0;
+const SERVER_LIFECYCLE_CLOSING: u8 = 1;
+const SERVER_LIFECYCLE_TERMINATED: u8 = 2;
+
 #[derive(Default)]
-struct ServerDeliveryState {
-    callback: Option<NotificationCallback>,
-    updates: BTreeMap<TopicId, QueuedUpdate>,
-    next_update_sequence: u64,
-    next_notification_ticket: u64,
-    next_refresh_id: u64,
-    phase: DeliveryPhase,
+struct TopicShard {
+    active_by_topic: HashMap<TopicId, ActiveSubscription>,
+    topic_by_key: HashMap<SubscriptionKey, TopicId>,
+    pending: [HashMap<TopicId, QueuedUpdate>; 2],
 }
 
 #[derive(Clone)]
@@ -919,30 +927,22 @@ enum NotificationCompletion {
     Failed(XllError),
 }
 
-impl ServerDeliveryState {
-    fn allocate_update_sequence(&mut self) -> XllResult<u64> {
-        let seq = self.next_update_sequence;
-        self.next_update_sequence = seq.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5345_514f_5646_4c57,
-        })?;
-        Ok(seq)
-    }
+#[derive(Default)]
+struct RefreshState {
+    next_refresh_id: u64,
+    next_notification_ticket: u64,
+    callback: Option<NotificationCallback>,
+    phase: DeliveryPhase,
+    in_flight: Option<Vec<QueuedUpdate>>,
+}
 
-    fn allocate_refresh_id(&mut self) -> XllResult<u64> {
-        let id = self.next_refresh_id;
-        self.next_refresh_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5245_464f_5646_4c57,
+impl RefreshState {
+    fn ensure_notification_ticket(&self) -> XllResult<()> {
+        let ticket = self.next_notification_ticket;
+        ticket.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5449_434b_4f56_464c,
         })?;
-        Ok(id)
-    }
-
-    fn reset_suppressed_signal(&mut self) {
-        if let DeliveryPhase::BetweenRefreshes {
-            signal: signal @ SignalState::Suppressed { .. },
-        } = &mut self.phase
-        {
-            *signal = SignalState::Dormant;
-        }
+        Ok(())
     }
 
     fn attach_callback(&mut self, callback: NotificationCallback) -> Option<NotificationCallback> {
@@ -959,14 +959,6 @@ impl ServerDeliveryState {
             *signal = SignalState::Dormant;
         }
         retired
-    }
-
-    fn ensure_notification_ticket(&self) -> XllResult<()> {
-        let ticket = self.next_notification_ticket;
-        ticket.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5449_434b_4f56_464c,
-        })?;
-        Ok(())
     }
 
     fn prepare_notification(
@@ -1030,38 +1022,6 @@ impl ServerDeliveryState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ServerLifecycle {
-    Open,
-    Closing,
-    Terminated,
-}
-
-struct ServerState {
-    lifecycle: ServerLifecycle,
-    active_by_topic: HashMap<TopicId, ActiveSubscription>,
-    topic_by_key: HashMap<SubscriptionKey, TopicId>,
-    delivery: ServerDeliveryState,
-}
-
-impl ServerState {
-    fn ensure_open(&self) -> XllResult<()> {
-        if self.lifecycle == ServerLifecycle::Open {
-            Ok(())
-        } else {
-            Err(XllError::Closing)
-        }
-    }
-
-    fn has_deliverable_updates(&self) -> bool {
-        self.delivery.updates.keys().any(|topic_id| {
-            self.active_by_topic
-                .get(topic_id)
-                .is_some_and(|active| active.committed)
-        })
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct RtdServerHandle {
     inner: Arc<ServerRuntime>,
@@ -1074,12 +1034,16 @@ impl RtdServerHandle {
     ) -> XllResult<Option<NotificationCallback>> {
         let _operation = self.inner.enter_operation()?;
         let (retired, attempt) = {
-            let mut state = self.inner.state.lock();
-            state.ensure_open()?;
-            let retired = state.delivery.attach_callback(callback);
-            let has_updates = state.has_deliverable_updates();
-            let prepared = state.delivery.prepare_notification(has_updates)?;
-            let attempt = prepared.map(|p| state.delivery.commit_notification(p));
+            self.inner.ensure_open()?;
+            let mut refresh = self.inner.refresh.lock();
+            let retired = refresh.attach_callback(callback);
+            let has_updates = self.inner.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
+            let attempt = prepared.map(|p| {
+                self.inner.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            });
             (retired, attempt)
         };
         if let Some(attempt) = attempt {
@@ -1089,18 +1053,22 @@ impl RtdServerHandle {
     }
 
     pub(crate) fn detach_update_callback(&self) -> Option<NotificationCallback> {
-        let mut state = self.inner.state.lock();
-        state.delivery.detach_callback()
+        let mut refresh = self.inner.refresh.lock();
+        refresh.detach_callback()
     }
 
     pub(crate) fn pulse_notification(&self) -> XllResult<()> {
         let _operation = self.inner.enter_operation()?;
         let attempt = {
-            let mut state = self.inner.state.lock();
-            state.ensure_open()?;
-            let has_updates = state.has_deliverable_updates();
-            let prepared = state.delivery.prepare_notification(has_updates)?;
-            prepared.map(|p| state.delivery.commit_notification(p))
+            self.inner.ensure_open()?;
+            let mut refresh = self.inner.refresh.lock();
+            let has_updates = self.inner.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
+            prepared.map(|p| {
+                self.inner.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            })
         };
         if let Some(attempt) = attempt {
             self.inner.drive_notification(attempt);
@@ -1111,35 +1079,62 @@ impl RtdServerHandle {
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch> {
         let operation = self.inner.enter_operation()?;
         let (refresh_id, updates) = {
-            let mut state = self.inner.state.lock();
-            state.ensure_open()?;
-            if matches!(state.delivery.phase, DeliveryPhase::Refreshing { .. }) {
+            self.inner.ensure_open()?;
+            let mut refresh = self.inner.refresh.lock();
+            if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
                 return Err(XllError::Internal {
                     diagnostic_id: 0x4f56_4c50_5245_4652,
                 });
             }
-            let refresh_id = state.delivery.allocate_refresh_id()?;
-            let ServerState {
-                active_by_topic,
-                delivery,
-                ..
-            } = &mut *state;
-            let updates = delivery
-                .updates
-                .iter()
-                .filter(|&(&topic_id, _)| {
-                    active_by_topic
-                        .get(&topic_id)
-                        .is_some_and(|active| active.committed)
-                })
-                .map(|(&topic_id, queued)| RtdUpdate {
-                    sequence: queued.sequence,
-                    topic_id: topic_id.0,
-                    value: queued.value.clone(),
+            let refresh_id = refresh.next_refresh_id;
+            refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
+                diagnostic_id: 0x5245_464f_5646_4c57,
+            })?;
+
+            self.inner.publish_epoch.fetch_add(1, Ordering::AcqRel);
+
+            let mut deliverable = Vec::new();
+            for shard_mutex in self.inner.shards.iter() {
+                let shard = shard_mutex.lock();
+                for buf in [0, 1] {
+                    for (topic_id, queued) in &shard.pending[buf] {
+                        if shard
+                            .active_by_topic
+                            .get(topic_id)
+                            .is_some_and(|active| active.committed)
+                        {
+                            deliverable.push((queued.sequence, topic_id.0, queued.value.clone()));
+                        }
+                    }
+                }
+            }
+
+            let mut by_topic: HashMap<i32, (u64, Arc<RtdValue>)> = HashMap::new();
+            for (sequence, topic_id, value) in deliverable {
+                match by_topic.entry(topic_id) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert((sequence, value));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if sequence > slot.get().0 {
+                            slot.insert((sequence, value));
+                        }
+                    }
+                }
+            }
+
+            let mut updates_vec: Vec<RtdUpdate> = by_topic
+                .into_iter()
+                .map(|(topic_id, (sequence, value))| RtdUpdate {
+                    sequence,
+                    topic_id,
+                    value: (*value).clone(),
                 })
                 .collect();
-            delivery.phase = DeliveryPhase::Refreshing { refresh_id };
-            (refresh_id, updates)
+            updates_vec.sort_unstable_by_key(|u| u.sequence);
+
+            refresh.phase = DeliveryPhase::Refreshing { refresh_id };
+            (refresh_id, updates_vec)
         };
         Ok(RtdRefreshBatch {
             server: Arc::clone(&self.inner),
@@ -1152,23 +1147,30 @@ impl RtdServerHandle {
 
     #[cfg(test)]
     pub(crate) fn pending_update_count(&self) -> usize {
-        let state = self.inner.state.lock();
-        state
-            .delivery
-            .updates
-            .keys()
-            .filter(|topic_id| {
-                state
+        let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
+        let buf0 = (epoch & 1) as usize;
+        let buf1 = 1 - buf0;
+        let mut count = 0;
+        for shard_mutex in self.inner.shards.iter() {
+            let shard = shard_mutex.lock();
+            let keys0 = shard.pending[buf0].keys();
+            let keys1 = shard.pending[buf1].keys();
+            for topic_id in keys0.chain(keys1) {
+                if shard
                     .active_by_topic
                     .get(topic_id)
                     .is_some_and(|a| a.committed)
-            })
-            .count()
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     pub(crate) fn claim(&self, key: &SubscriptionKey) -> XllResult<()> {
         let _operation = self.inner.enter_operation()?;
-        self.inner.state.lock().ensure_open()?;
+        self.inner.ensure_open()?;
         let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
         parent.claim_server_key(self.inner.generation, key)
     }
@@ -1197,7 +1199,13 @@ pub(crate) struct ServerRuntime {
     generation: ServerGeneration,
     module_ingress: Option<&'static crate::ingress::ExportIngress>,
     operation_gate: Arc<OperationGate>,
-    state: Mutex<ServerState>,
+    lifecycle: AtomicU8,
+    publish_epoch: AtomicU64,
+    next_update_sequence: AtomicU64,
+    notified_epoch: AtomicU64,
+    pending_updates: AtomicUsize,
+    shards: Box<[Mutex<TopicShard>]>,
+    refresh: Mutex<RefreshState>,
     parent: Weak<SubscriptionRuntime>,
     termination_coordinator: TerminationCoordinator,
 }
@@ -1219,6 +1227,51 @@ impl Drop for ServerOperation {
 }
 
 impl ServerRuntime {
+    fn ensure_open(&self) -> XllResult<()> {
+        if self.lifecycle.load(Ordering::Acquire) == SERVER_LIFECYCLE_OPEN {
+            Ok(())
+        } else {
+            Err(XllError::Closing)
+        }
+    }
+
+    fn has_deliverable_updates(&self) -> bool {
+        let epoch = self.publish_epoch.load(Ordering::Acquire);
+        let buf0 = (epoch & 1) as usize;
+        let buf1 = 1 - buf0;
+        self.shards.iter().any(|shard_mutex| {
+            let shard = shard_mutex.lock();
+            shard.pending[buf0]
+                .keys()
+                .chain(shard.pending[buf1].keys())
+                .any(|tid| {
+                    shard
+                        .active_by_topic
+                        .get(tid)
+                        .is_some_and(|active| active.committed)
+                })
+        })
+    }
+
+    fn ensure_notified(self: &Arc<Self>, epoch: u64) -> XllResult<()> {
+        if self.notified_epoch.load(Ordering::Acquire) == epoch {
+            return Ok(());
+        }
+        let attempt = {
+            let mut refresh = self.refresh.lock();
+            let has_updates = self.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            prepared.map(|p| {
+                self.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            })
+        };
+        if let Some(attempt) = attempt {
+            self.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
     fn enter_operation(&self) -> XllResult<ServerOperation> {
         let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
         if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
@@ -1277,17 +1330,35 @@ impl ServerRuntime {
         value: RtdValue,
     ) -> XllResult<()> {
         let _operation = self.enter_operation()?;
-        let attempt = {
-            let mut state = self.state.lock();
-            state.ensure_open()?;
-            let active = state
-                .active_by_topic
-                .get(&topic_id)
-                .filter(|active| active.generation == generation)
-                .ok_or(XllError::Closing)?;
+        value.validate()?;
 
-            let committed = active.committed;
-            let is_new_update = !state.delivery.updates.contains_key(&topic_id);
+        let shard_index = shard_index(topic_id);
+
+        let value = Arc::new(value);
+
+        let epoch = loop {
+            self.ensure_open()?;
+
+            let epoch = self.publish_epoch.load(Ordering::Acquire);
+            let buffer = (epoch & 1) as usize;
+
+            let mut shard = self.shards[shard_index].lock();
+
+            if self.publish_epoch.load(Ordering::Acquire) != epoch {
+                drop(shard);
+                continue;
+            }
+
+            let conn_gen = {
+                let active = shard
+                    .active_by_topic
+                    .get(&topic_id)
+                    .filter(|active| active.generation == generation)
+                    .ok_or(XllError::Closing)?;
+                active.generation
+            };
+
+            let is_new_update = !shard.pending[buffer].contains_key(&topic_id);
 
             let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
             let permit = if is_new_update {
@@ -1296,43 +1367,34 @@ impl ServerRuntime {
                 None
             };
 
-            let conn_gen = active.generation;
-            let sequence = state.delivery.allocate_update_sequence()?;
-            let prepared = if committed {
-                state.delivery.prepare_notification(true)?
-            } else {
-                None
-            };
+            let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
 
-            match state.delivery.updates.entry(topic_id) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
+            match shard.pending[buffer].entry(topic_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let existing = entry.get_mut();
                     existing.connection_generation = conn_gen;
                     existing.sequence = sequence;
-                    existing.value = value.clone();
+                    existing.value = Arc::clone(&value);
                 }
-                std::collections::btree_map::Entry::Vacant(entry) => {
+                std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(QueuedUpdate {
+                        topic_id,
                         connection_generation: conn_gen,
                         sequence,
-                        value: value.clone(),
+                        value: Arc::clone(&value),
                         _permit: permit.expect("new update owns quota permit"),
                     });
+                    self.pending_updates.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
-            state
-                .active_by_topic
-                .get_mut(&topic_id)
-                .expect("active topic was validated above")
-                .latest = value;
-
-            prepared.map(|prepared| state.delivery.commit_notification(prepared))
+            if let Some(active) = shard.active_by_topic.get_mut(&topic_id) {
+                active.latest = Arc::clone(&value);
+            }
+            break epoch;
         };
 
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
+        self.ensure_notified(epoch)?;
         Ok(())
     }
 
@@ -1379,9 +1441,9 @@ impl ServerRuntime {
         ticket: u64,
         outcome: XllResult<()>,
     ) -> NotificationCompletion {
-        let mut state = self.state.lock();
-        let callback = state.delivery.callback.clone();
-        let Some(signal) = state.delivery.signal_for_ticket_mut(ticket) else {
+        let mut refresh = self.refresh.lock();
+        let callback = refresh.callback.clone();
+        let Some(signal) = refresh.signal_for_ticket_mut(ticket) else {
             return NotificationCompletion::Finished;
         };
 
@@ -1392,7 +1454,7 @@ impl ServerRuntime {
 
         match outcome {
             Ok(()) => {
-                if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                if let Some(signal) = refresh.signal_calling_mut(ticket) {
                     *signal = SignalState::Signaled { ticket };
                 }
                 NotificationCompletion::Finished
@@ -1400,7 +1462,7 @@ impl ServerRuntime {
             Err(error) => {
                 if attempt < 2 {
                     let next_attempt = attempt + 1;
-                    if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                    if let Some(signal) = refresh.signal_calling_mut(ticket) {
                         *signal = SignalState::Calling {
                             ticket,
                             attempt: next_attempt,
@@ -1409,11 +1471,16 @@ impl ServerRuntime {
                     if let Some(callback) = callback {
                         NotificationCompletion::Retry(NotificationAttempt { ticket, callback })
                     } else {
-                        state.delivery.reset_suppressed_signal();
+                        if let DeliveryPhase::BetweenRefreshes {
+                            signal: signal @ SignalState::Suppressed { .. },
+                        } = &mut refresh.phase
+                        {
+                            *signal = SignalState::Dormant;
+                        }
                         NotificationCompletion::Failed(error)
                     }
                 } else {
-                    if let Some(signal) = state.delivery.signal_calling_mut(ticket) {
+                    if let Some(signal) = refresh.signal_calling_mut(ticket) {
                         *signal = SignalState::Suppressed { ticket };
                     }
                     NotificationCompletion::Failed(error)
@@ -1425,13 +1492,13 @@ impl ServerRuntime {
     fn complete_refresh_inner(
         &self,
         refresh_id: u64,
-        delivered_updates: &[RtdUpdate],
+        _delivered_updates: &[RtdUpdate],
         outcome: RefreshOutcome,
     ) -> XllResult<Option<NotificationAttempt>> {
-        let mut state = self.state.lock();
+        let mut refresh = self.refresh.lock();
         let DeliveryPhase::Refreshing {
             refresh_id: active_id,
-        } = state.delivery.phase
+        } = refresh.phase
         else {
             return Err(XllError::Internal {
                 diagnostic_id: 0x4e4f_5245_4652_4143,
@@ -1444,53 +1511,57 @@ impl ServerRuntime {
             });
         }
 
-        state.delivery.ensure_notification_ticket()?;
+        refresh.ensure_notification_ticket()?;
 
         match outcome {
             RefreshOutcome::Delivered => {
-                for update in delivered_updates {
+                for update in _delivered_updates {
                     let topic_id = TopicId(update.topic_id);
-                    if state
-                        .delivery
-                        .updates
+                    let shard_index = shard_index(topic_id);
+                    let mut shard = self.shards[shard_index].lock();
+                    if shard.pending[0]
                         .get(&topic_id)
                         .is_some_and(|u| u.sequence == update.sequence)
                     {
-                        state.delivery.updates.remove(&topic_id);
+                        shard.pending[0].remove(&topic_id);
+                        self.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    if shard.pending[1]
+                        .get(&topic_id)
+                        .is_some_and(|u| u.sequence == update.sequence)
+                    {
+                        shard.pending[1].remove(&topic_id);
+                        self.pending_updates.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
             }
             RefreshOutcome::Failed => {}
         }
 
-        state.delivery.phase = DeliveryPhase::BetweenRefreshes {
+        refresh.phase = DeliveryPhase::BetweenRefreshes {
             signal: SignalState::Dormant,
         };
 
-        let has_updates = state.has_deliverable_updates();
-        let prepared = state.delivery.prepare_notification(has_updates)?;
-        let attempt = prepared.map(|p| state.delivery.commit_notification(p));
+        let has_updates = self.has_deliverable_updates();
+        let prepared = refresh.prepare_notification(has_updates)?;
+        let attempt = prepared.map(|p| refresh.commit_notification(p));
         Ok(attempt)
     }
 
     fn abort_refresh_no_unwind(self: &Arc<Self>, refresh_id: u64) {
         let attempt = {
-            let mut state = self.state.lock();
+            let mut refresh = self.refresh.lock();
             if let DeliveryPhase::Refreshing {
                 refresh_id: active_id,
-            } = state.delivery.phase
+            } = refresh.phase
             {
                 if active_id == refresh_id {
-                    state.delivery.phase = DeliveryPhase::BetweenRefreshes {
+                    refresh.phase = DeliveryPhase::BetweenRefreshes {
                         signal: SignalState::Dormant,
                     };
-                    let has_updates = state.has_deliverable_updates();
-                    let prepared = state
-                        .delivery
-                        .prepare_notification(has_updates)
-                        .ok()
-                        .flatten();
-                    prepared.map(|p| state.delivery.commit_notification(p))
+                    let has_updates = self.has_deliverable_updates();
+                    let prepared = refresh.prepare_notification(has_updates).ok().flatten();
+                    prepared.map(|p| refresh.commit_notification(p))
                 } else {
                     None
                 }
@@ -1526,22 +1597,26 @@ impl ServerRuntime {
                 let wait = self.operation_gate.close_and_wait_begin();
                 term_state.phase = ServerTerminationPhase::Terminating;
 
-                let (callback, initial_subscriptions) = {
-                    let mut state = self.state.lock();
-                    debug_assert_eq!(state.lifecycle, ServerLifecycle::Open);
-                    state.lifecycle = ServerLifecycle::Closing;
+                self.lifecycle
+                    .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
-                    let callback = state.delivery.detach_callback();
-                    state.delivery.updates.clear();
-
-                    let initial_subscriptions = state
-                        .active_by_topic
-                        .values_mut()
-                        .filter_map(|active| active.subscription.take())
-                        .collect::<Vec<_>>();
-
-                    (callback, initial_subscriptions)
+                let callback = {
+                    let mut refresh = self.refresh.lock();
+                    refresh.detach_callback()
                 };
+
+                let mut initial_subscriptions = Vec::new();
+                for shard_mutex in self.shards.iter() {
+                    let mut shard = shard_mutex.lock();
+                    shard.pending[0].clear();
+                    shard.pending[1].clear();
+                    for active in shard.active_by_topic.values_mut() {
+                        if let Some(sub) = active.subscription.take() {
+                            initial_subscriptions.push(sub);
+                        }
+                    }
+                }
+                self.pending_updates.store(0, Ordering::Release);
 
                 TerminationAdmission::Owner(ServerTermination {
                     server: Arc::clone(self),
@@ -1725,22 +1800,25 @@ impl<'a> ServerTermination<'a> {
         }
 
         let (late_callback, active_entries) = {
-            let mut state = self.server.state.lock();
-            let late_callback = state.delivery.detach_callback();
-            state.delivery.updates.clear();
-
-            let active_entries = state
-                .active_by_topic
-                .drain()
-                .map(|(_, active)| TerminatedTopic {
-                    key: active.key,
-                    generation: active.generation,
-                    subscription: active.subscription,
-                })
-                .collect::<Vec<_>>();
-
-            state.topic_by_key.clear();
-            state.lifecycle = ServerLifecycle::Terminated;
+            let late_callback = self.server.refresh.lock().detach_callback();
+            let mut active_entries = Vec::new();
+            for shard_mutex in self.server.shards.iter() {
+                let mut shard = shard_mutex.lock();
+                shard.pending[0].clear();
+                shard.pending[1].clear();
+                for (_, active) in shard.active_by_topic.drain() {
+                    active_entries.push(TerminatedTopic {
+                        key: active.key,
+                        generation: active.generation,
+                        subscription: active.subscription,
+                    });
+                }
+                shard.topic_by_key.clear();
+            }
+            self.server.pending_updates.store(0, Ordering::Release);
+            self.server
+                .lifecycle
+                .store(SERVER_LIFECYCLE_TERMINATED, Ordering::Release);
 
             (late_callback, active_entries)
         };
@@ -2081,16 +2159,21 @@ impl SubscriptionRuntime {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
+        let mut shards = Vec::with_capacity(TOPIC_SHARDS);
+        for _ in 0..TOPIC_SHARDS {
+            shards.push(Mutex::new(TopicShard::default()));
+        }
         let server = Arc::new(ServerRuntime {
             generation,
             module_ingress: self.module_ingress,
             operation_gate: OperationGate::new(),
-            state: Mutex::new(ServerState {
-                lifecycle: ServerLifecycle::Open,
-                active_by_topic: HashMap::new(),
-                topic_by_key: HashMap::new(),
-                delivery: ServerDeliveryState::default(),
-            }),
+            lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
+            publish_epoch: AtomicU64::new(0),
+            next_update_sequence: AtomicU64::new(0),
+            notified_epoch: AtomicU64::new(u64::MAX),
+            pending_updates: AtomicUsize::new(0),
+            shards: shards.into_boxed_slice(),
+            refresh: Mutex::new(RefreshState::default()),
             parent: Arc::downgrade(self),
             termination_coordinator: TerminationCoordinator::default(),
         });
@@ -2346,27 +2429,28 @@ impl SubscriptionRuntime {
             (source, topic)
         };
 
+        let shard_index = shard_index(topic_id);
         let reservation_result = {
-            let mut state = server_handle.inner.state.lock();
+            let mut shard = server_handle.inner.shards[shard_index].lock();
 
-            if let Err(err) = state.ensure_open() {
+            if let Err(err) = server_handle.inner.ensure_open() {
                 Err(ServerReservationFailure::Overloaded(err))
-            } else if state.active_by_topic.contains_key(&topic_id) {
+            } else if shard.active_by_topic.contains_key(&topic_id) {
                 Err(ServerReservationFailure::DuplicateTopicId)
-            } else if state.topic_by_key.contains_key(key) {
+            } else if shard.topic_by_key.contains_key(key) {
                 Err(ServerReservationFailure::DuplicateKey)
             } else {
                 match self.active_quota.try_acquire() {
                     Ok(permit) => {
-                        state.topic_by_key.insert(key.clone(), topic_id);
-                        state.active_by_topic.insert(
+                        shard.topic_by_key.insert(key.clone(), topic_id);
+                        shard.active_by_topic.insert(
                             topic_id,
                             ActiveSubscription {
                                 key: key.clone(),
                                 generation: conn_gen,
                                 subscription: None,
                                 committed: false,
-                                latest: RtdValue::Empty,
+                                latest: Arc::new(RtdValue::Empty),
                                 _permit: permit,
                             },
                         );
@@ -2406,18 +2490,20 @@ impl SubscriptionRuntime {
         };
 
         let install_result = {
-            let mut state = server_handle.inner.state.lock();
-            if state.ensure_open().is_err() {
+            let mut shard = server_handle.inner.shards[shard_index].lock();
+            if server_handle.inner.ensure_open().is_err() {
                 Err(subscription)
             } else {
-                match state.active_by_topic.get_mut(&topic_id) {
+                match shard.active_by_topic.get_mut(&topic_id) {
                     Some(active) if active.generation == conn_gen => {
                         active.subscription = Some(subscription);
-                        let latest = active.latest.clone();
-                        let observed = state
-                            .delivery
-                            .updates
+                        let latest = (*active.latest).clone();
+                        let epoch = server_handle.inner.publish_epoch.load(Ordering::Acquire);
+                        let buf0 = (epoch & 1) as usize;
+                        let buf1 = 1 - buf0;
+                        let observed = shard.pending[buf0]
                             .get(&topic_id)
+                            .or_else(|| shard.pending[buf1].get(&topic_id))
                             .filter(|u| u.connection_generation == conn_gen)
                             .map(|u| u.sequence);
                         Ok((latest, observed))
@@ -2464,9 +2550,10 @@ impl SubscriptionRuntime {
         observed_sequence: Option<u64>,
     ) -> XllResult<()> {
         let attempt = {
-            let mut state = server.state.lock();
-            state.ensure_open()?;
-            let Some(active) = state.active_by_topic.get_mut(&topic_id) else {
+            let shard_index = shard_index(topic_id);
+            let mut shard = server.shards[shard_index].lock();
+            server.ensure_open()?;
+            let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
                 return Err(XllError::Closing);
             };
             if active.generation != generation {
@@ -2475,15 +2562,43 @@ impl SubscriptionRuntime {
             active.committed = true;
 
             if let Some(obs) = observed_sequence {
-                state
-                    .delivery
-                    .updates
-                    .retain(|&tid, u| tid != topic_id || u.sequence > obs);
+                if shard.pending[0]
+                    .get(&topic_id)
+                    .is_some_and(|u| u.sequence <= obs)
+                {
+                    shard.pending[0].remove(&topic_id);
+                    server.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                }
+                if shard.pending[1]
+                    .get(&topic_id)
+                    .is_some_and(|u| u.sequence <= obs)
+                {
+                    shard.pending[1].remove(&topic_id);
+                    server.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                }
             }
 
-            let has_updates = state.has_deliverable_updates();
-            let prepared = state.delivery.prepare_notification(has_updates)?;
-            prepared.map(|p| state.delivery.commit_notification(p))
+            let epoch = server.publish_epoch.load(Ordering::Acquire);
+            let buf0 = (epoch & 1) as usize;
+            let buf1 = 1 - buf0;
+            let has_pending = shard.pending[buf0]
+                .get(&topic_id)
+                .or_else(|| shard.pending[buf1].get(&topic_id))
+                .is_some_and(|u| {
+                    u.connection_generation == generation
+                        && observed_sequence.is_none_or(|seq| u.sequence > seq)
+                });
+            if has_pending {
+                let mut refresh = server.refresh.lock();
+                let has_updates = server.has_deliverable_updates();
+                let prepared = refresh.prepare_notification(has_updates)?;
+                prepared.map(|p| {
+                    server.notified_epoch.store(epoch, Ordering::Release);
+                    refresh.commit_notification(p)
+                })
+            } else {
+                None
+            }
         };
 
         let removed_source = {
@@ -2549,36 +2664,40 @@ impl SubscriptionRuntime {
         key: &SubscriptionKey,
     ) -> XllResult<()> {
         let (subscription, _removed_update) = {
-            let mut state = server_handle.inner.state.lock();
-            let sub = state
+            let shard_index = shard_index(topic_id);
+            let mut shard = server_handle.inner.shards[shard_index].lock();
+            let sub = shard
                 .active_by_topic
                 .get_mut(&topic_id)
                 .filter(|a| a.generation == generation)
                 .and_then(|a| a.subscription.take());
 
-            if state
+            if shard
                 .active_by_topic
                 .get(&topic_id)
                 .is_some_and(|a| a.generation == generation)
             {
-                state.active_by_topic.remove(&topic_id);
+                shard.active_by_topic.remove(&topic_id);
             }
-            if state.topic_by_key.get(key).is_some_and(|&tid| {
-                state
+            if shard.topic_by_key.get(key).is_some_and(|&tid| {
+                shard
                     .active_by_topic
                     .get(&tid)
                     .is_none_or(|a| a.generation == generation)
             }) {
-                state.topic_by_key.remove(key);
+                shard.topic_by_key.remove(key);
             }
 
-            let rem_update = if state
-                .delivery
-                .updates
+            let rem_update = if shard.pending[0]
                 .get(&topic_id)
                 .is_some_and(|u| u.connection_generation == generation)
             {
-                state.delivery.updates.remove(&topic_id)
+                shard.pending[0].remove(&topic_id)
+            } else if shard.pending[1]
+                .get(&topic_id)
+                .is_some_and(|u| u.connection_generation == generation)
+            {
+                shard.pending[1].remove(&topic_id)
             } else {
                 None
             };
@@ -2651,13 +2770,15 @@ impl SubscriptionRuntime {
         topic_id: TopicId,
     ) -> XllResult<()> {
         let (subscription, key_to_clean, conn_gen) = {
-            let mut state = server_handle.inner.state.lock();
-            state.ensure_open()?;
-            let Some((tid, active)) = state.active_by_topic.remove_entry(&topic_id) else {
+            let shard_index = shard_index(topic_id);
+            let mut shard = server_handle.inner.shards[shard_index].lock();
+            server_handle.inner.ensure_open()?;
+            let Some((tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
                 return Ok(());
             };
-            state.topic_by_key.remove(&active.key);
-            state.delivery.updates.remove(&tid);
+            shard.topic_by_key.remove(&active.key);
+            shard.pending[0].remove(&tid);
+            shard.pending[1].remove(&tid);
             (active.subscription, active.key, active.generation)
         };
 
@@ -3018,7 +3139,7 @@ pub(crate) mod tests {
         let _sink_a = sink_a.lock().clone().unwrap();
         let sink_b = sink_b.lock().clone().unwrap();
 
-        let lock_guard = server_a.inner.state.lock();
+        let lock_guard = server_a.inner.shards[0].lock();
 
         let b_published = Arc::new(AtomicBool::new(false));
         let b_published_clone = Arc::clone(&b_published);
@@ -3121,8 +3242,8 @@ pub(crate) mod tests {
         let sink_b = sink_b.lock().clone().unwrap();
         sink_b.publish(42.0).unwrap();
 
-        // server A の state mutex を保持した状態で server B.begin_refresh を実行
-        let _guard_a = server_a.inner.state.lock();
+        // server A の shard mutex を保持した状態で server B.begin_refresh を実行
+        let _guard_a = server_a.inner.shards[0].lock();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let server_b_clone = server_b.clone();
@@ -3680,10 +3801,10 @@ pub(crate) mod tests {
             .unwrap();
         let key = prep.key().clone();
 
-        {
-            let mut state = server.inner.state.lock();
-            state.lifecycle = ServerLifecycle::Closing;
-        }
+        server
+            .inner
+            .lifecycle
+            .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
         assert!(matches!(
             server.attach_update_callback(Arc::new(|| Ok(()))),
@@ -3730,8 +3851,8 @@ pub(crate) mod tests {
         conn.commit().unwrap();
 
         {
-            let mut state = server.inner.state.lock();
-            let active = state.active_by_topic.get_mut(&TopicId(1)).unwrap();
+            let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
+            let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
             active.subscription = Some(Box::new(FailingDisconnectSubscription));
         }
 
@@ -3835,8 +3956,8 @@ pub(crate) mod tests {
         conn.commit().unwrap();
 
         {
-            let mut state = server.inner.state.lock();
-            let active = state.active_by_topic.get_mut(&TopicId(1)).unwrap();
+            let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
+            let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
             active.subscription = Some(Box::new(FailingDisconnectSubscription));
         }
 
@@ -3866,8 +3987,8 @@ pub(crate) mod tests {
             .unwrap();
 
         {
-            let mut state = server.inner.state.lock();
-            let active = state.active_by_topic.get_mut(&TopicId(1)).unwrap();
+            let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
+            let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
             active.subscription = Some(Box::new(FailingDisconnectSubscription));
         }
 
@@ -3910,8 +4031,8 @@ pub(crate) mod tests {
         conn.commit().unwrap();
 
         {
-            let mut state = server.inner.state.lock();
-            let active = state.active_by_topic.get_mut(&TopicId(1)).unwrap();
+            let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
+            let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
             active.subscription = Some(Box::new(PanickingCancelSubscription));
         }
 
@@ -3968,10 +4089,10 @@ pub(crate) mod tests {
 
         rx_enter.recv().unwrap();
 
-        {
-            let mut state = server.inner.state.lock();
-            state.lifecycle = ServerLifecycle::Closing;
-        }
+        server
+            .inner
+            .lifecycle
+            .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
         tx_close.send(()).unwrap();
 
