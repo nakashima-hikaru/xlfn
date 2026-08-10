@@ -8,7 +8,7 @@ namespace XlFnFormal.Shutdown
 
 open Lean
 
-private def schemaVersion : Nat := 2
+private def schemaVersion : Nat := 3
 
 private structure WireState where
   generation : Nat
@@ -187,6 +187,7 @@ private def parseResources (json : Json) : Except String Resources := do
   let callbackGateOpen : Bool ← field json "callbackGateOpen"
   let activeCalls : Nat ← field json "activeCalls"
   let returnBlocks : Nat ← field json "returnBlocks"
+  let returnBlocksInFree : Nat ← field json "returnBlocksInFree"
   let returnFreeOperations : Nat ← field json "returnFreeOperations"
   let asyncTasks : Nat ← field json "asyncTasks"
   let asyncExecutorRunning : Bool ← field json "asyncExecutorRunning"
@@ -213,6 +214,7 @@ private def parseResources (json : Json) : Except String Resources := do
     callbackGateOpen,
     activeCalls,
     returnBlocks,
+    returnBlocksInFree,
     returnFreeOperations,
     asyncTasks,
     asyncExecutorRunning,

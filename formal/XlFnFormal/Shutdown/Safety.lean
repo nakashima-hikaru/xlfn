@@ -105,6 +105,7 @@ theorem reachable_closed_has_no_executable_work
     current.resources.externalEntries = 0 ∧
     current.resources.activeCalls = 0 ∧
     current.resources.returnBlocks = 0 ∧
+    current.resources.returnBlocksInFree = 0 ∧
     current.resources.returnFreeOperations = 0 ∧
     current.resources.asyncTasks = 0 ∧
     current.resources.asyncExecutorRunning = false ∧
@@ -125,12 +126,12 @@ theorem reachable_closed_has_no_executable_work
   have hRtd := Resources.quiescent_rtdDrained hQuiescent
   have hHandles := Resources.quiescent_handlesDrained hQuiescent
   rcases hCalls with ⟨hExternal, hCalls⟩
-  rcases hReturns with ⟨hBlocks, hFree⟩
+  rcases hReturns with ⟨hBlocks, hBlocksInFree, hFree⟩
   rcases hAsync with ⟨hTasks, hExecutor⟩
   rcases hSubscriptions with ⟨hSubscriptions, hCallbacks⟩
   rcases hRtd with ⟨hOperations, hFactories, hServers, hLocks⟩
   rcases hHandles with ⟨hHandleOperations, hHandleValues⟩
-  exact ⟨hExternal, hCalls, hBlocks, hFree, hTasks, hExecutor,
+  exact ⟨hExternal, hCalls, hBlocks, hBlocksInFree, hFree, hTasks, hExecutor,
     hSubscriptions, hCallbacks, hOperations, hFactories, hServers, hLocks,
     hHandleOperations, hHandleValues⟩
 

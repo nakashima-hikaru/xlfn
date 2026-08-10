@@ -136,23 +136,27 @@ inductive Step : State → Event → State → Prop where
 
   | beginReturnFree {s : State}
       (hAllowed : s.phase.AllowsReturnFree)
-      (hAvailable : s.resources.returnFreeOperations < s.resources.returnBlocks) :
+      (hAvailable : s.resources.returnBlocksInFree < s.resources.returnBlocks) :
       Step s .beginReturnFree
         { s with resources :=
             { s.resources with
+              returnBlocksInFree := s.resources.returnBlocksInFree + 1
               returnFreeOperations := s.resources.returnFreeOperations + 1 } }
 
-  | releaseReturnBlock {s : State} {blocks : Nat}
+  | releaseReturnBlock {s : State} {blocks blocksInFree : Nat}
       (hLive : s.phase.IsLive)
       (hBlocks : s.resources.returnBlocks = blocks + 1)
-      : Step s .releaseReturnBlock
+      (hInFree : s.resources.returnBlocksInFree = blocksInFree + 1) :
+      Step s .releaseReturnBlock
         { s with resources :=
             { s.resources with
-              returnBlocks := blocks } }
+              returnBlocks := blocks
+              returnBlocksInFree := blocksInFree } }
 
   | endReturnFree {s : State} {freeOperations : Nat}
       (hLive : s.phase.IsLive)
-      (hOperations : s.resources.returnFreeOperations = freeOperations + 1) :
+      (hOperations : s.resources.returnFreeOperations = freeOperations + 1)
+      (hReleased : s.resources.returnBlocksInFree ≤ freeOperations) :
       Step s .endReturnFree
         { s with resources :=
             { s.resources with

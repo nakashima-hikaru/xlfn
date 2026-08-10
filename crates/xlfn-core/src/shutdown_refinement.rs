@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 
 #[cfg(any(test, feature = "shutdown-trace"))]
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +68,7 @@ pub(crate) struct GhostResources {
     pub(crate) callback_gate_open: bool,
     pub(crate) active_calls: u64,
     pub(crate) return_blocks: u64,
+    pub(crate) return_blocks_in_free: u64,
     pub(crate) return_free_operations: u64,
     pub(crate) async_tasks: u64,
     pub(crate) async_executor_running: bool,
@@ -98,6 +99,7 @@ impl GhostResources {
             callback_gate_open: true,
             active_calls: 0,
             return_blocks: 0,
+            return_blocks_in_free: 0,
             return_free_operations: 0,
             async_tasks: 0,
             async_executor_running: false,
@@ -131,7 +133,9 @@ impl GhostResources {
     }
 
     fn returns_drained(&self) -> bool {
-        self.return_blocks == 0 && self.return_free_operations == 0
+        self.return_blocks == 0
+            && self.return_blocks_in_free == 0
+            && self.return_free_operations == 0
     }
 
     fn async_drained(&self) -> bool {
@@ -468,12 +472,16 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
         }
         GhostEvent::BeginReturnFree => {
             if !return_free_allowed(&source.phase)
-                || resources.return_free_operations >= resources.return_blocks
+                || resources.return_blocks_in_free >= resources.return_blocks
             {
                 return Err(GhostViolation::Precondition(
                     "return free requires an outstanding return block",
                 ));
             }
+            increment(
+                &mut resources.return_blocks_in_free,
+                "return blocks in free",
+            )?;
             increment(
                 &mut resources.return_free_operations,
                 "return free operations",
@@ -483,11 +491,27 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             if !live(&source.phase) {
                 return Err(GhostViolation::Terminal);
             }
+            if resources.return_blocks == 0 || resources.return_blocks_in_free == 0 {
+                return Err(GhostViolation::Precondition(
+                    "return block release requires a block in free",
+                ));
+            }
             decrement(&mut resources.return_blocks, "return blocks")?;
+            decrement(
+                &mut resources.return_blocks_in_free,
+                "return blocks in free",
+            )?;
         }
         GhostEvent::EndReturnFree => {
             if !live(&source.phase) {
                 return Err(GhostViolation::Terminal);
+            }
+            if resources.return_free_operations == 0
+                || resources.return_blocks_in_free >= resources.return_free_operations
+            {
+                return Err(GhostViolation::Precondition(
+                    "return free ends only after its block is released",
+                ));
             }
             decrement(
                 &mut resources.return_free_operations,
@@ -997,6 +1021,39 @@ mod tests {
             machine.apply(GhostEvent::FinishClose),
             Err(GhostViolation::Precondition(_))
         ));
+    }
+
+    #[test]
+    fn overlapping_return_frees_claim_distinct_live_blocks() {
+        let mut machine = open_machine();
+
+        for event in [
+            GhostEvent::EnterCall,
+            GhostEvent::CreateReturnBlock,
+            GhostEvent::LeaveCall,
+            GhostEvent::BeginReturnFree,
+            GhostEvent::ReleaseReturnBlock,
+            GhostEvent::EnterCall,
+            GhostEvent::CreateReturnBlock,
+            GhostEvent::LeaveCall,
+            GhostEvent::BeginReturnFree,
+        ] {
+            machine.apply(event).unwrap();
+        }
+
+        assert_eq!(machine.state().resources.return_blocks, 1);
+        assert_eq!(machine.state().resources.return_blocks_in_free, 1);
+        assert_eq!(machine.state().resources.return_free_operations, 2);
+
+        for event in [
+            GhostEvent::ReleaseReturnBlock,
+            GhostEvent::EndReturnFree,
+            GhostEvent::EndReturnFree,
+        ] {
+            machine.apply(event).unwrap();
+        }
+
+        assert!(machine.state().resources.returns_drained());
     }
 
     #[test]

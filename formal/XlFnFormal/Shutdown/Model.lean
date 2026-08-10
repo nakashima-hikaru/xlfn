@@ -155,6 +155,7 @@ structure Resources where
   callbackGateOpen : Bool := true
   activeCalls : Nat := 0
   returnBlocks : Nat := 0
+  returnBlocksInFree : Nat := 0
   returnFreeOperations : Nat := 0
   asyncTasks : Nat := 0
   asyncExecutorRunning : Bool := false
@@ -187,7 +188,9 @@ def CallsDrained (r : Resources) : Prop :=
   r.externalEntries = 0 ∧ r.activeCalls = 0
 
 def ReturnsDrained (r : Resources) : Prop :=
-  r.returnBlocks = 0 ∧ r.returnFreeOperations = 0
+  r.returnBlocks = 0 ∧
+  r.returnBlocksInFree = 0 ∧
+  r.returnFreeOperations = 0
 
 def AsyncDrained (r : Resources) : Prop :=
   r.asyncTasks = 0 ∧ r.asyncExecutorRunning = false
