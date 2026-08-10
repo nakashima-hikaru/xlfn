@@ -1171,8 +1171,8 @@ mod tests {
     #[test]
     fn oper_is_the_first_field_and_is_freed_once() {
         let _test = test_lock();
-        let before = LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
         let runtime = open_test_runtime();
+        assert!(runtime.returns_are_quiescent());
         let pointer = ffi_boundary(&runtime, || Ok(42.0));
         assert!(!pointer.is_null());
         // SAFETY: pointer is the live return from ffi_boundary.
@@ -1181,15 +1181,15 @@ mod tests {
         // runtime before the producer is released.
         // SAFETY: pointer remains the live return from ffi_boundary.
         assert_ne!(unsafe { (*pointer).xltype } & XLBIT_DLL_FREE, 0);
-        assert_eq!(
-            LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed),
-            before + 1
+        assert!(
+            !runtime.returns_are_quiescent(),
+            "Excel-owned return must keep a runtime-local return obligation live"
         );
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
-        assert_eq!(
-            LIVE_BLOCKS.load(std::sync::atomic::Ordering::Relaxed),
-            before
+        assert!(
+            runtime.returns_are_quiescent(),
+            "free_return must release the runtime-local return obligation"
         );
     }
 
