@@ -67,7 +67,8 @@ private def callsDrained (r : Resources) : Bool :=
   r.externalEntries == 0 && r.activeCalls == 0
 
 private def returnsDrained (r : Resources) : Bool :=
-  r.returnBlocks == 0 && r.returnFreeOperations == 0
+  r.returnBlocks == 0 && r.returnBlocksInFree == 0 &&
+    r.returnFreeOperations == 0
 
 private def asyncDrained (r : Resources) : Bool :=
   r.asyncTasks == 0 && r.asyncExecutorRunning == false
@@ -233,18 +234,23 @@ def apply? (s : State) (event : Event) : Option State :=
       else none
   | .beginReturnFree =>
       if allowsReturnFree s.phase = true ∧
-          s.resources.returnFreeOperations < s.resources.returnBlocks then
+          s.resources.returnBlocksInFree < s.resources.returnBlocks then
         some { s with resources :=
           { s.resources with
+            returnBlocksInFree := s.resources.returnBlocksInFree + 1
             returnFreeOperations := s.resources.returnFreeOperations + 1 } }
       else none
   | .releaseReturnBlock =>
-      if live s.phase && s.resources.returnBlocks > 0 then
+      if live s.phase && s.resources.returnBlocks > 0 &&
+          s.resources.returnBlocksInFree > 0 then
         some { s with resources :=
-          { s.resources with returnBlocks := decrement s.resources.returnBlocks } }
+          { s.resources with
+            returnBlocks := decrement s.resources.returnBlocks
+            returnBlocksInFree := decrement s.resources.returnBlocksInFree } }
       else none
   | .endReturnFree =>
-      if live s.phase && s.resources.returnFreeOperations > 0 then
+      if live s.phase && s.resources.returnFreeOperations > 0 &&
+          s.resources.returnBlocksInFree < s.resources.returnFreeOperations then
         some { s with resources :=
           { s.resources with
             returnFreeOperations := decrement s.resources.returnFreeOperations } }
