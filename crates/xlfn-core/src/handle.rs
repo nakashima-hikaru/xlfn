@@ -228,6 +228,67 @@ impl Drop for HandleLease {
     }
 }
 
+struct HandlePrepareState {
+    active: AtomicUsize,
+    waiters: AtomicUsize,
+    wait_lock: Mutex<()>,
+    idle: Condvar,
+}
+
+impl HandlePrepareState {
+    const fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            waiters: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
+            idle: Condvar::new(),
+        }
+    }
+
+    fn enter(&self) -> HandlePrepareGuard<'_> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .expect("handle prepare count cannot overflow");
+
+        HandlePrepareGuard { state: self }
+    }
+
+    fn wait_for_idle(&self) {
+        let mut guard = self.wait_lock.lock();
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+
+        while self.active.load(Ordering::Acquire) != 0 {
+            self.idle.wait(&mut guard);
+        }
+
+        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
+struct HandlePrepareGuard<'a> {
+    state: &'a HandlePrepareState,
+}
+
+impl Drop for HandlePrepareGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.state.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+
+        if previous != 1 || self.state.waiters.load(Ordering::Acquire) == 0 {
+            return;
+        }
+
+        let _guard = self.state.wait_lock.lock();
+
+        if self.state.active.load(Ordering::Acquire) == 0 {
+            self.state.idle.notify_all();
+        }
+    }
+}
+
 struct HandleEntry {
     type_id: TypeId,
     type_name: &'static str,
@@ -853,6 +914,17 @@ struct Initialization {
     completed: Condvar,
 }
 
+enum PrepareDecision {
+    Existing {
+        token: String,
+        generation: u64,
+    },
+    Initialize {
+        initialization: Arc<Initialization>,
+        generation: u64,
+    },
+}
+
 thread_local! {
     static ACTIVE_HANDLE_INITIALIZATION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
@@ -885,6 +957,7 @@ impl Drop for HandleInitializationGuard {
 pub(crate) struct HandleRuntime {
     registry: HandleRegistry,
     topics: Mutex<TopicState>,
+    prepares: HandlePrepareState,
     leases: Arc<HandleLeaseState>,
     _module_ingress: Option<&'static crate::ingress::ExportIngress>,
 }
@@ -902,6 +975,7 @@ impl HandleRuntime {
         Ok(Self {
             registry: HandleRegistry::try_new(maximum_handles)?,
             topics: Mutex::new(TopicState::default()),
+            prepares: HandlePrepareState::new(),
             leases: Arc::new(HandleLeaseState::new()),
             _module_ingress: module_ingress,
         })
@@ -958,6 +1032,32 @@ impl HandleRuntime {
         self.prepare_observed(key, create, |_, _| Ok(()))
     }
 
+    fn observe_existing(
+        &self,
+        key: &str,
+        token: String,
+        generation: u64,
+        observe: impl FnOnce(&str, &str) -> XllResult<()>,
+    ) -> XllResult<(String, bool)> {
+        observe(key, &token)?;
+
+        let topics = self.topics.lock();
+
+        if topics.closed || topics.generation != generation {
+            return Err(XllError::Closing);
+        }
+
+        if !topics
+            .by_key
+            .get(key)
+            .is_some_and(|topic| topic.token == token)
+        {
+            return Err(XllError::StaleHandle);
+        }
+
+        Ok((token, false))
+    }
+
     pub(crate) fn prepare_observed<T>(
         &self,
         key: String,
@@ -968,28 +1068,67 @@ impl HandleRuntime {
         T: ExcelHandleObject,
     {
         let _active_initialization = HandleInitializationGuard::enter()?;
+        let _prepare = self.prepares.enter();
         let _handle_operation = self.leases.acquire();
-        let (initialization, generation) = loop {
+
+        let decision = loop {
             let mut topics = self.topics.lock();
+
             if topics.closed {
                 return Err(XllError::Closing);
             }
+
+            //
+            // 1. A cold publication for this key is still in progress.
+            //
             if let Some(initialization) = topics.initializing.get(&key).cloned() {
                 if initialization.owner == std::thread::current().id() {
                     return Err(XllError::ReentrantCall);
                 }
+
                 initialization.completed.wait(&mut topics);
                 continue;
             }
+
+            //
+            // 2. No initialization is in flight, so a visible topic is committed
+            //    enough to use as the memoized value.
+            //
+            if let Some(topic) = topics.by_key.get(&key) {
+                break PrepareDecision::Existing {
+                    token: topic.token.clone(),
+                    generation: topics.generation,
+                };
+            }
+
+            //
+            // 3. Real miss. Become the single-flight owner.
+            //
             let initialization = Arc::new(Initialization {
                 owner: std::thread::current().id(),
                 owner_done: AtomicBool::new(false),
                 completed: Condvar::new(),
             });
+
             topics
                 .initializing
                 .insert(key.clone(), Arc::clone(&initialization));
-            break (initialization, topics.generation);
+
+            break PrepareDecision::Initialize {
+                initialization,
+                generation: topics.generation,
+            };
+        };
+
+        let (initialization, generation) = match decision {
+            PrepareDecision::Existing { token, generation } => {
+                return self.observe_existing(&key, token, generation, observe);
+            }
+
+            PrepareDecision::Initialize {
+                initialization,
+                generation,
+            } => (initialization, generation),
         };
 
         let initializing = scopeguard::guard(
@@ -1012,43 +1151,6 @@ impl HandleRuntime {
                 }
             },
         );
-
-        //
-        // Warm path: check for an existing topic before invoking the factory.
-        //
-        let existing_token = {
-            let topics = self.topics.lock();
-
-            if topics.closed || topics.generation != generation {
-                return Err(XllError::Closing);
-            }
-
-            topics.by_key.get(&key).map(|topic| topic.token.clone())
-        };
-
-        if let Some(token) = existing_token {
-            // Reuse the established RTD topic/token identity. The factory
-            // is never invoked for a cache hit; the existing Arc<T> stays.
-            observe(&key, &token)?;
-
-            // observe may race with disconnect/shutdown, so re-validate.
-            {
-                let topics = self.topics.lock();
-                if topics.closed || topics.generation != generation {
-                    return Err(XllError::Closing);
-                }
-                if !topics
-                    .by_key
-                    .get(&key)
-                    .is_some_and(|topic| topic.token == token)
-                {
-                    return Err(XllError::StaleHandle);
-                }
-            }
-
-            drop(initializing);
-            return Ok((token, false));
-        }
 
         //
         // Cold path: no existing topic, invoke the factory.
@@ -1311,23 +1413,44 @@ impl HandleRuntime {
     pub fn close(&self) -> XllResult<()> {
         let initializations = {
             let mut topics = self.topics.lock();
+
             topics.closed = true;
             topics.generation = topics.generation.wrapping_add(1);
             topics.by_key.clear();
             topics.by_excel_id.clear();
+
             topics
                 .initializing
                 .drain()
                 .map(|(_, value)| value)
                 .collect::<Vec<_>>()
         };
-        for initialization in initializations {
+
+        //
+        // Wake cold-path waiters.
+        //
+        for initialization in &initializations {
             initialization.completed.notify_all();
+        }
+
+        //
+        // Preserve the current cold-owner synchronization.
+        //
+        for initialization in initializations {
             let mut topics = self.topics.lock();
+
             while !initialization.owner_done.load(Ordering::Acquire) {
                 initialization.completed.wait(&mut topics);
             }
         }
+
+        //
+        // warm prepares are no longer represented in `initializing`.
+        // Wait for every prepare_observed call that entered before or during
+        // the close transition to leave before closing the registry.
+        //
+        self.prepares.wait_for_idle();
+
         self.registry.close_with_leases(&self.leases)
     }
 
@@ -2746,5 +2869,111 @@ mod tests {
             .unwrap();
         closer.join().unwrap();
         assert_eq!(leases.active(), 0);
+    }
+
+    #[test]
+    fn warm_hit_does_not_enter_single_flight_initialization() {
+        let runtime = HandleRuntime::new(8);
+
+        let (token, created) = runtime
+            .prepare_observed(
+                "warm-fast".to_owned(),
+                || Ok(Arc::new(DataRecord(1))),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+
+        assert!(created);
+
+        let calls = AtomicUsize::new(0);
+
+        let (second, created) = runtime
+            .prepare_observed(
+                "warm-fast".to_owned(),
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Arc::new(DataRecord(2)))
+                },
+                |key, _| {
+                    let topics = runtime.topics.lock();
+
+                    assert!(
+                        !topics.initializing.contains_key(key),
+                        "warm hit must bypass per-key single-flight state",
+                    );
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!created);
+        assert_eq!(token, second);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let runtime = Arc::new(HandleRuntime::new(8));
+
+        runtime
+            .prepare_observed(
+                "warm-close".to_owned(),
+                || Ok(Arc::new(DataRecord(1))),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let warm_runtime = Arc::clone(&runtime);
+        let warm = std::thread::spawn(move || {
+            warm_runtime.prepare_observed::<DataRecord>(
+                "warm-close".to_owned(),
+                || panic!("warm factory must not run"),
+                |_, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+
+        entered_rx.recv().unwrap();
+
+        let closing_runtime = Arc::clone(&runtime);
+        let (closed_tx, closed_rx) = mpsc::channel();
+
+        let closer = std::thread::spawn(move || {
+            closed_tx.send(closing_runtime.close()).unwrap();
+        });
+
+        while !runtime.topics.lock().closed {
+            std::thread::yield_now();
+        }
+
+        //
+        // close has started, but registry must remain alive while observe executes.
+        //
+        assert!(!runtime.registry.state.read().closed);
+
+        assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(warm.join().unwrap(), Err(XllError::Closing)));
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+
+        closer.join().unwrap();
+
+        assert!(runtime.registry.state.read().closed);
     }
 }
