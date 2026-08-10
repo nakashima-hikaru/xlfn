@@ -527,7 +527,7 @@ theorem apply?_sound
     | apply Step.finishClose
     | apply Step.failStop
     all_goals
-      simp_all [live_iff, decrement_add_one, producer_alive_bool_iff,
+      simp_all [live_iff, decrement, decrement_add_one, producer_alive_bool_iff,
       allows_return_creation_iff, allows_return_free_iff,
       allows_async_creation_iff, allows_subscription_creation_iff,
       allows_rtd_creation_iff, allows_handle_creation_iff,
