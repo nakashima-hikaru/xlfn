@@ -128,7 +128,7 @@ The selected package must contain exactly one `cdylib` target.
 
 ## `build-manifest.json`
 
-Every distribution directory contains schema version 6 audit metadata. Its top-level fields are:
+Every package directory contains schema version 6 audit metadata. Its top-level fields are:
 
 | Field | Meaning |
 |---|---|

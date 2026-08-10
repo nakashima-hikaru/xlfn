@@ -1,7 +1,7 @@
-//! Cargo subcommand for checking, staging, and distributing Rust Excel XLLs.
+//! Cargo subcommand for checking, staging, and packaging Rust Excel XLLs.
 //!
 //! `cargo xlfn check` validates the selected Windows target and CRT policy,
-//! while `cargo xlfn dist` builds a closed-world package and commits it through
+//! while `cargo xlfn package` builds a closed-world package and commits it through
 //! the transactional staging API in `xlfn-package`.
 
 use anyhow::{Context, anyhow, bail};
@@ -58,26 +58,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    New(NewArgs),
     Check(CheckArgs),
-    Dist(DistArgs),
-}
-
-#[derive(Args)]
-struct NewArgs {
-    name: PathBuf,
-    /// Include empty XLL bundle metadata and native directories.
-    #[arg(long)]
-    bundle: bool,
-    /// Use a local xlfn crate path in the generated manifest.
-    #[arg(long, conflicts_with_all = ["xlfn_git", "xlfn_rev"])]
-    xlfn_path: Option<PathBuf>,
-    /// Use an xlfn Git repository in the generated manifest.
-    #[arg(long, conflicts_with = "xlfn_path")]
-    xlfn_git: Option<String>,
-    /// Pin --xlfn-git to a specific revision.
-    #[arg(long, requires = "xlfn_git")]
-    xlfn_rev: Option<String>,
+    Package(PackageArgs),
 }
 
 #[derive(Args)]
@@ -203,12 +185,12 @@ impl WindowsTarget {
 }
 
 #[derive(Args)]
-struct DistArgs {
+struct PackageArgs {
     #[arg(long, value_enum, conflicts_with = "all")]
     target: Option<WindowsTarget>,
     #[arg(long, conflicts_with = "target")]
     all: bool,
-    #[arg(long, default_value = "dist")]
+    #[arg(long, default_value = "package")]
     out: PathBuf,
     #[command(flatten)]
     project: ProjectArgs,
@@ -226,31 +208,9 @@ fn normalize_cargo_subcommand_args(mut args: Vec<std::ffi::OsString>) -> Vec<std
 fn run() -> Result {
     let args = normalize_cargo_subcommand_args(std::env::args_os().collect());
     match Cli::parse_from(args).command {
-        Commands::New(args) => {
-            let dependency = xlfn_dependency_spec(&args)?;
-            scaffold(&args.name, args.bundle, &dependency)
-        }
         Commands::Check(args) => check(&args),
-        Commands::Dist(args) => distribute(&args),
+        Commands::Package(args) => package(&args),
     }
-}
-
-fn xlfn_dependency_spec(args: &NewArgs) -> Result<String> {
-    if let Some(path) = &args.xlfn_path {
-        let path = path.to_str().context("--xlfn-path must be valid UTF-8")?;
-        return Ok(format!("xlfn = {{ path = {path:?} }}"));
-    }
-    if let Some(git) = &args.xlfn_git {
-        let revision = args
-            .xlfn_rev
-            .as_deref()
-            .context("--xlfn-git requires --xlfn-rev for a pinned dependency")?;
-        return Ok(format!("xlfn = {{ git = {git:?}, rev = {revision:?} }}"));
-    }
-    Ok(format!(
-        "xlfn = {{ version = {:?} }}",
-        env!("CARGO_PKG_VERSION")
-    ))
 }
 
 fn check(args: &CheckArgs) -> Result {
@@ -361,105 +321,6 @@ fn is_reserved_distribution_name(name: &str, artifact_name: &str) -> bool {
         || name.eq_ignore_ascii_case("build-manifest.json")
 }
 
-fn scaffold(root: &Path, bundle: bool, dependency: &str) -> Result {
-    scaffold_with_writer(root, bundle, dependency, |path, contents| {
-        fs::write(path, contents).map(|_| ())
-    })
-}
-
-fn scaffold_with_writer<F>(root: &Path, bundle: bool, dependency: &str, mut write_file: F) -> Result
-where
-    F: FnMut(&Path, &[u8]) -> io::Result<()>,
-{
-    let canonical = if root == Path::new(".") {
-        std::env::current_dir()?
-    } else {
-        root.to_path_buf()
-    };
-    if root != Path::new(".") && fs::symlink_metadata(root).is_ok() {
-        bail!("{} already exists", root.display());
-    }
-    if root == Path::new(".") && fs::symlink_metadata(root.join("Cargo.toml")).is_ok() {
-        bail!("Cargo.toml already exists in current directory");
-    }
-    if root == Path::new(".") && fs::symlink_metadata(root.join("src")).is_ok() {
-        bail!("src already exists in current directory");
-    }
-    let package_name = canonical
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("project path must end in valid UTF-8")?;
-    validate_project_name(package_name)?;
-    let artifact_name = pascal_name(package_name);
-    let display_name = display_name(package_name);
-    let excel_prefix = package_name.replace('-', "_").to_ascii_uppercase();
-    let destination = if root == Path::new(".") {
-        canonical.clone()
-    } else {
-        root.to_path_buf()
-    };
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let staging_guard = tempfile::Builder::new()
-        .prefix(".cargo-xlfn-new-")
-        .tempdir_in(parent)?;
-    let staging = staging_guard.path().join("project");
-    fs::create_dir_all(staging.join("src"))?;
-    let bundle_metadata = if bundle {
-        "\n[package.metadata.xlfn.bundle]\nx86 = []\nx64 = []\nexternal-imports = []\nstrict-paths = true\n"
-    } else {
-        ""
-    };
-    let cargo_manifest = format!(
-        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.97.1\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n{dependency}\n\n[package.metadata.xlfn]\nartifact-name = {artifact_name:?}\n{bundle_metadata}"
-    );
-    write_file(&staging.join("Cargo.toml"), cargo_manifest.as_bytes())?;
-    let struct_name = format!("{artifact_name}Addin");
-    let library = format!(
-        "#![deny(unsafe_op_in_unsafe_fn)]\nuse xlfn::prelude::*;\nmod udf;\n\npub struct State;\n\n#[excel_addin(name = {display_name:?}, id = {package_name:?}, category = {artifact_name:?})]\npub struct {struct_name};\n\nimpl Addin for {struct_name} {{\n    type State = State;\n    type Error = XllError;\n\n    fn open(context: &OpenContext) -> Result<State, XllError> {{\n        xlfn::diagnostics::install_file_diagnostic_sink(&context.build_info().addin_id)\n            .map_err(|_| XllError::Internal {{ diagnostic_id: 0x4449_4147_5349_4e4b }})?;\n        Ok(State)\n    }}\n}}\n"
-    );
-    write_file(&staging.join("src/lib.rs"), library.as_bytes())?;
-    let udf = format!(
-        "use xlfn::prelude::*;\n/// Returns the Add-in version.\n#[excel_function(name = \"{excel_prefix}.VERSION\", thread_safe)]\npub fn version() -> XllResult<String> {{ Ok(env!(\"CARGO_PKG_VERSION\").to_owned()) }}\n"
-    );
-    write_file(&staging.join("src/udf.rs"), udf.as_bytes())?;
-    if bundle {
-        fs::create_dir_all(staging.join("native/x86"))?;
-        fs::create_dir_all(staging.join("native/x64"))?;
-    }
-    sync_scaffold_files(&staging)?;
-    if root == Path::new(".") {
-        commit_scaffold_into_existing_directory(&staging, &destination, bundle)?;
-    } else {
-        if fs::symlink_metadata(&destination).is_ok() {
-            bail!("{} already exists", root.display());
-        }
-        rename_path(&staging, &destination)?;
-    }
-    println!("created {}", root.display());
-    Ok(())
-}
-
-fn sync_scaffold_files(staging: &Path) -> io::Result<()> {
-    for path in [
-        staging.join("Cargo.toml"),
-        staging.join("src/lib.rs"),
-        staging.join("src/udf.rs"),
-    ] {
-        // FlushFileBuffers requires a handle opened with write access on
-        // Windows. File::open is read-only and deterministically returns
-        // ERROR_ACCESS_DENIED when sync_all maps to that API.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)?
-            .sync_all()?;
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn retryable_windows_path_error(error: &io::Error) -> bool {
     matches!(
@@ -530,85 +391,6 @@ fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     fs::rename(from, to)
-}
-
-fn commit_scaffold_into_existing_directory(
-    staging: &Path,
-    destination: &Path,
-    bundle: bool,
-) -> io::Result<()> {
-    let entries = if bundle {
-        &["Cargo.toml", "src", "native"][..]
-    } else {
-        &["Cargo.toml", "src"][..]
-    };
-    for entry in entries {
-        if fs::symlink_metadata(destination.join(entry)).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("scaffold destination already contains {entry}"),
-            ));
-        }
-    }
-
-    let mut committed = Vec::new();
-    for entry in entries {
-        let source = staging.join(entry);
-        let target = destination.join(entry);
-        if let Err(error) = rename_path(&source, &target) {
-            let rollback = committed.iter().rev().try_for_each(|entry: &&str| {
-                rename_path(&destination.join(entry), &staging.join(entry))
-            });
-            return match rollback {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(io::Error::other(format!(
-                    "{error}; scaffold rollback failed: {rollback_error}"
-                ))),
-            };
-        }
-        committed.push(entry);
-    }
-    Ok(())
-}
-
-fn validate_project_name(name: &str) -> Result {
-    let valid = !name.is_empty()
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
-    if valid {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "project name must start with an ASCII letter and contain only letters, digits, '-' or '_'"
-        ))
-    }
-}
-
-fn pascal_name(name: &str) -> String {
-    name.split(['-', '_'])
-        .filter(|part| !part.is_empty())
-        .map(capitalize)
-        .collect()
-}
-
-fn display_name(name: &str) -> String {
-    name.split(['-', '_'])
-        .filter(|part| !part.is_empty())
-        .map(capitalize)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn capitalize(part: &str) -> String {
-    let mut chars = part.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_ascii_uppercase().to_string() + chars.as_str()
-    })
 }
 
 struct ProjectMetadata {
@@ -794,13 +576,13 @@ fn package_for_current_directory<'a>(
         .map(|(package, _)| package)
 }
 
-fn distribute(args: &DistArgs) -> Result {
+fn package(args: &PackageArgs) -> Result {
     let targets = if args.all {
         vec![WindowsTarget::X86, WindowsTarget::X64]
     } else {
         vec![
             args.target
-                .context("dist requires --target TARGET or --all")?,
+                .context("package requires --target TARGET or --all")?,
         ]
     };
     let metadata = project_metadata(&args.project, &args.build)?;
@@ -808,7 +590,7 @@ fn distribute(args: &DistArgs) -> Result {
     let target_parent = metadata.crt.target_directory(&metadata.target_directory);
     fs::create_dir_all(&target_parent)?;
     let build_target_guard = tempfile::Builder::new()
-        .prefix(".cargo-xlfn-dist-build-")
+        .prefix(".cargo-xlfn-package-build-")
         .tempdir_in(&target_parent)?;
     let build_target_directory = build_target_guard.path();
     if args.all {
@@ -823,7 +605,7 @@ fn distribute(args: &DistArgs) -> Result {
         // the complete path again before placing any staging directory in it.
         validate_output_destination(&args.out)?;
         let staging_guard = tempfile::Builder::new()
-            .prefix(".cargo-xlfn-dist-all-")
+            .prefix(".cargo-xlfn-package-all-")
             .tempdir_in(output_parent)?;
         let staging_root = xlfn_package::PrivateStagingDirectory::create(
             &staging_guard.path().join("distribution"),
@@ -834,7 +616,7 @@ fn distribute(args: &DistArgs) -> Result {
                 &staging_root.path().join(target.directory()),
             )?;
             validate_output_destination(&args.out.join(target.directory()))?;
-            let verified = stage_distribution_target(
+            let verified = stage_package_target(
                 *target,
                 args,
                 &metadata,
@@ -895,7 +677,7 @@ fn distribute(args: &DistArgs) -> Result {
             &staging_guard.path().join("distribution"),
         )?;
         let verified =
-            stage_distribution_target(target, args, &metadata, &staging, build_target_directory)?;
+            stage_package_target(target, args, &metadata, &staging, build_target_directory)?;
         let prepared = verified.prepare_commit(staging.path(), target.triple())?;
         let expected_names = verified
             .artifacts()
@@ -934,7 +716,7 @@ fn validate_transactional_output_root(destination: &Path) -> Result {
         Some(Component::Normal(_))
     ) {
         bail!(
-            "dist --all output must name a dedicated directory, not {}",
+            "package --all output must name a dedicated directory, not {}",
             destination.display()
         );
     }
@@ -944,7 +726,7 @@ fn validate_transactional_output_root(destination: &Path) -> Result {
         let destination = fs::canonicalize(destination)?;
         if current.starts_with(&destination) {
             bail!(
-                "dist --all refuses to replace the current directory or one of its ancestors: {}",
+                "package --all refuses to replace the current directory or one of its ancestors: {}",
                 destination.display()
             );
         }
@@ -957,9 +739,9 @@ fn validate_output_destination(destination: &Path) -> Result {
     Ok(())
 }
 
-fn stage_distribution_target(
+fn stage_package_target(
     target: WindowsTarget,
-    args: &DistArgs,
+    args: &PackageArgs,
     metadata: &ProjectMetadata,
     staging: &xlfn_package::PrivateStagingDirectory,
     target_directory: &Path,
@@ -2882,98 +2664,10 @@ mod tests {
     #[test]
     fn removed_native_commands_and_unknown_targets_are_rejected() {
         assert!(Cli::try_parse_from(["cargo-xlfn", "native", "inspect"]).is_err());
+        assert!(Cli::try_parse_from(["cargo-xlfn", "new", "my-xll"]).is_err());
         assert!(
-            Cli::try_parse_from(["cargo-xlfn", "dist", "--target", "x86_64-pc-window-msvc"])
+            Cli::try_parse_from(["cargo-xlfn", "package", "--target", "x86_64-pc-window-msvc"])
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn default_scaffold_is_one_crate_without_build_script() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("demo");
-        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
-        scaffold(&root, false, &dependency).unwrap();
-        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-        let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
-        assert!(cargo.contains(&format!(
-            "xlfn = {{ version = {:?}",
-            env!("CARGO_PKG_VERSION")
-        )));
-        assert!(!cargo.contains("build-dependencies"));
-        assert!(!root.join("build.rs").exists());
-        assert!(!root.join("src/addin.rs").exists());
-        assert!(!library.contains("mod dynamic"));
-        assert!(library.contains("#[excel_addin("));
-        assert!(!library.contains("xlfn::export!("));
-    }
-
-    #[test]
-    fn scaffold_write_failure_leaves_no_partial_destination_or_staging_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("demo");
-        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
-        let mut writes = 0;
-
-        let result = scaffold_with_writer(&root, false, &dependency, |path, contents| {
-            writes += 1;
-            if writes == 2 {
-                return Err(io::Error::other("injected scaffold write failure"));
-            }
-            fs::write(path, contents).map(|_| ())
-        });
-
-        assert!(result.is_err());
-        assert!(!root.exists());
-        let leftovers = fs::read_dir(directory.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .filter(|name| name.to_string_lossy().starts_with(".cargo-xlfn-new-"))
-            .count();
-        assert_eq!(leftovers, 0);
-    }
-
-    #[test]
-    fn bundle_scaffold_uses_generic_bundle_metadata() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("bundle-demo");
-        let dependency = format!("xlfn = {{ version = {:?} }}", env!("CARGO_PKG_VERSION"));
-        scaffold(&root, true, &dependency).unwrap();
-        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-        assert!(cargo.contains("[package.metadata.xlfn.bundle]"));
-        assert!(cargo.contains("x86 = []"));
-        assert!(!cargo.contains("features = [\"dynamic\"]"));
-        assert!(!root.join("src/dynamic.rs").exists());
-        assert!(root.join("native/x86").is_dir());
-        assert!(root.join("native/x64").is_dir());
-        assert!(!root.join("build.rs").exists());
-    }
-
-    #[test]
-    fn scaffold_dependency_source_is_explicit_and_pinned() {
-        let args = NewArgs {
-            name: PathBuf::from("demo"),
-            bundle: false,
-            xlfn_path: None,
-            xlfn_git: Some("https://github.com/nakashima-hikaru/xlfn".to_owned()),
-            xlfn_rev: Some("0123456789abcdef".to_owned()),
-        };
-
-        assert_eq!(
-            xlfn_dependency_spec(&args).unwrap(),
-            "xlfn = { git = \"https://github.com/nakashima-hikaru/xlfn\", rev = \"0123456789abcdef\" }"
-        );
-
-        let path_args = NewArgs {
-            name: PathBuf::from("demo"),
-            bundle: false,
-            xlfn_path: Some(PathBuf::from("../xlfn/crates/xlfn")),
-            xlfn_git: None,
-            xlfn_rev: None,
-        };
-        assert_eq!(
-            xlfn_dependency_spec(&path_args).unwrap(),
-            "xlfn = { path = \"../xlfn/crates/xlfn\" }"
         );
     }
 

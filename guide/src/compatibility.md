@@ -20,7 +20,7 @@ The repository pins the toolchain and both Windows MSVC targets in `rust-toolcha
 
 The supported XLL target implementations are:
 
-| Excel process | Rust target | Distribution directory |
+| Excel process | Rust target | Package directory |
 |---|---|---|
 | 32-bit Excel | `i686-pc-windows-msvc` | `win-x86` |
 | 64-bit Excel | `x86_64-pc-windows-msvc` | `win-x64` |

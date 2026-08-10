@@ -28,10 +28,10 @@ Host-side tests that do not link an XLL may run on other operating systems. Pack
 
 Match the XLL to the **Excel process**, not to the operating system:
 
-| Excel process | Rust target | Distribution directory |
+| Excel process | Rust target | Package directory |
 |---|---|---|
-| 32-bit Excel | `i686-pc-windows-msvc` | `dist/win-x86/` |
-| 64-bit Excel | `x86_64-pc-windows-msvc` | `dist/win-x64/` |
+| 32-bit Excel | `i686-pc-windows-msvc` | `package/win-x86/` |
+| 64-bit Excel | `x86_64-pc-windows-msvc` | `package/win-x64/` |
 
 A 64-bit edition of Windows can run 32-bit Excel. In that case, use the x86 XLL.
 

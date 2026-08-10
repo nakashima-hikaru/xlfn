@@ -26,7 +26,7 @@ The attribute generates the Excel ABI wrapper and registration descriptor. Argum
 - generic push-based RTD subscriptions;
 - bounded diagnostic delivery and structured `tracing` events;
 - linked-artifact, PE architecture, export, dependency, and optional sidecar-package validation;
-- transactional x86/x64 distribution with best-effort rollback through `cargo xlfn`.
+- transactional x86/x64 packaging with best-effort rollback through `cargo xlfn`.
 
 ## Framework boundary
 

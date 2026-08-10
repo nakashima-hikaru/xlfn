@@ -1,6 +1,6 @@
 # Build, validate, and load
 
-An XLL is not complete when `cargo check` succeeds. Excel loads a linked PE image, resolves imports, calls a fixed set of exports, and expects the image architecture to match the Excel process. xlfn therefore supplies `cargo xlfn check` and `cargo xlfn dist` as the supported artifact workflows.
+An XLL is not complete when `cargo check` succeeds. Excel loads a linked PE image, resolves imports, calls a fixed set of exports, and expects the image architecture to match the Excel process. xlfn therefore supplies `cargo xlfn check` and `cargo xlfn package` as the supported artifact workflows.
 
 ## Development validation
 
@@ -38,30 +38,30 @@ cargo xlfn check `
 
 The default is `--crt static`, which reduces deployment dependence on a separately installed VC runtime. The command reports that default rather than changing the profile silently. Use `--crt dynamic` when the linked application and its binary dependencies require `/MD`, or `--crt inherit` to preserve Cargo, environment, and toolchain CRT settings exactly.
 
-`static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `dist` verify. The CRT observer recognizes an exact, case-insensitive allowlist of release/debug MSVC runtime DLLs and Universal CRT API-set DLLs; lookalike names are not classified. Under `static`, an observed dynamic CRT import is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
+`static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `package` verify. The CRT observer recognizes an exact, case-insensitive allowlist of release/debug MSVC runtime DLLs and Universal CRT API-set DLLs; lookalike names are not classified. Under `static`, an observed dynamic CRT import is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
 
 CRT observation does not approve an external dependency. Any runtime DLL not included in the package must be listed explicitly in `external-imports`, where it remains a deliberate deployment exception and is not validated as part of the package closure.
 
 The policy cannot recompile an existing `.lib`. Build linked binary components with a matching MSVC runtime: `/MT` (or `/MTd`) for `static`, and `/MD` (or `/MDd`) for `dynamic`. Matching CRT settings also do not make cross-module allocator ownership safe: allocate and free an object in the same module, or expose an explicit paired deallocator/caller-owned buffer contract.
 
-## Release distribution
+## Release packaging
 
 Build one target:
 
 ```powershell
-cargo xlfn dist --target x86_64-pc-windows-msvc
+cargo xlfn package --target x86_64-pc-windows-msvc
 ```
 
 Build both bitnesses as one output transaction:
 
 ```powershell
-cargo xlfn dist --all
+cargo xlfn package --all
 ```
 
-The default output root is `dist/`. A typical result is:
+The default output root is `package/`. A typical result is:
 
 ```text
-dist/
+package/
 ├── win-x86/
 │   ├── DeskTools.xll
 │   ├── build-manifest.json
@@ -72,7 +72,7 @@ dist/
     └── NativeEngine.dll
 ```
 
-For `--all`, every target is built, staged, and verified before the previous output root is transactionally replaced. The replacement is not reader-visible atomicity; the journal provides crash recovery on the next invocation, while rollback remains best effort. If the final replacement and its rollback both fail, the tool preserves the previous distribution in a recovery directory and reports that path. Do not delete the recovery directory until the failure has been investigated.
+For `--all`, every target is built, staged, and verified before the previous output root is transactionally replaced. The replacement is not reader-visible atomicity; the journal provides crash recovery on the next invocation, while rollback remains best effort. If the final replacement and its rollback both fail, the tool preserves the previous package in a recovery directory and reports that path. Do not delete the recovery directory until the failure has been investigated.
 
 ## Loading in Excel
 
@@ -84,7 +84,7 @@ bundle files in that directory; moving only the `.xll` invalidates that deployme
 When Excel reports that a file cannot be opened or is not a valid add-in, check these in order:
 
 1. Excel process bitness versus XLL bitness;
-2. whether the complete distribution directory was copied;
+2. whether the complete package directory was copied;
 3. Windows file blocking and code-signing policy;
 4. missing or wrong-architecture binary dependencies;
 5. diagnostics emitted during `xlAutoOpen`;

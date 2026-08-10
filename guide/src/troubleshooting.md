@@ -158,14 +158,14 @@ A safe XLL close waits for in-process work to become quiescent. A hang usually i
 
 Do not add a timeout that lets Excel unload while code may still execute. Capture thread dumps, identify the owner and wait dependency, then fix cancellation or move the uninterruptible operation out of process.
 
-## `cargo xlfn dist` refuses paths or imports
+## `cargo xlfn package` refuses paths or imports
 
 - `artifact-name` must be a valid non-reserved Windows basename.
 - Bundle metadata paths are relative to the package manifest directory.
 - Bundled basenames must be unique case-insensitively and must not collide with the XLL or `build-manifest.json`.
 - With `strict-paths = true`, configured paths reject symlinks or reparse points observed during validation; protect the manifest tree from concurrent mutation when that threat is in scope.
 - Every non-system import must be packaged or explicitly approved as an external import.
-- `dist --all` requires a dedicated replaceable output directory.
+- `package --all` requires a dedicated replaceable output directory.
 
 When commit and rollback both fail, preserve and inspect the recovery path reported by the tool.
 

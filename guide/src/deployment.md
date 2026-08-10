@@ -5,7 +5,7 @@ A deployable add-in is a versioned directory, not an isolated `.xll` file. Build
 ## Produce target directories
 
 ```powershell
-cargo xlfn dist --all --locked
+cargo xlfn package --all --locked
 ```
 
 This creates `win-x86` and `win-x64` directories under the selected output root. Distribute only the directory matching the Excel process bitness, or package both with an installer that selects correctly.
@@ -13,7 +13,7 @@ This creates `win-x86` and `win-x64` directories under the selected output root.
 Use an explicit output root for release automation:
 
 ```powershell
-cargo xlfn dist --all --out artifacts/xlfn-1.4.0 --locked
+cargo xlfn package --all --out artifacts/xlfn-1.4.0 --locked
 ```
 
 The `--all` operation stages and validates both targets before replacing the output root. Do not point it at the repository root, current directory, or a directory that contains unrelated artifacts.

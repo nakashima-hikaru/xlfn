@@ -1,6 +1,6 @@
 # `cargo xlfn` reference
 
-`cargo-xlfn` creates add-in crates, validates linked XLL artifacts, and produces bitness-specific distribution directories. Invoke it through Cargo:
+`cargo-xlfn` is an optional developer tool that validates linked XLL artifacts and produces bitness-specific package directories. Invoke it through Cargo:
 
 ```console
 cargo xlfn <COMMAND> [OPTIONS]
@@ -17,33 +17,6 @@ Or from a local checkout:
 ```console
 cargo install --path crates/cargo-xlfn --locked --force
 ```
-
-## `cargo xlfn new`
-
-```text
-cargo xlfn new <PATH> [--bundle]
-                    [--xlfn-path <PATH>]
-                    [--xlfn-git <URL> --xlfn-rev <REV>]
-```
-
-Creates a new package at `<PATH>`. The final path component must begin with an ASCII letter and contain only ASCII letters, digits, `-`, or `_`.
-
-Generated files include:
-
-```text
-Cargo.toml
-src/lib.rs
-src/udf.rs
-```
-
-`--bundle` additionally:
-
-- creates `native/x86/` and `native/x64/` as conventional sidecar directories;
-- adds strict generic bundle metadata.
-
-The generated dependency uses the installed CLI version by default. When developing against an unreleased local checkout, use `--xlfn-path` with a path relative to the generated `Cargo.toml`, or use `--xlfn-git` together with `--xlfn-rev`. The source options are mutually exclusive.
-
-The command refuses to overwrite an existing destination or an existing `Cargo.toml` when targeting the current directory.
 
 ## `cargo xlfn check`
 
@@ -71,7 +44,7 @@ For each target, `check`:
 7. verifies PE architecture;
 8. validates the complete packaged DLL import closure.
 
-The default Cargo profile is `dev` unless `--profile` is supplied. `check` does not create a persistent distribution directory.
+The default Cargo profile is `dev` unless `--profile` is supplied. `check` does not create a persistent package directory.
 
 Examples:
 
@@ -83,11 +56,11 @@ cargo xlfn check --package data-xlfn --profile release --locked
 cargo xlfn check --manifest-path xlfn/examples/basic-xll/Cargo.toml --all-features
 ```
 
-## `cargo xlfn dist`
+## `cargo xlfn package`
 
 ```text
-cargo xlfn dist (--target <TARGET> | --all) [--out <PATH>]
-               [PROJECT OPTIONS] [BUILD OPTIONS]
+cargo xlfn package (--target <TARGET> | --all) [--out <PATH>]
+                 [PROJECT OPTIONS] [BUILD OPTIONS]
 ```
 
 Exactly one of `--target` and `--all` is required.
@@ -95,14 +68,14 @@ Exactly one of `--target` and `--all` is required.
 - `--target i686-pc-windows-msvc` writes an x86 package.
 - `--target x86_64-pc-windows-msvc` writes an x64 package.
 - `--all` stages both architectures and transactionally replaces the output root with best-effort rollback.
-- `--out <PATH>` selects the output root; the default is `dist`.
+- `--out <PATH>` selects the output root; the default is `package`.
 
-`dist` uses the `release` profile by default unless `--profile` is supplied.
+`package` uses the `release` profile by default unless `--profile` is supplied.
 
 Typical output:
 
 ```text
-dist/
+package/
 ├── win-x86/
 │   ├── MyAddin.xll
 │   ├── build-manifest.json
@@ -113,18 +86,18 @@ dist/
     └── packaged sidecar files
 ```
 
-Each target is fully staged and validated before commit. With `--all`, either both target directories are committed or the previous distribution is restored when rollback is possible. This is a transactional replacement, not a reader-visible atomic directory swap: readers may observe the replacement window, and power loss is outside the guarantee. The transaction journal is checked on the next invocation. If commit and rollback both fail because of a filesystem fault, the command reports a preserved recovery path rather than deleting the previous package.
+Each target is fully staged and validated before commit. With `--all`, either both target directories are committed or the previous package is restored when rollback is possible. This is a transactional replacement, not a reader-visible atomic directory swap: readers may observe the replacement window, and power loss is outside the guarantee. The transaction journal is checked on the next invocation. If commit and rollback both fail because of a filesystem fault, the command reports a preserved recovery path rather than deleting the previous package.
 
 Examples:
 
 ```console
-cargo xlfn dist --all
-cargo xlfn dist --target x86_64-pc-windows-msvc
-cargo xlfn dist --all --out artifacts/xll --locked
-cargo xlfn dist --target i686-pc-windows-msvc --features async
+cargo xlfn package --all
+cargo xlfn package --target x86_64-pc-windows-msvc
+cargo xlfn package --all --out artifacts/xll --locked
+cargo xlfn package --target i686-pc-windows-msvc --features async
 ```
 
-For `--all`, the output root must be a dedicated directory; `.` and filesystem roots are rejected because the whole root is replaced transactionally. A single-target distribution replaces only its `win-x86` or `win-x64` subdirectory under `--out`, so an existing parent directory may be used.
+For `--all`, the output root must be a dedicated directory; `.` and filesystem roots are rejected because the whole root is replaced transactionally. A single-target package replaces only its `win-x86` or `win-x64` subdirectory under `--out`, so an existing parent directory may be used.
 
 ## Project options
 
@@ -175,7 +148,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo xlfn check --package my-addin --all-features --locked
-cargo xlfn dist --package my-addin --all --all-features --locked --out dist
+cargo xlfn package --package my-addin --all --all-features --locked --out package
 ```
 
 `cargo xlfn check` complements rather than replaces Rust tests and real-Excel qualification.

@@ -1,12 +1,17 @@
 # Create your first add-in
 
-## 1. Install the project tool
+## 1. Setup compilation targets and optional tooling
 
-Install `cargo-xlfn` from crates.io and add the MSVC compilation targets:
+Add the MSVC target for your target Excel bitness:
+
+```powershell
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+```
+
+`xlfn` is a library and framework crate. To perform automated PE artifact inspection and directory packaging, install the optional `cargo-xlfn` CLI tool:
 
 ```powershell
 cargo install cargo-xlfn --locked
-rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 ```
 
 From a local checkout, the equivalent command is:
@@ -15,42 +20,38 @@ From a local checkout, the equivalent command is:
 cargo install --path crates/cargo-xlfn --locked --force
 ```
 
-Create a project outside the `xlfn` workspace checkout:
+## 2. Create a library crate
+
+Create a standard Rust library project:
 
 ```powershell
-cargo xlfn new hello-xlfn
+cargo new --lib hello-xlfn
 cd hello-xlfn
 ```
 
-Use `--bundle` when the application needs packaged sidecar files:
-
-```powershell
-cargo xlfn new data-xlfn --bundle
-```
-
-## 2. Understand the generated crate
-
-The scaffold creates a `cdylib`, a single add-in definition in `src/lib.rs`, and worksheet functions in `src/udf.rs`. Its `Cargo.toml` contains an explicit distribution artifact name:
+In `Cargo.toml`, set the crate type to `cdylib` and add `xlfn` as a dependency:
 
 ```toml
+[package]
+name = "hello-xlfn"
+version = "0.1.0"
+edition = "2024"
+
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 xlfn = "0.1"
-
-[package.metadata.xlfn]
-artifact-name = "HelloXll"
 ```
 
-The scaffold uses the release version embedded in `cargo-xlfn`. For a sibling local checkout during development, use a path dependency instead:
+For a local checkout during development, use a path dependency instead:
 
 ```toml
 [dependencies]
 xlfn = { path = "../xlfn/crates/xlfn" }
 ```
 
-The crate-root add-in owns state and lifecycle:
+Define the add-in in `src/lib.rs`:
 
 ```rust
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -84,7 +85,7 @@ impl Addin for HelloXll {
 
 ## 3. Add a function
 
-In `src/udf.rs`:
+Create `src/udf.rs`:
 
 ```rust
 use xlfn::prelude::*;
@@ -106,7 +107,9 @@ pub fn add(
 
 The doc comment becomes the function description unless `description = "..."` is supplied explicitly.
 
-## 4. Validate linked artifacts
+## 4. Validate linked artifacts (Optional)
+
+`cargo-xlfn` provides artifact validation for Excel XLLs beyond standard `cargo check`:
 
 ```powershell
 cargo xlfn check
@@ -118,21 +121,23 @@ Without `--target`, `check` builds and validates both Windows targets. During de
 cargo xlfn check --target x86_64-pc-windows-msvc
 ```
 
-This is stronger than `cargo check`: it links the DLL, stages an XLL package, verifies the `.xllexp` manifest, compares required exports with the PE export table, checks architecture, and resolves packaged imports.
+This links the DLL, stages an XLL package, verifies the `.xllexp` manifest, compares required exports with the PE export table, checks architecture, and resolves packaged imports.
 
-## 5. Create a distribution
+## 5. Create a package
 
 ```powershell
-cargo xlfn dist --all
+cargo xlfn package --all
 ```
 
-The x86 and x64 packages are staged and validated before the output root is replaced. A failure in either target leaves the previous distribution in place.
+The x86 and x64 packages are staged and validated before the output root is replaced. A failure in either target leaves the previous package directory in place.
 
 For one target:
 
 ```powershell
-cargo xlfn dist --target x86_64-pc-windows-msvc
+cargo xlfn package --target x86_64-pc-windows-msvc
 ```
+
+*(Note: You can also build directly using `cargo build --target x86_64-pc-windows-msvc`, but `cargo xlfn package` provides automated XLL PE validation, sidecar handling, and transactional output staging.)*
 
 ## 6. Load the XLL in Excel
 
@@ -140,7 +145,7 @@ In Excel, open:
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
-Select the `.xll` in the directory matching the Excel process bitness. Keep the complete distribution directory together, including every packaged sidecar and `build-manifest.json`.
+Select the `.xll` in the directory matching the Excel process bitness (`package/win-x64` or `package/win-x86`). Keep the complete package directory together, including every packaged sidecar and `build-manifest.json`.
 
 Enter:
 

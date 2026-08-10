@@ -77,7 +77,7 @@ On Windows:
 ```powershell
 cargo xlfn check --target x86_64-pc-windows-msvc --all-features --locked
 cargo xlfn check --target i686-pc-windows-msvc --all-features --locked
-cargo xlfn dist --all --all-features --locked
+cargo xlfn package --all --all-features --locked
 ```
 
 Verify that:

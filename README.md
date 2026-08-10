@@ -46,39 +46,56 @@ Choose the target based on the **Excel process bitness**, not the Windows bitnes
 
 ### Create an add-in
 
-Install the CLI and Rust targets:
+1. Add the Rust targets for your Excel process bitness:
 
 ```powershell
-cargo install cargo-xlfn --locked
 rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 ```
 
-Create a project:
+2. Create a new library crate using standard Cargo tooling:
 
 ```powershell
-cargo xlfn new my-xll
+cargo new --lib my-xll
 cd my-xll
 ```
 
-Build a distribution for 64-bit Excel:
+3. Configure `Cargo.toml` to build a `cdylib` and add `xlfn` as a dependency:
+
+```toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xlfn = "0.1.0"
+```
+
+4. (Recommended) Install `cargo-xlfn` for optional artifact validation and packaging tooling:
 
 ```powershell
-cargo xlfn dist --target x86_64-pc-windows-msvc
+cargo install cargo-xlfn --locked
+```
+
+5. Package for 64-bit Excel:
+
+```powershell
+cargo xlfn package --target x86_64-pc-windows-msvc
 ```
 
 For 32-bit Excel:
 
 ```powershell
-cargo xlfn dist --target i686-pc-windows-msvc
+cargo xlfn package --target i686-pc-windows-msvc
 ```
 
-To build both:
+To package both:
 
 ```powershell
-cargo xlfn dist --all
+cargo xlfn package --all
 ```
 
-Load the generated `.xll` from `dist/win-x64` or `dist/win-x86` using:
+*(Note: You can also build directly using `cargo build --target x86_64-pc-windows-msvc`, but `cargo xlfn` provides automated XLL PE validation and transactional directory packaging.)*
+
+Load the generated `.xll` from `package/win-x64` or `package/win-x86` using:
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
