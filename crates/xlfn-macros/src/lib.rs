@@ -331,9 +331,6 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
         impl #impl_generics ::xlfn::convert::MainThreadReturn
             for #ident #type_generics #where_clause
         {}
-        impl #impl_generics ::xlfn::convert::VolatileReturn
-            for #ident #type_generics #where_clause
-        {}
     })
 }
 
@@ -1610,7 +1607,7 @@ mod tests {
         assert!(expanded.contains("ExcelReturn for Dataset"));
         assert!(expanded.contains("publish_new_handle"));
         assert!(expanded.contains("MainThreadReturn for Dataset"));
-        assert!(expanded.contains("VolatileReturn for Dataset"));
+        assert!(!expanded.contains("VolatileReturn"));
         assert!(!expanded.contains("ExcelHandleType"));
         assert!(!expanded.contains("NAME"));
     }

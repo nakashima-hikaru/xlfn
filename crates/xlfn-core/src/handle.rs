@@ -14,10 +14,13 @@ use std::thread::ThreadId;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 ///
-/// A handle-producing UDF constructs its value synchronously on every Excel
-/// evaluation. Its factory must return in bounded time and must not start a
-/// second handle initialization. XLL shutdown cannot safely unload the module
-/// while an active factory still executes.
+/// A handle-producing UDF is memoized by its formula identity.
+/// For one live formula identity, the producer is evaluated at most once
+/// and the resulting handle token identifies that object for the token's
+/// entire lifetime.
+///
+/// Producers must therefore depend only on their Excel-visible inputs and
+/// stable application state explicitly represented by those inputs.
 pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
 
 /// A typed, call-safe reference to an object owned by an Excel handle topic.
@@ -103,7 +106,6 @@ impl<T: ExcelHandleObject> crate::ExcelReturn for Handle<T> {
 }
 
 impl<T: ExcelHandleObject> crate::value::MainThreadReturn for Handle<T> {}
-impl<T: ExcelHandleObject> crate::value::VolatileReturn for Handle<T> {}
 
 struct HandleLeaseState {
     active: AtomicUsize,
@@ -287,35 +289,6 @@ where
     fn drop(&mut self) {
         if let Some(value) = self.value.take() {
             let value: Arc<dyn Any + Send + Sync> = value;
-            self.registry
-                .drop_values(std::iter::once(value), self.operation);
-        }
-    }
-}
-
-struct DisplacedHandleValue<'a> {
-    registry: &'a HandleRegistry,
-    value: Option<Arc<dyn Any + Send + Sync>>,
-    operation: &'static str,
-}
-
-impl<'a> DisplacedHandleValue<'a> {
-    fn new(
-        registry: &'a HandleRegistry,
-        value: Arc<dyn Any + Send + Sync>,
-        operation: &'static str,
-    ) -> Self {
-        Self {
-            registry,
-            value: Some(value),
-            operation,
-        }
-    }
-}
-
-impl Drop for DisplacedHandleValue<'_> {
-    fn drop(&mut self) {
-        if let Some(value) = self.value.take() {
             self.registry
                 .drop_values(std::iter::once(value), self.operation);
         }
@@ -541,44 +514,6 @@ impl HandleRegistry {
             value: Some(value),
             lease: Some(lease),
         })
-    }
-
-    fn replace_pending<T>(
-        &self,
-        token: &str,
-        value: &mut Option<Arc<T>>,
-    ) -> XllResult<Arc<dyn Any + Send + Sync>>
-    where
-        T: Any + Send + Sync + 'static,
-    {
-        let parsed = self.parse_token(token)?;
-        let mut state = self.state.write();
-        if state.closed {
-            return Err(XllError::Closing);
-        }
-        let slot = state
-            .slots
-            .get_mut(parsed.slot as usize)
-            .ok_or(XllError::StaleHandle)?;
-        if slot.generation != parsed.generation {
-            return Err(XllError::StaleHandle);
-        }
-        let entry = slot.entry.as_mut().ok_or(XllError::StaleHandle)?;
-        if entry.type_id != TypeId::of::<T>() || !entry.value.as_ref().is::<T>() {
-            let actual_type = entry.type_name;
-            drop(state);
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                tracing::warn!(
-                    expected_type = type_name::<T>(),
-                    actual_type,
-                    "Excel handle replacement type mismatch"
-                );
-            }));
-            return Err(XllError::InvalidHandle);
-        }
-        let replacement: Arc<dyn Any + Send + Sync> =
-            value.take().expect("pending handle value is armed");
-        Ok(std::mem::replace(&mut entry.value, replacement))
     }
 
     #[cfg(test)]
@@ -952,8 +887,6 @@ pub(crate) struct HandleRuntime {
     topics: Mutex<TopicState>,
     leases: Arc<HandleLeaseState>,
     _module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    #[cfg(test)]
-    after_replace_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleRuntime {
@@ -971,8 +904,6 @@ impl HandleRuntime {
             topics: Mutex::new(TopicState::default()),
             leases: Arc::new(HandleLeaseState::new()),
             _module_ingress: module_ingress,
-            #[cfg(test)]
-            after_replace_hook: Mutex::new(None),
         })
     }
 
@@ -1082,6 +1013,46 @@ impl HandleRuntime {
             },
         );
 
+        //
+        // Warm path: check for an existing topic before invoking the factory.
+        //
+        let existing_token = {
+            let topics = self.topics.lock();
+
+            if topics.closed || topics.generation != generation {
+                return Err(XllError::Closing);
+            }
+
+            topics.by_key.get(&key).map(|topic| topic.token.clone())
+        };
+
+        if let Some(token) = existing_token {
+            // Reuse the established RTD topic/token identity. The factory
+            // is never invoked for a cache hit; the existing Arc<T> stays.
+            observe(&key, &token)?;
+
+            // observe may race with disconnect/shutdown, so re-validate.
+            {
+                let topics = self.topics.lock();
+                if topics.closed || topics.generation != generation {
+                    return Err(XllError::Closing);
+                }
+                if !topics
+                    .by_key
+                    .get(&key)
+                    .is_some_and(|topic| topic.token == token)
+                {
+                    return Err(XllError::StaleHandle);
+                }
+            }
+
+            drop(initializing);
+            return Ok((token, false));
+        }
+
+        //
+        // Cold path: no existing topic, invoke the factory.
+        //
         let value = match create() {
             Ok(value) => value,
             Err(error) => {
@@ -1090,65 +1061,6 @@ impl HandleRuntime {
         };
         let mut value =
             PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
-
-        {
-            let topics = self.topics.lock();
-            if topics.closed || topics.generation != generation {
-                return Err(XllError::Closing);
-            }
-        }
-
-        let existing_token = self
-            .topics
-            .lock()
-            .by_key
-            .get(&key)
-            .map(|topic| topic.token.clone());
-        if let Some(token) = existing_token {
-            // Preserve the established RTD topic/token identity. Excel may
-            // return its cached RTD value here, so publication is validated
-            // before the registry slot is atomically replaced.
-            observe(&key, &token)?;
-            {
-                let topics = self.topics.lock();
-                if topics.closed || topics.generation != generation {
-                    return Err(XllError::Closing);
-                }
-                if !topics
-                    .by_key
-                    .get(&key)
-                    .is_some_and(|topic| topic.token == token)
-                {
-                    return Err(XllError::StaleHandle);
-                }
-            }
-            let previous = self.registry.replace_pending(&token, value.slot())?;
-            let previous = DisplacedHandleValue::new(
-                &self.registry,
-                previous,
-                "handle formula value replacement",
-            );
-            #[cfg(test)]
-            if let Some(hook) = self.after_replace_hook.lock().clone() {
-                hook();
-            }
-            {
-                let topics = self.topics.lock();
-                if topics.closed || topics.generation != generation {
-                    return Err(XllError::Closing);
-                }
-                if !topics
-                    .by_key
-                    .get(&key)
-                    .is_some_and(|topic| topic.token == token)
-                {
-                    return Err(XllError::StaleHandle);
-                }
-            }
-            drop(previous);
-            drop(initializing);
-            return Ok((token, false));
-        }
 
         let token = self.registry.insert_pending(value.slot())?;
         let unpublished = scopeguard::guard(
@@ -1465,11 +1377,6 @@ impl HandleRuntime {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.registry.len()
-    }
-
-    #[cfg(test)]
-    fn set_after_replace_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
-        *self.after_replace_hook.lock() = hook;
     }
 }
 
@@ -1915,31 +1822,35 @@ mod tests {
     }
 
     #[test]
-    fn formula_topics_keep_identity_but_replace_the_value_on_each_evaluation() {
+    fn repeated_formula_identity_runs_factory_exactly_once() {
         let runtime = HandleRuntime::new(8);
-        let (token, created) = runtime
-            .prepare::<DataRecord>("book:sheet:A1:market:rate=1".to_owned(), || {
-                Ok(Arc::new(DataRecord(7)))
+        let calls = AtomicUsize::new(0);
+
+        let (first, created) = runtime
+            .prepare("same".to_owned(), || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Arc::new(DataRecord(1)))
             })
             .unwrap();
         assert!(created);
-        let previous_call = runtime.lookup::<DataRecord>(&token).unwrap();
-        let (replacement_token, created) = runtime
-            .prepare::<DataRecord>("book:sheet:A1:market:rate=1".to_owned(), || {
-                Ok(Arc::new(DataRecord(9)))
+
+        let (second, created) = runtime
+            .prepare("same".to_owned(), || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Arc::new(DataRecord(2)))
             })
             .unwrap();
         assert!(!created);
-        assert_eq!(replacement_token, token);
-        assert_eq!(previous_call.0, 7);
-        assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 9);
-        runtime
-            .connect(1, 41, "book:sheet:A1:market:rate=1")
-            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        assert_eq!(runtime.lookup::<DataRecord>(&first).unwrap().0, 1);
+
+        runtime.connect(1, 41, "same").unwrap();
         runtime.disconnect(1, 41);
         assert_eq!(runtime.len(), 0);
         assert!(matches!(
-            runtime.lookup::<DataRecord>(&token),
+            runtime.lookup::<DataRecord>(&first),
             Err(XllError::StaleHandle)
         ));
     }
@@ -2343,20 +2254,24 @@ mod tests {
     }
 
     #[test]
-    fn failed_reobservation_preserves_the_previously_published_value() {
+    fn cache_hit_observe_failure_does_not_invalidate_object() {
         let runtime = HandleRuntime::new(8);
         let (token, created) = runtime
             .prepare_observed(
-                "observed-replacement".to_owned(),
+                "observed-memoized".to_owned(),
                 || Ok(Arc::new(DataRecord(1))),
                 |_, _| Ok(()),
             )
             .unwrap();
         assert!(created);
 
-        let replacement = runtime.prepare_observed(
-            "observed-replacement".to_owned(),
-            || Ok(Arc::new(DataRecord(2))),
+        let calls = AtomicUsize::new(0);
+        let result = runtime.prepare_observed(
+            "observed-memoized".to_owned(),
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Arc::new(DataRecord(2)))
+            },
             |_, _| {
                 Err(XllError::ExcelApi {
                     function: "xlfRtd",
@@ -2364,123 +2279,52 @@ mod tests {
                 })
             },
         );
-        assert!(matches!(replacement, Err(XllError::ExcelApi { .. })));
+        assert!(matches!(result, Err(XllError::ExcelApi { .. })));
+
+        // factory was never invoked because cache hit skips it
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        // original object is preserved
         assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 1);
         assert_eq!(runtime.len(), 1);
     }
 
-    struct PanicFlagRecord {
-        panic_on_drop: bool,
-    }
-
-    impl ExcelHandleObject for PanicFlagRecord {}
-
-    impl Drop for PanicFlagRecord {
-        fn drop(&mut self) {
-            if self.panic_on_drop {
-                panic!("injected unpublished handle destructor panic");
-            }
-        }
-    }
-
     #[test]
-    fn observation_failure_accounts_for_new_value_destructor_panic() {
+    fn cache_hit_observe_failure_preserves_existing_topic() {
         let runtime = HandleRuntime::new(8);
-        runtime
+        let (token, created) = runtime
             .prepare_observed(
-                "observed-panic".to_owned(),
-                || {
-                    Ok(Arc::new(PanicFlagRecord {
-                        panic_on_drop: false,
-                    }))
-                },
+                "observe-retry".to_owned(),
+                || Ok(Arc::new(DataRecord(10))),
                 |_, _| Ok(()),
             )
             .unwrap();
+        assert!(created);
 
+        // Observation failure on warm hit
         let result = runtime.prepare_observed(
-            "observed-panic".to_owned(),
-            || {
-                Ok(Arc::new(PanicFlagRecord {
-                    panic_on_drop: true,
-                }))
+            "observe-retry".to_owned(),
+            || Ok(Arc::new(DataRecord(20))),
+            |_, _| {
+                Err(XllError::ExcelApi {
+                    function: "xlfRtd",
+                    code: xlfn_sys::XLRET_FAILED,
+                })
             },
-            |_, _| Err(XllError::Closing),
         );
-        assert!(matches!(result, Err(XllError::Closing)));
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
-    }
+        assert!(matches!(result, Err(XllError::ExcelApi { .. })));
 
-    #[test]
-    fn replacement_failure_accounts_for_new_value_destructor_panic() {
-        let runtime = HandleRuntime::new(8);
-        runtime
+        // Retry with successful observation still reuses the same object
+        let (retry_token, created) = runtime
             .prepare_observed(
-                "replace-panic".to_owned(),
-                || {
-                    Ok(Arc::new(PanicFlagRecord {
-                        panic_on_drop: false,
-                    }))
-                },
+                "observe-retry".to_owned(),
+                || Ok(Arc::new(DataRecord(30))),
                 |_, _| Ok(()),
             )
             .unwrap();
-
-        let result = runtime.prepare_observed(
-            "replace-panic".to_owned(),
-            || {
-                Ok(Arc::new(PanicFlagRecord {
-                    panic_on_drop: true,
-                }))
-            },
-            |_, token| {
-                let previous = runtime.registry.remove_any(token)?;
-                runtime
-                    .registry
-                    .drop_values(std::iter::once(previous), "test replacement removal");
-                Ok(())
-            },
-        );
-        assert!(matches!(result, Err(XllError::StaleHandle)));
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
-    }
-
-    #[test]
-    fn post_replace_disconnect_accounts_for_displaced_value_panic() {
-        let runtime = Arc::new(HandleRuntime::new(8));
-        runtime
-            .prepare_observed(
-                "disconnect-replace-panic".to_owned(),
-                || {
-                    Ok(Arc::new(PanicFlagRecord {
-                        panic_on_drop: true,
-                    }))
-                },
-                |_, _| Ok(()),
-            )
-            .unwrap();
-        runtime.connect(7, 11, "disconnect-replace-panic").unwrap();
-
-        let disconnecting = Arc::clone(&runtime);
-        runtime.set_after_replace_hook(Some(Arc::new(move || {
-            disconnecting.disconnect(7, 11);
-        })));
-        let result = runtime.prepare_observed(
-            "disconnect-replace-panic".to_owned(),
-            || {
-                Ok(Arc::new(PanicFlagRecord {
-                    panic_on_drop: false,
-                }))
-            },
-            |_, _| Ok(()),
-        );
-        runtime.set_after_replace_hook(None);
-
-        assert!(matches!(
-            result,
-            Err(XllError::Closing | XllError::StaleHandle)
-        ));
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+        assert!(!created);
+        assert_eq!(retry_token, token);
+        assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 10);
     }
 
     #[test]
@@ -2565,7 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_prepare_serializes_but_evaluates_each_factory() {
+    fn concurrent_prepare_with_same_key_runs_factory_once() {
         use std::sync::Barrier;
         use std::sync::mpsc;
 
@@ -2608,10 +2452,58 @@ mod tests {
         let res1 = t1.join().unwrap();
         let res2 = t2.join().unwrap();
 
-        assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+        // Under memoization, thread 1 creates the topic. Thread 2 waits for
+        // thread 1 to finish, then finds the existing topic and reuses it.
+        // The factory is invoked exactly once.
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
         assert_eq!(res1.0, res2.0);
-        assert_ne!(res1.1, res2.1);
-        assert_eq!(runtime.lookup::<DataRecord>(&res1.0).unwrap().0, 200);
+        assert!(!res2.1);
+        assert_eq!(runtime.lookup::<DataRecord>(&res1.0).unwrap().0, 100);
+        assert_eq!(runtime.len(), 1);
+    }
+
+    #[test]
+    fn handle_dependency_chain_propagates_identity_change() {
+        let runtime = HandleRuntime::new(16);
+
+        // Upstream: different argument digest → different key → different token
+        let (upstream_a, created) = runtime
+            .prepare("sheet:A1:CURVE.CREATE:digest_a".to_owned(), || {
+                Ok(Arc::new(DataRecord(10)))
+            })
+            .unwrap();
+        assert!(created);
+
+        // Downstream uses upstream token as part of its key, simulating
+        // MODEL.CREATE(Handle<Curve>, params). The raw upstream token becomes
+        // part of the argument digest, so a different upstream token yields
+        // a different downstream key.
+        let downstream_key_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
+        let (downstream_a, created) = runtime
+            .prepare(downstream_key_a, || Ok(Arc::new(DataRecord(100))))
+            .unwrap();
+        assert!(created);
+
+        // Upstream changes (different arguments → different key)
+        let (upstream_b, created) = runtime
+            .prepare("sheet:A1:CURVE.CREATE:digest_b".to_owned(), || {
+                Ok(Arc::new(DataRecord(20)))
+            })
+            .unwrap();
+        assert!(created);
+        assert_ne!(upstream_a, upstream_b);
+
+        // Downstream key also changes because the upstream token changed
+        let downstream_key_b = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_b);
+        let (downstream_b, created) = runtime
+            .prepare(downstream_key_b, || Ok(Arc::new(DataRecord(200))))
+            .unwrap();
+        assert!(created);
+        assert_ne!(downstream_a, downstream_b);
+
+        // Both downstream objects are distinct
+        assert_eq!(runtime.lookup::<DataRecord>(&downstream_a).unwrap().0, 100);
+        assert_eq!(runtime.lookup::<DataRecord>(&downstream_b).unwrap().0, 200);
     }
 
     #[test]

@@ -74,24 +74,42 @@ fn dataset_evaluate(dataset: Handle<Dataset>, time: f64) -> XllResult<f64> {
 }
 ```
 
-`Handle<T>` dereferences to `T` and retains an `Arc<T>` for the duration of the Rust value. A consumer therefore sees a stable object even if the producer formula replaces its object concurrently after the consumer has resolved the handle.
+`Handle<T>` dereferences to `T` and retains an `Arc<T>` for the duration of the Rust value.
 
 No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<T>`.
 
 ## Re-evaluation semantics
 
-A producer runs on every Excel evaluation. xlfn does not silently memoize the producer body.
+Handle-producing functions are memoized by formula identity.
 
-For the same formula identity, the framework keeps the visible token and RTD topic stable, then atomically replaces the object after the refreshed observation succeeds. This yields two useful properties:
+Recalculation with the same caller, function identity, and arguments reuses the existing handle object without invoking the producer again.
 
-- recalculation can reload external state or rebuild the object;
-- dependent cells do not receive a gratuitously different token on every recalc.
+Changing any part of formula identity creates a new object and token.
+
+A live token never changes the object it identifies.
 
 A formula identity includes the caller sheet/cell, stable UDF ID, and a canonical fingerprint of raw arguments. The fingerprint is streamed through BLAKE3 and is bounded to 16 MiB.
 
 The caller sheet portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new handle identity.
 
-Changing the caller, function ID, or arguments creates a different formula identity. A producer must be deterministic enough that repeated evaluation is operationally safe; it should not create irreversible side effects merely because Excel recalculated.
+Changing the caller, function ID, or arguments creates a different formula identity. A producer must be deterministic: its output must depend only on its Excel-visible inputs and stable application state explicitly represented by those inputs.
+
+### External state and dependency design
+
+Because the producer runs at most once per formula identity, reading hidden mutable state inside the producer does not produce automatic updates when that state changes. Make varying state an explicit Excel-visible dependency:
+
+```rust
+// NG: hidden mutable state is read but never triggers re-evaluation.
+fn market() -> Market {
+    database.load_latest()
+}
+
+// OK: changing snapshot_id changes formula identity, creating a new object.
+fn market(snapshot_id: String) -> Market { .. }
+
+// OK: changing the upstream Handle token changes the downstream fingerprint.
+fn model(market: Handle<MarketSnapshot>) -> Model { .. }
+```
 
 ## Handle alias functions
 
@@ -143,11 +161,10 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 - thread-safe UDFs;
 - macro-sheet UDFs;
 - asynchronous UDFs;
-- functions with raw reference arguments.
+- functions with raw reference arguments;
+- volatile UDFs.
 
-A producer may be `volatile`, but use volatility deliberately because it invokes construction on every recalculation cycle.
-
-`Handle<T>` aliases also support main-thread and volatile return semantics.
+`Handle<T>` aliases use main-thread return semantics.
 
 ## Caller restrictions
 
@@ -171,4 +188,3 @@ A good handle object is:
 - free of workbook-owned pointers;
 - bounded in memory;
 - safe to drop during orderly add-in close.
-

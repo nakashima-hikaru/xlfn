@@ -17,6 +17,8 @@ use std::sync::Arc;
 #[cfg(feature = "async")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use std::sync::Arc;
+
 #[cfg(feature = "async")]
 pub struct AsyncSpawnBenchmark {
     manager: Arc<AsyncManager>,
@@ -209,5 +211,113 @@ impl Drop for SyncBoundaryWorkerPool {
             crate::ingress::global_ingress().begin_close_with(|| {});
             let _ = crate::ingress::global_ingress().seal_and_drain();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handle prepare benchmarks
+// ---------------------------------------------------------------------------
+
+use crate::handle::{ExcelHandleObject, HandleRuntime};
+
+#[allow(dead_code)]
+struct BenchHandleObject(u64);
+impl ExcelHandleObject for BenchHandleObject {}
+
+#[derive(Clone, Copy, Debug)]
+pub enum HandlePrepareKind {
+    /// First call for a key — factory is invoked.
+    ColdMiss,
+    /// Repeated call for an already-published key — factory is skipped.
+    WarmHit,
+    /// Multiple threads contend on the same key.
+    Contended,
+}
+
+pub struct HandlePrepareBenchmark {
+    runtime: Arc<HandleRuntime>,
+}
+
+impl HandlePrepareBenchmark {
+    pub fn new() -> Self {
+        Self {
+            runtime: Arc::new(
+                HandleRuntime::try_new_with_ingress(16_384, None)
+                    .expect("benchmark host provides an OS CSPRNG"),
+            ),
+        }
+    }
+
+    pub fn run(&self, kind: HandlePrepareKind, iterations: usize) {
+        match kind {
+            HandlePrepareKind::ColdMiss => {
+                for i in 0..iterations {
+                    let key = format!("cold:{i}");
+                    let _ = std::hint::black_box(
+                        self.runtime
+                            .prepare_observed(
+                                key,
+                                || Ok(Arc::new(BenchHandleObject(i as u64))),
+                                |_, _| Ok(()),
+                            )
+                            .unwrap(),
+                    );
+                }
+            }
+            HandlePrepareKind::WarmHit => {
+                // Seed one topic, then repeatedly hit it.
+                let key = "warm:0".to_owned();
+                self.runtime
+                    .prepare_observed(
+                        key.clone(),
+                        || Ok(Arc::new(BenchHandleObject(0))),
+                        |_, _| Ok(()),
+                    )
+                    .unwrap();
+                for _ in 0..iterations {
+                    let _ = std::hint::black_box(
+                        self.runtime
+                            .prepare_observed(
+                                key.clone(),
+                                || Ok(Arc::new(BenchHandleObject(1))),
+                                |_, _| Ok(()),
+                            )
+                            .unwrap(),
+                    );
+                }
+            }
+            HandlePrepareKind::Contended => {
+                use std::sync::Barrier;
+
+                let barrier = Arc::new(Barrier::new(4));
+                let threads: Vec<_> = (0..4)
+                    .map(|_| {
+                        let b = Arc::clone(&barrier);
+                        let rt = Arc::clone(&self.runtime);
+                        std::thread::spawn(move || {
+                            b.wait();
+                            for i in 0..iterations {
+                                let key = format!("contended:{i}");
+                                let _ = std::hint::black_box(rt.prepare_observed(
+                                    key,
+                                    || Ok(Arc::new(BenchHandleObject(i as u64))),
+                                    |_, _| Ok(()),
+                                ));
+                            }
+                        })
+                    })
+                    .collect();
+                for t in threads {
+                    t.join().expect("benchmark thread panicked");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for HandlePrepareBenchmark {
+    fn drop(&mut self) {
+        self.runtime.terminate_all_topics();
+        let _ = self.runtime.close();
     }
 }
