@@ -28,9 +28,13 @@ The attribute generates the Excel ABI wrapper and registration descriptor. Argum
 - linked-artifact, PE architecture, export, dependency, and optional sidecar-package validation;
 - transactional x86/x64 distribution with best-effort rollback through `cargo xlfn`.
 
-## What the framework does not infer
+## Framework boundary
 
-xlfn deliberately does not provide an external-engine adapter. It does not generate bindings, load libraries, select an ABI or transport, create external-engine worker pools, interpret external status codes or buffers, or manage external object registries. It also does not infer business semantics, cache keys, or RTD-source cancellation policy. Those contracts remain explicit in application code.
+xlfn owns the Excel-facing boundary of an XLL. Once arguments have been converted to Rust values and a function has obtained the capabilities allowed by its execution context, the rest of the call is ordinary application code.
+
+Dependencies below that boundary are application concerns. They may be Rust crates, native libraries, COM components, local processes, IPC endpoints, or remote services. xlfn does not generate bindings for them, load them at runtime, choose their ABI or transport, create their worker pools, or define their object identity. Optional bundle metadata can stage and validate sidecar files for distribution, but packaging does not create a runtime integration API.
+
+xlfn also does not infer business semantics, cache keys, or application-specific cancellation policy. Keep those contracts explicit in ordinary Rust code.
 
 ## Documentation map
 
@@ -40,7 +44,7 @@ Use this guide for workflows, mental models, constraints, and operational practi
 cargo doc --package xlfn --all-features --open
 ```
 
-Start with [Requirements and compatibility](requirements.md), then complete [Create your first add-in](quick-start.md). Applications that integrate an external engine should first understand [Formula-owned handles](handles.md), [Asynchronous functions](async-functions.md), and [External engine integration](native-overview.md).
+Start with [Requirements and compatibility](requirements.md), then complete [Create your first add-in](quick-start.md). Continue with [Add-in lifecycle and state](lifecycle.md) and [Execution modes and contexts](execution-modes.md) before using stateful facilities such as [Formula-owned handles](handles.md), [Asynchronous functions](async-functions.md), or [Streaming RTD](rtd.md). For packaging and release behavior, use [Deployment and distribution](deployment.md).
 
 ## Status and release claims
 

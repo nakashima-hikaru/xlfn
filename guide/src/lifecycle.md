@@ -24,9 +24,9 @@ With the `async` feature, it also exposes `async_worker_count`.
 - `module_directory()` — the directory containing the XLL;
 - `build_info()` — add-in ID, crate version, and target triple.
 
-Use this hook to load bounded configuration, install diagnostics, and create application-owned adapters or resources needed by later calls. Return an error rather than panicking. The framework converts the error through `IntoXllError`, records diagnostics, and fails the open operation safely.
+Use this hook to load bounded configuration, install diagnostics, and create application-owned resources needed by later calls. Return an error rather than panicking. The framework converts the error through `IntoXllError`, records diagnostics, and fails the open operation safely.
 
-Do not perform unbounded network or external-engine work in `open`. Excel is waiting synchronously.
+Do not perform unbounded I/O or long-running initialization in `open`. Excel is waiting synchronously.
 
 ## Shared state
 
@@ -56,23 +56,34 @@ fn async_worker_count(_: &State) -> usize {
 }
 ```
 
-The framework clamps the value to `1..=32`. The default is the available parallelism capped at four. This pool executes Rust futures; it is separate from any executor, worker, connection pool, or external-engine runtime created by the application.
+The framework clamps the value to `1..=32`. The default is the available parallelism capped at four. This pool executes Rust futures; it is separate from any executor, worker, connection pool, or other runtime created by the application.
 
 ## Quiescence, cleanup, and unload safety
 
-`Addin::quiesce` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. It must synchronously stop every application-owned thread, callback, task, and external producer that could execute XLL code after unload.
+`Addin::quiesce` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. It must synchronously stop every application-owned thread, callback, task, queue, and producer that could execute XLL code or require add-in state after unload.
 
-The formula-handle registry is closed after `quiesce` returns. If a formula-owned Rust object refers to an application adapter, quiescence must invalidate or release its external object before stopping the adapter, and the later Rust `Drop` must not require a stopped worker or connection. See [External objects as formula handles](native-objects.md).
+The formula-handle registry is closed after `quiesce` returns. Formula-owned Rust objects can therefore still exist while application quiescence is being established. If a handle object refers to an application-owned resource, `quiesce` must leave its later `Drop` safe after workers, connections, or owner threads have stopped. Prefer releasing or invalidating such resources while their owners are still available, then make the later wrapper drop local or idempotent. See [Formula-owned handles](handles.md).
 
 ```rust
 fn quiesce(state: &mut State) -> Result<(), Error> {
     state.request_application_shutdown();
-    state.stop_application_adapters()?;
+    state.join_application_workers()?;
     Ok(())
 }
 ```
 
 `xlAutoClose` cannot reject DLL unload. If `quiesce` fails or panics, the framework fail-stops because unload safety is unknown. It also fail-stops when an Excel callback remains registered, a framework producer cannot be stopped, an RTD/COM object remains live, a handle runtime is not quiescent, or an `Arc<State>` escaped.
+
+For application-owned concurrent or thread-affine resources, a safe shutdown sequence is:
+
+1. reject new application submissions;
+2. signal cancellation or shutdown;
+3. resolve or reject queued requests according to the application's contract;
+4. release thread-affine resources on the thread that owns them;
+5. join every application-owned worker or coordinator;
+6. release remaining application roots before `quiesce` returns.
+
+xlfn cannot prove those application-level properties; `quiesce` is the boundary at which the add-in must establish them.
 
 After quiescence, `Addin::cleanup` performs best-effort disposal. It cannot return an arbitrary business error. Report recoverable failures explicitly; they are logged without preventing safe unload:
 
@@ -91,11 +102,11 @@ Consequences:
 - cancellation must be cooperative;
 - background callbacks must be quiescent before `quiesce` returns;
 - every application-owned worker or coordinator must be joined;
-- an in-process external operation that cannot be interrupted should be isolated out of process;
+- in-process work that cannot be interrupted should be isolated out of process when safe unload requires a hard stop;
 - do not implement a timeout that abandons in-process code and then permits unload.
 
 ## Application-owned lifecycle resources
 
 `Addin::open`, `Addin::quiesce`, and `Addin::cleanup` for a generation run on the same lifecycle thread. An application may use this property for lifecycle-owned registries or other resources that are not exposed to worksheet calls. `State` itself remains `Send + Sync + 'static`; expose only safe, thread-compatible clients through it.
 
-When an application uses an owner/client split, do not let submitted work capture and destroy the owner responsible for joining its own worker. xlfn does not supply or enforce this adapter pattern.
+For a thread-affine application resource, lifecycle code may own the resource and its worker while `State` exposes only a safe client. Do not let submitted work capture and destroy the owner responsible for joining its own worker. xlfn constrains the Excel boundary and unload ordering; the application's internal dispatch design remains ordinary Rust code.

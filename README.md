@@ -132,7 +132,7 @@ Inputs are decoded through typed conversion traits. Rust values and `Result<T, E
 - [Native asynchronous functions](guide/src/async-functions.md)
 - [Streaming RTD](guide/src/rtd.md)
 - [Custom value conversions](guide/src/custom-conversions.md)
-- [Native engine integration](guide/src/native-overview.md)
+- [Add-in lifecycle and state](guide/src/lifecycle.md)
 - Diagnostics and panic containment
 - Package staging and PE validation
 - Static or dynamic MSVC CRT policies
@@ -180,7 +180,7 @@ xlfn currently includes:
 - distribution staging and native artifact validation;
 - a Lean 4 shutdown model.
 
-Application-specific calculation engines, worker processes, and external-engine adapters remain the responsibility of the add-in.
+Application-specific domain logic, native-library bindings, services, worker processes, and downstream protocols remain the responsibility of the add-in.
 
 Because the project is still at `0.1.0`, API stability is not guaranteed. Automated tests and artifact validation do not replace testing in the exact Excel channels, locales, architectures, and deployment environments used in production.
 

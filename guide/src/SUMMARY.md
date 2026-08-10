@@ -27,12 +27,6 @@
 - [Asynchronous functions](async-functions.md)
 - [Streaming RTD](rtd.md)
 
-# External engines and application adapters
-
-- [External engine integration](native-overview.md)
-- [Thread-affine application adapters](native-threading.md)
-- [External objects as formula handles](native-objects.md)
-
 # Advanced runtime facilities
 
 - [Calculation caches](caching.md)

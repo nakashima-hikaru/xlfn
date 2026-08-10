@@ -5,14 +5,12 @@ A production add-in is normally one Rust crate. Separate crates are optional arc
 ```text
 hello-xlfn/
 ├── Cargo.toml
-├── src/
-│   ├── lib.rs       # one add-in definition and lifecycle state
-│   └── udf.rs       # exported worksheet functions
-├── adapter/         # optional application-owned external integration
-└── native/          # conventional optional sidecar directory by bitness
-    ├── x86/
-    └── x64/
+└── src/
+    ├── lib.rs       # one add-in definition and lifecycle state
+    └── udf.rs       # exported worksheet functions
 ```
+
+This is the framework-level shape, not a required application architecture. Add any modules, workspace crates, generated bindings, data directories, or sidecar directories that the application itself needs. xlfn only gives such files special meaning when they are referenced by an xlfn build or packaging contract.
 
 ## `src/lib.rs`: lifecycle and shared state
 
@@ -52,7 +50,7 @@ fn load_configuration(_: &std::path::Path) -> XllResult<Configuration> {
 }
 ```
 
-`State` must be `Send + Sync + 'static`. Any external-engine adapter stored in it must satisfy that contract. When an external implementation is thread-affine, the application should expose a safe, cloneable client while retaining shutdown ownership in its own runtime. See [External engine integration](native-overview.md).
+`State` must be `Send + Sync + 'static`. Anything stored in it must independently satisfy the concurrency contract of every worksheet function that can access it. If an application resource is thread-affine, expose only a safe thread-compatible client through `State` and retain creation, destruction, and join ownership in application lifecycle code. See [Add-in lifecycle and state](lifecycle.md) and [Execution modes and contexts](execution-modes.md).
 
 ## UDF modules
 
@@ -68,11 +66,11 @@ Each Excel-visible function remains a non-generic, safe, free Rust function. Int
 
 ## Cargo metadata
 
-Cargo metadata controls output names and optional sidecar-file placement. It is not a second source of truth for worksheet signatures or application-adapter contracts.
+Cargo metadata controls output names and optional sidecar-file placement. It is not a second source of truth for worksheet signatures or application runtime behavior.
 
 - `#[excel_function]` is the source of truth for worksheet metadata.
 - `#[excel_addin]` is the source of truth for add-in identity and lifecycle exports.
-- Application adapter code is the source of truth for any external ABI, protocol, or object-lifetime contract.
+- Ordinary application code is the source of truth for domain behavior and downstream dependency contracts.
 - `[package.metadata.xlfn]` controls distribution artifact naming and bundle staging.
 
 ## Generated boundary

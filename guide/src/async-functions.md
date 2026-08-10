@@ -77,7 +77,7 @@ Excel async calls currently receive `CancellationGuarantee::BestEffort`. The tok
 
 Cancellation is cooperative. Dropping a future or setting a token cannot forcibly interrupt:
 
-- a blocking external call;
+- a blocking or foreign call;
 - synchronous filesystem or network I/O;
 - a lock held by another thread;
 - foreign code that does not expose cancellation.
@@ -101,7 +101,7 @@ async fn fetch_data(
 }
 ```
 
-Submit blocking or thread-affine work through an application-owned bounded adapter, then await its reply without blocking the xlfn executor. xlfn does not provide that adapter or define its cancellation semantics. See [Thread-affine application adapters](native-threading.md).
+Submit blocking or thread-affine work through an application-owned bounded execution mechanism, then await an owned reply without blocking the xlfn executor. xlfn does not define that mechanism's queueing, affinity, overload, or cancellation semantics. If it is reachable from a `thread_safe` function, its concurrency contract must also satisfy the rules in [Execution modes and contexts](execution-modes.md).
 
 ## Error and panic behavior
 

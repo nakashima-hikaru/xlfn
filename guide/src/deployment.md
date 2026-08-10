@@ -33,6 +33,12 @@ audit metadata and are not verified before DLL execution.
 
 Keep all files together. Renaming a sidecar DLL or moving it to another directory can break both explicit loading and transitive imports.
 
+## Packaging boundary
+
+Bundle staging and PE dependency validation are build and distribution facilities. They do not load a sidecar at runtime, resolve application symbols, choose an ABI or protocol, construct application objects, or prove that downstream calls are thread-safe or cancellable. If application code uses a packaged component, that code owns the runtime contract and loading policy.
+
+If the add-in has no sidecar files, no bundle metadata is required.
+
 ## Versioning worksheet APIs
 
 A released workbook depends on more than the crate's semantic version. Treat these as public contracts:
@@ -43,7 +49,6 @@ A released workbook depends on more than the crate's semantic version. Treat the
 - enum strings;
 - handle object types and producer semantics;
 - RTD topic identity;
-- application-adapter protocol or ABI version policy;
 - add-in ID and category.
 
 Adding a new function is usually compatible. Renaming a function, changing argument order, changing a default, or changing an enum text can silently alter existing workbooks.
@@ -62,7 +67,7 @@ Avoid:
 - search-path-dependent DLL placement;
 - copying only the XLL while resolving application sidecars from an ambient global directory.
 
-If the application adapter loads a packaged DLL, it should use an explicit path derived from the installed package rather than ambient search paths. xlfn does not perform that load. Transitive dependencies still resolve according to Windows loader behavior and the validated package import closure.
+If application code loads a packaged DLL, it should use an explicit path derived from the installed package rather than ambient search paths. xlfn does not perform that load. Transitive dependencies still resolve according to Windows loader behavior and the validated package import closure.
 
 ## Code signing
 
@@ -99,7 +104,7 @@ Do not overwrite a loaded XLL in place. Excel can retain module and DLL file han
 5. load the new version and run smoke tests;
 6. remove old versions only after the rollback window.
 
-When the add-in's external data format or adapter protocol, token semantics, or RTD ownership schema changes, restart Excel rather than attempting an in-process hot swap.
+When the add-in's executable sidecars, application-owned data or protocol assumptions, token semantics, or RTD ownership schema change, restart Excel rather than attempting an in-process hot swap.
 
 ## Distribution checklist
 

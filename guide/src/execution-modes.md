@@ -30,6 +30,12 @@ fn version(
 
 `ThreadSafeContext` is `Copy`, `Send`, and `Sync` when the referenced state permits it. Its presence marks the function as thread-safe even if the function attribute omits the flag. Use an explicit attribute as well when it improves readability, but do not treat duplicate declaration as additional safety.
 
+### What `thread_safe` guarantees
+
+`thread_safe` declares that Excel may invoke the generated boundary concurrently on calculation threads. It does not make `State` or anything reached through `State` thread-safe. Every application resource used by the function must independently support concurrent access or be protected by an application synchronization or dispatch policy.
+
+Do not move call-scoped Excel values, raw references, or callback capabilities to another thread. Thread affinity below the Rust worksheet-function boundary is a separate application concern from Excel's execution mode.
+
 ## Macro-sheet context
 
 ```rust

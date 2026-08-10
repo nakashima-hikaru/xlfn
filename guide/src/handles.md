@@ -1,6 +1,6 @@
 # Formula-owned handles
 
-Handles let a worksheet formula own a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts `Handle<T>`.
+Handles let a worksheet formula own a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts `Handle<T>`. xlfn owns the formula token, registry entry, and Rust value lifetime; any resource managed inside `T` remains part of `T`'s application-level contract.
 
 ## Define a handle object
 
@@ -38,7 +38,7 @@ impl Dataset {
 }
 ```
 
-The derived trait requires the value to be `Any + Send + Sync + 'static`. The object may contain synchronized application-adapter clients, immutable data, or other owned resources. It must not contain call-scoped Excel references.
+The derived trait requires the value to be `Any + Send + Sync + 'static`. The object may contain immutable data, synchronized application clients, typed resource identifiers, or other owned Rust values. It must not contain call-scoped Excel references.
 
 ## Produce and consume
 
@@ -115,9 +115,26 @@ Destructors must obey the same shutdown rules as any in-process code:
 - do not call Excel;
 - do not block indefinitely;
 - do not panic;
-- release thread-affine external resources through the application adapter rather than directly from an arbitrary handle destructor.
+- do not directly destroy a thread-affine application resource from an arbitrary handle destructor.
 
 The runtime supports at most 16,384 live handles per open generation. This is a safety bound, not a capacity target.
+
+## Resource-backed handle objects
+
+A handle object may represent or refer to a resource that is owned elsewhere in the application. Prefer a safe Rust client plus a typed logical identifier over a raw pointer. If a raw pointer is unavoidable, the application must independently prove that movement, concurrent access, and destruction from every possible drop thread are valid; adding `unsafe impl Send` or `Sync` only to satisfy `ExcelHandleObject` does not establish those properties.
+
+If explicit close and `Drop` can both release the same application resource, make release idempotent. Dependencies between application resources are also application state: do not rely on an incidental Rust drop order when explicit invalidation can make a still-referenced object unusable.
+
+## Shutdown interaction
+
+The close order relevant to handle objects is:
+
+1. xlfn stops and drains framework-managed work;
+2. `Addin::quiesce` establishes application-level quiescence;
+3. xlfn closes the formula-handle registry and drops remaining Rust handle objects;
+4. `Addin::cleanup` performs bounded best-effort disposal.
+
+A handle object's `Drop` therefore must remain safe after `quiesce` has stopped application workers or owner threads. If resource destruction requires such an owner, release or invalidate the resource during `quiesce` while the owner is still available, and make the later Rust wrapper drop a local or idempotent operation. Do not defer the only copy of an application shutdown protocol to handle `Drop`.
 
 ## Valid producer contexts
 
@@ -150,9 +167,8 @@ A good handle object is:
 
 - immutable or internally synchronized;
 - cheap to share through `Arc`;
-- explicit about external thread-affinity through application-adapter clients;
+- explicit about any application-level thread affinity;
 - free of workbook-owned pointers;
 - bounded in memory;
 - safe to drop during orderly add-in close.
 
-For external resources, continue with [External objects as formula handles](native-objects.md).
