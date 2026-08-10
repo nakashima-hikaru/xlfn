@@ -88,7 +88,7 @@ jobs:
                   cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked -- -D warnings
 
             - name: Install mdBook
-              uses: peaceiris/actions-mdbook@062dc9e3eab0bad35531417c6bb6c6a7a184764f # v2
+              uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2
               with:
                   # Keep this in sync with deploy-guide.yml; update through an explicit dependency PR.
                   mdbook-version: 0.5.4
