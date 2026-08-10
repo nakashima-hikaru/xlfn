@@ -12,12 +12,9 @@ use crate::async_udf::AsyncManager;
 use crate::cancellation::CancellationSource;
 #[cfg(feature = "async")]
 use crate::{CancellationGuarantee, XllError};
-#[cfg(feature = "async")]
 use std::sync::Arc;
 #[cfg(feature = "async")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use std::sync::Arc;
 
 #[cfg(feature = "async")]
 pub struct AsyncSpawnBenchmark {
@@ -220,8 +217,9 @@ impl Drop for SyncBoundaryWorkerPool {
 
 use crate::handle::{ExcelHandleObject, HandleRuntime};
 
-#[allow(dead_code)]
-struct BenchHandleObject(u64);
+struct BenchHandleObject {
+    _payload: u64,
+}
 impl ExcelHandleObject for BenchHandleObject {}
 
 #[derive(Clone, Copy, Debug)]
@@ -236,6 +234,12 @@ pub enum HandlePrepareKind {
 
 pub struct HandlePrepareBenchmark {
     runtime: Arc<HandleRuntime>,
+}
+
+impl Default for HandlePrepareBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HandlePrepareBenchmark {
@@ -257,7 +261,7 @@ impl HandlePrepareBenchmark {
                         self.runtime
                             .prepare_observed(
                                 key,
-                                || Ok(Arc::new(BenchHandleObject(i as u64))),
+                                || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
                                 |_, _| Ok(()),
                             )
                             .unwrap(),
@@ -270,7 +274,7 @@ impl HandlePrepareBenchmark {
                 self.runtime
                     .prepare_observed(
                         key.clone(),
-                        || Ok(Arc::new(BenchHandleObject(0))),
+                        || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
                         |_, _| Ok(()),
                     )
                     .unwrap();
@@ -279,7 +283,7 @@ impl HandlePrepareBenchmark {
                         self.runtime
                             .prepare_observed(
                                 key.clone(),
-                                || Ok(Arc::new(BenchHandleObject(1))),
+                                || Ok(Arc::new(BenchHandleObject { _payload: 1 })),
                                 |_, _| Ok(()),
                             )
                             .unwrap(),
@@ -300,7 +304,7 @@ impl HandlePrepareBenchmark {
                                 let key = format!("contended:{i}");
                                 let _ = std::hint::black_box(rt.prepare_observed(
                                     key,
-                                    || Ok(Arc::new(BenchHandleObject(i as u64))),
+                                    || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
                                     |_, _| Ok(()),
                                 ));
                             }
