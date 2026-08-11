@@ -37,6 +37,11 @@ name = "handle_prepare"
 harness = false
 required-features = ["bench-internals"]
 
+[[bench]]
+name = "formula_fingerprint"
+harness = false
+required-features = ["bench-internals"]
+
 
 [dependencies]
 arc-swap.workspace = true

@@ -232,6 +232,128 @@ impl Drop for SyncBoundaryWorkerPool {
 }
 
 // ---------------------------------------------------------------------------
+// Formula fingerprint benchmarks
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub enum FingerprintBenchCase {
+    ScalarInteger,
+    ShortString,
+    Utf16String32KiB,
+    NumericCells10K,
+    NumericCells100K,
+}
+
+impl FingerprintBenchCase {
+    pub const ALL: [Self; 5] = [
+        Self::ScalarInteger,
+        Self::ShortString,
+        Self::Utf16String32KiB,
+        Self::NumericCells10K,
+        Self::NumericCells100K,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ScalarInteger => "scalar_integer",
+            Self::ShortString => "short_string",
+            Self::Utf16String32KiB => "utf16_string_32kib",
+            Self::NumericCells10K => "numeric_cells_10k",
+            Self::NumericCells100K => "numeric_cells_100k",
+        }
+    }
+}
+
+pub struct FingerprintBenchmark {
+    payload: Vec<u8>,
+    chunks: Vec<std::ops::Range<usize>>,
+}
+
+impl FingerprintBenchmark {
+    pub fn new(case: FingerprintBenchCase) -> Self {
+        let mut benchmark = Self {
+            payload: Vec::new(),
+            chunks: Vec::new(),
+        };
+
+        match case {
+            FingerprintBenchCase::ScalarInteger => {
+                benchmark.push_u8(3);
+                benchmark.push_u32(0);
+            }
+            FingerprintBenchCase::ShortString => benchmark.push_string(5),
+            FingerprintBenchCase::Utf16String32KiB => benchmark.push_string(16 * 1024),
+            FingerprintBenchCase::NumericCells10K => benchmark.push_numeric_array(10_000),
+            FingerprintBenchCase::NumericCells100K => benchmark.push_numeric_array(100_000),
+        }
+
+        benchmark
+    }
+
+    pub fn encoded_bytes(&self) -> usize {
+        self.payload.len()
+    }
+
+    pub fn run_buffered(&self) -> [u8; 32] {
+        crate::formula_fingerprint::benchmark_stream(&self.payload, &self.chunks)
+    }
+
+    pub fn run_direct(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        let mut bytes = 0_usize;
+        for chunk in &self.chunks {
+            let part = &self.payload[chunk.clone()];
+            bytes = bytes
+                .checked_add(part.len())
+                .expect("fingerprint benchmark byte count cannot overflow");
+            assert!(bytes <= 16 * 1024 * 1024);
+            hasher.update(part);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    fn push_chunk(&mut self, bytes: &[u8]) {
+        let start = self.payload.len();
+        self.payload.extend_from_slice(bytes);
+        self.chunks.push(start..self.payload.len());
+    }
+
+    fn push_u8(&mut self, value: u8) {
+        self.push_chunk(&[value]);
+    }
+
+    fn push_u16(&mut self, value: u16) {
+        self.push_chunk(&value.to_le_bytes());
+    }
+
+    fn push_u32(&mut self, value: u32) {
+        self.push_chunk(&value.to_le_bytes());
+    }
+
+    fn push_u64(&mut self, value: u64) {
+        self.push_chunk(&value.to_le_bytes());
+    }
+
+    fn push_string(&mut self, units: usize) {
+        self.push_u8(4);
+        self.push_u64(units as u64);
+        for index in 0..units {
+            self.push_u16((b'a' + (index % 26) as u8) as u16);
+        }
+    }
+
+    fn push_numeric_array(&mut self, cells: usize) {
+        self.push_u8(8);
+        self.push_u64(cells as u64);
+        self.push_u64(1);
+        for index in 0..cells {
+            self.push_u8(1);
+            self.push_u64((index as f64).to_bits());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handle prepare benchmarks
 // ---------------------------------------------------------------------------
 
