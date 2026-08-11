@@ -41,7 +41,7 @@ pub(crate) use topic::{
 
 pub(crate) mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct TestSubscription {
         canceled: Arc<AtomicBool>,
