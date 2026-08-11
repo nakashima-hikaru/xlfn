@@ -1,4 +1,4 @@
-use crate::win32::{CLSCTX_INPROC_SERVER, CoCreateInstance, GUID, S_OK};
+use crate::win32::{CLSCTX_INPROC_SERVER, CoCreateInstance, E_POINTER, GUID, S_OK};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
@@ -99,22 +99,31 @@ impl GlobalInterfaceTable {
     }
 
     /// # Safety
-    /// `interface_id` and `output` must satisfy the GIT method's COM contract.
+    /// `interface_id` must point to a readable GUID for the duration of the
+    /// call. The returned pointer owns the one interface reference produced by
+    /// GetInterfaceFromGlobal.
     pub(super) unsafe fn get_interface(
         &self,
         cookie: u32,
         interface_id: *const GUID,
-        output: *mut *mut c_void,
-    ) -> i32 {
-        // SAFETY: validated by this method's caller contract.
-        unsafe {
+    ) -> Result<NonNull<c_void>, i32> {
+        let mut output = ptr::null_mut();
+        // SAFETY: `interface_id` is validated by this method's caller contract
+        // and `output` is a writable local result slot.
+        let status = unsafe {
             ((*(*self.pointer.as_ptr()).vtable).get_interface_from_global)(
                 self.pointer.as_ptr(),
                 cookie,
                 interface_id,
-                output,
+                &mut output,
             )
+        };
+
+        if status != S_OK {
+            return Err(status);
         }
+
+        NonNull::new(output).ok_or(E_POINTER)
     }
 }
 

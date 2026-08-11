@@ -1361,26 +1361,20 @@ impl RetainedUpdateCallback {
         })?;
 
         // SAFETY: this thread has entered a COM apartment. `get_git` returns
-        // one live IGlobalInterfaceTable wrapper on success.
-        // GetInterfaceFromGlobal writes one IRTDUpdateEvent reference into
-        // `proxy`; both returned COM references are released exactly once.
+        // one live IGlobalInterfaceTable wrapper on success, and the wrapper
+        // validates the GIT output before returning its owned reference.
         unsafe {
             let git = get_git().map_err(|_| XllError::Internal {
                 diagnostic_id: 0x4749_545f_4e55_4c4c,
             })?;
-            let mut proxy: *mut c_void = ptr::null_mut();
-            let status = git.get_interface(cookie, &IID_IRTD_UPDATE_EVENT, &mut proxy);
-
-            if status != S_OK || proxy.is_null() {
-                return Err(XllError::ExcelApi {
+            let proxy = git
+                .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
+                .map_err(|code| XllError::ExcelApi {
                     function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
-                    code: status,
-                });
-            }
-
-            let event = proxy.cast::<RtdUpdateEvent>();
-            let notify_status = callback_update_notify(event);
-            let _ = callback_release(event);
+                    code,
+                })?;
+            let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
+            let notify_status = event.notify();
 
             if notify_status != S_OK {
                 return Err(XllError::ExcelApi {
@@ -1544,6 +1538,40 @@ struct RtdUpdateEventVtable {
     get_heartbeat_interval: unsafe extern "system" fn(*mut RtdUpdateEvent, *mut i32) -> i32,
     set_heartbeat_interval: unsafe extern "system" fn(*mut RtdUpdateEvent, i32) -> i32,
     disconnect: unsafe extern "system" fn(*mut RtdUpdateEvent) -> i32,
+}
+
+/// Owns one `IRTDUpdateEvent` reference returned by either COM
+/// `QueryInterface` or the Global Interface Table.
+struct OwnedRtdUpdateEvent {
+    pointer: NonNull<RtdUpdateEvent>,
+}
+
+impl OwnedRtdUpdateEvent {
+    /// # Safety
+    /// `pointer` must identify a live `IRTDUpdateEvent` interface and own one
+    /// COM reference that this value can release exactly once.
+    unsafe fn from_raw(pointer: NonNull<RtdUpdateEvent>) -> Self {
+        Self { pointer }
+    }
+
+    fn as_ptr(&self) -> *mut RtdUpdateEvent {
+        self.pointer.as_ptr()
+    }
+
+    fn notify(&self) -> i32 {
+        // SAFETY: the wrapper owns a live interface reference for this call.
+        unsafe { ((*(*self.pointer.as_ptr()).vtable).update_notify)(self.pointer.as_ptr()) }
+    }
+}
+
+impl Drop for OwnedRtdUpdateEvent {
+    fn drop(&mut self) {
+        // SAFETY: `pointer` is a live interface with exactly one owned
+        // reference, and Drop runs exactly once.
+        unsafe {
+            ((*(*self.pointer.as_ptr()).vtable).release)(self.pointer.as_ptr());
+        }
+    }
 }
 
 static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactoryVtable {
@@ -2298,14 +2326,22 @@ unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
 
 unsafe extern "system" fn factory_release(this: *mut ClassFactory) -> u32 {
     let _module_call = COM_MODULE_LIFETIME.enter_call();
-    // SAFETY: COM calls Release only on a live object with at least one
-    // outstanding reference.
-    let remaining = unsafe { (*this).references.fetch_sub(1, Ordering::AcqRel) - 1 };
+    let Some(this) = NonNull::new(this) else {
+        return 0;
+    };
+
+    // SAFETY: COM calls Release only on a live object. A zero previous count
+    // is an invariant violation and must never wrap to `u32::MAX`.
+    let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
+    if previous == 0 {
+        std::process::abort();
+    }
+    let remaining = previous - 1;
 
     if remaining == 0 {
         // SAFETY: observing the transition to zero proves this is the final
         // reference and uniquely owns the original Box allocation.
-        let factory = unsafe { Box::from_raw(this) };
+        let factory = unsafe { Box::from_raw(this.as_ptr()) };
 
         // SAFETY: each factory owns one server reference acquired when the
         // factory was constructed.
@@ -2450,13 +2486,23 @@ unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32 {
 
 unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32 {
     let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let Some(this) = NonNull::new(this) else {
+        return 0;
+    };
+
     // SAFETY: callers release only an outstanding reference to a live server.
-    let remaining = unsafe { (*this).references.fetch_sub(1, Ordering::AcqRel) - 1 };
+    // A zero previous count is an invariant violation and must never wrap to
+    // `u32::MAX`.
+    let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
+    if previous == 0 {
+        std::process::abort();
+    }
+    let remaining = previous - 1;
 
     if remaining == 0 {
         // SAFETY: the transition to zero proves exclusive ownership of the Box
         // allocation originally produced by Box::into_raw.
-        drop(unsafe { Box::from_raw(this) });
+        drop(unsafe { Box::from_raw(this.as_ptr()) });
     }
 
     remaining
@@ -2662,11 +2708,7 @@ unsafe fn server_invoke_inner(
             let mut value = 0;
             // SAFETY: `callback` owns one queried IRTDUpdateEvent reference for
             // this call and `value` is writable.
-            let status =
-                unsafe { server_start(this, callback.cast::<c_void>().as_ptr(), &mut value) };
-
-            // SAFETY: query_rtd_update_event acquired exactly one reference.
-            unsafe { callback_release(callback.as_ptr()) };
+            let status = unsafe { server_start(this, callback.as_ptr().cast(), &mut value) };
 
             if status == S_OK {
                 // SAFETY: the optional result was initialized above.
@@ -2922,7 +2964,7 @@ unsafe fn dispatch_array_argument(argument: *mut VARIANT) -> Option<DispatchArra
     }
 }
 
-unsafe fn query_rtd_update_event(argument: *mut VARIANT) -> Option<NonNull<RtdUpdateEvent>> {
+unsafe fn query_rtd_update_event(argument: *mut VARIANT) -> Option<OwnedRtdUpdateEvent> {
     // SAFETY: the caller supplies a readable argument VARIANT.
     let argument = unsafe { unwrap_dispatch_variant(argument)? };
     // SAFETY: the discriminant is checked before reading its matching interface
@@ -2960,7 +3002,11 @@ unsafe fn query_rtd_update_event(argument: *mut VARIANT) -> Option<NonNull<RtdUp
     };
 
     if status == S_OK {
-        NonNull::new(output.cast::<RtdUpdateEvent>())
+        NonNull::new(output.cast::<RtdUpdateEvent>()).map(|pointer| {
+            // SAFETY: QueryInterface returned S_OK and one owned
+            // IRTDUpdateEvent reference in `output`.
+            unsafe { OwnedRtdUpdateEvent::from_raw(pointer) }
+        })
     } else {
         None
     }
@@ -3188,18 +3234,6 @@ fn notification_for(
         let _notification_operation = operations.enter_notification().ok_or(XllError::Closing)?;
         callback.notify()
     })
-}
-
-unsafe fn callback_release(callback: *mut RtdUpdateEvent) -> u32 {
-    // SAFETY: `callback` is a live COM interface pointer returned with one
-    // owned reference by GetInterfaceFromGlobal.
-    unsafe { ((*(*callback).vtable).release)(callback) }
-}
-
-unsafe fn callback_update_notify(callback: *mut RtdUpdateEvent) -> i32 {
-    // SAFETY: `callback` is a live IRTDUpdateEvent interface pointer retained
-    // for the duration of this invocation.
-    unsafe { ((*(*callback).vtable).update_notify)(callback) }
 }
 
 unsafe extern "system" fn connect_data(
@@ -5009,16 +5043,48 @@ mod tests {
         }
     }
 
-    struct TestUnknownReference(*mut c_void);
+    struct TestClassFactory(NonNull<ClassFactory>);
+
+    impl TestClassFactory {
+        fn as_ptr(&self) -> *mut ClassFactory {
+            self.0.as_ptr()
+        }
+
+        fn vtable(&self) -> &ClassFactoryVtable {
+            // SAFETY: `get_test_class_factory` constructs this wrapper only
+            // from a successful COM class-factory result with the static
+            // implementation vtable.
+            unsafe { &*self.0.as_ref().vtable }
+        }
+    }
+
+    impl Drop for TestClassFactory {
+        fn drop(&mut self) {
+            // SAFETY: the wrapper owns exactly the factory reference returned
+            // by DllGetClassObject.
+            unsafe { factory_release(self.as_ptr()) };
+        }
+    }
+
+    struct TestUnknownReference(NonNull<c_void>);
 
     impl TestUnknownReference {
         fn new(pointer: *mut c_void) -> Self {
-            assert!(!pointer.is_null());
-            Self(pointer)
+            Self(NonNull::new(pointer).expect("COM returned a null interface"))
         }
 
         fn as_ptr(&self) -> *mut c_void {
-            self.0
+            self.0.as_ptr()
+        }
+
+        fn cast<T>(&self) -> NonNull<T> {
+            self.0.cast()
+        }
+
+        fn iunknown_vtable(&self) -> &IUnknown_Vtbl {
+            // SAFETY: every wrapped value is a live COM interface and the
+            // IUnknown-compatible vtable is its first ABI field.
+            unsafe { &*(*self.as_ptr().cast::<*const IUnknown_Vtbl>()) }
         }
     }
 
@@ -5767,16 +5833,16 @@ mod tests {
         }
     }
 
-    unsafe fn release_unknown(interface: *mut c_void) -> u32 {
+    unsafe fn release_unknown(interface: NonNull<c_void>) -> u32 {
         // SAFETY: callers pass one owned reference to a live COM interface. All
         // COM interfaces begin with an IUnknown-compatible vtable.
-        let vtable = unsafe { *interface.cast::<*const IUnknown_Vtbl>() };
+        let vtable = unsafe { *interface.as_ptr().cast::<*const IUnknown_Vtbl>() };
         // SAFETY: `vtable` came from the same live interface and `interface`
         // owns exactly one reference for this release.
-        unsafe { ((*vtable).Release)(interface) }
+        unsafe { ((*vtable).Release)(interface.as_ptr()) }
     }
 
-    unsafe fn get_test_class_factory(active: &ActiveServer) -> *mut ClassFactory {
+    fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
         let iid = iid_iclass_factory_from_fields();
         let mut output = ptr::null_mut();
 
@@ -5791,8 +5857,9 @@ mod tests {
             )
         };
         assert_eq!(status, S_OK);
-        assert!(!output.is_null());
-        output.cast()
+        TestClassFactory(
+            NonNull::new(output.cast()).expect("DllGetClassObject returned null factory"),
+        )
     }
 
     struct DispatchTestSubscription {
@@ -6231,7 +6298,7 @@ mod tests {
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the RTD server while the
         // factory and queried interfaces are exercised and released.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory = get_test_class_factory(&ensured.active);
         let unknown_iid = iid_iunknown_from_fields();
         let mut server_unknown = ptr::null_mut();
 
@@ -6240,8 +6307,8 @@ mod tests {
         assert_eq!(
             // SAFETY: see the pointer and lifetime justification above.
             unsafe {
-                ((*(*factory).vtable).create_instance)(
-                    factory,
+                (factory.vtable().create_instance)(
+                    factory.as_ptr(),
                     ptr::null_mut(),
                     &unknown_iid,
                     &mut server_unknown,
@@ -6249,12 +6316,12 @@ mod tests {
             },
             S_OK
         );
-        assert!(!server_unknown.is_null());
+        let server_unknown = TestUnknownReference::new(server_unknown);
 
         // Query through the returned IUnknown vtable, as a COM client does,
         // using independently field-constructed standard/Excel IIDs.
         // SAFETY: CreateInstance returned a live IUnknown-compatible pointer.
-        let unknown_vtable = unsafe { *server_unknown.cast::<*const IUnknown_Vtbl>() };
+        let unknown_vtable = server_unknown.iunknown_vtable();
         for iid in [
             iid_iunknown_from_fields(),
             iid_idispatch_from_fields(),
@@ -6265,21 +6332,16 @@ mod tests {
             // `queried` is a writable output slot.
             assert_eq!(
                 // SAFETY: see the pointer and lifetime justification above.
-                unsafe { ((*unknown_vtable).QueryInterface)(server_unknown, &iid, &mut queried,) },
+                unsafe {
+                    ((*unknown_vtable).QueryInterface)(server_unknown.as_ptr(), &iid, &mut queried)
+                },
                 S_OK
             );
-            assert!(!queried.is_null());
-
-            // SAFETY: QueryInterface returned one owned reference.
-            unsafe { release_unknown(queried) };
+            let _queried = TestUnknownReference::new(queried);
         }
 
-        // SAFETY: CreateInstance and DllGetClassObject each returned one owned
-        // reference, both released exactly once.
-        unsafe {
-            release_unknown(server_unknown);
-            factory_release(factory);
-        }
+        drop(server_unknown);
+        drop(factory);
 
         shutdown(handles).unwrap();
     }
@@ -6291,9 +6353,9 @@ mod tests {
         let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory = get_test_class_factory(&ensured.active);
         // SAFETY: `factory` is a live IClassFactory pointer.
-        let create_instance = unsafe { (*(*factory).vtable).create_instance };
+        let create_instance = factory.vtable().create_instance;
         let unknown_iid = iid_iunknown_from_fields();
         let unsupported_iid = GUID {
             data1: 0xdead_beef,
@@ -6308,7 +6370,7 @@ mod tests {
         // aggregation; the other pointers are valid.
         assert_eq!(
             // SAFETY: see the intentional failure-case justification above.
-            unsafe { create_instance(factory, stale, &unknown_iid, &mut output) },
+            unsafe { create_instance(factory.as_ptr(), stale, &unknown_iid, &mut output) },
             CLASS_E_NOAGGREGATION
         );
         assert!(output.is_null());
@@ -6326,7 +6388,7 @@ mod tests {
         // SAFETY: null IID intentionally exercises pointer validation.
         assert_eq!(
             // SAFETY: the method validates the IID before dereferencing it.
-            unsafe { create_instance(factory, ptr::null_mut(), ptr::null(), &mut output,) },
+            unsafe { create_instance(factory.as_ptr(), ptr::null_mut(), ptr::null(), &mut output) },
             E_POINTER
         );
         assert!(output.is_null());
@@ -6335,7 +6397,14 @@ mod tests {
         // SAFETY: the unsupported IID is readable and output is writable.
         assert_eq!(
             // SAFETY: all pointers are live for the call.
-            unsafe { create_instance(factory, ptr::null_mut(), &unsupported_iid, &mut output,) },
+            unsafe {
+                create_instance(
+                    factory.as_ptr(),
+                    ptr::null_mut(),
+                    &unsupported_iid,
+                    &mut output,
+                )
+            },
             E_NOINTERFACE
         );
         assert!(output.is_null());
@@ -6343,12 +6412,18 @@ mod tests {
         // SAFETY: null output intentionally exercises pointer validation.
         assert_eq!(
             // SAFETY: the method validates output before dereferencing it.
-            unsafe { create_instance(factory, ptr::null_mut(), &unknown_iid, ptr::null_mut(),) },
+            unsafe {
+                create_instance(
+                    factory.as_ptr(),
+                    ptr::null_mut(),
+                    &unknown_iid,
+                    ptr::null_mut(),
+                )
+            },
             E_POINTER
         );
 
-        // SAFETY: DllGetClassObject returned this one factory reference.
-        unsafe { factory_release(factory) };
+        drop(factory);
         shutdown(handles).unwrap();
     }
 
@@ -6413,9 +6488,9 @@ mod tests {
         assert!(output.is_null());
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory = get_test_class_factory(&ensured.active);
         // SAFETY: `factory` is a live IClassFactory pointer.
-        let factory_query = unsafe { (*(*factory).vtable).query_interface };
+        let factory_query = factory.vtable().query_interface;
 
         output = stale;
         assert_eq!(
@@ -6430,7 +6505,7 @@ mod tests {
         assert_eq!(
             // SAFETY: `factory` and output are live; null IID intentionally
             // exercises validation.
-            unsafe { factory_query(factory, ptr::null(), &mut output) },
+            unsafe { factory_query(factory.as_ptr(), ptr::null(), &mut output) },
             E_POINTER
         );
         assert!(output.is_null());
@@ -6439,7 +6514,7 @@ mod tests {
         assert_eq!(
             // SAFETY: all pointers are live and the IID is intentionally
             // unsupported.
-            unsafe { factory_query(factory, &unsupported_iid, &mut output) },
+            unsafe { factory_query(factory.as_ptr(), &unsupported_iid, &mut output) },
             E_NOINTERFACE
         );
         assert!(output.is_null());
@@ -6448,8 +6523,8 @@ mod tests {
         assert_eq!(
             // SAFETY: `factory`, the IID, and output slot remain live.
             unsafe {
-                ((*(*factory).vtable).create_instance)(
-                    factory,
+                (factory.vtable().create_instance)(
+                    factory.as_ptr(),
                     ptr::null_mut(),
                     &unknown_iid,
                     &mut server_unknown,
@@ -6457,9 +6532,10 @@ mod tests {
             },
             S_OK
         );
+        let server_unknown = TestUnknownReference::new(server_unknown);
         let server = server_unknown.cast::<RtdServer>();
         // SAFETY: CreateInstance returned the RtdServer identity pointer.
-        let server_query = unsafe { (*(*server).vtable).query_interface };
+        let server_query = unsafe { (*server.as_ref().vtable).query_interface };
 
         output = stale;
         assert_eq!(
@@ -6474,7 +6550,7 @@ mod tests {
         assert_eq!(
             // SAFETY: `server` and output remain live; null IID intentionally
             // exercises validation.
-            unsafe { server_query(server, ptr::null(), &mut output) },
+            unsafe { server_query(server.as_ptr(), ptr::null(), &mut output) },
             E_POINTER
         );
         assert!(output.is_null());
@@ -6483,17 +6559,13 @@ mod tests {
         assert_eq!(
             // SAFETY: all pointers remain live and the IID is intentionally
             // unsupported.
-            unsafe { server_query(server, &unsupported_iid, &mut output) },
+            unsafe { server_query(server.as_ptr(), &unsupported_iid, &mut output) },
             E_NOINTERFACE
         );
         assert!(output.is_null());
 
-        // SAFETY: CreateInstance and DllGetClassObject returned these owned
-        // references.
-        unsafe {
-            release_unknown(server_unknown);
-            factory_release(factory);
-        }
+        drop(server_unknown);
+        drop(factory);
         shutdown(handles).unwrap();
     }
 
@@ -6505,14 +6577,14 @@ mod tests {
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
         // interfaces are used below.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory = get_test_class_factory(&ensured.active);
         let dispatch_iid = iid_idispatch_from_fields();
         let mut dispatch = ptr::null_mut();
         assert_eq!(
             // SAFETY: `factory`, the IID, and output are live for the call.
             unsafe {
-                ((*(*factory).vtable).create_instance)(
-                    factory,
+                (factory.vtable().create_instance)(
+                    factory.as_ptr(),
                     ptr::null_mut(),
                     &dispatch_iid,
                     &mut dispatch,
@@ -6520,15 +6592,15 @@ mod tests {
             },
             S_OK
         );
-        assert!(!dispatch.is_null());
+        let dispatch = TestUnknownReference::new(dispatch);
         let server = dispatch.cast::<RtdServer>();
         // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
-        let vtable = unsafe { (*server).vtable };
+        let vtable = unsafe { server.as_ref().vtable };
 
         let mut type_info_count = u32::MAX;
         assert_eq!(
             // SAFETY: `server` is live and the count output is writable.
-            unsafe { ((*vtable).get_type_info_count)(server, &mut type_info_count) },
+            unsafe { ((*vtable).get_type_info_count)(server.as_ptr(), &mut type_info_count) },
             S_OK
         );
         assert_eq!(type_info_count, 0);
@@ -6537,14 +6609,14 @@ mod tests {
         let mut type_info = stale;
         assert_eq!(
             // SAFETY: `server` is live and the output is writable.
-            unsafe { ((*vtable).get_type_info)(server, 0, 0, &mut type_info) },
+            unsafe { ((*vtable).get_type_info)(server.as_ptr(), 0, 0, &mut type_info) },
             E_NOTIMPL
         );
         assert!(type_info.is_null());
         type_info = stale;
         assert_eq!(
             // SAFETY: `server` is live and the output is writable.
-            unsafe { ((*vtable).get_type_info)(server, 1, 0, &mut type_info) },
+            unsafe { ((*vtable).get_type_info)(server.as_ptr(), 1, 0, &mut type_info) },
             DISP_E_BADINDEX
         );
         assert!(type_info.is_null());
@@ -6564,7 +6636,14 @@ mod tests {
             assert_eq!(
                 // SAFETY: all COM input and output arrays remain live.
                 unsafe {
-                    ((*vtable).get_ids_of_names)(server, &null_iid, names.as_ptr(), 1, 0, &mut id)
+                    ((*vtable).get_ids_of_names)(
+                        server.as_ptr(),
+                        &null_iid,
+                        names.as_ptr(),
+                        1,
+                        0,
+                        &mut id,
+                    )
                 },
                 S_OK
             );
@@ -6586,7 +6665,7 @@ mod tests {
             // SAFETY: all COM input and output arrays remain live.
             unsafe {
                 ((*vtable).get_ids_of_names)(
-                    server,
+                    server.as_ptr(),
                     &null_iid,
                     names.as_ptr(),
                     names.len() as u32,
@@ -6604,7 +6683,14 @@ mod tests {
         assert_eq!(
             // SAFETY: all COM input and output arrays remain live.
             unsafe {
-                ((*vtable).get_ids_of_names)(server, &null_iid, names.as_ptr(), 1, 0, &mut id)
+                ((*vtable).get_ids_of_names)(
+                    server.as_ptr(),
+                    &null_iid,
+                    names.as_ptr(),
+                    1,
+                    0,
+                    &mut id,
+                )
             },
             DISP_E_UNKNOWNNAME
         );
@@ -6618,7 +6704,7 @@ mod tests {
             // SAFETY: the server, IID, DISPPARAMS, and outputs remain live.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_HEARTBEAT,
                     &null_iid,
                     0,
@@ -6645,7 +6731,7 @@ mod tests {
             // passing a null pVarResult.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_HEARTBEAT,
                     &null_iid,
                     0,
@@ -6659,12 +6745,8 @@ mod tests {
             S_OK
         );
 
-        // SAFETY: CreateInstance and DllGetClassObject returned these owned
-        // references.
-        unsafe {
-            release_unknown(dispatch);
-            factory_release(factory);
-        }
+        drop(dispatch);
+        drop(factory);
         shutdown(handles).unwrap();
     }
 
@@ -6675,14 +6757,14 @@ mod tests {
         let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-        let factory = unsafe { get_test_class_factory(&ensured.active) };
+        let factory = get_test_class_factory(&ensured.active);
         let dispatch_iid = iid_idispatch_from_fields();
         let mut dispatch = ptr::null_mut();
         assert_eq!(
             // SAFETY: `factory`, the IID, and output are live for the call.
             unsafe {
-                ((*(*factory).vtable).create_instance)(
-                    factory,
+                (factory.vtable().create_instance)(
+                    factory.as_ptr(),
                     ptr::null_mut(),
                     &dispatch_iid,
                     &mut dispatch,
@@ -6690,9 +6772,10 @@ mod tests {
             },
             S_OK
         );
+        let dispatch = TestUnknownReference::new(dispatch);
         let server = dispatch.cast::<RtdServer>();
         // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
-        let vtable = unsafe { (*server).vtable };
+        let vtable = unsafe { server.as_ref().vtable };
         let null_iid = iid_null_from_fields();
 
         let mut parameters = DISPPARAMS::default();
@@ -6709,7 +6792,7 @@ mod tests {
             // exercise argument-count validation.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_DISCONNECT_DATA,
                     &null_iid,
                     0,
@@ -6734,7 +6817,7 @@ mod tests {
             // SAFETY: the one-element argument array and all outputs are live.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_DISCONNECT_DATA,
                     &null_iid,
                     0,
@@ -6754,7 +6837,7 @@ mod tests {
             // the call; flags intentionally omit DISPATCH_METHOD.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_HEARTBEAT,
                     &null_iid,
                     0,
@@ -6808,7 +6891,7 @@ mod tests {
             // remain valid for this direct typed-vtable failure case.
             unsafe {
                 connect_data(
-                    server,
+                    server.as_ptr(),
                     41,
                     &mut typed_array,
                     &mut typed_new_values,
@@ -6843,7 +6926,7 @@ mod tests {
             // remain live for Invoke.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_CONNECT_DATA,
                     &null_iid,
                     0,
@@ -6881,7 +6964,7 @@ mod tests {
             // SAFETY: the named argument, its DISPID, and outputs remain live.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_DISCONNECT_DATA,
                     &null_iid,
                     0,
@@ -6899,10 +6982,8 @@ mod tests {
 
         // SAFETY: CreateInstance and DllGetClassObject returned these owned
         // references.
-        unsafe {
-            release_unknown(dispatch);
-            factory_release(factory);
-        }
+        drop(dispatch);
+        drop(factory);
         shutdown(handles).unwrap();
     }
 
@@ -6936,16 +7017,14 @@ mod tests {
 
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
         // factory and dispatch interface are used.
-        let factory =
-            TestUnknownReference::new(unsafe { get_test_class_factory(&ensured.active) }.cast());
+        let factory = get_test_class_factory(&ensured.active);
         let dispatch_iid = iid_idispatch_from_fields();
         let mut dispatch = ptr::null_mut();
         assert_eq!(
             // SAFETY: `factory`, the IID, and output slot remain live.
             unsafe {
-                let factory_pointer = factory.as_ptr().cast::<ClassFactory>();
-                ((*(*factory_pointer).vtable).create_instance)(
-                    factory_pointer,
+                (factory.vtable().create_instance)(
+                    factory.as_ptr(),
                     ptr::null_mut(),
                     &dispatch_iid,
                     &mut dispatch,
@@ -6954,9 +7033,9 @@ mod tests {
             S_OK
         );
         let dispatch = TestUnknownReference::new(dispatch);
-        let server = dispatch.as_ptr().cast::<RtdServer>();
+        let server = dispatch.cast::<RtdServer>();
         // SAFETY: CreateInstance returned the RtdServer identity pointer.
-        let vtable = unsafe { (*server).vtable };
+        let vtable = unsafe { server.as_ref().vtable };
         let null_iid = iid_null_from_fields();
 
         let mut topic_count = -1;
@@ -6981,7 +7060,7 @@ mod tests {
             // remain live for Invoke.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_REFRESH_DATA,
                     &null_iid,
                     0,
@@ -7049,7 +7128,7 @@ mod tests {
             // discard the returned SAFEARRAY after committing the update.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_REFRESH_DATA,
                     &null_iid,
                     0,
@@ -7074,7 +7153,7 @@ mod tests {
             // before quiescing the generation.
             unsafe {
                 ((*vtable).invoke)(
-                    server,
+                    server.as_ptr(),
                     DISPID_SERVER_TERMINATE,
                     &null_iid,
                     0,
@@ -7091,6 +7170,8 @@ mod tests {
         unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
         assert!(disconnected.load(Ordering::Acquire));
 
+        drop(dispatch);
+        drop(factory);
         subscriptions.close().unwrap();
     }
 
