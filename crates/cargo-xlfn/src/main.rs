@@ -407,6 +407,21 @@ struct ProjectMetadata {
     bundle: Option<BundleMetadata>,
 }
 
+fn parse_bundle_metadata(value: serde_json::Value) -> Result<BundleMetadata> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+
+        if path.is_empty() {
+            anyhow!("invalid [package.metadata.xlfn.bundle]: {}", error.inner())
+        } else {
+            anyhow!(
+                "invalid [package.metadata.xlfn.bundle] at {path}: {}",
+                error.inner()
+            )
+        }
+    })
+}
+
 fn project_metadata(args: &ProjectArgs, build: &BuildSelectionArgs) -> Result<ProjectMetadata> {
     // Discover the selected package without resolving dependencies or applying
     // package-relative feature names. `cargo metadata` has no `--package` option,
@@ -469,9 +484,8 @@ fn project_metadata(args: &ProjectArgs, build: &BuildSelectionArgs) -> Result<Pr
     let bundle = metadata
         .and_then(|value| value.get("bundle"))
         .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .context("invalid [package.metadata.xlfn.bundle]")?;
+        .map(parse_bundle_metadata)
+        .transpose()?;
     let mut resolved_features = cargo
         .resolve
         .as_ref()
@@ -3264,6 +3278,52 @@ mod tests {
     }
 
     #[test]
+    fn bundle_metadata_type_error_reports_nested_path() {
+        let error = parse_bundle_metadata(serde_json::json!({
+            "x86": ["foo.dll", 42]
+        }))
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("[package.metadata.xlfn.bundle]"),
+            "{message}"
+        );
+        assert!(message.contains("x86[1]"), "{message}");
+    }
+
+    #[test]
+    fn bundle_metadata_scalar_error_reports_field_path() {
+        let error = parse_bundle_metadata(serde_json::json!({
+            "strict-paths": "yes"
+        }))
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("[package.metadata.xlfn.bundle]"),
+            "{message}"
+        );
+        assert!(message.contains("strict-paths"), "{message}");
+    }
+
+    #[test]
+    fn bundle_metadata_path_tracking_preserves_valid_deserialization() {
+        let metadata = parse_bundle_metadata(serde_json::json!({
+            "x86": ["foo.dll"],
+            "x64": ["bar.dll"],
+            "external-imports": ["engine.dll"],
+            "strict-paths": true
+        }))
+        .unwrap();
+
+        assert_eq!(metadata.x86, vec!["foo.dll"]);
+        assert_eq!(metadata.x64, vec!["bar.dll"]);
+        assert_eq!(metadata.external_imports, vec!["engine.dll"]);
+        assert!(metadata.strict_paths);
+    }
+
+    #[test]
     fn check_args_supports_build_selection_flags() {
         let parsed = Cli::try_parse_from([
             "cargo-xlfn",
@@ -3376,6 +3436,43 @@ mod tests {
         let build = BuildSelectionArgs::default();
         let metadata = project_metadata(&args, &build).unwrap();
         assert_eq!(metadata.package_name, "basic-xlfn");
+    }
+
+    #[test]
+    fn project_metadata_reports_bundle_metadata_path() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::write(
+            directory.path().join("Cargo.toml"),
+            r#"[package]
+name = "bundle-diagnostic-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.xlfn.bundle]
+x86 = ["foo.dll", 123]
+"#,
+        )
+        .unwrap();
+        fs::write(directory.path().join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+
+        let args = ProjectArgs {
+            package: None,
+            manifest_path: Some(directory.path().join("Cargo.toml")),
+        };
+        let error = project_metadata(&args, &BuildSelectionArgs::default())
+            .err()
+            .expect("invalid bundle metadata should fail project metadata resolution");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[package.metadata.xlfn.bundle]"),
+            "{message}"
+        );
+        assert!(message.contains("x86[1]"), "{message}");
     }
 
     #[test]
