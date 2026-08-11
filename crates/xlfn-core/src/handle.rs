@@ -1520,25 +1520,44 @@ impl Drop for RtdOperationGuard {
     }
 }
 
-fn format_formula_topic_key(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FormulaCaller {
     sheet_id: xlfn_sys::IDSHEET,
     row: i32,
     column: i32,
+}
+
+pub(crate) fn format_formula_topic_key(
+    caller: FormulaCaller,
     udf_id: &'static str,
     argument_digest: &[u8; 32],
 ) -> String {
-    let mut digest = String::with_capacity(argument_digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    // 20 digits for a 64-bit IDSHEET, 11 for each i32 coordinate, four
+    // separators, and the 64-character digest. This upper bound keeps the
+    // complete key in one allocation on both supported pointer widths.
+    const NUMERIC_KEY_CAPACITY: usize = 20 + 11 + 11 + 4;
+    let mut result =
+        String::with_capacity(NUMERIC_KEY_CAPACITY + udf_id.len() + argument_digest.len() * 2);
+
+    write!(
+        &mut result,
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
+        caller.sheet_id, caller.row, caller.column, udf_id,
+    )
+    .expect("writing to String cannot fail");
+
     for byte in argument_digest {
-        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    format!("{sheet_id}\u{1f}{row}\u{1f}{column}\u{1f}{udf_id}\u{1f}{digest}")
+
+    result
 }
 
-pub(crate) fn formula_topic_key(
+pub(crate) fn resolve_formula_caller(
     callbacks: &crate::host_callback::HostCallbackSession,
-    udf_id: &'static str,
-    argument_digest: &[u8; 32],
-) -> XllResult<String> {
+) -> XllResult<FormulaCaller> {
     use xlfn_sys::{XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLTYPE_REF, XLTYPE_SREF};
 
     // SAFETY: this runs synchronously on the generated main-thread UDF boundary.
@@ -1556,7 +1575,7 @@ pub(crate) fn formula_topic_key(
             code: status.raw_code(),
         }));
     }
-    let (row, column) = {
+    let (row, column, sheet_id) = {
         let value = caller.borrow()?;
         match value.base_type() {
             XLTYPE_SREF => {
@@ -1573,7 +1592,11 @@ pub(crate) fn formula_topic_key(
                         ),
                     ));
                 }
-                (reference.reference.rw_first, reference.reference.col_first)
+                (
+                    reference.reference.rw_first,
+                    reference.reference.col_first,
+                    None,
+                )
             }
             XLTYPE_REF => {
                 // SAFETY: the type selects the MRef member.
@@ -1598,7 +1621,7 @@ pub(crate) fn formula_topic_key(
                         ),
                     ));
                 }
-                (area.rw_first, area.col_first)
+                (area.rw_first, area.col_first, Some(reference.sheet_id))
             }
             _ => {
                 return Err(XllError::input(
@@ -1610,6 +1633,15 @@ pub(crate) fn formula_topic_key(
             }
         }
     };
+
+    if let Some(sheet_id) = sheet_id {
+        caller.try_release()?;
+        return Ok(FormulaCaller {
+            sheet_id,
+            row,
+            column,
+        });
+    }
 
     let caller_arguments = [caller.raw_pointer()?];
     // SAFETY: caller remains live for the nested xlSheetNm callback.
@@ -1666,13 +1698,20 @@ pub(crate) fn formula_topic_key(
     sheet.try_release()?;
     caller.try_release()?;
 
-    Ok(format_formula_topic_key(
+    Ok(FormulaCaller {
         sheet_id,
         row,
         column,
-        udf_id,
-        argument_digest,
-    ))
+    })
+}
+
+pub(crate) fn formula_topic_key(
+    callbacks: &crate::host_callback::HostCallbackSession,
+    udf_id: &'static str,
+    argument_digest: &[u8; 32],
+) -> XllResult<String> {
+    let caller = resolve_formula_caller(callbacks)?;
+    Ok(format_formula_topic_key(caller, udf_id, argument_digest))
 }
 
 struct ParsedToken {
@@ -1695,12 +1734,120 @@ mod tests {
     #[test]
     fn formula_topic_key_uses_the_stable_sheet_identifier() {
         let digest = [0xab_u8; 32];
-        let first = format_formula_topic_key(17, 4, 8, "TEST.CREATE", &digest);
-        let recalculated = format_formula_topic_key(17, 4, 8, "TEST.CREATE", &digest);
-        let other_sheet = format_formula_topic_key(18, 4, 8, "TEST.CREATE", &digest);
+        let caller = FormulaCaller {
+            sheet_id: 17,
+            row: 4,
+            column: 8,
+        };
+        let first = format_formula_topic_key(caller, "TEST.CREATE", &digest);
+        let recalculated = format_formula_topic_key(caller, "TEST.CREATE", &digest);
+        let other_sheet = format_formula_topic_key(
+            FormulaCaller {
+                sheet_id: 18,
+                ..caller
+            },
+            "TEST.CREATE",
+            &digest,
+        );
 
         assert_eq!(first, recalculated);
         assert_ne!(first, other_sheet);
+    }
+
+    #[test]
+    fn formula_topic_key_changes_with_every_identity_component() {
+        let digest = [0x12_u8; 32];
+        let caller = FormulaCaller {
+            sheet_id: 17,
+            row: 4,
+            column: 8,
+        };
+        let base = format_formula_topic_key(caller, "TEST.CREATE", &digest);
+
+        assert_ne!(
+            base,
+            format_formula_topic_key(
+                FormulaCaller {
+                    sheet_id: 18,
+                    ..caller
+                },
+                "TEST.CREATE",
+                &digest,
+            )
+        );
+        assert_ne!(
+            base,
+            format_formula_topic_key(FormulaCaller { row: 5, ..caller }, "TEST.CREATE", &digest,)
+        );
+        assert_ne!(
+            base,
+            format_formula_topic_key(
+                FormulaCaller {
+                    column: 9,
+                    ..caller
+                },
+                "TEST.CREATE",
+                &digest,
+            )
+        );
+        assert_ne!(
+            base,
+            format_formula_topic_key(caller, "TEST.OTHER", &digest)
+        );
+        assert_ne!(
+            base,
+            format_formula_topic_key(caller, "TEST.CREATE", &[0x13_u8; 32])
+        );
+
+        assert!(base.ends_with("1212121212121212121212121212121212121212121212121212121212121212"));
+    }
+
+    #[test]
+    fn ref_caller_uses_embedded_sheet_id_without_sheet_callbacks() {
+        let _callback_guard = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::Ref);
+
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        let caller = resolve_formula_caller(&callbacks).unwrap();
+
+        assert_eq!(
+            caller,
+            FormulaCaller {
+                sheet_id: 17,
+                row: 11,
+                column: 3,
+            }
+        );
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XLF_CALLER), 1);
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_NM), 0);
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_ID), 0);
+        assert_eq!(crate::test_callback::free_calls(), 1);
+    }
+
+    #[test]
+    fn sref_caller_keeps_sheet_lookup_fallback() {
+        let _callback_guard = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::SRef);
+
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        let caller = resolve_formula_caller(&callbacks).unwrap();
+
+        assert_eq!(
+            caller,
+            FormulaCaller {
+                sheet_id: 19,
+                row: 11,
+                column: 3,
+            }
+        );
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XLF_CALLER), 1);
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_NM), 1);
+        assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_ID), 1);
+        assert_eq!(crate::test_callback::free_calls(), 3);
     }
 
     #[test]

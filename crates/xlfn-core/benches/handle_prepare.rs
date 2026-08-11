@@ -1,26 +1,30 @@
-use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn_core::benchmark_support::{HandlePrepareBenchmark, HandlePrepareKind};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use xlfn_core::benchmark_support::{
+    HandleColdBatch, HandleContendedBenchmark, HandleWarmBenchmark,
+};
 
 fn handle_prepare_cold_miss(c: &mut Criterion) {
-    let bench = HandlePrepareBenchmark::new();
     c.bench_function("handle_prepare_cold_miss", |b| {
-        b.iter(|| bench.run(HandlePrepareKind::ColdMiss, 100));
+        b.iter_batched_ref(
+            || HandleColdBatch::new(100),
+            |batch| batch.run(),
+            BatchSize::SmallInput,
+        );
     });
-    drop(bench);
 }
 
 fn handle_prepare_warm_hit(c: &mut Criterion) {
-    let bench = HandlePrepareBenchmark::new();
+    let bench = HandleWarmBenchmark::new();
     c.bench_function("handle_prepare_warm_hit", |b| {
-        b.iter(|| bench.run(HandlePrepareKind::WarmHit, 100));
+        b.iter(|| bench.run(100));
     });
     drop(bench);
 }
 
 fn handle_prepare_same_key_contended(c: &mut Criterion) {
-    let bench = HandlePrepareBenchmark::new();
+    let bench = HandleContendedBenchmark::new();
     c.bench_function("handle_prepare_same_key_contended", |b| {
-        b.iter(|| bench.run(HandlePrepareKind::Contended, 100));
+        b.iter(|| bench.run());
     });
     drop(bench);
 }

@@ -13,7 +13,6 @@ use crate::cancellation::CancellationSource;
 #[cfg(feature = "async")]
 use crate::{CancellationGuarantee, XllError};
 use std::sync::Arc;
-#[cfg(feature = "async")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "async")]
@@ -222,106 +221,193 @@ struct BenchHandleObject {
 }
 impl ExcelHandleObject for BenchHandleObject {}
 
-#[derive(Clone, Copy, Debug)]
-pub enum HandlePrepareKind {
-    /// First call for a key — factory is invoked.
-    ColdMiss,
-    /// Repeated call for an already-published key — factory is skipped.
-    WarmHit,
-    /// Multiple threads contend on the same key.
-    Contended,
+const HANDLE_CONTENTION_WORKERS: usize = 4;
+// Contention uses one fresh topic per benchmark iteration. Keep the logical
+// limit at the registry's token-slot maximum so Criterion cannot exhaust it
+// during a longer default run; this does not preallocate the slot storage.
+const HANDLE_CONTENTION_CAPACITY: usize = u32::MAX as usize;
+
+fn cleanup_handle_runtime(runtime: &HandleRuntime) {
+    runtime.terminate_all_topics();
+    let _ = runtime.close();
 }
 
-pub struct HandlePrepareBenchmark {
+/// A batch whose runtime and formula keys are prepared before the timed call.
+pub struct HandleColdBatch {
     runtime: Arc<HandleRuntime>,
+    keys: Vec<String>,
 }
 
-impl Default for HandlePrepareBenchmark {
+impl HandleColdBatch {
+    pub fn new(iterations: usize) -> Self {
+        Self {
+            runtime: Arc::new(
+                HandleRuntime::try_new_with_ingress(iterations.max(1), None)
+                    .expect("benchmark host provides an OS CSPRNG"),
+            ),
+            keys: (0..iterations).map(|i| format!("cold:{i}")).collect(),
+        }
+    }
+
+    pub fn run(&mut self) {
+        let keys = std::mem::take(&mut self.keys);
+        for (i, key) in keys.into_iter().enumerate() {
+            let result = self
+                .runtime
+                .prepare_observed(
+                    key,
+                    || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
+                    |_, _| Ok(()),
+                )
+                .expect("cold handle publication failed");
+            std::hint::black_box(result);
+        }
+    }
+}
+
+impl Drop for HandleColdBatch {
+    fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+/// A warm-hit benchmark with its seed publication outside the timed section.
+pub struct HandleWarmBenchmark {
+    runtime: Arc<HandleRuntime>,
+    key: String,
+}
+
+impl HandleWarmBenchmark {
+    pub fn new() -> Self {
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(1, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let key = "warm:0".to_owned();
+        runtime
+            .prepare_observed(
+                key.clone(),
+                || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                |_, _| Ok(()),
+            )
+            .expect("warm handle seed publication failed");
+        Self { runtime, key }
+    }
+
+    pub fn run(&self, iterations: usize) {
+        for _ in 0..iterations {
+            let result = self
+                .runtime
+                .prepare_observed(
+                    self.key.clone(),
+                    || -> crate::XllResult<Arc<BenchHandleObject>> {
+                        unreachable!("warm factory must not run")
+                    },
+                    |_, _| Ok(()),
+                )
+                .expect("warm handle observation failed");
+            std::hint::black_box(result);
+        }
+    }
+}
+
+impl Default for HandleWarmBenchmark {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HandlePrepareBenchmark {
+impl Drop for HandleWarmBenchmark {
+    fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+struct ContendedHandleBatch {
+    key: Arc<str>,
+}
+
+/// A persistent worker pool for measuring same-key contention without thread
+/// creation in the timed section.
+pub struct HandleContendedBenchmark {
+    runtime: Arc<HandleRuntime>,
+    next_key: AtomicUsize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<ContendedHandleBatch>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleContendedBenchmark {
     pub fn new() -> Self {
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(HANDLE_CONTENTION_CAPACITY, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(HANDLE_CONTENTION_WORKERS);
+        let mut start_tx = Vec::with_capacity(HANDLE_CONTENTION_WORKERS);
+        let mut workers = Vec::with_capacity(HANDLE_CONTENTION_WORKERS);
+
+        for _ in 0..HANDLE_CONTENTION_WORKERS {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<ContendedHandleBatch>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while let Ok(batch) = worker_rx.recv() {
+                    let result = worker_runtime
+                        .prepare_observed(
+                            batch.key.to_string(),
+                            || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                            |_, _| Ok(()),
+                        )
+                        .expect("contended handle publication failed");
+                    std::hint::black_box(result);
+                    done_tx
+                        .send(())
+                        .expect("benchmark driver received completion signal");
+                }
+            }));
+        }
+
         Self {
-            runtime: Arc::new(
-                HandleRuntime::try_new_with_ingress(16_384, None)
-                    .expect("benchmark host provides an OS CSPRNG"),
-            ),
+            runtime,
+            next_key: AtomicUsize::new(0),
+            start_tx,
+            done_rx,
+            workers,
         }
     }
 
-    pub fn run(&self, kind: HandlePrepareKind, iterations: usize) {
-        match kind {
-            HandlePrepareKind::ColdMiss => {
-                for i in 0..iterations {
-                    let key = format!("cold:{i}");
-                    let _ = std::hint::black_box(
-                        self.runtime
-                            .prepare_observed(
-                                key,
-                                || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
-                                |_, _| Ok(()),
-                            )
-                            .unwrap(),
-                    );
-                }
-            }
-            HandlePrepareKind::WarmHit => {
-                // Seed one topic, then repeatedly hit it.
-                let key = "warm:0".to_owned();
-                self.runtime
-                    .prepare_observed(
-                        key.clone(),
-                        || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
-                        |_, _| Ok(()),
-                    )
-                    .unwrap();
-                for _ in 0..iterations {
-                    let _ = std::hint::black_box(
-                        self.runtime
-                            .prepare_observed(
-                                key.clone(),
-                                || Ok(Arc::new(BenchHandleObject { _payload: 1 })),
-                                |_, _| Ok(()),
-                            )
-                            .unwrap(),
-                    );
-                }
-            }
-            HandlePrepareKind::Contended => {
-                use std::sync::Barrier;
-
-                let barrier = Arc::new(Barrier::new(4));
-                let threads: Vec<_> = (0..4)
-                    .map(|_| {
-                        let b = Arc::clone(&barrier);
-                        let rt = Arc::clone(&self.runtime);
-                        std::thread::spawn(move || {
-                            b.wait();
-                            for i in 0..iterations {
-                                let key = format!("contended:{i}");
-                                let _ = std::hint::black_box(rt.prepare_observed(
-                                    key,
-                                    || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
-                                    |_, _| Ok(()),
-                                ));
-                            }
-                        })
-                    })
-                    .collect();
-                for t in threads {
-                    t.join().expect("benchmark thread panicked");
-                }
-            }
+    pub fn run(&self) {
+        let id = self.next_key.fetch_add(1, Ordering::Relaxed);
+        let key: Arc<str> = format!("contended:{id}").into();
+        for start in &self.start_tx {
+            start
+                .send(ContendedHandleBatch {
+                    key: Arc::clone(&key),
+                })
+                .expect("benchmark worker received start signal");
+        }
+        for _ in 0..self.start_tx.len() {
+            self.done_rx
+                .recv()
+                .expect("benchmark worker finished batch processing");
         }
     }
 }
 
-impl Drop for HandlePrepareBenchmark {
+impl Default for HandleContendedBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for HandleContendedBenchmark {
     fn drop(&mut self) {
-        self.runtime.terminate_all_topics();
-        let _ = self.runtime.close();
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
     }
 }

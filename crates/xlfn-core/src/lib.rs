@@ -144,7 +144,11 @@ pub(crate) mod test_callback {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard, TryLockError};
-    use xlfn_sys::{XL_ASYNC_RETURN, XL_FREE, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS};
+    use xlfn_sys::{
+        XL_ASYNC_RETURN, XL_FREE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLMREF12, XLOPER12,
+        XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT, XLRET_FAILED,
+        XLRET_SUCCESS, XLTYPE_REF, XLTYPE_SREF, XLTYPE_STR,
+    };
 
     static TOTAL_CALLS: AtomicUsize = AtomicUsize::new(0);
     static ASYNC_RETURN_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -154,8 +158,24 @@ pub(crate) mod test_callback {
     static TERMINAL_STATUS: AtomicI32 = AtomicI32::new(XLRET_ABORT);
     static TERMINAL_USED: AtomicBool = AtomicBool::new(false);
     static ASYNC_REJECTED: AtomicBool = AtomicBool::new(false);
+    static FORMULA_CALLER_KIND: AtomicI32 = AtomicI32::new(0);
     static CALLBACK_ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
     static CALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static FORMULA_CALLER_REFERENCES: XLMREF12 = XLMREF12 {
+        count: 1,
+        reftbl: [XLREF12 {
+            rw_first: 11,
+            rw_last: 11,
+            col_first: 3,
+            col_last: 3,
+        }],
+    };
+    static FORMULA_SHEET_NAME: [u16; 6] = [5, 83, 104, 101, 101, 116];
+
+    pub(crate) enum FormulaCallerKind {
+        Ref = 1,
+        SRef = 2,
+    }
     thread_local! {
         static CALLBACK_TEST_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
     }
@@ -229,6 +249,7 @@ pub(crate) mod test_callback {
         TERMINAL_STATUS.store(XLRET_ABORT, Ordering::Relaxed);
         TERMINAL_USED.store(false, Ordering::Relaxed);
         ASYNC_REJECTED.store(false, Ordering::Relaxed);
+        FORMULA_CALLER_KIND.store(0, Ordering::Relaxed);
         CALLBACK_ORDER
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -244,6 +265,10 @@ pub(crate) mod test_callback {
 
     pub(crate) fn set_async_rejected(rejected: bool) {
         ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_formula_caller(kind: FormulaCallerKind) {
+        FORMULA_CALLER_KIND.store(kind as i32, Ordering::Relaxed);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -271,6 +296,15 @@ pub(crate) mod test_callback {
             .clone()
     }
 
+    pub(crate) fn calls_for(function: i32) -> usize {
+        CALLBACK_ORDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|&&called| called == function)
+            .count()
+    }
+
     unsafe extern "system" fn callback(
         function: i32,
         argument_count: i32,
@@ -285,6 +319,78 @@ pub(crate) mod test_callback {
         if function == XL_FREE {
             FREE_CALLS.fetch_add(1, Ordering::Relaxed);
             return XLRET_SUCCESS;
+        }
+        match (FORMULA_CALLER_KIND.load(Ordering::Relaxed), function) {
+            (kind, XLF_CALLER) if kind != 0 => {
+                // SAFETY: the test callback owns the static reference table for
+                // the duration of the process.
+                let references = (&FORMULA_CALLER_REFERENCES as *const XLMREF12).cast_mut();
+                if kind == FormulaCallerKind::Ref as i32 {
+                    // SAFETY: the callback contract supplies writable result storage.
+                    unsafe {
+                        *result = XLOPER12 {
+                            value: XLOPER12Value {
+                                mref: XLOPER12MRef {
+                                    references,
+                                    sheet_id: 17,
+                                },
+                            },
+                            xltype: XLTYPE_REF,
+                        };
+                    }
+                } else {
+                    // SAFETY: the callback contract supplies writable result storage.
+                    unsafe {
+                        *result = XLOPER12 {
+                            value: XLOPER12Value {
+                                sref: XLOPER12SRef {
+                                    count: 1,
+                                    reference: XLREF12 {
+                                        rw_first: 11,
+                                        rw_last: 11,
+                                        col_first: 3,
+                                        col_last: 3,
+                                    },
+                                },
+                            },
+                            xltype: XLTYPE_SREF,
+                        };
+                    }
+                }
+                return XLRET_SUCCESS;
+            }
+            (kind, XL_SHEET_NM) if kind != 0 => {
+                // SAFETY: the callback contract supplies writable result storage;
+                // the static counted string remains live for the test process.
+                unsafe {
+                    *result = XLOPER12 {
+                        value: XLOPER12Value {
+                            string: FORMULA_SHEET_NAME.as_ptr().cast_mut(),
+                        },
+                        xltype: XLTYPE_STR,
+                    };
+                }
+                return XLRET_SUCCESS;
+            }
+            (kind, XL_SHEET_ID) if kind != 0 => {
+                // SAFETY: the test callback owns the static reference table for
+                // the duration of the process.
+                let references = (&FORMULA_CALLER_REFERENCES as *const XLMREF12).cast_mut();
+                // SAFETY: the callback contract supplies writable result storage.
+                unsafe {
+                    *result = XLOPER12 {
+                        value: XLOPER12Value {
+                            mref: XLOPER12MRef {
+                                references,
+                                sheet_id: 19,
+                            },
+                        },
+                        xltype: XLTYPE_REF,
+                    };
+                }
+                return XLRET_SUCCESS;
+            }
+            _ => {}
         }
         if function == XL_ASYNC_RETURN {
             if ASYNC_REJECTED.load(Ordering::Relaxed) {
