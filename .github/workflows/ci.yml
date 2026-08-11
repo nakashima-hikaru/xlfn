@@ -37,14 +37,14 @@ jobs:
             - name: Check dependency advisories, licenses, bans, and sources
               uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
-            - name: Check formatting
-              run: just fmt
-
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
                   tool: just,cargo-nextest,cargo-hack
                   fallback: none
+
+            - name: Check formatting
+              run: just fmt
 
             - name: Run Clippy
               run: just clippy
