@@ -15,9 +15,9 @@ fn concurrent_spawns(c: &mut Criterion) {
             &threads,
             |b, &threads| {
                 b.iter_batched_ref(
-                    || AsyncSpawnBenchmark::new(WORKERS),
+                    || AsyncSpawnBenchmark::new(WORKERS, threads),
                     |benchmark| {
-                        let result = benchmark.run(threads, ITERATIONS_PER_THREAD);
+                        let result = benchmark.run(ITERATIONS_PER_THREAD);
                         assert_eq!(result.other_errors, 0);
                         assert_eq!(result.overloaded, 0);
                         assert_eq!(result.accepted, attempts);
