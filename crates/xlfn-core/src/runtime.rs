@@ -21,6 +21,7 @@ pub enum LifecyclePhase {
 impl LifecyclePhase {
     fn from_raw(value: u8) -> Self {
         match value {
+            0 => Self::Closed,
             1 => Self::Opening,
             2 => Self::Open,
             3 => Self::Closing,
