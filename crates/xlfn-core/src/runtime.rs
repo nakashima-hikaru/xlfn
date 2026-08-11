@@ -25,7 +25,7 @@ impl LifecyclePhase {
             2 => Self::Open,
             3 => Self::Closing,
             4 => Self::OpenRollbackPending,
-            _ => Self::Closed,
+            _ => std::process::abort(),
         }
     }
 }

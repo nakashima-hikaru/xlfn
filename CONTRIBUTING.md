@@ -16,9 +16,22 @@ just check
 
 `just quick` runs formatting, workspace Clippy, and the default nextest
 profile. `just check` additionally runs the cargo-hack feature powerset,
-benchmark compilation, and cargo-deny. Use `just test-libtest` when validating
-same-process libtest behavior, which is the execution model retained by the
-Windows artifact job.
+benchmark compilation, cargo-deny, and the public API compatibility audit.
+Use `just test-libtest` when validating same-process libtest behavior, which is
+the execution model retained by the Windows artifact job.
+
+## API compatibility
+
+`just semver` runs `cargo-semver-checks` for the publishable workspace crates
+against the published `0.1.0` tag. The CI checkout fetches the full history so
+that this baseline is available in pull requests as well as on `main`.
+
+The current `0.1.0`-to-`main` audit passes even with patch-release rules, so
+the next release can be `0.1.1`; a major-version bump is not required by the
+Rust public API. If a future change intentionally breaks that API, either add
+a compatibility layer or update the baseline and release version to `0.2.0`
+as part of that release. CLI behavior and procedural-macro diagnostics are
+separate compatibility contracts and are not covered by this audit.
 
 Standalone consumers should also be checked when their interfaces change:
 

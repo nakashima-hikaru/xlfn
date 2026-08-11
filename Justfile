@@ -56,9 +56,16 @@ features:
 deny:
     cargo deny check
 
+semver:
+    # Keep this baseline on the latest published release tag.
+    cargo semver-checks \
+        --workspace \
+        --baseline-rev 0.1.0 \
+        --release-type patch
+
 quick: fmt clippy test
 
-check: fmt clippy features test bench-check deny
+check: fmt clippy features test bench-check deny semver
 
 # --- Benchmark recipes ---
 
