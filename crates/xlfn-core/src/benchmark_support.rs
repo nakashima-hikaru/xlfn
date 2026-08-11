@@ -653,6 +653,126 @@ impl Drop for HandleFormulaBenchmark {
     }
 }
 
+/// A persistent worker pool that looks up a different warm topic per worker.
+///
+/// The topics, worker threads, and synchronization channels are all prepared
+/// before measurement. Each timed batch therefore exercises concurrent
+/// `TopicState` access without paying for cold publication or thread creation.
+pub struct HandleDistinctKeyBenchmark {
+    runtime: Arc<HandleRuntime>,
+    iterations_per_worker: usize,
+    factory_calls: Arc<AtomicUsize>,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleDistinctKeyBenchmark {
+    pub fn new(worker_count: usize, iterations_per_worker: usize) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let keys = (0..worker_count)
+            .map(|worker| Arc::<str>::from(format!("warm:{worker}")))
+            .collect::<Vec<_>>();
+
+        for key in &keys {
+            let factory_calls = Arc::clone(&factory_calls);
+            runtime
+                .prepare_observed(
+                    key.to_string(),
+                    move || {
+                        factory_calls.fetch_add(1, Ordering::Relaxed);
+                        Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                    },
+                    |_, _| Ok(()),
+                )
+                .expect("distinct-key warm seed publication failed");
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for key in keys {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_factory_calls = Arc::clone(&factory_calls);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_worker {
+                        let result = worker_runtime
+                            .prepare_observed(
+                                key.to_string(),
+                                || {
+                                    worker_factory_calls.fetch_add(1, Ordering::Relaxed);
+                                    Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                                },
+                                |_, _| Ok(()),
+                            )
+                            .expect("distinct-key warm observation failed");
+                        std::hint::black_box(result);
+                    }
+                    done_tx
+                        .send(())
+                        .expect("benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            iterations_per_worker,
+            factory_calls,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("distinct-key benchmark worker received start signal");
+        }
+        for _ in 0..self.start_tx.len() {
+            self.done_rx
+                .recv()
+                .expect("distinct-key benchmark worker finished batch");
+        }
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.start_tx.len() * self.iterations_per_worker
+    }
+
+    pub fn assert_warm_hit(&self) {
+        assert_eq!(
+            self.factory_calls.load(Ordering::Relaxed),
+            self.start_tx.len(),
+            "distinct-key benchmark executed a factory during warm-hit measurement"
+        );
+    }
+}
+
+impl Drop for HandleDistinctKeyBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
 struct ContendedHandleBatch {
     key: Arc<str>,
 }
