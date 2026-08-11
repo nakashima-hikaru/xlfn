@@ -7,8 +7,7 @@ use xlfn_sys::{
 
 const MAX_FINGERPRINT_BYTES: usize = 16 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 256;
-const HASH_BUFFER_INLINE_BYTES: usize = 32;
-const HASH_BUFFER_ACTIVATION_BYTES: usize = HASH_BUFFER_BYTES / 8;
+const BUFFERED_STRING_THRESHOLD_UNITS: usize = 16;
 const DOMAIN: &[u8] = b"xlfn-formula-fingerprint-v1\0";
 
 const TAG_NUMBER: u8 = 1;
@@ -21,7 +20,21 @@ const TAG_BLANK: u8 = 7;
 const TAG_ARRAY: u8 = 8;
 
 pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<[u8; 32]> {
-    let mut encoder = FingerprintEncoder::new();
+    if arguments_require_buffer(arguments)? {
+        let mut encoder = BufferedFingerprintEncoder::new();
+        encode_arguments(&mut encoder, arguments)?;
+        Ok(encoder.finish())
+    } else {
+        let mut encoder = FingerprintEncoder::new();
+        encode_arguments(&mut encoder, arguments)?;
+        Ok(encoder.finish())
+    }
+}
+
+fn encode_arguments<S: FingerprintSink>(
+    encoder: &mut S,
+    arguments: &[*mut XLOPER12],
+) -> XllResult<()> {
     encoder.write(DOMAIN)?;
     encoder.write_u64(arguments.len() as u64)?;
     for argument in arguments {
@@ -30,101 +43,35 @@ pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<[u8; 
         let value = unsafe { XlValueRef::from_raw(*argument) }?;
         encoder.write_value(value, false)?;
     }
-    Ok(encoder.finish())
+    Ok(())
 }
 
-struct FingerprintEncoder {
-    hasher: blake3::Hasher,
-    bytes: usize,
-    buffering: bool,
-    buffered: usize,
-    buffer: SmallVec<[u8; HASH_BUFFER_INLINE_BYTES]>,
+fn arguments_require_buffer(arguments: &[*mut XLOPER12]) -> XllResult<bool> {
+    if arguments.len() > 4 {
+        return Ok(true);
+    }
+
+    for argument in arguments {
+        // SAFETY: fingerprint's caller supplies live XLOPER12 arguments for
+        // the duration of the call.
+        let value = unsafe { XlValueRef::from_raw(*argument) }?;
+        match value.base_type() {
+            XLTYPE_MULTI => return Ok(true),
+            XLTYPE_STR
+                if value.utf16("formula_fingerprint")?.len() >= BUFFERED_STRING_THRESHOLD_UNITS =>
+            {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(false)
 }
 
-impl FingerprintEncoder {
-    fn new() -> Self {
-        Self {
-            hasher: blake3::Hasher::new(),
-            bytes: 0,
-            buffering: false,
-            buffered: 0,
-            buffer: SmallVec::new(),
-        }
-    }
-
-    fn finish(mut self) -> [u8; 32] {
-        self.flush();
-        *self.hasher.finalize().as_bytes()
-    }
-
-    fn flush(&mut self) {
-        if self.buffered == 0 {
-            return;
-        }
-
-        self.hasher.update(&self.buffer[..self.buffered]);
-        self.buffered = 0;
-    }
-
-    fn write(&mut self, bytes: &[u8]) -> XllResult<()> {
-        let actual = self
-            .bytes
-            .checked_add(bytes.len())
-            .ok_or(XllError::Domain {
-                code: crate::DomainErrorCode::Overflow,
-            })?;
-        if actual > MAX_FINGERPRINT_BYTES {
-            return Err(XllError::input(
-                "formula_fingerprint",
-                InputError::TooLarge {
-                    limit: MAX_FINGERPRINT_BYTES,
-                    actual,
-                },
-            ));
-        }
-        self.bytes = actual;
-
-        // Keep genuinely small streams on the direct path. This preserves the
-        // scalar fast path while still switching to staging before repetitive
-        // two-byte writes become expensive.
-        if !self.buffering && actual <= HASH_BUFFER_ACTIVATION_BYTES {
-            self.hasher.update(bytes);
-            return Ok(());
-        }
-        self.buffering = true;
-        if self.buffer.is_empty() {
-            self.buffer.resize(HASH_BUFFER_BYTES, 0);
-        }
-
-        self.write_buffered(bytes);
-        Ok(())
-    }
-
-    fn write_buffered(&mut self, mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            // Avoid an unnecessary copy when both the staging buffer is empty
-            // and the caller already supplied at least one full-sized chunk.
-            if self.buffered == 0 && bytes.len() >= HASH_BUFFER_BYTES {
-                let direct = bytes.len() / HASH_BUFFER_BYTES * HASH_BUFFER_BYTES;
-                self.hasher.update(&bytes[..direct]);
-                bytes = &bytes[direct..];
-                continue;
-            }
-
-            let available = HASH_BUFFER_BYTES - self.buffered;
-            let copied = available.min(bytes.len());
-
-            // Keep the direct encoder small; only streams that cross the
-            // activation threshold pay for the full staging capacity.
-            self.buffer[self.buffered..self.buffered + copied].copy_from_slice(&bytes[..copied]);
-            self.buffered += copied;
-            bytes = &bytes[copied..];
-
-            if self.buffered == HASH_BUFFER_BYTES {
-                self.flush();
-            }
-        }
-    }
+trait FingerprintSink: Sized {
+    fn write(&mut self, bytes: &[u8]) -> XllResult<()>;
+    fn finish(self) -> [u8; 32];
 
     fn write_tag(&mut self, tag: u8) -> XllResult<()> {
         self.write(&[tag])
@@ -217,9 +164,148 @@ impl FingerprintEncoder {
     }
 }
 
+struct FingerprintEncoder {
+    hasher: blake3::Hasher,
+    bytes: usize,
+}
+
+struct BufferedFingerprintEncoder {
+    hasher: blake3::Hasher,
+    bytes: usize,
+    buffered: usize,
+    buffer: SmallVec<[u8; HASH_BUFFER_BYTES]>,
+}
+
+impl FingerprintEncoder {
+    fn new() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+            bytes: 0,
+        }
+    }
+}
+
+impl FingerprintSink for FingerprintEncoder {
+    fn write(&mut self, bytes: &[u8]) -> XllResult<()> {
+        let actual = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(XllError::Domain {
+                code: crate::DomainErrorCode::Overflow,
+            })?;
+        if actual > MAX_FINGERPRINT_BYTES {
+            return Err(XllError::input(
+                "formula_fingerprint",
+                InputError::TooLarge {
+                    limit: MAX_FINGERPRINT_BYTES,
+                    actual,
+                },
+            ));
+        }
+        self.bytes = actual;
+        self.hasher.update(bytes);
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        *self.hasher.finalize().as_bytes()
+    }
+}
+
+impl BufferedFingerprintEncoder {
+    fn new() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+            bytes: 0,
+            buffered: 0,
+            buffer: SmallVec::new(),
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.buffered == 0 {
+            return;
+        }
+
+        self.hasher.update(&self.buffer[..self.buffered]);
+        self.buffered = 0;
+    }
+
+    fn write_buffered(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            // Avoid an unnecessary copy when both the staging buffer is empty
+            // and the caller already supplied at least one full-sized chunk.
+            if self.buffered == 0 && bytes.len() >= HASH_BUFFER_BYTES {
+                let direct = bytes.len() / HASH_BUFFER_BYTES * HASH_BUFFER_BYTES;
+                self.hasher.update(&bytes[..direct]);
+                bytes = &bytes[direct..];
+                continue;
+            }
+
+            let available = HASH_BUFFER_BYTES - self.buffered;
+            let copied = available.min(bytes.len());
+
+            if self.buffer.is_empty() {
+                self.buffer.resize(HASH_BUFFER_BYTES, 0);
+            }
+
+            self.buffer[self.buffered..self.buffered + copied].copy_from_slice(&bytes[..copied]);
+            self.buffered += copied;
+            bytes = &bytes[copied..];
+
+            if self.buffered == HASH_BUFFER_BYTES {
+                self.flush();
+            }
+        }
+    }
+}
+
+impl FingerprintSink for BufferedFingerprintEncoder {
+    fn write(&mut self, bytes: &[u8]) -> XllResult<()> {
+        let actual = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(XllError::Domain {
+                code: crate::DomainErrorCode::Overflow,
+            })?;
+        if actual > MAX_FINGERPRINT_BYTES {
+            return Err(XllError::input(
+                "formula_fingerprint",
+                InputError::TooLarge {
+                    limit: MAX_FINGERPRINT_BYTES,
+                    actual,
+                },
+            ));
+        }
+        self.bytes = actual;
+        self.write_buffered(bytes);
+        Ok(())
+    }
+    fn finish(self) -> [u8; 32] {
+        let mut encoder = self;
+        encoder.flush();
+        *encoder.hasher.finalize().as_bytes()
+    }
+}
+
 #[cfg(feature = "bench-internals")]
 #[inline]
 pub(crate) fn benchmark_stream(payload: &[u8], chunks: &[std::ops::Range<usize>]) -> [u8; 32] {
+    let mut encoder = BufferedFingerprintEncoder::new();
+    for chunk in chunks {
+        encoder
+            .write(&payload[chunk.clone()])
+            .expect("fingerprint benchmark input fits within the byte budget");
+    }
+    encoder.finish()
+}
+
+#[cfg(feature = "bench-internals")]
+#[inline]
+pub(crate) fn benchmark_direct_stream(
+    payload: &[u8],
+    chunks: &[std::ops::Range<usize>],
+) -> [u8; 32] {
     let mut encoder = FingerprintEncoder::new();
     for chunk in chunks {
         encoder
@@ -350,7 +436,7 @@ mod tests {
             b"tail",
         ];
 
-        let mut encoder = FingerprintEncoder::new();
+        let mut encoder = BufferedFingerprintEncoder::new();
         let mut direct = blake3::Hasher::new();
 
         for part in parts {

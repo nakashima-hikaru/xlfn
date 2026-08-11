@@ -267,6 +267,7 @@ impl FingerprintBenchCase {
 pub struct FingerprintBenchmark {
     payload: Vec<u8>,
     chunks: Vec<std::ops::Range<usize>>,
+    use_buffer: bool,
 }
 
 impl FingerprintBenchmark {
@@ -274,7 +275,16 @@ impl FingerprintBenchmark {
         let mut benchmark = Self {
             payload: Vec::new(),
             chunks: Vec::new(),
+            use_buffer: matches!(
+                case,
+                FingerprintBenchCase::Utf16String32KiB
+                    | FingerprintBenchCase::NumericCells10K
+                    | FingerprintBenchCase::NumericCells100K
+            ),
         };
+
+        benchmark.push_chunk(b"xlfn-formula-fingerprint-v1\0");
+        benchmark.push_u64(1);
 
         match case {
             FingerprintBenchCase::ScalarInteger => {
@@ -298,18 +308,16 @@ impl FingerprintBenchmark {
         crate::formula_fingerprint::benchmark_stream(&self.payload, &self.chunks)
     }
 
-    pub fn run_direct(&self) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        let mut bytes = 0_usize;
-        for chunk in &self.chunks {
-            let part = &self.payload[chunk.clone()];
-            bytes = bytes
-                .checked_add(part.len())
-                .expect("fingerprint benchmark byte count cannot overflow");
-            assert!(bytes <= 16 * 1024 * 1024);
-            hasher.update(part);
+    pub fn run_selected(&self) -> [u8; 32] {
+        if self.use_buffer {
+            self.run_buffered()
+        } else {
+            self.run_direct()
         }
-        *hasher.finalize().as_bytes()
+    }
+
+    pub fn run_direct(&self) -> [u8; 32] {
+        crate::formula_fingerprint::benchmark_direct_stream(&self.payload, &self.chunks)
     }
 
     fn push_chunk(&mut self, bytes: &[u8]) {

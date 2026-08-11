@@ -9,10 +9,10 @@ fn formula_fingerprint_benchmarks(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(benchmark.encoded_bytes() as u64));
 
         group.bench_with_input(
-            BenchmarkId::new("buffered", case.name()),
+            BenchmarkId::new("selected", case.name()),
             &benchmark,
             |b, benchmark| {
-                b.iter(|| std::hint::black_box(benchmark.run_buffered()));
+                b.iter(|| std::hint::black_box(benchmark.run_selected()));
             },
         );
         group.bench_with_input(
