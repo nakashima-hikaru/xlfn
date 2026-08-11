@@ -28,7 +28,6 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-24.04
     env:
-      BENCHER_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
       BENCHER_TESTBED: github-ubuntu-24.04
     steps:
       - name: Check out repository
@@ -54,8 +53,8 @@ jobs:
             echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
           fi
 
-      - name: Track benchmarks with Bencher
-        if: steps.bencher-config.outputs.enabled == 'true'
+      - name: Track benchmarks with Bencher (main / nightly)
+        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'
         shell: bash
         env:
           BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
@@ -65,7 +64,29 @@ jobs:
           bencher run \
             --project "$BENCHER_PROJECT" \
             --key "$BENCHER_API_KEY" \
-            --branch "$BENCHER_BRANCH" \
+            --branch main \
+            --testbed "$BENCHER_TESTBED" \
+            --adapter rust_criterion \
+            --github-actions "$GITHUB_TOKEN" \
+            --ci-only-on-alert \
+            "just bench"
+
+      - name: Track PR benchmarks with Bencher
+        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bencher run \
+            --project "$BENCHER_PROJECT" \
+            --key "$BENCHER_API_KEY" \
+            --branch "$GITHUB_HEAD_REF" \
+            --start-point "$GITHUB_BASE_REF" \
+            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --start-point-clone-thresholds \
+            --start-point-reset \
             --testbed "$BENCHER_TESTBED" \
             --adapter rust_criterion \
             --github-actions "$GITHUB_TOKEN" \

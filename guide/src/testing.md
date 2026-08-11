@@ -7,16 +7,21 @@ No single test layer is sufficient for an XLL. xlfn separates source correctness
 Run on every change:
 
 ```console
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
+just quick
 ```
 
-Also build the feature combinations your consumers use, including the no-default-feature facade:
+This runs `fmt`, `clippy`, and `test` (nextest). For release qualification, run
+the full check which also exercises `cargo-hack` feature powerset, benchmark
+linting, and `cargo deny`:
 
 ```console
-cargo check --package xlfn --locked
-cargo check --package xlfn --features async --locked
+just check
+```
+
+Also build the standalone consumers:
+
+```console
+cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
 cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
 ```
 

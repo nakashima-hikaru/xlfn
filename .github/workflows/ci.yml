@@ -40,8 +40,11 @@ jobs:
             - name: Check formatting
               run: cargo fmt --all -- --check
 
-            - name: Install just
-              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+            - name: Install development tools
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just,cargo-nextest,cargo-hack
+                  fallback: none
 
             - name: Run Clippy
               run: >-
@@ -53,21 +56,14 @@ jobs:
                   --
                   -D warnings
 
-            - name: Check facade feature combinations
-              run: |
-                  cargo check --package xlfn --locked
-                  cargo check --package xlfn --features async --locked
+            - name: Check feature combinations
+              run: just features
 
             - name: Check benchmark compilation
               run: just bench-check
 
             - name: Run Rust tests
-              run: >-
-                  cargo test
-                  --workspace
-                  --all-targets
-                  --all-features
-                  --locked
+              run: just test-ci
 
             - name: Model-check handle close race
               run: >-
