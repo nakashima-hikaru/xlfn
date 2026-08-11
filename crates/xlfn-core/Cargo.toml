@@ -38,6 +38,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "handle_formula"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "formula_fingerprint"
 harness = false
 required-features = ["bench-internals"]

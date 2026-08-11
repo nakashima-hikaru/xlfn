@@ -5,6 +5,7 @@
 
 #![cfg(feature = "bench-internals")]
 #![doc(hidden)]
+#![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
@@ -365,7 +366,8 @@ impl FingerprintBenchmark {
 // Handle prepare benchmarks
 // ---------------------------------------------------------------------------
 
-use crate::handle::{ExcelHandleObject, HandleRuntime};
+use crate::handle::{ExcelHandleObject, FormulaCaller, HandleRuntime, format_formula_topic_key};
+use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
 struct BenchHandleObject {
     _payload: u64,
@@ -469,6 +471,183 @@ impl Default for HandleWarmBenchmark {
 }
 
 impl Drop for HandleWarmBenchmark {
+    fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Formula-to-handle end-to-end benchmarks
+// ---------------------------------------------------------------------------
+
+const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
+
+#[derive(Clone, Copy, Debug)]
+pub enum HandleFormulaBenchCase {
+    ScalarNumber,
+    ShortString,
+    NumericCells10K,
+    NumericCells100K,
+}
+
+impl HandleFormulaBenchCase {
+    pub const ALL: [Self; 4] = [
+        Self::ScalarNumber,
+        Self::ShortString,
+        Self::NumericCells10K,
+        Self::NumericCells100K,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ScalarNumber => "scalar_number",
+            Self::ShortString => "short_string",
+            Self::NumericCells10K => "numeric_cells_10k",
+            Self::NumericCells100K => "numeric_cells_100k",
+        }
+    }
+}
+
+/// XLOPER12 arguments whose backing storage is allocated before measurement.
+///
+/// The raw argument pointer remains valid because the root XLOPER12 lives in a
+/// Box and array/string payloads live in Vec allocations whose addresses do not
+/// change when the owner is moved into the benchmark.
+#[allow(
+    dead_code,
+    reason = "Fields intentionally keep benchmark pointers alive"
+)]
+struct PreparedFormulaArguments {
+    root: Box<XLOPER12>,
+    string_storage: Option<Vec<u16>>,
+    cell_storage: Option<Vec<XLOPER12>>,
+    raw_args: [*mut XLOPER12; 1],
+}
+
+impl PreparedFormulaArguments {
+    fn new(case: HandleFormulaBenchCase) -> Self {
+        let (root, string_storage, cell_storage) = match case {
+            HandleFormulaBenchCase::ScalarNumber => (XLOPER12::number(42.0), None, None),
+            HandleFormulaBenchCase::ShortString => {
+                let mut storage = Vec::with_capacity(6);
+                storage.push(5);
+                storage.extend("short".encode_utf16());
+                let root = XLOPER12 {
+                    value: XLOPER12Value {
+                        string: storage.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                };
+                (root, Some(storage), None)
+            }
+            HandleFormulaBenchCase::NumericCells10K => Self::numeric_array(10_000),
+            HandleFormulaBenchCase::NumericCells100K => Self::numeric_array(100_000),
+        };
+
+        let mut root = Box::new(root);
+        let raw_args = [root.as_mut() as *mut XLOPER12];
+        Self {
+            root,
+            string_storage,
+            cell_storage,
+            raw_args,
+        }
+    }
+
+    fn numeric_array(cells: usize) -> (XLOPER12, Option<Vec<u16>>, Option<Vec<XLOPER12>>) {
+        let mut storage = (0..cells)
+            .map(|index| XLOPER12::number(index as f64))
+            .collect::<Vec<_>>();
+        let columns = cells.min(10_000);
+        let rows = cells.div_ceil(columns);
+        let root = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: storage.as_mut_ptr(),
+                    rows: i32::try_from(rows).expect("benchmark array fits Excel rows"),
+                    columns: i32::try_from(columns).expect("benchmark array fits Excel columns"),
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        (root, None, Some(storage))
+    }
+}
+
+pub struct HandleFormulaBenchmark {
+    runtime: Arc<HandleRuntime>,
+    arguments: PreparedFormulaArguments,
+    caller: FormulaCaller,
+    factory_calls: AtomicUsize,
+}
+
+impl HandleFormulaBenchmark {
+    pub fn new(case: HandleFormulaBenchCase) -> Self {
+        let arguments = PreparedFormulaArguments::new(case);
+        let caller = FormulaCaller {
+            sheet_id: 7,
+            row: 42,
+            column: 11,
+        };
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(1, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let factory_calls = AtomicUsize::new(0);
+        let key = formula_topic_key(&arguments, caller);
+
+        runtime
+            .prepare_observed(
+                key,
+                || {
+                    factory_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                },
+                |_, _| Ok(()),
+            )
+            .expect("formula handle warm seed publication failed");
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+
+        Self {
+            runtime,
+            arguments,
+            caller,
+            factory_calls,
+        }
+    }
+
+    pub fn run(&self) -> (String, bool) {
+        let key = formula_topic_key(&self.arguments, self.caller);
+        self.runtime
+            .prepare_observed(
+                key,
+                || -> crate::XllResult<Arc<BenchHandleObject>> {
+                    self.factory_calls.fetch_add(1, Ordering::Relaxed);
+                    panic!("formula handle warm-hit factory must not run");
+                },
+                |_, _| Ok(()),
+            )
+            .expect("formula handle warm observation failed")
+    }
+
+    pub fn assert_warm_hit(&self) {
+        assert_eq!(
+            self.factory_calls.load(Ordering::Relaxed),
+            1,
+            "formula handle benchmark executed its factory during warm-hit measurement"
+        );
+    }
+}
+
+fn formula_topic_key(arguments: &PreparedFormulaArguments, caller: FormulaCaller) -> String {
+    // SAFETY: the root XLOPER12 and all backing storage were allocated before
+    // the benchmark began and remain owned by `arguments` for this call.
+    let digest = unsafe { crate::formula_fingerprint::fingerprint(&arguments.raw_args) }
+        .expect("benchmark XLOPER12 arguments must fingerprint successfully");
+    format_formula_topic_key(caller, HANDLE_FORMULA_UDF_ID, &digest)
+}
+
+impl Drop for HandleFormulaBenchmark {
     fn drop(&mut self) {
         cleanup_handle_runtime(&self.runtime);
     }

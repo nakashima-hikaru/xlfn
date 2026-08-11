@@ -81,5 +81,8 @@ bench-sync:
 bench-handle:
     cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
 
+bench-handle-formula:
+    cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked
+
 bench-check:
     cargo clippy --package xlfn-core --benches --features "bench-internals async" --locked -- -D warnings
