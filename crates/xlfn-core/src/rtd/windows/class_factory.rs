@@ -1,7 +1,7 @@
 use super::module_state::{COM_MODULE_LIFETIME, ComObjectKind, ComObjectLease};
 use super::{
-    ACTIVE_SERVER, IID_ICLASS_FACTORY, IID_IUNKNOWN, RtdServer, com_boundary, guid_eq,
-    server_add_ref, server_query_interface, server_release,
+    ACTIVE_SERVER, IID_IUNKNOWN, RtdServer, com_boundary, guid_eq, server_add_ref,
+    server_query_interface, server_release,
 };
 use crate::XllError;
 use crate::win32::{
@@ -12,6 +12,9 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+pub(crate) const IID_ICLASS_FACTORY: GUID =
+    GUID::from_u128(0x0000_0001_0000_0000_c000_0000_0000_0046);
 
 pub(super) static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactoryVtable {
     query_interface: factory_query_interface,

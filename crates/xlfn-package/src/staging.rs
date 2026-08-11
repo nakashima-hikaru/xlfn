@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(target_os = "windows")]
+fn wide_nul(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 /// A directory that was created or adopted after its private staging
 /// invariants were established.  Packaging APIs accept this capability
 /// instead of an arbitrary path so callers cannot accidentally stage into a
