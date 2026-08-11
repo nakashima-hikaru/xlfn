@@ -38,7 +38,7 @@ arc-swap = "1.9.2"
 async-channel = "2.5.0"
 async-task = "4.7.1"
 bindgen = "0.72.1"
-blake3 = { version = "1.8.5", features = ["pure"] }
+blake3 = "1.8.5"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.5", features = ["derive"] }
 constant_time_eq = "0.5.0"

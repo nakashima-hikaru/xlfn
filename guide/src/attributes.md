@@ -161,7 +161,12 @@ struct Dataset {
 }
 ```
 
-The type must satisfy `Any + Send + Sync + 'static`. Returning the object publishes or replaces the formula-owned object; accepting `Handle<Dataset>` resolves and type-checks the token. Handle objects are main-thread return values, including volatile main-thread functions, but are not thread-safe, macro-sheet, or async return values.
+The type must satisfy `Any + Send + Sync + 'static`. Returning the object
+publishes it for the producer formula's identity; a changed formula identity
+publishes a new object while a same-identity recalculation reuses the memoized
+object. Accepting `Handle<Dataset>` resolves and type-checks the token. Handle
+objects are main-thread return values, including volatile main-thread
+functions, but are not thread-safe, macro-sheet, or async return values.
 
 See [Formula-owned handles](handles.md).
 

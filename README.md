@@ -181,6 +181,7 @@ CI builds the Lean project, runs `leanchecker`, and rejects committed `sorry` or
 - [Compatibility](guide/src/compatibility.md)
 - [CLI reference](guide/src/cli-reference.md)
 - [Testing and release qualification](guide/src/testing.md)
+- [Contributor checks](CONTRIBUTING.md)
 - [Security model](guide/src/security.md)
 - [Basic example](examples/basic-xll)
 

@@ -8,6 +8,10 @@ fail-fast = false
 global-timeout = "20m"
 
 [test-groups]
+# This serialization applies to nextest runs only. Windows artifact CI
+# deliberately retains same-process libtest semantics; RTD tests also acquire
+# their process-global test lock, so this group is a scheduling optimization,
+# not a correctness precondition for the Windows-targeted job.
 windows-rtd = { max-threads = 1 }
 
 [[profile.default.overrides]]

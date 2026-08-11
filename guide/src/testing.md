@@ -1,112 +1,15 @@
 # Testing and release qualification
 
-No single test layer is sufficient for an XLL. xlfn separates source correctness, ABI correctness, linked-artifact correctness, and real-Excel behavior so that evidence is not overstated.
+No single test layer is sufficient for an XLL. Test the add-in's Rust code,
+the linked Windows artifact, and the exact Excel environments that matter to
+the deployment. Repository contributors should use the checks in
+[CONTRIBUTING.md](../../CONTRIBUTING.md); this page focuses on add-in authors
+and release operators.
 
-## 1. Rust source checks
+## Rust and artifact checks
 
-Run on every change:
-
-```console
-just quick
-```
-
-This runs `fmt`, `clippy`, and `test` (nextest). For release qualification, run
-the full check which also exercises `cargo-hack` feature powerset, benchmark
-linting, and `cargo deny`:
-
-```console
-just check
-```
-
-Also build the standalone consumers:
-
-```console
-cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
-cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
-```
-
-Unit tests should cover pure business logic separately from generated boundaries. Property tests are useful for conversion limits, fingerprints, token parsing, array shapes, and cache keys.
-
-## 2. Compile-fail contracts
-
-Procedural macros and marker traits enforce misuse at compile time. Maintain compile-fail fixtures for:
-
-- invalid context positions and borrowed context types;
-- incompatible `thread_safe`, `macro_sheet`, reference, and async combinations;
-- unsupported return modes;
-- generic, unsafe, extern, or variadic UDFs;
-- invalid defaults and argument names;
-- handle producer restrictions;
-- invalid application error conversions and adapter configuration.
-
-A good diagnostic is part of the user interface. Assert relevant error text without overfitting compiler formatting.
-
-## 3. Concurrency and shutdown tests
-
-Deterministic tests should place barriers at lifecycle race points rather than relying only on stress loops. Cover:
-
-- close racing with call entry;
-- async cancellation versus application-adapter claim and completion;
-- task drop that re-enters cancellation state;
-- handle replacement and formula-topic termination;
-- RTD subscribe, publish, notify, `ServerTerminate`, and close barriers;
-- application-adapter queue-full shutdown and graceful drain;
-- cache clear versus in-flight initialization;
-- same-key cache recursion;
-- application-adapter reentry rejection where the chosen implementation requires it.
-
-Use Loom or another model checker for small synchronization cores where practical, and retain ordinary stress tests for integration pressure.
-
-## 4. Independent ABI probes
-
-Excel ABI declarations should be checked against code compiled with the target Excel headers. When an application adapter crosses another binary ABI, add an independent probe appropriate to that selected boundary.
-
-For the repository's Excel SDK probe on Windows:
-
-```powershell
-$env:XLFN_SDK_INCLUDE = "C:\path\to\XlFnSdk\include"
-cargo test --manifest-path probes/excel-abi-probe/Cargo.toml --features sdk-bindgen --target x86_64-pc-windows-msvc --locked
-cargo test --manifest-path probes/excel-abi-probe/Cargo.toml --features sdk-bindgen --target i686-pc-windows-msvc --locked
-```
-
-An in-process binary adapter should have an equivalent probe for every shared structure, calling convention, ownership rule, and critical callback. Check `sizeof`, alignment, offsets, architecture-specific types, and a live trampoline call where possible. The commands above run those checks from the Rust test harness; a plain `cargo test` without `sdk-bindgen` is intentionally rejected rather than treated as a successful ABI check.
-
-CI downloads the Microsoft Excel 2013 XLL SDK MSI and verifies its SHA-256 before extraction; local runs should use the same SDK release or an explicitly reviewed header bundle.
-
-Treat the downloaded SDK or header bundle as a supply-chain input: pin its digest and verify its publisher in CI.
-
-## 5. Historical benchmark tracking
-
-Criterion benchmarks are tracked separately from correctness CI through
-Bencher. The root `Justfile` is the shared command surface:
-
-```console
-just bench
-just bench-async
-just bench-sync
-just bench-handle
-just bench-check
-```
-
-The benchmark workflow runs on pushes to `main`, pull requests, and a nightly
-schedule on the fixed `ubuntu-24.04` runner. It submits Criterion output using
-Bencher's `rust_criterion` adapter and records the testbed as
-`github-ubuntu-24.04`. The initial workflow is informational: it does not set
-regression thresholds or fail on alerts. Thresholds should be enabled only
-after the main-branch noise distribution is understood.
-
-To enable history publishing, configure the repository with:
-
-- an Actions secret named `BENCHER_API_KEY` containing a Bencher project API key;
-- an Actions repository variable named `BENCHER_PROJECT` containing the Bencher project slug.
-
-Fork pull requests never receive the secret. They run the benchmark command
-without publishing results. Closed same-repository pull requests are archived
-from Bencher so temporary PR branches do not accumulate indefinitely.
-
-## 6. Linked-artifact tests
-
-On Windows:
+Run the add-in's unit and integration tests with its normal Cargo profile. For
+the xlfn packaging contract, validate the exact target and feature selection:
 
 ```powershell
 cargo xlfn check --target x86_64-pc-windows-msvc --all-features --locked
@@ -121,14 +24,18 @@ Verify that:
 - PE machine type matches the target;
 - every packaged import resolves;
 - bundle files have unique case-insensitive basenames;
-- the final staged bytes match the manifest records;
+- final staged bytes match the manifest records;
 - a consumer crate can use the published facade under both targets.
 
-Artifact tests do not start Excel.
+Artifact tests do not start Excel. They complement, rather than replace, the
+add-in's own unit tests and real-Excel qualification.
 
-## 7. Real-Excel qualification
+## Real-Excel qualification
 
-Run the exact final package in each supported environment. At minimum, qualify each supported Excel bitness. When support claims include both Windows 10 and 11 or multiple enterprise channels, include those combinations explicitly.
+Run the exact final package in every supported environment. At minimum,
+qualify each supported Excel bitness. When support claims include multiple
+Windows builds, Excel channels, or locales, include those combinations
+explicitly.
 
 Record:
 
@@ -158,8 +65,7 @@ result and evidence:
 - scalar, string, Boolean, integer, error, date, and array round trips;
 - blank versus missing policies;
 - Function Wizard descriptions and help topics;
-- thread-safe functions under multi-threaded recalculation;
-- volatile and hidden registration behavior;
+- thread-safe, volatile, and hidden registration behavior;
 - wrong input types and propagated Excel errors.
 
 ### References
@@ -170,13 +76,22 @@ result and evidence:
 - owned coercion;
 - 32-bit and 64-bit `IDSHEET` behavior.
 
-### Handles
+### Formula-owned handles
 
-- create, consume, alias, recalculate, replace, and delete;
-- wrong-type, stale, forged, and previous-session tokens;
-- Formula Wizard, VBA/direct calls, and multi-cell caller rejection;
-- workbook close and add-in unload cleanup;
-- external object destruction on its required application-owned executor.
+- create and consume a handle;
+- alias an existing handle;
+- recalculate with the same formula identity and confirm object reuse;
+- change an explicit identity input and confirm a new object and token;
+- retire the formula and confirm cleanup;
+- reject wrong-type, stale, forged, and previous-session tokens;
+- verify Formula Wizard, VBA/direct calls, and multi-cell caller behavior;
+- verify workbook-close and add-in-unload cleanup;
+- verify external object destruction on its required application-owned executor.
+
+A stable token does not mean that the producer runs on every recalculation. The
+same formula identity reuses its memoized object; identity changes create a new
+object and token. Test observable object behavior or expose an explicit version
+dependency instead of using token text as an application identifier.
 
 ### Async
 
@@ -211,7 +126,7 @@ Adapt this matrix to the selected integration mechanism:
 
 ## Release evidence
 
-A high-quality release distinguishes these statuses:
+Distinguish these statuses:
 
 - **implemented** — source exists;
 - **unit-tested** — host tests passed;
@@ -219,4 +134,5 @@ A high-quality release distinguishes these statuses:
 - **Excel validated** — named real-Excel environments passed;
 - **signed/deployed** — final binaries passed organizational release controls.
 
-Do not mark one status based on another. Publish the supported environment matrix and any known unqualified combinations with the release notes.
+Do not mark one status based on another. Publish the supported environment
+matrix and any known unqualified combinations with the release notes.
