@@ -1,0 +1,185 @@
+use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SourceAddress(usize);
+
+impl SourceAddress {
+    pub(crate) fn of<S: ?Sized>(source: &Arc<S>) -> Self {
+        let ptr = Arc::as_ptr(source).cast::<()>();
+        Self(ptr as usize)
+    }
+}
+
+pub(crate) trait SourceIdentityAnchor: Send + Sync + 'static {}
+
+impl<T> SourceIdentityAnchor for T where T: Send + Sync + 'static {}
+
+pub(crate) struct SourceIdentityEntry {
+    pub(crate) id: u64,
+    pub(crate) anchor: Weak<dyn SourceIdentityAnchor>,
+}
+
+fn weak_source_anchor<S>(source: &Arc<S>) -> Weak<dyn SourceIdentityAnchor>
+where
+    S: RtdSource,
+{
+    let erased: Arc<dyn SourceIdentityAnchor> = Arc::clone(source) as _;
+    Arc::downgrade(&erased)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResolvedSourceIdentity {
+    pub(crate) address: SourceAddress,
+    pub(crate) id: u64,
+    pub(crate) newly_registered: bool,
+}
+
+pub(crate) struct SourceIdentityRegistry {
+    pub(crate) by_address: HashMap<SourceAddress, SourceIdentityEntry>,
+    pub(crate) next_id: u64,
+}
+
+impl SourceIdentityRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            by_address: HashMap::new(),
+            next_id: 1,
+        }
+    }
+
+    pub(crate) fn allocate_id(&mut self) -> XllResult<u64> {
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: 0x5254_4453_4944_4f56,
+        })?;
+        Ok(id)
+    }
+
+    pub(crate) fn resolve<S>(
+        &mut self,
+        source: &Arc<S>,
+        limit: usize,
+    ) -> XllResult<ResolvedSourceIdentity>
+    where
+        S: RtdSource,
+    {
+        let address = SourceAddress::of(source);
+
+        if let Some(entry) = self.by_address.get(&address)
+            && entry.anchor.upgrade().is_some()
+        {
+            return Ok(ResolvedSourceIdentity {
+                address,
+                id: entry.id,
+                newly_registered: false,
+            });
+        }
+
+        self.by_address.remove(&address);
+
+        if self.by_address.len() >= limit {
+            self.reclaim_dead();
+        }
+
+        if self.by_address.len() >= limit {
+            return Err(XllError::Overloaded);
+        }
+
+        let id = self.allocate_id()?;
+        let anchor = weak_source_anchor(source);
+
+        self.by_address
+            .insert(address, SourceIdentityEntry { id, anchor });
+
+        Ok(ResolvedSourceIdentity {
+            address,
+            id,
+            newly_registered: true,
+        })
+    }
+
+    pub(crate) fn rollback_registration(&mut self, identity: ResolvedSourceIdentity) {
+        if !identity.newly_registered {
+            return;
+        }
+
+        let should_remove = self
+            .by_address
+            .get(&identity.address)
+            .is_some_and(|entry| entry.id == identity.id);
+
+        if should_remove {
+            self.by_address.remove(&identity.address);
+        }
+    }
+
+    pub(crate) fn reclaim_dead(&mut self) {
+        self.by_address
+            .retain(|_, entry| entry.anchor.upgrade().is_some());
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.by_address.clear();
+    }
+}
+
+pub(crate) static NEXT_RTD_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
+    NEXT_RTD_RUNTIME_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| XllError::Internal {
+            diagnostic_id: 0x5254_4452_5449_444f,
+        })
+}
+
+#[derive(Default)]
+pub(crate) struct SubscriptionIdentityIndex {
+    pub(crate) key_by_identity: HashMap<SubscriptionIdentity, SubscriptionKey>,
+    pub(crate) identity_by_key: HashMap<SubscriptionKey, SubscriptionIdentity>,
+}
+
+impl SubscriptionIdentityIndex {
+    pub(crate) fn get_key(&self, identity: &SubscriptionIdentity) -> Option<&SubscriptionKey> {
+        self.key_by_identity.get(identity)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Bidirectional index accessor for identity lookup by key"
+    )]
+    pub(crate) fn get_identity(&self, key: &SubscriptionKey) -> Option<&SubscriptionIdentity> {
+        self.identity_by_key.get(key)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        identity: SubscriptionIdentity,
+        key: SubscriptionKey,
+    ) -> XllResult<()> {
+        if self.key_by_identity.contains_key(&identity) || self.identity_by_key.contains_key(&key) {
+            return Err(XllError::Internal {
+                diagnostic_id: 0x5254_4449_4458_4455,
+            });
+        }
+
+        self.key_by_identity.insert(identity.clone(), key.clone());
+        self.identity_by_key.insert(key, identity);
+
+        Ok(())
+    }
+
+    pub(crate) fn remove_by_key(&mut self, key: &SubscriptionKey) -> Option<SubscriptionIdentity> {
+        let identity = self.identity_by_key.remove(key)?;
+        let removed_key = self.key_by_identity.remove(&identity);
+        debug_assert_eq!(removed_key.as_ref(), Some(key));
+        Some(identity)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.key_by_identity.clear();
+        self.identity_by_key.clear();
+    }
+}
