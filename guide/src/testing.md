@@ -70,7 +70,36 @@ CI downloads the Microsoft Excel 2013 XLL SDK MSI and verifies its SHA-256 befor
 
 Treat the downloaded SDK or header bundle as a supply-chain input: pin its digest and verify its publisher in CI.
 
-## 5. Linked-artifact tests
+## 5. Historical benchmark tracking
+
+Criterion benchmarks are tracked separately from correctness CI through
+Bencher. The root `Justfile` is the shared command surface:
+
+```console
+just bench
+just bench-async
+just bench-sync
+just bench-handle
+just bench-check
+```
+
+The benchmark workflow runs on pushes to `main`, pull requests, and a nightly
+schedule on the fixed `ubuntu-24.04` runner. It submits Criterion output using
+Bencher's `rust_criterion` adapter and records the testbed as
+`github-ubuntu-24.04`. The initial workflow is informational: it does not set
+regression thresholds or fail on alerts. Thresholds should be enabled only
+after the main-branch noise distribution is understood.
+
+To enable history publishing, configure the repository with:
+
+- an Actions secret named `BENCHER_API_KEY` containing a Bencher project API key;
+- an Actions repository variable named `BENCHER_PROJECT` containing the Bencher project slug.
+
+Fork pull requests never receive the secret. They run the benchmark command
+without publishing results. Closed same-repository pull requests are archived
+from Bencher so temporary PR branches do not accumulate indefinitely.
+
+## 6. Linked-artifact tests
 
 On Windows:
 
@@ -92,7 +121,7 @@ Verify that:
 
 Artifact tests do not start Excel.
 
-## 6. Real-Excel qualification
+## 7. Real-Excel qualification
 
 Run the exact final package in each supported environment. At minimum, qualify each supported Excel bitness. When support claims include both Windows 10 and 11 or multiple enterprise channels, include those combinations explicitly.
 

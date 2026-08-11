@@ -40,6 +40,9 @@ jobs:
             - name: Check formatting
               run: cargo fmt --all -- --check
 
+            - name: Install just
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+
             - name: Run Clippy
               run: >-
                   cargo clippy
@@ -56,9 +59,7 @@ jobs:
                   cargo check --package xlfn --features async --locked
 
             - name: Check benchmark compilation
-              run: |
-                  cargo clippy --package xlfn-core --bench async_spawn --features "bench-internals async" --locked -- -D warnings
-                  cargo clippy --package xlfn-core --bench sync_boundary --features bench-internals --locked -- -D warnings
+              run: just bench-check
 
             - name: Run Rust tests
               run: >-
