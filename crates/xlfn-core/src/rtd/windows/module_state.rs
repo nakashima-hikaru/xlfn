@@ -1,4 +1,3 @@
-use super::{GitRevocationDebtClaim, retry_git_revocation_debt};
 use parking_lot::{Condvar, Mutex};
 use std::num::NonZeroU32;
 
@@ -42,6 +41,36 @@ struct ComModuleLifetimeInner {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ComModuleQuiescenceError {
     pub(super) state: ComModuleState,
+}
+
+pub(super) struct GitRevocationDebtClaim {
+    cookie: Option<NonZeroU32>,
+}
+
+impl GitRevocationDebtClaim {
+    pub(super) fn raw(&self) -> u32 {
+        self.cookie
+            .expect("unresolved GIT revocation debt contains a cookie")
+            .get()
+    }
+
+    pub(super) fn resolve(mut self) {
+        let _cookie = self
+            .cookie
+            .take()
+            .expect("GIT revocation debt is resolved once");
+        COM_MODULE_LIFETIME.git_revocation_debt_resolved();
+    }
+}
+
+impl Drop for GitRevocationDebtClaim {
+    fn drop(&mut self) {
+        let Some(cookie) = self.cookie.take() else {
+            return;
+        };
+
+        COM_MODULE_LIFETIME.requeue_git_revocation_debt(cookie);
+    }
 }
 
 pub(super) struct ComModuleLifetime {
@@ -219,7 +248,10 @@ impl ComModuleLifetime {
         self.inner.lock().state.is_quiescent()
     }
 
-    pub(super) fn wait_for_quiescence(&self) -> Result<(), ComModuleQuiescenceError> {
+    pub(super) fn wait_for_quiescence(
+        &self,
+        retry_git_revocation_debt: fn(),
+    ) -> Result<(), ComModuleQuiescenceError> {
         #[cfg(test)]
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
 
