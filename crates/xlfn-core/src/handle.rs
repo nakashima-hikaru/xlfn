@@ -109,6 +109,7 @@ impl<T: ExcelHandleObject> crate::value::MainThreadReturn for Handle<T> {}
 
 struct HandleLeaseState {
     active: AtomicUsize,
+    waiters: AtomicUsize,
     wait_lock: Mutex<()>,
     idle: Condvar,
     cleanup_failure: Mutex<Option<XllError>>,
@@ -122,6 +123,7 @@ impl HandleLeaseState {
     fn new() -> Self {
         Self {
             active: AtomicUsize::new(0),
+            waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             cleanup_failure: Mutex::new(None),
@@ -161,6 +163,8 @@ impl HandleLeaseState {
 
     fn wait_for_idle(&self) {
         let mut guard = self.wait_lock.lock();
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+
         while self.active.load(Ordering::Acquire) != 0 {
             #[cfg(test)]
             if let Some(hook) = self.before_idle_wait_hook.lock().as_ref().cloned() {
@@ -168,6 +172,9 @@ impl HandleLeaseState {
             }
             self.idle.wait(&mut guard);
         }
+
+        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
     }
 
     fn record_cleanup_failure(&self, error: XllError) {
@@ -217,9 +224,12 @@ impl Drop for HandleLease {
             })
             .expect("handle lease count remains balanced");
 
-        if previous == 1 {
+        if previous == 1 && self.state.waiters.load(Ordering::Acquire) != 0 {
             let _wait_guard = self.state.wait_lock.lock();
-            self.state.idle.notify_all();
+
+            if self.state.active.load(Ordering::Acquire) == 0 {
+                self.state.idle.notify_all();
+            }
         }
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -2966,6 +2976,33 @@ mod tests {
 
         waiter.join().unwrap();
         assert_eq!(leases.active(), 0);
+    }
+
+    #[test]
+    fn final_lease_drop_does_not_take_wait_lock_without_waiters() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let leases = Arc::new(HandleLeaseState::new());
+        let lease = leases.acquire();
+
+        // Deliberately occupy the shutdown-only mutex.
+        let wait_guard = leases.wait_lock.lock();
+
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            drop(lease);
+            done_tx.send(()).unwrap();
+        });
+
+        // The ordinary final-drop path must not depend on wait_lock when there
+        // are no shutdown waiters.
+        let completed = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+
+        drop(wait_guard);
+        worker.join().unwrap();
+
+        assert!(completed);
     }
 
     #[test]
