@@ -26,9 +26,9 @@ jobs:
   benchmark:
     name: Criterion benchmarks
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     env:
-      BENCHER_TESTBED: github-ubuntu-24.04
+      BENCHER_TESTBED: github-windows-2025
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +95,7 @@ jobs:
 
       - name: Run benchmarks without publishing
         if: steps.bencher-config.outputs.enabled != 'true'
+        shell: bash
         run: just bench
 
   archive-closed-pr:
