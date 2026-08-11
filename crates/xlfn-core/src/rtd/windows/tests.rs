@@ -2695,3 +2695,50 @@ fn scavenger_deletes_only_fully_marked_registration_for_same_module() {
         unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
     }
 }
+
+#[test]
+fn unwrap_dispatch_variant_enforces_single_level_indirection() {
+    // 1. Direct VARIANT -> returns argument pointer directly
+    let mut direct = VARIANT::default();
+    direct.Anonymous.Anonymous.vt = VT_I4;
+    direct.Anonymous.Anonymous.Anonymous.lVal = 42;
+
+    // SAFETY: `direct` is a readable VARIANT on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut direct) };
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&mut direct as *mut _));
+
+    // 2. VT_BYREF | VT_VARIANT -> VT_I4 -> returns inner VARIANT pointer
+    let mut inner = VARIANT::default();
+    inner.Anonymous.Anonymous.vt = VT_I4;
+    inner.Anonymous.Anonymous.Anonymous.lVal = 42;
+
+    let mut byref_valid = VARIANT::default();
+    byref_valid.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_valid.Anonymous.Anonymous.Anonymous.pvarVal = &mut inner;
+
+    // SAFETY: both VARIANTs are readable on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_valid) };
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&mut inner as *mut _));
+
+    // 3. VT_BYREF | VT_VARIANT -> null -> returns None
+    let mut byref_null = VARIANT::default();
+    byref_null.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_null.Anonymous.Anonymous.Anonymous.pvarVal = ptr::null_mut();
+
+    // SAFETY: `byref_null` is a readable VARIANT on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_null) };
+    assert_eq!(unwrapped, None);
+
+    // 4. VT_BYREF | VT_VARIANT -> VT_BYREF | VT_VARIANT -> returns None (automation spec violation)
+    let mut nested_inner = VARIANT::default();
+    nested_inner.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    nested_inner.Anonymous.Anonymous.Anonymous.pvarVal = &mut inner;
+
+    let mut byref_nested = VARIANT::default();
+    byref_nested.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_nested.Anonymous.Anonymous.Anonymous.pvarVal = &mut nested_inner;
+
+    // SAFETY: all VARIANTs are readable on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_nested) };
+    assert_eq!(unwrapped, None);
+}

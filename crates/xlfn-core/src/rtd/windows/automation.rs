@@ -492,24 +492,27 @@ unsafe fn query_rtd_update_event(argument: *mut VARIANT) -> Option<OwnedRtdUpdat
     }
 }
 
-unsafe fn unwrap_dispatch_variant(mut argument: *mut VARIANT) -> Option<NonNull<VARIANT>> {
-    for _ in 0..4 {
-        let argument_ptr = NonNull::new(argument)?;
-        // SAFETY: the current argument is a readable VARIANT.
-        if unsafe { (*argument_ptr.as_ptr()).Anonymous.Anonymous.vt } != (VT_BYREF | VT_VARIANT) {
-            return Some(argument_ptr);
-        }
-
-        // SAFETY: the checked discriminant selects pvarVal.
-        argument = unsafe {
-            (*argument_ptr.as_ptr())
-                .Anonymous
-                .Anonymous
-                .Anonymous
-                .pvarVal
-        };
+pub(super) unsafe fn unwrap_dispatch_variant(argument: *mut VARIANT) -> Option<NonNull<VARIANT>> {
+    let argument = NonNull::new(argument)?;
+    // SAFETY: the caller supplies a readable argument VARIANT.
+    if unsafe { (*argument.as_ptr()).Anonymous.Anonymous.vt } != (VT_BYREF | VT_VARIANT) {
+        return Some(argument);
     }
-    None
+
+    // SAFETY: the checked discriminant selects pvarVal.
+    let referenced =
+        NonNull::new(unsafe { (*argument.as_ptr()).Anonymous.Anonymous.Anonymous.pvarVal })?;
+
+    // Automation permits only one level of VT_BYREF | VT_VARIANT indirection.
+    // Reject malformed nested references instead of following arbitrary
+    // pointer chains.
+    // SAFETY: a valid VT_BYREF | VT_VARIANT argument points to a readable
+    // referenced VARIANT.
+    if unsafe { (*referenced.as_ptr()).Anonymous.Anonymous.vt } == (VT_BYREF | VT_VARIANT) {
+        return None;
+    }
+
+    Some(referenced)
 }
 
 unsafe fn write_i4_dispatch_result(result: *mut VARIANT, value: i32) {

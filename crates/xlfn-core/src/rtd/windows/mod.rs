@@ -48,7 +48,7 @@ use automation::{
     DISPID_CONNECT_DATA, DISPID_DISCONNECT_DATA, DISPID_HEARTBEAT, DISPID_REFRESH_DATA,
     DISPID_SERVER_START, DISPID_SERVER_TERMINATE, IID_NULL, MAX_RTD_TOPIC_PARTS,
     checked_topic_part_count, checked_topic_part_length, topic_key_from_safearray,
-    write_bstr_variant, write_refresh_data,
+    unwrap_dispatch_variant, write_bstr_variant, write_refresh_data,
 };
 use class_factory::IID_ICLASS_FACTORY;
 pub(super) use class_factory::dll_get_class_object;
