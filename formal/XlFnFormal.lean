@@ -22,3 +22,9 @@ import XlFnFormal.Composition.Invariant
 import XlFnFormal.Composition.Safety
 import XlFnFormal.Composition.Checker
 import XlFnFormal.Composition.Refinement
+import XlFnFormal.Handle.Model
+import XlFnFormal.Handle.Transition
+import XlFnFormal.Handle.Invariant
+import XlFnFormal.Handle.Safety
+import XlFnFormal.Handle.Checker
+import XlFnFormal.Handle.Counterexample
