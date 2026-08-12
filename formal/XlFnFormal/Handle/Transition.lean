@@ -10,7 +10,8 @@ inductive Event where
   | beginInitialize
   | finishInitialize
   | publishTopic
-  | rollbackPending
+  | rollbackPendingReuse (token : Token) (nextGeneration : Generation)
+  | rollbackPendingRetire (token : Token)
   | insertFresh
   | insertReuse (slot : SlotId) (generation : Generation)
   | removeReuse (token : Token) (nextGeneration : Generation)
@@ -30,13 +31,13 @@ inductive Step : State → Event → State → Prop where
 
   | endPrepare
       {s : State}
-      (hPrep : s.activePrepares > 0) :
+      (hPrep : s.activePrepares > s.activeInitializers) :
       Step s .endPrepare { s with activePrepares := s.activePrepares - 1 }
 
   | beginInitialize
       {s : State}
-      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
-      (hPrep : s.activePrepares > 0) :
+      (hPhase : s.phase = .«open»)
+      (hPrep : s.activePrepares > s.activeInitializers) :
       Step s .beginInitialize { s with activeInitializers := s.activeInitializers + 1 }
 
   | finishInitialize
@@ -50,10 +51,28 @@ inductive Step : State → Event → State → Prop where
       (hInit : s.activeInitializers > 0) :
       Step s .publishTopic s
 
-  | rollbackPending
+  | rollbackPendingReuse
       {s : State}
-      (hInit : s.activeInitializers > 0) :
-      Step s .rollbackPending s
+      {token : Token}
+      {nextGen : Generation}
+      (hInit : s.activeInitializers > 0)
+      (hAuth : s.AuthenticatedFor token)
+      (hInBounds : token.slot < s.slots.length)
+      (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
+      (hNextGen : nextGeneration? token.generation = some nextGen) :
+      Step s (.rollbackPendingReuse token nextGen)
+        { s with slots := s.slots.set token.slot (.vacant nextGen) }
+
+  | rollbackPendingRetire
+      {s : State}
+      {token : Token}
+      (hInit : s.activeInitializers > 0)
+      (hAuth : s.AuthenticatedFor token)
+      (hInBounds : token.slot < s.slots.length)
+      (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
+      (hExhausted : nextGeneration? token.generation = none) :
+      Step s (.rollbackPendingRetire token)
+        { s with slots := s.slots.set token.slot .retired }
 
   | insertFresh
       {s : State}

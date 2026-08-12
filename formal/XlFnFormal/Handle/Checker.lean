@@ -14,13 +14,13 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .endPrepare =>
-      if s.activePrepares > 0 then
+      if s.activePrepares > s.activeInitializers then
         some { s with activePrepares := s.activePrepares - 1 }
       else
         none
 
   | .beginInitialize =>
-      if (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares > 0 then
+      if s.phase = .«open» ∧ s.activePrepares > s.activeInitializers then
         some { s with activeInitializers := s.activeInitializers + 1 }
       else
         none
@@ -37,9 +37,21 @@ def apply? (s : State) (e : Event) : Option State :=
       else
         none
 
-  | .rollbackPending =>
-      if s.activeInitializers > 0 then
-        some s
+  | .rollbackPendingReuse token nextGen =>
+      if hPre : s.activeInitializers > 0 ∧ s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = some nextGen then
+        if hLive : s.slots.get ⟨token.slot, hPre.2.2.1⟩ = .live token.generation then
+          some { s with slots := s.slots.set token.slot (.vacant nextGen) }
+        else
+          none
+      else
+        none
+
+  | .rollbackPendingRetire token =>
+      if hPre : s.activeInitializers > 0 ∧ s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = none then
+        if hLive : s.slots.get ⟨token.slot, hPre.2.2.1⟩ = .live token.generation then
+          some { s with slots := s.slots.set token.slot .retired }
+        else
+          none
       else
         none
 
@@ -123,7 +135,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [if_neg hPre] at h
         cases h
   | endPrepare =>
-      by_cases hPre : s.activePrepares > 0
+      by_cases hPre : s.activePrepares > s.activeInitializers
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
@@ -132,7 +144,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [if_neg hPre] at h
         cases h
   | beginInitialize =>
-      by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares > 0
+      by_cases hPre : s.phase = .«open» ∧ s.activePrepares > s.activeInitializers
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
@@ -158,14 +170,31 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · simp only [apply?] at h
         rw [if_neg hPre] at h
         cases h
-  | rollbackPending =>
-      by_cases hPre : s.activeInitializers > 0
+  | rollbackPendingReuse token nextGen =>
+      by_cases hPre : s.activeInitializers > 0 ∧ s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = some nextGen
+      · by_cases hLive : s.slots.get ⟨token.slot, hPre.2.2.1⟩ = .live token.generation
+        · simp only [apply?] at h
+          rw [dif_pos hPre, dif_pos hLive] at h
+          cases h
+          exact Step.rollbackPendingReuse hPre.1 hPre.2.1 hPre.2.2.1 hLive hPre.2.2.2
+        · simp only [apply?] at h
+          rw [dif_pos hPre, dif_neg hLive] at h
+          cases h
       · simp only [apply?] at h
-        rw [if_pos hPre] at h
+        rw [dif_neg hPre] at h
         cases h
-        exact Step.rollbackPending hPre
+  | rollbackPendingRetire token =>
+      by_cases hPre : s.activeInitializers > 0 ∧ s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = none
+      · by_cases hLive : s.slots.get ⟨token.slot, hPre.2.2.1⟩ = .live token.generation
+        · simp only [apply?] at h
+          rw [dif_pos hPre, dif_pos hLive] at h
+          cases h
+          exact Step.rollbackPendingRetire hPre.1 hPre.2.1 hPre.2.2.1 hLive hPre.2.2.2
+        · simp only [apply?] at h
+          rw [dif_pos hPre, dif_neg hLive] at h
+          cases h
       · simp only [apply?] at h
-        rw [if_neg hPre] at h
+        rw [dif_neg hPre] at h
         cases h
   | insertFresh =>
       by_cases hPre : s.MayInsert

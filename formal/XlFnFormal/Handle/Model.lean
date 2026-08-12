@@ -78,6 +78,9 @@ def MayInsert (s : State) : Prop :=
 instance (s : State) : Decidable s.MayInsert :=
   inferInstanceAs (Decidable (s.phase = .«open» ∨ (s.phase = .drainingPrepares ∧ s.activeInitializers > 0)))
 
+def OperationInvariant (s : State) : Prop :=
+  s.activeInitializers ≤ s.activePrepares
+
 def CloseCertified (s : State) : Prop :=
   s.phase = .closed ∧
   s.activePrepares = 0 ∧
@@ -97,6 +100,11 @@ theorem initialState_noLiveSlots (session : SessionId) :
     NoLiveSlots (initialState session).slots := by
   intro slot hSlot
   simp [initialState] at hSlot
+
+theorem initialState_operationInvariant (session : SessionId) :
+    OperationInvariant (initialState session) := by
+  dsimp [OperationInvariant, initialState]
+  exact Nat.le_refl 0
 
 end State
 
