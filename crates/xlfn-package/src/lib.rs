@@ -39,6 +39,7 @@ mod architecture;
 mod artifact;
 mod bundle;
 mod commit;
+mod def;
 mod error;
 mod fs_identity;
 mod manifest;
@@ -63,6 +64,7 @@ pub use bundle::{
     stage_bundle, verify_bundle_files,
 };
 pub use commit::{CommitSourceLease, PreparedDirectoryCommit, PreparedPackageCommit};
+pub use def::ModuleDefinition;
 pub use error::{
     EffectiveCrtPolicy, ImportTarget, PackageError, PackageResult, REQUIRED_XLL_EXPORTS,
     SYSTEM_IMPORT_POLICY_VERSION,

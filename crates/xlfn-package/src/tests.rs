@@ -1543,3 +1543,31 @@ fn verify_xll_exports_rejects_unmanifested_custom_entry_and_ordinals() {
         .extend([ExportAddressIndex(1), ExportAddressIndex(2)]);
     assert!(verify_xll_exports(&info, &xll_path, &[]).is_err());
 }
+
+#[test]
+fn default_xll_module_definition_marks_only_com_exports_private() {
+    let def = ModuleDefinition::default_xll();
+    assert!(def.starts_with("EXPORTS\n"));
+    assert!(def.contains("    DllCanUnloadNow PRIVATE\n"));
+    assert!(def.contains("    DllGetClassObject PRIVATE\n"));
+    assert!(def.contains("    xlAutoOpen\n"));
+    assert!(def.contains("    xlAutoClose\n"));
+    assert!(def.contains("    xlAutoFree12\n"));
+    assert!(def.contains("    xlAddInManagerInfo12\n"));
+    assert!(!def.contains("xlAutoOpen PRIVATE"));
+    assert!(!def.contains("xlAutoClose PRIVATE"));
+}
+
+#[test]
+fn custom_exports_module_definition_preserves_public_udf_exports() {
+    let def = ModuleDefinition::generate([
+        "xlAutoOpen",
+        "xll_add",
+        "DllCanUnloadNow",
+        "DllGetClassObject",
+    ]);
+    assert!(def.contains("    xll_add\n"));
+    assert!(!def.contains("xll_add PRIVATE"));
+    assert!(def.contains("    DllCanUnloadNow PRIVATE\n"));
+    assert!(def.contains("    DllGetClassObject PRIVATE\n"));
+}

@@ -1085,13 +1085,6 @@ fn expand_excel_addin(
         > = ::std::sync::OnceLock::new();
 
         #gating
-        #[cfg(all(target_os = "windows", target_env = "msvc"))]
-        #[used]
-        #[unsafe(link_section = ".drectve")]
-        static __XLFN_MSVC_LINKER_OPTIONS: [u8; b" /IGNORE:4104".len()] =
-            *b" /IGNORE:4104";
-
-        #gating
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
@@ -1839,7 +1832,7 @@ mod tests {
         })
         .unwrap();
         let expanded = expand_excel_addin(quote!(), item).unwrap().to_string();
-        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 10);
+        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 9);
     }
 
     #[test]

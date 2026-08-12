@@ -119,7 +119,7 @@ pub(crate) fn configure_wrapper(
     resolved: ResolvedCrtPolicy,
     target: &str,
 ) -> Result<()> {
-    if resolved.policy == CrtPolicy::Inherit {
+    if !target.ends_with("-pc-windows-msvc") {
         return Ok(());
     }
     validate_explicit_policy_target(resolved.policy, target)?;
@@ -157,6 +157,7 @@ pub(crate) fn run_wrapper() -> Result<ExitStatus> {
     let policy = match policy_value.as_str() {
         "static" => CrtPolicy::Static,
         "dynamic" => CrtPolicy::Dynamic,
+        "inherit" => CrtPolicy::Inherit,
         value => bail!("internal rustc wrapper has invalid CRT policy {value:?}"),
     };
     let args = wrapper_arguments(args, policy, &target);
@@ -190,14 +191,50 @@ fn wrapper_arguments(
     selected_target: &OsStr,
 ) -> Vec<OsString> {
     if rustc_invocation_targets(&args, selected_target) {
-        args.push(OsString::from("-C"));
-        args.push(OsString::from(match policy {
-            CrtPolicy::Static => "target-feature=+crt-static",
-            CrtPolicy::Dynamic => "target-feature=-crt-static",
-            CrtPolicy::Inherit => return args,
-        }));
+        match policy {
+            CrtPolicy::Static => {
+                args.push(OsString::from("-C"));
+                args.push(OsString::from("target-feature=+crt-static"));
+            }
+            CrtPolicy::Dynamic => {
+                args.push(OsString::from("-C"));
+                args.push(OsString::from("target-feature=-crt-static"));
+            }
+            CrtPolicy::Inherit => {}
+        }
+        if is_cdylib_link(&args) {
+            match write_temp_def_file() {
+                Ok(def_path) => {
+                    args.push(OsString::from("-C"));
+                    args.push(OsString::from(format!(
+                        "link-arg=/DEF:{}",
+                        def_path.display()
+                    )));
+                }
+                Err(_error) => {}
+            }
+        }
     }
     args
+}
+
+fn is_cdylib_link(args: &[OsString]) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "--crate-type" && pair[1] == "cdylib")
+        || args.iter().any(|argument| {
+            argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix("--crate-type="))
+                .is_some_and(|crate_type| crate_type.split(',').any(|t| t == "cdylib"))
+        })
+}
+
+fn write_temp_def_file() -> std::io::Result<PathBuf> {
+    let temp_dir = std::env::temp_dir();
+    let def_path = temp_dir.join("xlfn_xll_module.def");
+    let content = xlfn_package::ModuleDefinition::default_xll();
+    std::fs::write(&def_path, content)?;
+    Ok(def_path)
 }
 
 fn rustc_invocation_targets(args: &[OsString], selected_target: &OsStr) -> bool {
@@ -336,15 +373,36 @@ mod tests {
     }
 
     #[test]
-    fn inherit_is_a_wrapper_noop() {
+    fn non_msvc_target_is_a_wrapper_noop() {
         let mut command = Command::new("cargo");
         configure_wrapper(
             &mut command,
             ResolvedCrtPolicy::resolve(Some(CrtPolicy::Inherit), None),
-            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu",
         )
         .unwrap();
         assert!(command.get_envs().next().is_none());
+    }
+
+    #[test]
+    fn cdylib_link_injects_def_file() {
+        let input = vec![
+            "rustc".into(),
+            "--target".into(),
+            "x86_64-pc-windows-msvc".into(),
+            "--crate-type".into(),
+            "cdylib".into(),
+        ];
+        let output = wrapper_arguments(
+            input,
+            CrtPolicy::Inherit,
+            OsStr::new("x86_64-pc-windows-msvc"),
+        );
+        assert!(
+            output
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("link-arg=/DEF:"))
+        );
     }
 
     #[test]
