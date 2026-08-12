@@ -1104,6 +1104,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    static COMPOSITION_TRACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct RetryClose;
 
     struct RetryState {
@@ -1625,6 +1627,190 @@ mod tests {
         let failure_trace = failure_runtime.ghost_trace_json();
         assert!(failure_trace.contains("fail_stopped"));
         check("fail-stop", failure_trace);
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::new();
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        crate::diagnostics::reset_diagnostic_router().unwrap();
+        crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+        crate::diagnostics::report_no_unwind("composition_checker_trace", &XllError::Panic);
+
+        assert_eq!(close_addin::<CleanClose>(&runtime), 1);
+        let trace = runtime.composition_trace_json();
+        if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TRACE") {
+            std::fs::write(path, &trace).expect("write Rust composition trace");
+        }
+        let mut child = Command::new(&checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start composition_trace_checker");
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .expect("failed to write composition trace");
+        let output = child
+            .wait_with_output()
+            .expect("failed to wait for composition_trace_checker");
+        assert!(
+            output.status.success(),
+            "Lean checker rejected Rust composition trace: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_owner_takeover_trace_is_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::new();
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        crate::diagnostics::reset_diagnostic_router().unwrap();
+        crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+        crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::Panic);
+
+        let first = runtime.begin_final_close().unwrap();
+        drop(first);
+        let second = runtime.begin_final_close().unwrap();
+        drop(second);
+
+        assert_eq!(close_addin::<CleanClose>(&runtime), 1);
+        let trace = runtime.composition_trace_json();
+        if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TAKEOVER_TRACE") {
+            std::fs::write(path, &trace).expect("write Rust composition takeover trace");
+        }
+        let mut child = Command::new(&checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start composition_trace_checker");
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .expect("failed to write composition takeover trace");
+        let output = child
+            .wait_with_output()
+            .expect("failed to wait for composition_trace_checker");
+        assert!(
+            output.status.success(),
+            "Lean checker rejected Rust composition takeover trace: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_uncommitted_and_rollback_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let check = |label: &str, trace: String, path_name: &str| {
+            if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
+                let path = std::path::Path::new(&directory).join(path_name);
+                std::fs::write(path, &trace).expect("write Rust composition path trace");
+            }
+            let mut child = Command::new(&checker)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|error| {
+                    panic!("failed to start composition checker for {label}: {error}")
+                });
+            child
+                .stdin
+                .take()
+                .expect("composition checker stdin is piped")
+                .write_all(trace.as_bytes())
+                .unwrap_or_else(|error| {
+                    panic!("failed to write {label} composition trace: {error}")
+                });
+            let output = child.wait_with_output().unwrap_or_else(|error| {
+                panic!("failed to wait for {label} composition checker: {error}")
+            });
+            assert!(
+                output.status.success(),
+                "Lean checker rejected {label} Rust composition trace: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        let uncommitted = std::sync::Arc::new(Runtime::new());
+        let mut opening = uncommitted.begin_open().unwrap();
+        let request_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let request_barrier_for_hook = std::sync::Arc::clone(&request_barrier);
+        uncommitted.set_composition_request_hook(Some(std::sync::Arc::new(move || {
+            request_barrier_for_hook.wait();
+        })));
+        let closing_runtime = std::sync::Arc::clone(&uncommitted);
+        let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+        let close_waiter = std::thread::spawn(move || {
+            let close_attempt = closing_runtime
+                .begin_final_close()
+                .expect("final close must acquire after open rejection");
+            owner_tx.send(()).expect("final close owner signal");
+            drop(close_attempt);
+        });
+        request_barrier.wait();
+        let _ = uncommitted.begin_close();
+        assert!(uncommitted.finish_open(&mut opening, Vec::new()).is_err());
+        owner_rx.recv().expect("final close owner was not acquired");
+        close_waiter.join().expect("final close waiter panicked");
+        uncommitted.set_composition_request_hook(None);
+        assert_eq!(close_addin::<CleanClose>(&uncommitted), 1);
+        check(
+            "uncommitted final close",
+            uncommitted.composition_trace_json(),
+            "rust-composition-uncommitted-trace.json",
+        );
+
+        let rollback = Runtime::new();
+        let mut opening = rollback.begin_open().unwrap();
+        assert!(opening.fail());
+        let mut callbacks = HostCallbackSession::new();
+        let outcome = rollback_open::<CleanClose>(&rollback, &mut callbacks);
+        assert!(outcome.unload_safe());
+        check(
+            "open rollback",
+            rollback.composition_trace_json(),
+            "rust-composition-open-rollback-trace.json",
+        );
     }
 
     #[test]

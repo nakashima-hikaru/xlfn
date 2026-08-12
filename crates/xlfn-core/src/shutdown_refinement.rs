@@ -941,13 +941,22 @@ impl GhostMachine {
 
 pub(crate) struct ShutdownGhost {
     inner: Mutex<GhostMachine>,
+    composition: Mutex<Option<Arc<crate::composition_refinement::CompositionTrace>>>,
 }
 
 impl ShutdownGhost {
     pub(crate) const fn new() -> Self {
         Self {
             inner: Mutex::new(GhostMachine::new()),
+            composition: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn set_composition(
+        &self,
+        composition: Arc<crate::composition_refinement::CompositionTrace>,
+    ) {
+        *self.composition.lock() = Some(composition);
     }
 
     pub(crate) fn begin_generation(
@@ -959,21 +968,30 @@ impl ShutdownGhost {
     }
 
     pub(crate) fn apply(&self, event: GhostEvent) -> Result<(), GhostViolation> {
-        self.inner.lock().apply(event)
+        let result = self.inner.lock().apply(event.clone());
+        if result.is_ok()
+            && !matches!(event, GhostEvent::FinishClose)
+            && let Some(composition) = self.composition.lock().as_ref().cloned()
+        {
+            composition
+                .record(crate::composition_refinement::CompositionEvent::LiftShutdown(event));
+        }
+        result
     }
 
     pub(crate) fn record_event(&self, event: GhostEvent) {
-        let mut machine = self.inner.lock();
-        if !machine.active {
+        if !self.active() {
             return;
         }
-        machine
-            .apply(event)
+        self.apply(event)
             .unwrap_or_else(|violation| panic!("shutdown refinement violation: {violation}"));
     }
 
     pub(crate) fn fail_stop(&self, reason: GhostFailure) -> Result<(), GhostViolation> {
-        self.inner.lock().fail_stop(reason)
+        if !self.active() {
+            return Ok(());
+        }
+        self.apply(GhostEvent::FailStop(reason))
     }
 
     pub(crate) fn record_returned_success(&self) -> Result<(), GhostViolation> {

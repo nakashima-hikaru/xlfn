@@ -547,6 +547,11 @@ where
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
+pub(crate) fn refinement_snapshot() -> GhostDiagnosticsSnapshot {
+    router().ghost_snapshot()
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
 pub(crate) fn record_ghost_diagnostics_stopped(
     ghost: crate::shutdown_refinement::GhostHandle,
 ) -> XllResult<()> {

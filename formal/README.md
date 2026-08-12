@@ -188,10 +188,12 @@ committed session is retired.
 `commitOpen` creates a generation, `finishCommittedShutdown` moves the
 Shutdown session to `closed`, `publishCommittedClosed` publishes the
 lifecycle state, `retireCommittedShutdown` models the returned-success
-record, and `releaseCleanupOwner` is the final return-safety point. The
-uncommitted final-close and open-rollback transitions remain session-free.
-The intermediate `closed + some Closed` state is therefore intentional and
-requires the final-close cleanup owner.
+record, and `releaseCleanupOwner` is the final return-safety point. An
+abandoned close owner may release only its ownership while the lifecycle is
+still `closing`, leaving the Shutdown session available for a takeover; the
+`closed + some Closed` state still requires retirement before that owner can
+be released. The uncommitted final-close and open-rollback transitions remain
+session-free.
 
 `Composition/Invariant.lean` proves `Valid` preservation and reachable-trace
 validity, including lifecycle/Shutdown generation equality and preservation of
@@ -225,16 +227,18 @@ intermediate full state is reconstructed by `Composition.apply?`:
 ```
 
 Parameterized events carry their concrete attempt/resource payloads, and
-`liftShutdown` nests an existing Shutdown event. The three replay fixtures in
-`fixtures/composition/` cover committed close, uncommitted final close, and
-open rollback. They can be checked with:
+`liftShutdown` nests an existing Shutdown event. The four replay fixtures in
+`fixtures/composition/` cover committed close, uncommitted final close, open
+rollback, and committed-owner takeover. They can be checked with:
 
 ```text
 lake exe composition_trace_checker < fixtures/composition/committed.json
 ```
 
-The generic refinement boundary is now in place. A Rust producer still needs
-to emit these composition events at the lifecycle linearization points and
-to convert the observed close/rollback certificate snapshots into the event
-resource payloads; that adapter is deliberately separate from the executable
-abstract checker.
+The generic refinement boundary is now in place. The Rust feature-gated
+`composition_refinement` producer emits composition events at the lifecycle
+linearization points and converts the observed close/rollback certificate
+state into resource payloads. The CI Lean job feeds those generated traces to
+`composition_trace_checker`, including the committed-owner takeover path. The
+producer uses checked attempt allocation and fail-stop close-epoch advancing,
+so the concrete side does not rely on wrapping `u64` counters.

@@ -155,14 +155,16 @@ theorem Step.valid_preserved
         hValid.1 hLifecycleStep
       exact ⟨hLifecycleValid, by simp [State.SessionConsistent], by
         simp [State.CurrentShutdownCertified]⟩
-  | releaseCleanupOwner hNoSession hLifecycle =>
+  | releaseCleanupOwner hAllowed hLifecycle =>
       have hLifecycleValid := Lifecycle.Step.valid_preserved
         hValid.1 hLifecycle
+      have hConsistent := hValid.2.1
       cases hLifecycle
       exact ⟨hLifecycleValid, by
         cases hPhase : s.lifecycle.phase <;>
+          cases hSession : s.currentShutdown <;>
           simp_all [State.SessionConsistent], by
-        simp [State.CurrentShutdownCertified]⟩
+        simpa [State.CurrentShutdownCertified] using hValid.2.2⟩
 
 theorem Step.unloadCertificationConsistent_preserved
     {s t : State} {event : Event}
@@ -203,7 +205,7 @@ theorem Step.unloadCertificationConsistent_preserved
       simp [State.UnloadCertificationConsistent]
   | finishOpenRollback hNoSession hCertificate =>
       simp [State.UnloadCertificationConsistent]
-  | releaseCleanupOwner hNoSession hLifecycle =>
+  | releaseCleanupOwner hAllowed hLifecycle =>
       cases hLifecycle <;>
         simp_all [State.UnloadCertificationConsistent]
 

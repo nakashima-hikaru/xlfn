@@ -60,6 +60,10 @@ pub struct Runtime<S> {
     async_manager: crate::async_udf::AsyncManager,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: OnceLock<crate::shutdown_refinement::GhostHandle>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    composition: OnceLock<Arc<crate::composition_refinement::CompositionTrace>>,
+    #[cfg(test)]
+    composition_request_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
     #[cfg(test)]
     test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -98,6 +102,10 @@ impl<S> Runtime<S> {
             async_manager: crate::async_udf::AsyncManager::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: OnceLock::new(),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            composition: OnceLock::new(),
+            #[cfg(test)]
+            composition_request_hook: Mutex::new(None),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
@@ -109,6 +117,83 @@ impl<S> Runtime<S> {
             self.ghost
                 .get_or_init(|| Arc::new(crate::shutdown_refinement::ShutdownGhost::new())),
         )
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn composition_trace(&self) -> &crate::composition_refinement::CompositionTrace {
+        let trace = self
+            .composition
+            .get_or_init(|| Arc::new(crate::composition_refinement::CompositionTrace::new()));
+        self.ghost_handle().set_composition(Arc::clone(trace));
+        trace.as_ref()
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_composition_event(&self, event: crate::composition_refinement::CompositionEvent) {
+        self.composition_trace().record(event);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_composition_begin_open(&self, sampled_epoch: u64, attempt: u64) {
+        self.composition_trace().begin_open(sampled_epoch, attempt);
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn mark_composition_return_pending(&self) {
+        self.composition_trace().mark_return_pending();
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn finish_composition_return(&self) {
+        self.composition_trace().finish_return();
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn mark_composition_terminal_pending(&self) {
+        self.composition_trace().mark_terminal_pending();
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn composition_quiescent_resources(&self) -> crate::shutdown_refinement::GhostResources {
+        let ingress = crate::ingress::global_ingress();
+        let diagnostics = crate::diagnostics::refinement_snapshot();
+        let state_owned_by_runtime = self.state.load_full().is_some();
+        let return_blocks = self
+            .returns
+            .get()
+            .map_or(0, |tracker| tracker.refinement_obligations());
+        #[cfg(feature = "async")]
+        let async_executor_running = !self.async_manager.is_stopped();
+        #[cfg(not(feature = "async"))]
+        let async_executor_running = false;
+        crate::shutdown_refinement::GhostResources {
+            ingress_open: ingress.phase() == crate::ingress::PHASE_OPEN,
+            external_entries: ingress.active_calls() as u64,
+            registrations: self.registrations.lock().len() as u64,
+            event_registrations: self.event_registrations.lock().len() as u64,
+            registration_state_known: !self.registration_state_unknown(),
+            callback_gate_open: crate::callback_gate::is_open(),
+            active_calls: ingress.active_udfs() as u64,
+            return_blocks,
+            return_blocks_in_free: 0,
+            return_free_operations: 0,
+            async_tasks: u64::from(async_executor_running),
+            async_executor_running,
+            rtd_operations: 0,
+            subscriptions: u64::from(self.subscriptions.lock().is_some()),
+            callbacks: 0,
+            rtd_class_factories: 0,
+            rtd_servers: 0,
+            rtd_server_locks: 0,
+            handle_operations: 0,
+            handles: u64::from(self.handles.lock().is_some()),
+            state_unique: !state_owned_by_runtime,
+            addin_quiesced: !state_owned_by_runtime,
+            state_owned_by_runtime,
+            diagnostics_pending: diagnostics.pending,
+            diagnostics_running: diagnostics.running,
+            cleanup_issues: 0,
+        }
     }
 
     #[must_use]
@@ -137,7 +222,7 @@ impl<S> Runtime<S> {
             });
         }
 
-        let attempt_id = self.next_lifecycle_attempt_id();
+        let attempt_id = self.next_lifecycle_attempt_id()?;
         let tracker = self.return_tracker();
         tracker.reopen_admission()?;
 
@@ -151,6 +236,8 @@ impl<S> Runtime<S> {
         self.open_attempt_id.store(attempt_id, Ordering::Release);
         self.phase
             .store(LifecyclePhase::Opening as u8, Ordering::Release);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_composition_begin_open(expected_close_epoch, attempt_id);
         Ok(OpenAttemptGuard {
             runtime: self,
             attempt_id,
@@ -163,13 +250,48 @@ impl<S> Runtime<S> {
         self.begin_open_if_epoch(self.close_epoch())
     }
 
-    fn next_lifecycle_attempt_id(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn set_composition_request_hook(
+        &self,
+        hook: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    ) {
+        *self.composition_request_hook.lock() = hook;
+    }
+
+    fn next_lifecycle_attempt_id(&self) -> XllResult<u64> {
         loop {
-            let attempt_id = self.next_lifecycle_attempt.fetch_add(1, Ordering::Relaxed);
-            if attempt_id != 0 {
-                return attempt_id;
+            let attempt_id = self.next_lifecycle_attempt.load(Ordering::Relaxed);
+            let Some(next) = attempt_id.checked_add(1) else {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4154_544d_4f56_464c,
+                });
+            };
+            if attempt_id == 0 {
+                return Err(XllError::Internal {
+                    diagnostic_id: 0x4154_544d_5a45_524f,
+                });
+            }
+            match self.next_lifecycle_attempt.compare_exchange_weak(
+                attempt_id,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(attempt_id),
+                Err(_) => continue,
             }
         }
+    }
+
+    fn advance_close_epoch(&self) {
+        self.close_epoch
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                epoch.checked_add(1)
+            })
+            .unwrap_or_else(|_| {
+                tracing::error!("lifecycle close epoch exhausted; fail-stopping");
+                std::process::abort();
+            });
     }
 
     pub(crate) fn close_epoch(&self) -> u64 {
@@ -221,6 +343,8 @@ impl<S> Runtime<S> {
             .collect();
         self.registrations.lock().extend(new_items);
         let can_commit = self.phase() == LifecyclePhase::Opening;
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let mut committed_resources = None;
         if can_commit {
             let ingress = crate::ingress::global_ingress();
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -239,10 +363,18 @@ impl<S> Runtime<S> {
                         crate::diagnostics::connect_ghost(Arc::clone(&ghost), |snapshot| {
                             resources.diagnostics_running = snapshot.running;
                             resources.diagnostics_pending = snapshot.pending;
+                            #[cfg(any(test, feature = "shutdown-refinement"))]
+                            let trace_resources = resources.clone();
                             ghost
                                 .begin_generation(attempt.attempt_id, resources)
                                 .map_err(|_| XllError::Internal {
                                     diagnostic_id: 0x4748_4f53_5447_454e,
+                                })
+                                .map(|()| {
+                                    #[cfg(any(test, feature = "shutdown-refinement"))]
+                                    {
+                                        committed_resources = Some(trace_resources);
+                                    }
                                 })
                         })?;
                         crate::rtd::set_ghost(Arc::clone(&ghost));
@@ -273,6 +405,22 @@ impl<S> Runtime<S> {
                     Ok::<(), XllError>(())
                 })
                 .map_err(|_| XllError::Closing)??;
+        }
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if can_commit {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::CommitOpen {
+                    attempt: attempt.attempt_id,
+                    resources: committed_resources
+                        .expect("committed open must initialize composition resources"),
+                },
+            );
+        } else {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
+                    attempt: attempt.attempt_id,
+                },
+            );
         }
         self.open_attempt_id.store(0, Ordering::Release);
         attempt.active = false;
@@ -367,7 +515,7 @@ impl<S> Runtime<S> {
     pub(crate) fn begin_close(&self) -> bool {
         let _wait_guard = self.wait_lock.lock();
         crate::ingress::global_ingress().with_linearization(|| {
-            if self.phase() == LifecyclePhase::Open {
+            if matches!(self.phase(), LifecyclePhase::Opening | LifecyclePhase::Open) {
                 if let Some(tracker) = self.returns.get() {
                     tracker.close_admission();
                 }
@@ -387,7 +535,15 @@ impl<S> Runtime<S> {
         // and acquisition of its open-attempt token while the phase is Closed.
         // This epoch is deliberately not part of CloseCertificate: a waiting
         // final-close caller may advance it while the active owner finishes.
-        self.close_epoch.fetch_add(1, Ordering::AcqRel);
+        self.advance_close_epoch();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_composition_event(
+            crate::composition_refinement::CompositionEvent::RequestFinalClose,
+        );
+        #[cfg(test)]
+        if let Some(hook) = self.composition_request_hook.lock().clone() {
+            hook();
+        }
         if let Some(tracker) = self.returns.get() {
             tracker.close_admission();
         }
@@ -423,6 +579,10 @@ impl<S> Runtime<S> {
                     && !self.close_attempt_active.load(Ordering::Acquire)
                 {
                     self.close_attempt_active.store(true, Ordering::Release);
+                    #[cfg(any(test, feature = "shutdown-refinement"))]
+                    self.record_composition_event(
+                        crate::composition_refinement::CompositionEvent::AcquireFinalCloseOwner,
+                    );
                     Some(true)
                 } else {
                     None
@@ -448,6 +608,10 @@ impl<S> Runtime<S> {
             }
             if !self.close_attempt_active.load(Ordering::Acquire) {
                 self.close_attempt_active.store(true, Ordering::Release);
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                self.record_composition_event(
+                    crate::composition_refinement::CompositionEvent::AcquireOpenRollbackOwner,
+                );
                 return Some(CloseAttemptGuard { runtime: self });
             }
             self.lifecycle_changed.wait(&mut wait_guard);
@@ -620,12 +784,16 @@ impl<S> Runtime<S> {
             });
         }
         if self.ghost_handle().active() {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::RetireCommittedShutdown,
+            );
             self.ghost_handle()
                 .record_returned_success()
                 .map_err(|_| XllError::Internal {
                     diagnostic_id: 0x434c_4f53_5452_5355,
                 })?;
         }
+        self.mark_composition_return_pending();
         Ok(())
     }
 
@@ -638,6 +806,17 @@ impl<S> Runtime<S> {
         self.ghost_handle()
             .trace_json()
             .expect("ghost trace serialization")
+    }
+
+    #[cfg(any(test, feature = "shutdown-trace"))]
+    #[allow(
+        dead_code,
+        reason = "Trace extraction is consumed by the feature-gated Lean checker test"
+    )]
+    pub(crate) fn composition_trace_json(&self) -> String {
+        self.composition_trace()
+            .trace_json()
+            .expect("composition trace serialization")
     }
 }
 
@@ -826,9 +1005,17 @@ impl<S> Runtime<S> {
                 diagnostic_id: 0x4f50_5242_5048_4153,
             });
         }
+        crate::callback_gate::close_from_runtime();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_composition_event(
+            crate::composition_refinement::CompositionEvent::FinishOpenRollback(
+                self.composition_quiescent_resources(),
+            ),
+        );
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.mark_composition_terminal_pending();
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
-        crate::callback_gate::close_from_runtime();
         self.lifecycle_changed.notify_all();
         crate::rtd::certify_module_unload();
         #[cfg(test)]
@@ -892,16 +1079,36 @@ impl<S> Runtime<S> {
         self.layers.store(None);
         let _wait_guard = self.wait_lock.lock();
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        if self.ghost_handle().active() {
+        let committed = self.ghost_handle().active();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if committed {
+            let event = crate::shutdown_refinement::GhostEvent::FinishClose;
             self.ghost_handle()
-                .apply(crate::shutdown_refinement::GhostEvent::FinishClose)
+                .apply(event.clone())
                 .map_err(|_| XllError::Internal {
                     diagnostic_id: 0x434c_4f53_5447_484f,
                 })?;
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
+            );
         }
         crate::callback_gate::close_from_runtime();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if !committed {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(
+                    self.composition_quiescent_resources(),
+                ),
+            );
+        }
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if committed {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
+            );
+        }
         self.lifecycle_changed.notify_all();
         crate::rtd::certify_module_unload();
         #[cfg(test)]
@@ -1090,6 +1297,13 @@ impl<S> Drop for CloseAttemptGuard<'_, S> {
         self.runtime
             .close_attempt_active
             .store(false, Ordering::Release);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        {
+            self.runtime.record_composition_event(
+                crate::composition_refinement::CompositionEvent::ReleaseCleanupOwner,
+            );
+            self.runtime.finish_composition_return();
+        }
         self.runtime.lifecycle_changed.notify_all();
     }
 }
@@ -1110,6 +1324,14 @@ impl<S> OpenAttemptGuard<'_, S> {
             return false;
         }
         let should_rollback = self.runtime.fail_open_attempt(self.attempt_id);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if should_rollback {
+            self.runtime.record_composition_event(
+                crate::composition_refinement::CompositionEvent::FailOpen {
+                    attempt: self.attempt_id,
+                },
+            );
+        }
         self.active = false;
         should_rollback
     }
@@ -1441,6 +1663,17 @@ pub(crate) mod tests {
         let _ = runtime.take_state();
         finish_test_close(&runtime);
         drop(second);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn lifecycle_attempt_counter_refuses_exhaustion() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<()>::new();
+        runtime
+            .next_lifecycle_attempt
+            .store(u64::MAX, Ordering::Release);
+        assert!(runtime.begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 

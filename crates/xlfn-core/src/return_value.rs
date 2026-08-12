@@ -216,6 +216,11 @@ impl ReturnTracker {
         self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK == 0
     }
 
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn refinement_obligations(&self) -> u64 {
+        (self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK) as u64
+    }
+
     pub(crate) fn admission_closed(&self) -> bool {
         self.state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
     }

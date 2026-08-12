@@ -272,7 +272,7 @@ jobs:
               working-directory: formal
               run: lake build composition_trace_checker
 
-            - name: Validate composition three-path fixtures
+            - name: Validate composition replay fixtures
               shell: bash
               run: |
                   for trace in formal/fixtures/composition/*.json; do
@@ -303,3 +303,30 @@ jobs:
                   --locked
                   --
                   --ignored
+
+            - name: Validate a Rust-generated composition trace
+              env:
+                  XLFN_COMPOSITION_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/composition_trace_checker
+                  XLFN_COMPOSITION_TRACE: ${{ github.workspace }}/rust-composition-trace.json
+                  XLFN_COMPOSITION_TAKEOVER_TRACE: ${{ github.workspace }}/rust-composition-owner-takeover-trace.json
+                  XLFN_COMPOSITION_TRACE_DIR: ${{ github.workspace }}
+              run: >-
+                  cargo test
+                  --package xlfn-core
+                  --lib
+                  --features "async shutdown-refinement"
+                  rust_composition
+                  --locked
+                  --
+                  --ignored
+
+            - name: Upload Rust composition traces
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: rust-composition-traces
+                  path: |
+                      rust-composition-trace.json
+                      rust-composition-owner-takeover-trace.json
+                      rust-composition-uncommitted-trace.json
+                      rust-composition-open-rollback-trace.json
+                  if-no-files-found: error

@@ -36,6 +36,8 @@ mod callback_gate;
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
+#[cfg(any(test, feature = "shutdown-refinement"))]
+mod composition_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod crt;
 mod diagnostics;

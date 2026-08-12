@@ -170,10 +170,9 @@ def apply? (s : State) (event : Event) : Option State :=
           unloadCertified := true }
       else none
   | .releaseCleanupOwner =>
-      if s.currentShutdown = none then
+      if s.currentShutdown = none ∨ s.lifecycle.phase = .closing then
         match Lifecycle.apply? s.lifecycle .releaseCleanupOwner with
-        | some lifecycle' =>
-            some { s with lifecycle := lifecycle', currentShutdown := none }
+        | some lifecycle' => some { s with lifecycle := lifecycle' }
         | none => none
       else none
 
@@ -375,17 +374,18 @@ theorem apply?_sound
         rw [if_neg hPre] at h
         cases h
   | releaseCleanupOwner =>
-      by_cases hNoSession : s.currentShutdown = none
-      · simp only [apply?, hNoSession] at h
+      by_cases hAllowed : s.currentShutdown = none ∨
+          s.lifecycle.phase = .closing
+      · simp only [apply?, hAllowed] at h
         cases hLifecycle : Lifecycle.apply? s.lifecycle .releaseCleanupOwner with
         | none =>
             simp [hLifecycle] at h
         | some lifecycle' =>
             simp [hLifecycle] at h
             cases h
-            exact Step.releaseCleanupOwner hNoSession
+            exact Step.releaseCleanupOwner hAllowed
               (Lifecycle.apply?_sound hLifecycle)
-      · simp [apply?, hNoSession] at h
+      · simp [apply?, hAllowed] at h
 
 theorem apply?_complete
     {s t : State} {event : Event}
@@ -434,7 +434,7 @@ theorem apply?_complete
       simp [apply?, hNoSession, hCertificate.prerequisites]
   | @finishOpenRollback resources hNoSession hCertificate =>
       simp [apply?, hNoSession, hCertificate.prerequisites]
-  | releaseCleanupOwner hNoSession hStep =>
-      simp [apply?, hNoSession, Lifecycle.apply?_complete hStep]
+  | releaseCleanupOwner hAllowed hStep =>
+      simp [apply?, hAllowed, Lifecycle.apply?_complete hStep]
 
 end XlFnFormal.Composition

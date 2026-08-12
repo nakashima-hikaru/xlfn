@@ -164,8 +164,9 @@ inductive Step : State → Event → State → Prop where
   | releaseCleanupOwner
       {s : State}
       {t : Lifecycle.State}
-      (hNoSession : s.currentShutdown = none)
+      (hAllowed : s.currentShutdown = none ∨
+        s.lifecycle.phase = .closing)
       (hStep : Lifecycle.Step s.lifecycle .releaseCleanupOwner t) :
-      Step s .releaseCleanupOwner { s with lifecycle := t, currentShutdown := none }
+      Step s .releaseCleanupOwner { s with lifecycle := t }
 
 end XlFnFormal.Composition
