@@ -8,11 +8,11 @@ def PhaseInvariant (s : State) : Prop :=
   match s.phase with
   | .«open» => True
   | .drainingPrepares => True
-  | .registryClosed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0
-  | .closed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 ∧ s.activeLeases = 0
+  | .registryClosed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = []
+  | .closed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0
 
 def OperationInvariant (s : State) : Prop :=
-  s.activeInitializers ≤ s.activePrepares
+  s.initializers.length ≤ s.activePrepares
 
 def Invariant (s : State) : Prop :=
   PhaseInvariant s ∧ OperationInvariant s
@@ -46,17 +46,34 @@ theorem Step.operationInvariant_preserved {s s' : State} {e : Event} (hStep : St
   | endPrepare hPrep =>
       dsimp [OperationInvariant] at *
       exact Nat.le_sub_one_of_lt hPrep
-  | beginInitialize hPhase hPrep =>
+  | beginInitialize hPhase hPrep hFresh =>
       dsimp [OperationInvariant] at *
+      rw [List.length_append]
+      dsimp
       exact hPrep
-  | finishInitialize hInit =>
+  | finishInitialize hFind hStage =>
       dsimp [OperationInvariant] at *
-      exact Nat.le_trans (Nat.sub_le s.activeInitializers 1) hInv
-  | publishTopic => exact hInv
-  | rollbackPendingReuse => exact hInv
-  | rollbackPendingRetire => exact hInv
-  | insertFresh => exact hInv
-  | insertReuse => exact hInv
+      exact Nat.le_trans (State.removeInitializer_length_le s _) hInv
+  | insertPendingFresh hFind =>
+      dsimp [OperationInvariant] at *
+      rw [State.updateInitializer_length]
+      exact hInv
+  | insertPendingReuse hFind hInBounds hVacant =>
+      dsimp [OperationInvariant] at *
+      rw [State.updateInitializer_length]
+      exact hInv
+  | publishTopic hPhase hFind =>
+      dsimp [OperationInvariant] at *
+      rw [State.updateInitializer_length]
+      exact hInv
+  | rollbackPendingReuse hFind hInBounds hLive hNextGen =>
+      dsimp [OperationInvariant] at *
+      rw [State.updateInitializer_length]
+      exact hInv
+  | rollbackPendingRetire hFind hInBounds hLive hExhausted =>
+      dsimp [OperationInvariant] at *
+      rw [State.updateInitializer_length]
+      exact hInv
   | removeReuse => exact hInv
   | removeRetire => exact hInv
   | beginLookup => exact hInv
@@ -79,35 +96,82 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
       | «open» => exact trivial
       | drainingPrepares => exact trivial
       | registryClosed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
           rw [hInv'.2.1] at hPrep; contradiction
       | closed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 ∧ s.activeLeases = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0 := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
           rw [hInv'.2.1] at hPrep; contradiction
-  | beginInitialize hPhase hPrep =>
+  | beginInitialize hPhase hPrep hFresh =>
       dsimp [PhaseInvariant]
       rw [hPhase]
       dsimp
-  | finishInitialize hInit =>
+  | finishInitialize hFind hStage =>
+      rename_i id init
       dsimp [PhaseInvariant]
       cases hP : s.phase with
       | «open» => exact trivial
       | drainingPrepares => exact trivial
       | registryClosed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
-          rw [hInv'.2.2] at hInit; contradiction
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2]; rfl
+          rw [hNil] at hFind
+          cases hFind
       | closed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 ∧ s.activeLeases = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0 := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
-          rw [hInv'.2.2.1] at hInit; contradiction
-  | publishTopic hPhase hInit =>
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2.1]; rfl
+          rw [hNil] at hFind
+          cases hFind
+  | insertPendingFresh hFind =>
+      rename_i id
+      dsimp [PhaseInvariant]
+      cases hP : s.phase with
+      | «open» => exact trivial
+      | drainingPrepares => exact trivial
+      | registryClosed =>
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
+            unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2]; rfl
+          rw [hNil] at hFind
+          cases hFind
+      | closed =>
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0 := by
+            unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2.1]; rfl
+          rw [hNil] at hFind
+          cases hFind
+  | insertPendingReuse hFind hInBounds hVacant =>
+      rename_i id slotId gen
+      dsimp [PhaseInvariant]
+      cases hP : s.phase with
+      | «open» => exact trivial
+      | drainingPrepares => exact trivial
+      | registryClosed =>
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
+            unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2]; rfl
+          rw [hNil] at hFind
+          cases hFind
+      | closed =>
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0 := by
+            unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]; rw [hInv'.2.2.1]; rfl
+          rw [hNil] at hFind
+          cases hFind
+  | publishTopic hPhase hFind =>
       dsimp [PhaseInvariant]
       rw [hPhase]
       dsimp
-  | rollbackPendingReuse hInit hAuth hInBounds hLive hNextGen =>
+  | rollbackPendingReuse hFind hInBounds hLive hNextGen =>
       dsimp [PhaseInvariant]
       cases hP : s.phase with
       | «open» => exact trivial
@@ -120,7 +184,7 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
           have hNoLive : State.NoLiveSlots s.slots := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv.1
           exfalso; exact noLiveSlots_contradiction hNoLive hLive
-  | rollbackPendingRetire hInit hAuth hInBounds hLive hExhausted =>
+  | rollbackPendingRetire hFind hInBounds hLive hExhausted =>
       dsimp [PhaseInvariant]
       cases hP : s.phase with
       | «open» => exact trivial
@@ -133,16 +197,6 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
           have hNoLive : State.NoLiveSlots s.slots := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv.1
           exfalso; exact noLiveSlots_contradiction hNoLive hLive
-  | insertFresh hMay =>
-      dsimp [PhaseInvariant]
-      cases hMay with
-      | inl hO => rw [hO]; dsimp
-      | inr hDP => rw [hDP.1]; dsimp
-  | insertReuse hMay hInBounds hVacant =>
-      dsimp [PhaseInvariant]
-      cases hMay with
-      | inl hO => rw [hO]; dsimp
-      | inr hDP => rw [hDP.1]; dsimp
   | removeReuse hAuth hInBounds hLive hNextGen =>
       dsimp [PhaseInvariant]
       cases hP : s.phase with
@@ -185,11 +239,11 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
       | «open» => exact trivial
       | drainingPrepares => exact trivial
       | registryClosed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
           exact hInv'
       | closed =>
-          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 ∧ s.activeLeases = 0 := by
+          have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] ∧ s.activeLeases = 0 := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
           rw [hInv'.2.2.2] at hLease; contradiction
   | sealTopics hPhase =>
@@ -199,7 +253,7 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
       exact ⟨map_closeSlot_noLiveSlots s.slots, hNoPrepares, hNoInits⟩
   | finishClose hPhase hNoLeases =>
       dsimp [PhaseInvariant]
-      have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeInitializers = 0 := by
+      have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.initializers = [] := by
         unfold PhaseInvariant at hInv; rw [hPhase] at hInv; exact hInv
       exact ⟨hInv'.1, hInv'.2.1, hInv'.2.2, hNoLeases⟩
 

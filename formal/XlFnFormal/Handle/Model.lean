@@ -7,6 +7,7 @@ namespace XlFnFormal.Handle
 abbrev SessionId := Nat
 abbrev SlotId := Nat
 abbrev Generation := Nat
+abbrev InitializerId := Nat
 
 def maxGeneration : Generation := 2 ^ 64 - 1
 
@@ -47,12 +48,23 @@ inductive Phase where
   | closed
   deriving DecidableEq, Repr
 
+inductive InitializerStage where
+  | beforeInsert
+  | pending (token : Token)
+  | resolved
+  deriving DecidableEq, Repr
+
+structure Initializer where
+  id : InitializerId
+  stage : InitializerStage
+  deriving DecidableEq, Repr
+
 structure State where
   session : SessionId
   phase : Phase
   slots : List SlotState
   activePrepares : Nat
-  activeInitializers : Nat
+  initializers : List Initializer
   activeLeases : Nat
   deriving DecidableEq, Repr
 
@@ -72,19 +84,10 @@ def SlotNoLive : SlotState → Prop
 def NoLiveSlots (slots : List SlotState) : Prop :=
   ∀ slot ∈ slots, SlotNoLive slot
 
-def MayInsert (s : State) : Prop :=
-  s.phase = .«open» ∨ (s.phase = .drainingPrepares ∧ s.activeInitializers > 0)
-
-instance (s : State) : Decidable s.MayInsert :=
-  inferInstanceAs (Decidable (s.phase = .«open» ∨ (s.phase = .drainingPrepares ∧ s.activeInitializers > 0)))
-
-def OperationInvariant (s : State) : Prop :=
-  s.activeInitializers ≤ s.activePrepares
-
 def CloseCertified (s : State) : Prop :=
   s.phase = .closed ∧
   s.activePrepares = 0 ∧
-  s.activeInitializers = 0 ∧
+  s.initializers = [] ∧
   s.activeLeases = 0 ∧
   NoLiveSlots s.slots
 
@@ -93,7 +96,7 @@ def initialState (session : SessionId) : State :=
     phase := .«open»
     slots := []
     activePrepares := 0
-    activeInitializers := 0
+    initializers := []
     activeLeases := 0 }
 
 theorem initialState_noLiveSlots (session : SessionId) :
@@ -101,10 +104,23 @@ theorem initialState_noLiveSlots (session : SessionId) :
   intro slot hSlot
   simp [initialState] at hSlot
 
-theorem initialState_operationInvariant (session : SessionId) :
-    OperationInvariant (initialState session) := by
-  dsimp [OperationInvariant, initialState]
-  exact Nat.le_refl 0
+def findInitializer? (s : State) (id : InitializerId) : Option Initializer :=
+  s.initializers.find? (fun init => init.id = id)
+
+def updateInitializer (s : State) (id : InitializerId) (newStage : InitializerStage) : List Initializer :=
+  s.initializers.map (fun init => if init.id = id then { init with stage := newStage } else init)
+
+def removeInitializer (s : State) (id : InitializerId) : List Initializer :=
+  s.initializers.filter (fun init => init.id ≠ id)
+
+theorem updateInitializer_length (s : State) (id : InitializerId) (stage : InitializerStage) :
+    (s.updateInitializer id stage).length = s.initializers.length := by
+  simp [updateInitializer]
+
+theorem removeInitializer_length_le (s : State) (id : InitializerId) :
+    (s.removeInitializer id).length ≤ s.initializers.length := by
+  simp [removeInitializer]
+  exact List.length_filter_le _ _
 
 end State
 

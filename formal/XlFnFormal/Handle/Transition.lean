@@ -7,13 +7,13 @@ namespace XlFnFormal.Handle
 inductive Event where
   | beginPrepare
   | endPrepare
-  | beginInitialize
-  | finishInitialize
-  | publishTopic
-  | rollbackPendingReuse (token : Token) (nextGeneration : Generation)
-  | rollbackPendingRetire (token : Token)
-  | insertFresh
-  | insertReuse (slot : SlotId) (generation : Generation)
+  | beginInitialize (id : InitializerId)
+  | finishInitialize (id : InitializerId)
+  | insertPendingFresh (id : InitializerId)
+  | insertPendingReuse (id : InitializerId) (slot : SlotId) (generation : Generation)
+  | publishTopic (id : InitializerId)
+  | rollbackPendingReuse (id : InitializerId) (nextGeneration : Generation)
+  | rollbackPendingRetire (id : InitializerId)
   | removeReuse (token : Token) (nextGeneration : Generation)
   | removeRetire (token : Token)
   | beginLookup (token : Token)
@@ -31,64 +31,84 @@ inductive Step : State → Event → State → Prop where
 
   | endPrepare
       {s : State}
-      (hPrep : s.activePrepares > s.activeInitializers) :
+      (hPrep : s.activePrepares > s.initializers.length) :
       Step s .endPrepare { s with activePrepares := s.activePrepares - 1 }
 
   | beginInitialize
       {s : State}
+      {id : InitializerId}
       (hPhase : s.phase = .«open»)
-      (hPrep : s.activePrepares > s.activeInitializers) :
-      Step s .beginInitialize { s with activeInitializers := s.activeInitializers + 1 }
+      (hPrep : s.activePrepares > s.initializers.length)
+      (hFresh : s.findInitializer? id = none) :
+      Step s (.beginInitialize id)
+        { s with initializers := s.initializers ++ [{ id := id, stage := .beforeInsert }] }
 
   | finishInitialize
       {s : State}
-      (hInit : s.activeInitializers > 0) :
-      Step s .finishInitialize { s with activeInitializers := s.activeInitializers - 1 }
+      {id : InitializerId}
+      {init : Initializer}
+      (hFind : s.findInitializer? id = some init)
+      (hStage : init.stage = .beforeInsert ∨ init.stage = .resolved) :
+      Step s (.finishInitialize id)
+        { s with initializers := s.removeInitializer id }
+
+  | insertPendingFresh
+      {s : State}
+      {id : InitializerId}
+      (hFind : s.findInitializer? id = some { id := id, stage := .beforeInsert }) :
+      Step s (.insertPendingFresh id)
+        { s with
+            slots := s.slots ++ [.live 1]
+            initializers := s.updateInitializer id (.pending { session := s.session, slot := s.slots.length, generation := 1 }) }
+
+  | insertPendingReuse
+      {s : State}
+      {id : InitializerId}
+      {slotId : SlotId}
+      {gen : Generation}
+      (hFind : s.findInitializer? id = some { id := id, stage := .beforeInsert })
+      (hInBounds : slotId < s.slots.length)
+      (hVacant : s.slots.get ⟨slotId, hInBounds⟩ = .vacant gen) :
+      Step s (.insertPendingReuse id slotId gen)
+        { s with
+            slots := s.slots.set slotId (.live gen)
+            initializers := s.updateInitializer id (.pending { session := s.session, slot := slotId, generation := gen }) }
 
   | publishTopic
       {s : State}
+      {id : InitializerId}
+      {token : Token}
       (hPhase : s.phase = .«open»)
-      (hInit : s.activeInitializers > 0) :
-      Step s .publishTopic s
+      (hFind : s.findInitializer? id = some { id := id, stage := .pending token }) :
+      Step s (.publishTopic id)
+        { s with initializers := s.updateInitializer id .resolved }
 
   | rollbackPendingReuse
       {s : State}
+      {id : InitializerId}
       {token : Token}
       {nextGen : Generation}
-      (hInit : s.activeInitializers > 0)
-      (hAuth : s.AuthenticatedFor token)
+      (hFind : s.findInitializer? id = some { id := id, stage := .pending token })
       (hInBounds : token.slot < s.slots.length)
       (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
       (hNextGen : nextGeneration? token.generation = some nextGen) :
-      Step s (.rollbackPendingReuse token nextGen)
-        { s with slots := s.slots.set token.slot (.vacant nextGen) }
+      Step s (.rollbackPendingReuse id nextGen)
+        { s with
+            slots := s.slots.set token.slot (.vacant nextGen)
+            initializers := s.updateInitializer id .resolved }
 
   | rollbackPendingRetire
       {s : State}
+      {id : InitializerId}
       {token : Token}
-      (hInit : s.activeInitializers > 0)
-      (hAuth : s.AuthenticatedFor token)
+      (hFind : s.findInitializer? id = some { id := id, stage := .pending token })
       (hInBounds : token.slot < s.slots.length)
       (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
       (hExhausted : nextGeneration? token.generation = none) :
-      Step s (.rollbackPendingRetire token)
-        { s with slots := s.slots.set token.slot .retired }
-
-  | insertFresh
-      {s : State}
-      (hMay : s.MayInsert) :
-      Step s .insertFresh
-        { s with slots := s.slots ++ [.live 1] }
-
-  | insertReuse
-      {s : State}
-      {slotId : SlotId}
-      {gen : Generation}
-      (hMay : s.MayInsert)
-      (hInBounds : slotId < s.slots.length)
-      (hVacant : s.slots.get ⟨slotId, hInBounds⟩ = .vacant gen) :
-      Step s (.insertReuse slotId gen)
-        { s with slots := s.slots.set slotId (.live gen) }
+      Step s (.rollbackPendingRetire id)
+        { s with
+            slots := s.slots.set token.slot .retired
+            initializers := s.updateInitializer id .resolved }
 
   | removeReuse
       {s : State}
@@ -136,7 +156,7 @@ inductive Step : State → Event → State → Prop where
   | closeRegistry
       {s : State}
       (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
-      (hNoInits : s.activeInitializers = 0)
+      (hNoInits : s.initializers = [])
       (hNoPrepares : s.activePrepares = 0) :
       Step s .closeRegistry
         { s with

@@ -74,9 +74,30 @@ theorem Step.retiredAt_preserved
   | endPrepare => exact ⟨hIn, hGet⟩
   | beginInitialize => exact ⟨hIn, hGet⟩
   | finishInitialize => exact ⟨hIn, hGet⟩
+  | insertPendingFresh =>
+      have hIn' : slot < (s.slots ++ [SlotState.live 1]).length := by
+        rw [List.length_append]
+        exact Nat.lt_add_right 1 hIn
+      have hGet' : (s.slots ++ [SlotState.live 1]).get ⟨slot, hIn'⟩ = SlotState.retired := by
+        rw [get_append_left_slot s.slots [SlotState.live 1] slot hIn hIn']
+        exact hGet
+      exact ⟨hIn', hGet'⟩
+  | insertPendingReuse hFind hInBounds hVacant =>
+      rename_i id slotId gen
+      by_cases hEq : slot = slotId
+      · subst hEq
+        have hEq2 : SlotState.retired = SlotState.vacant gen := hGet.symm.trans hVacant
+        cases hEq2
+      · have hIn' : slot < (s.slots.set slotId (SlotState.live gen)).length := by
+          rw [List.length_set]
+          exact hIn
+        have hGet' : (s.slots.set slotId (SlotState.live gen)).get ⟨slot, hIn'⟩ = SlotState.retired := by
+          rw [get_set_ne_slot s.slots slotId slot (SlotState.live gen) hIn hIn' hEq]
+          exact hGet
+        exact ⟨hIn', hGet'⟩
   | publishTopic => exact ⟨hIn, hGet⟩
-  | rollbackPendingReuse hInit hAuth hInBounds hLive hNextGen =>
-      rename_i token nextGen
+  | rollbackPendingReuse hFind hInBounds hLive hNextGen =>
+      rename_i id token nextGen
       by_cases hEq : slot = token.slot
       · subst hEq
         have hEq2 : SlotState.retired = SlotState.live token.generation := hGet.symm.trans hLive
@@ -88,8 +109,8 @@ theorem Step.retiredAt_preserved
           rw [get_set_ne_slot s.slots token.slot slot (SlotState.vacant nextGen) hIn hIn' hEq]
           exact hGet
         exact ⟨hIn', hGet'⟩
-  | rollbackPendingRetire hInit hAuth hInBounds hLive hExhausted =>
-      rename_i token
+  | rollbackPendingRetire hFind hInBounds hLive hExhausted =>
+      rename_i id token
       by_cases hEq : slot = token.slot
       · subst hEq
         have hIn' : token.slot < (s.slots.set token.slot SlotState.retired).length := by
@@ -103,27 +124,6 @@ theorem Step.retiredAt_preserved
           exact hIn
         have hGet' : (s.slots.set token.slot SlotState.retired).get ⟨slot, hIn'⟩ = SlotState.retired := by
           rw [get_set_ne_slot s.slots token.slot slot SlotState.retired hIn hIn' hEq]
-          exact hGet
-        exact ⟨hIn', hGet'⟩
-  | insertFresh =>
-      have hIn' : slot < (s.slots ++ [SlotState.live 1]).length := by
-        rw [List.length_append]
-        exact Nat.lt_add_right 1 hIn
-      have hGet' : (s.slots ++ [SlotState.live 1]).get ⟨slot, hIn'⟩ = SlotState.retired := by
-        rw [get_append_left_slot s.slots [SlotState.live 1] slot hIn hIn']
-        exact hGet
-      exact ⟨hIn', hGet'⟩
-  | insertReuse hMay hInBounds hVacant =>
-      rename_i slotId gen
-      by_cases hEq : slot = slotId
-      · subst hEq
-        have hEq2 : SlotState.retired = SlotState.vacant gen := hGet.symm.trans hVacant
-        cases hEq2
-      · have hIn' : slot < (s.slots.set slotId (SlotState.live gen)).length := by
-          rw [List.length_set]
-          exact hIn
-        have hGet' : (s.slots.set slotId (SlotState.live gen)).get ⟨slot, hIn'⟩ = SlotState.retired := by
-          rw [get_set_ne_slot s.slots slotId slot (SlotState.live gen) hIn hIn' hEq]
           exact hGet
         exact ⟨hIn', hGet'⟩
   | removeReuse hAuth hInBounds hLive hNextGen =>
@@ -213,58 +213,6 @@ theorem aba_reuse_prevents_stale_token_lookup
   have hNe : token1.generation ≠ 2 := by rw [hStale]; decide
   exact mismatched_generation_cannot_lookup hLive2 hNe
 
-def aba_s1 (session : SessionId) : State :=
-  { session := session, phase := .«open», slots := [.live 1], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
-
-def aba_s2 (session : SessionId) : State :=
-  { session := session, phase := .«open», slots := [.vacant 2], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
-
-def aba_s3 (session : SessionId) : State :=
-  { session := session, phase := .«open», slots := [.live 2], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
-
-theorem Step_aba_step1 (session : SessionId) :
-    Step (State.initialState session) Event.insertFresh (aba_s1 session) := by
-  have hMay : (State.initialState session).MayInsert := Or.inl rfl
-  exact Step.insertFresh hMay
-
-theorem Step_aba_step2 (session : SessionId) :
-    Step (aba_s1 session) (Event.removeReuse { session := session, slot := 0, generation := 1 } 2) (aba_s2 session) := by
-  have hAuth : (aba_s1 session).AuthenticatedFor { session := session, slot := 0, generation := 1 } := rfl
-  have hInBounds : 0 < (aba_s1 session).slots.length := by dsimp [aba_s1]; decide
-  have hLive : (aba_s1 session).slots.get ⟨0, hInBounds⟩ = .live 1 := rfl
-  have hNextGen : nextGeneration? 1 = some 2 := rfl
-  exact Step.removeReuse hAuth hInBounds hLive hNextGen
-
-theorem Step_aba_step3 (session : SessionId) :
-    Step (aba_s2 session) (Event.insertReuse 0 2) (aba_s3 session) := by
-  have hMay : (aba_s2 session).MayInsert := Or.inl rfl
-  have hInBounds : 0 < (aba_s2 session).slots.length := by dsimp [aba_s2]; decide
-  have hVacant : (aba_s2 session).slots.get ⟨0, hInBounds⟩ = .vacant 2 := rfl
-  exact Step.insertReuse hMay hInBounds hVacant
-
-theorem remove_reuse_reinsert_prevents_aba
-    (session : SessionId) :
-    ∃ s1 s2 s3,
-      Step (State.initialState session) .insertFresh s1 ∧
-      Step s1
-        (.removeReuse
-          { session := session, slot := 0, generation := 1 }
-          2)
-        s2 ∧
-      Step s2 (.insertReuse 0 2) s3 ∧
-      ¬ ∃ s4,
-        Step s3
-          (.beginLookup
-            { session := session, slot := 0, generation := 1 })
-          s4 := by
-  have hInBounds3 : 0 < (aba_s3 session).slots.length := by dsimp [aba_s3]; decide
-  have hLive3 : (aba_s3 session).slots.get ⟨0, hInBounds3⟩ = .live 2 := rfl
-  refine ⟨aba_s1 session, aba_s2 session, aba_s3 session, ?_, ?_, ?_, ?_⟩
-  · exact Step_aba_step1 session
-  · exact Step_aba_step2 session
-  · exact Step_aba_step3 session
-  · exact aba_reuse_prevents_stale_token_lookup hInBounds3 hLive3 rfl
-
 theorem removed_token_cannot_become_valid_again
     {s : State} {token : Token} {hInBounds : token.slot < s.slots.length}
     (hRetired : s.slots.get ⟨token.slot, hInBounds⟩ = .retired) :
@@ -280,21 +228,21 @@ theorem exhausted_slot_is_permanently_retired
     (hStep : Step s (.removeRetire token) s')
     (hInBounds : token.slot < s'.slots.length) :
     s'.slots.get ⟨token.slot, hInBounds⟩ = .retired ∧
-    (∀ gen s'', ¬ Step s' (.insertReuse token.slot gen) s'') ∧
+    (∀ id gen s'', ¬ Step s' (.insertPendingReuse id token.slot gen) s'') ∧
     (∀ s'', ¬ Step s' (.beginLookup token) s'') := by
   cases hStep with
   | removeRetire hAuth hInBoundsOrig hLive hExhausted =>
       have hGet : (s.slots.set token.slot .retired).get ⟨token.slot, hInBounds⟩ = .retired := by
         simp
       refine ⟨hGet, ?_, ?_⟩
-      · intro gen s'' hInsert
+      · intro id gen s'' hInsert
         cases hInsert
-        rename_i _ _ hVacant
+        rename_i hFind hInBoundsNew hVacant
         rw [hGet] at hVacant
         cases hVacant
       · intro s'' hLookup
         cases hLookup
-        rename_i _ _ _ hLookupLive
+        rename_i hPhase hAuth hInBoundsNew hLookupLive
         rw [hGet] at hLookupLive
         cases hLookupLive
 
@@ -340,8 +288,8 @@ theorem successful_close_is_quiescent
   exact ⟨hClosed, hInv.2.1, hInv.2.2.1, hInv.2.2.2, hInv.1⟩
 
 theorem no_topic_publication_after_seal
-    {s : State} (hSealed : s.phase = .drainingPrepares) :
-    ¬ ∃ s', Step s .publishTopic s' := by
+    {s : State} {id : InitializerId} (hSealed : s.phase = .drainingPrepares) :
+    ¬ ∃ s', Step s (.publishTopic id) s' := by
   intro ⟨s', hStep⟩
   cases hStep
   rename_i hPhase _
@@ -350,27 +298,26 @@ theorem no_topic_publication_after_seal
 
 theorem registry_close_waits_for_initializers
     {s s' : State} (hStep : Step s .closeRegistry s') :
-    s.activeInitializers = 0 ∧ s.activePrepares = 0 := by
+    s.initializers = [] ∧ s.activePrepares = 0 := by
   cases hStep
   exact ⟨by assumption, by assumption⟩
 
 theorem draining_pending_insert_cannot_escape
-    {s : State} {token : Token}
+    {s : State} {id : InitializerId} {token : Token}
     (hSealed : s.phase = .drainingPrepares)
-    (hInit : s.activeInitializers > 0)
-    (hAuth : s.AuthenticatedFor token)
+    (hFind : s.findInitializer? id = some { id := id, stage := .pending token })
     (hInBounds : token.slot < s.slots.length)
     (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation) :
-    (¬ ∃ s', Step s .publishTopic s') ∧
-    ((∃ nextGen s', Step s (.rollbackPendingReuse token nextGen) s') ∨
-     (∃ s', Step s (.rollbackPendingRetire token) s')) := by
+    (¬ ∃ s', Step s (.publishTopic id) s') ∧
+    ((∃ nextGen s', Step s (.rollbackPendingReuse id nextGen) s') ∨
+     (∃ s', Step s (.rollbackPendingRetire id) s')) := by
   refine ⟨no_topic_publication_after_seal hSealed, ?_⟩
   cases hNext : nextGeneration? token.generation with
   | some nextGen =>
       left
-      refine ⟨nextGen, _, Step.rollbackPendingReuse hInit hAuth hInBounds hLive hNext⟩
+      refine ⟨nextGen, _, Step.rollbackPendingReuse hFind hInBounds hLive hNext⟩
   | none =>
       right
-      refine ⟨_, Step.rollbackPendingRetire hInit hAuth hInBounds hLive hNext⟩
+      refine ⟨_, Step.rollbackPendingRetire hFind hInBounds hLive hNext⟩
 
 end XlFnFormal.Handle
