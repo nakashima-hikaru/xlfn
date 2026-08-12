@@ -19,7 +19,7 @@ permissions:
   checks: write
 
 concurrency:
-  group: benchmarks-${{ github.workflow }}-${{ github.ref }}
+  group: benchmarks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -132,7 +132,19 @@ jobs:
             echo "Bencher is not configured; there is no branch to archive."
             exit 0
           fi
-          bencher archive \
+          set +e
+          output="$(bencher archive \
             --project "$BENCHER_PROJECT" \
             --key "$BENCHER_API_KEY" \
-            --branch "$BENCHER_BRANCH"
+            --branch "$BENCHER_BRANCH" 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -eq 0 ]]; then
+            exit 0
+          fi
+          if grep -Fq 'Could not find an entry with name' <<<"$output"; then
+            echo "::notice::Bencher branch '$BENCHER_BRANCH' does not exist; nothing to archive."
+            exit 0
+          fi
+          exit "$status"
