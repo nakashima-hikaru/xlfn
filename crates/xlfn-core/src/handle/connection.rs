@@ -1,8 +1,12 @@
 #[cfg(any(target_os = "windows", test))]
 use super::*;
+use std::sync::Arc;
+#[cfg(any(target_os = "windows", test))]
+use std::sync::Weak;
 
 pub(crate) struct Topic {
     pub(crate) token: String,
+    pub(crate) rtd_key: Arc<str>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) server_generation: Option<u64>,
     pub(crate) excel_topic: Option<HandleTopicOwner>,
@@ -20,7 +24,7 @@ pub(crate) struct HandleTopicOwner {
 pub(crate) struct HandleConnection {
     pub(crate) runtime: Weak<HandleRuntime>,
     pub(crate) owner: HandleTopicOwner,
-    pub(crate) key: String,
+    pub(crate) key: HandleTopicKey,
     pub(crate) token: String,
     pub(crate) created: bool,
     pub(crate) finished: bool,
@@ -38,7 +42,7 @@ impl HandleConnection {
         }
         if self.created {
             let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
-            runtime.commit_connection(self.owner, &self.key)?;
+            runtime.commit_connection(self.owner, self.key)?;
         }
         self.finished = true;
         Ok(())
@@ -52,7 +56,7 @@ impl HandleConnection {
         if self.created
             && let Some(runtime) = self.runtime.upgrade()
         {
-            runtime.rollback_connection(self.owner, &self.key);
+            runtime.rollback_connection(self.owner, self.key);
         }
     }
 }

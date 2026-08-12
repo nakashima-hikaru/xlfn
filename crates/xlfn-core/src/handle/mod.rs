@@ -7,8 +7,6 @@ use std::fmt::Write as _;
 use std::ops::Deref;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-#[cfg(any(target_os = "windows", test))]
-use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::ThreadId;
 

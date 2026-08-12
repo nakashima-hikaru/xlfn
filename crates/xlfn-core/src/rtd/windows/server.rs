@@ -962,12 +962,12 @@ unsafe fn connect_data_inner(
     // SAFETY: `this` remains valid for the duration of ConnectData.
     let generation = unsafe { (*this).generation };
 
-    let connection = if let Some(handle_key) = key.strip_prefix("handle:") {
+    let connection = if let Some(rtd_key) = key.strip_prefix("handle:") {
         let Some(handles) = handles.as_ref() else {
             return E_FAIL;
         };
 
-        match handles.connect_transaction(generation, topic_id, handle_key) {
+        match handles.connect_transaction(generation, topic_id, rtd_key) {
             Ok(connection) => ConnectDataTransaction::Handle(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);

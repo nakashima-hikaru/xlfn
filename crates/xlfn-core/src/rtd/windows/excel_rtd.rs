@@ -11,7 +11,7 @@ use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 pub(crate) fn observe(
     handles: Arc<HandleRuntime>,
-    key: &str,
+    rtd_key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
@@ -51,7 +51,7 @@ pub(crate) fn observe(
         }
     };
 
-    let mut topic = match CountedString::new(&format!("handle:{key}")) {
+    let mut topic = match CountedString::new(&format!("handle:{rtd_key}")) {
         Ok(value) => value,
         Err(error) => {
             discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -59,7 +59,7 @@ pub(crate) fn observe(
         }
     };
 
-    if let Err(error) = handles.claim_server(key, active.generation) {
+    if let Err(error) = handles.claim_server(rtd_key, active.generation) {
         discard_unpublished_server(active.pointer, ensured.newly_created);
         return Err(error);
     }

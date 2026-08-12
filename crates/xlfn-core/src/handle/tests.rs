@@ -1,5 +1,13 @@
 use super::*;
 
+fn format_formula_topic_key(
+    caller: FormulaCaller,
+    udf_id: &'static str,
+    argument_digest: &[u8; 32],
+) -> String {
+    FormulaTopicKey::new(caller, udf_id, argument_digest).format_rtd_key()
+}
+
 fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
 where
     T: Any + Send + Sync + 'static,
@@ -77,6 +85,58 @@ fn formula_topic_key_changes_with_every_identity_component() {
     );
 
     assert!(base.ends_with("1212121212121212121212121212121212121212121212121212121212121212"));
+}
+
+#[test]
+fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
+    let runtime = HandleRuntime::new(8);
+    let observed = Arc::new(Mutex::new(None::<String>));
+    let observed_for_callback = Arc::clone(&observed);
+
+    let (token, created) = runtime
+        .prepare_observed(
+            "reverse-map".to_owned(),
+            || Ok(Arc::new(DataRecord(7))),
+            move |rtd_key, observed_token| {
+                assert!(!observed_token.is_empty());
+                *observed_for_callback.lock() = Some(rtd_key.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(created);
+
+    let rtd_key = observed
+        .lock()
+        .clone()
+        .expect("observation key was recorded");
+    let topics = runtime.topics.read();
+    let identity = topics
+        .by_rtd_key
+        .get(rtd_key.as_str())
+        .copied()
+        .expect("published RTD key must resolve to its identity");
+    let topic = topics
+        .by_key
+        .get(&identity)
+        .expect("reverse map identity must resolve to a topic");
+    assert_eq!(topic.rtd_key.as_ref(), rtd_key.as_str());
+    assert_eq!(topic.token, token);
+    assert!(topics.by_excel_id.is_empty());
+    drop(topics);
+
+    runtime.connect(1, 41, &rtd_key).unwrap();
+    {
+        let topics = runtime.topics.read();
+        assert_eq!(topics.by_excel_id.len(), 1);
+        assert_eq!(topics.by_excel_id.values().next(), Some(&identity));
+    }
+
+    runtime.disconnect(1, 41);
+    let topics = runtime.topics.read();
+    assert!(topics.by_key.is_empty());
+    assert!(topics.by_rtd_key.is_empty());
+    assert!(topics.by_excel_id.is_empty());
 }
 
 #[test]
@@ -689,8 +749,8 @@ fn terminate_and_close_release_every_remaining_topic_once() {
 fn panicking_factory_does_not_publish_a_topic() {
     let runtime = HandleRuntime::new(8);
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ =
-            runtime.prepare::<DataRecord>("panic".to_owned(), || panic!("injected factory panic"));
+        let _ = runtime
+            .prepare::<DataRecord, _>("panic".to_owned(), || panic!("injected factory panic"));
     }));
     assert!(panic.is_err());
     assert_eq!(runtime.len(), 0);
@@ -926,7 +986,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
             let topics = runtime.topics.read();
             topics
                 .initializing
-                .get("concurrent-observe")
+                .get(&HandleTopicKey::from_test_label("concurrent-observe"))
                 .is_some_and(|initialization| Arc::strong_count(initialization) >= 2)
         };
         if waiter_is_blocked {
@@ -1127,7 +1187,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
             .topics
             .read()
             .initializing
-            .get("closing")
+            .get(&HandleTopicKey::from_test_label("closing"))
             .is_some_and(|initialization| Arc::strong_count(initialization) >= 4);
         if blocked {
             break;
@@ -1340,9 +1400,14 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
             },
             |key, _| {
                 let topics = runtime.topics.read();
+                let identity = topics
+                    .by_rtd_key
+                    .get(key)
+                    .copied()
+                    .expect("warm observation must use a published RTD key");
 
                 assert!(
-                    !topics.initializing.contains_key(key),
+                    !topics.initializing.contains_key(&identity),
                     "warm hit must bypass per-key single-flight state",
                 );
 
@@ -1376,7 +1441,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
 
     let warm_runtime = Arc::clone(&runtime);
     let warm = std::thread::spawn(move || {
-        warm_runtime.prepare_observed::<DataRecord>(
+        warm_runtime.prepare_observed::<DataRecord, _>(
             "warm-close".to_owned(),
             || panic!("warm factory must not run"),
             |_, _| {

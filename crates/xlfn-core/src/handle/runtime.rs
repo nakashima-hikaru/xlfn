@@ -1,9 +1,12 @@
 use super::*;
 
 pub(crate) struct TopicState {
-    pub(crate) by_key: FxHashMap<String, Topic>,
-    pub(crate) by_excel_id: FxHashMap<HandleTopicOwner, String>,
-    pub(crate) initializing: FxHashMap<String, Arc<Initialization>>,
+    pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
+    // Excel RTD callback strings are resolved here; they are not lifecycle
+    // identities and are never parsed back into formula components.
+    pub(crate) by_rtd_key: FxHashMap<Arc<str>, HandleTopicKey>,
+    pub(crate) by_excel_id: FxHashMap<HandleTopicOwner, HandleTopicKey>,
+    pub(crate) initializing: FxHashMap<HandleTopicKey, Arc<Initialization>>,
     pub(crate) generation: u64,
     pub(crate) closed: bool,
 }
@@ -12,6 +15,7 @@ impl Default for TopicState {
     fn default() -> Self {
         Self {
             by_key: FxHashMap::default(),
+            by_rtd_key: FxHashMap::default(),
             by_excel_id: FxHashMap::default(),
             initializing: FxHashMap::default(),
             generation: 1,
@@ -57,6 +61,7 @@ impl Initialization {
 pub(crate) enum PrepareDecision {
     Existing {
         token: String,
+        rtd_key: Arc<str>,
         generation: u64,
     },
     Initialize {
@@ -161,25 +166,27 @@ impl HandleRuntime {
     }
 
     #[cfg(test)]
-    pub fn prepare<T>(
+    pub fn prepare<T, K>(
         &self,
-        key: String,
+        key: K,
         create: impl FnOnce() -> XllResult<Arc<T>>,
     ) -> XllResult<(String, bool)>
     where
         T: ExcelHandleObject,
+        K: Into<HandleTopicKey>,
     {
         self.prepare_observed(key, create, |_, _| Ok(()))
     }
 
     pub(crate) fn observe_existing(
         &self,
-        key: &str,
+        key: HandleTopicKey,
+        rtd_key: Arc<str>,
         token: String,
         generation: u64,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)> {
-        observe(key, &token)?;
+        observe(&rtd_key, &token)?;
 
         let topics = self.topics.read();
 
@@ -189,7 +196,7 @@ impl HandleRuntime {
 
         if !topics
             .by_key
-            .get(key)
+            .get(&key)
             .is_some_and(|topic| topic.token == token)
         {
             return Err(XllError::StaleHandle);
@@ -198,15 +205,17 @@ impl HandleRuntime {
         Ok((token, false))
     }
 
-    pub(crate) fn prepare_observed<T>(
+    pub(crate) fn prepare_observed<T, K>(
         &self,
-        key: String,
+        key: K,
         create: impl FnOnce() -> XllResult<Arc<T>>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
         T: ExcelHandleObject,
+        K: Into<HandleTopicKey>,
     {
+        let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
         let _prepare = self.prepares.enter();
         let _handle_operation = self.leases.acquire();
@@ -238,6 +247,7 @@ impl HandleRuntime {
             if let Some(topic) = topics.by_key.get(&key) {
                 let decision = PrepareDecision::Existing {
                     token: topic.token.clone(),
+                    rtd_key: Arc::clone(&topic.rtd_key),
                     generation: topics.generation,
                 };
                 drop(topics);
@@ -267,6 +277,7 @@ impl HandleRuntime {
             if let Some(topic) = topics.by_key.get(&key) {
                 let decision = PrepareDecision::Existing {
                     token: topic.token.clone(),
+                    rtd_key: Arc::clone(&topic.rtd_key),
                     generation: topics.generation,
                 };
                 drop(topics);
@@ -280,9 +291,7 @@ impl HandleRuntime {
                 completed: Condvar::new(),
             });
 
-            topics
-                .initializing
-                .insert(key.clone(), Arc::clone(&initialization));
+            topics.initializing.insert(key, Arc::clone(&initialization));
 
             break PrepareDecision::Initialize {
                 initialization,
@@ -291,8 +300,12 @@ impl HandleRuntime {
         };
 
         let (initialization, generation) = match decision {
-            PrepareDecision::Existing { token, generation } => {
-                return self.observe_existing(&key, token, generation, observe);
+            PrepareDecision::Existing {
+                token,
+                rtd_key,
+                generation,
+            } => {
+                return self.observe_existing(key, rtd_key, token, generation, observe);
             }
 
             PrepareDecision::Initialize {
@@ -302,16 +315,16 @@ impl HandleRuntime {
         };
 
         let initializing = scopeguard::guard(
-            (&self.topics, key.as_str(), Arc::clone(&initialization)),
+            (&self.topics, key, Arc::clone(&initialization)),
             |(topics, key, owned)| {
                 {
                     let mut topics = topics.write();
                     if topics
                         .initializing
-                        .get(key)
+                        .get(&key)
                         .is_some_and(|current| Arc::ptr_eq(current, &owned))
                     {
-                        topics.initializing.remove(key);
+                        topics.initializing.remove(&key);
                     }
                 }
                 owned.complete();
@@ -332,14 +345,17 @@ impl HandleRuntime {
 
         let token = self.registry.insert_pending(value.slot())?;
         let unpublished = scopeguard::guard(
-            (&self.registry, &self.topics, key.as_str(), token.as_str()),
+            (&self.registry, &self.topics, key, token.as_str()),
             |(registry, topics, key, token)| {
                 let mut topics = topics.write();
-                if let Some(topic) = topics.by_key.get(key).filter(|topic| topic.token == token) {
-                    if let Some(owner) = topic.excel_topic {
+                if let Some(topic) = topics.by_key.get(&key).filter(|topic| topic.token == token) {
+                    let rtd_key = Arc::clone(&topic.rtd_key);
+                    let owner = topic.excel_topic;
+                    topics.by_key.remove(&key);
+                    topics.by_rtd_key.remove(rtd_key.as_ref());
+                    if let Some(owner) = owner {
                         topics.by_excel_id.remove(&owner);
                     }
-                    topics.by_key.remove(key);
                 }
                 drop(topics);
                 registry.remove_and_drop(token, "handle publication rollback");
@@ -350,10 +366,12 @@ impl HandleRuntime {
         if topics.closed || topics.generation != generation {
             return Err(XllError::Closing);
         }
+        let rtd_key: Arc<str> = key.format_rtd_key().into();
         topics.by_key.insert(
-            key.clone(),
+            key,
             Topic {
                 token: token.clone(),
+                rtd_key: Arc::clone(&rtd_key),
                 #[cfg(any(target_os = "windows", test))]
                 server_generation: None,
                 excel_topic: None,
@@ -361,6 +379,7 @@ impl HandleRuntime {
                 excel_topic_committed: false,
             },
         );
+        topics.by_rtd_key.insert(rtd_key.clone(), key);
         drop(topics);
 
         {
@@ -369,7 +388,7 @@ impl HandleRuntime {
                 return Err(XllError::Closing);
             }
         }
-        observe(&key, &token)?;
+        observe(&rtd_key, &token)?;
 
         let topics = self.topics.read();
         if topics.closed || topics.generation != generation {
@@ -389,12 +408,33 @@ impl HandleRuntime {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn claim_server(&self, key: &str, server_generation: u64) -> XllResult<()> {
+    fn topic_key_for_rtd(topics: &TopicState, rtd_key: &str) -> XllResult<HandleTopicKey> {
+        if let Some(&key) = topics.by_rtd_key.get(rtd_key) {
+            return Ok(key);
+        }
+
+        // Existing unit tests use readable labels instead of the serialized
+        // RTD representation. Keep that adapter test-only; production always
+        // resolves the exact string Excel supplied through by_rtd_key.
+        #[cfg(test)]
+        {
+            let key = HandleTopicKey::from_test_label(rtd_key);
+            if topics.by_key.contains_key(&key) {
+                return Ok(key);
+            }
+        }
+
+        Err(XllError::StaleHandle)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn claim_server(&self, rtd_key: &str, server_generation: u64) -> XllResult<()> {
         let mut topics = self.topics.write();
         if topics.closed {
             return Err(XllError::Closing);
         }
-        let topic = topics.by_key.get_mut(key).ok_or(XllError::StaleHandle)?;
+        let key = Self::topic_key_for_rtd(&topics, rtd_key)?;
+        let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
         if topic
             .server_generation
             .is_some_and(|existing| existing != server_generation)
@@ -410,13 +450,14 @@ impl HandleRuntime {
         &self,
         server_generation: u64,
         excel_topic_id: i32,
-        key: &str,
+        rtd_key: &str,
     ) -> XllResult<String> {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
         };
-        let (token, created) = self.connect_inner(server_generation, excel_topic_id, key)?;
+        let (key, token, created) =
+            self.connect_inner(server_generation, excel_topic_id, rtd_key)?;
         if created && let Err(error) = self.commit_connection(owner, key) {
             self.rollback_connection(owner, key);
             return Err(error);
@@ -429,17 +470,18 @@ impl HandleRuntime {
         self: &Arc<Self>,
         server_generation: u64,
         excel_topic_id: i32,
-        key: &str,
+        rtd_key: &str,
     ) -> XllResult<HandleConnection> {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
         };
-        let (token, created) = self.connect_inner(server_generation, excel_topic_id, key)?;
+        let (key, token, created) =
+            self.connect_inner(server_generation, excel_topic_id, rtd_key)?;
         Ok(HandleConnection {
             runtime: Arc::downgrade(self),
             owner,
-            key: key.to_owned(),
+            key,
             token,
             created,
             finished: false,
@@ -451,8 +493,8 @@ impl HandleRuntime {
         &self,
         server_generation: u64,
         excel_topic_id: i32,
-        key: &str,
-    ) -> XllResult<(String, bool)> {
+        rtd_key: &str,
+    ) -> XllResult<(HandleTopicKey, String, bool)> {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
@@ -461,15 +503,16 @@ impl HandleRuntime {
         if topics.closed {
             return Err(XllError::Closing);
         }
+        let key = Self::topic_key_for_rtd(&topics, rtd_key)?;
         if topics
             .by_excel_id
             .get(&owner)
-            .is_some_and(|existing| existing != key)
+            .is_some_and(|existing| existing != &key)
         {
             return Err(XllError::InvalidHandle);
         }
         let (token, created) = {
-            let topic = topics.by_key.get_mut(key).ok_or(XllError::StaleHandle)?;
+            let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
             if topic
                 .server_generation
                 .is_some_and(|existing| existing != server_generation)
@@ -492,20 +535,24 @@ impl HandleRuntime {
             };
             (topic.token.clone(), created)
         };
-        topics.by_excel_id.insert(owner, key.to_owned());
-        Ok((token, created))
+        topics.by_excel_id.insert(owner, key);
+        Ok((key, token, created))
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn commit_connection(&self, owner: HandleTopicOwner, key: &str) -> XllResult<()> {
+    pub(crate) fn commit_connection(
+        &self,
+        owner: HandleTopicOwner,
+        key: HandleTopicKey,
+    ) -> XllResult<()> {
         let mut topics = self.topics.write();
         if topics.closed {
             return Err(XllError::Closing);
         }
-        if topics.by_excel_id.get(&owner).map(String::as_str) != Some(key) {
+        if topics.by_excel_id.get(&owner) != Some(&key) {
             return Err(XllError::StaleHandle);
         }
-        let topic = topics.by_key.get_mut(key).ok_or(XllError::StaleHandle)?;
+        let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
         if topic.excel_topic != Some(owner) {
             return Err(XllError::StaleHandle);
         }
@@ -514,17 +561,17 @@ impl HandleRuntime {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: &str) {
+    pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: HandleTopicKey) {
         let mut topics = self.topics.write();
-        if topics.by_excel_id.get(&owner).map(String::as_str) != Some(key)
-            || !topics.by_key.get(key).is_some_and(|topic| {
+        if topics.by_excel_id.get(&owner) != Some(&key)
+            || !topics.by_key.get(&key).is_some_and(|topic| {
                 topic.excel_topic == Some(owner) && !topic.excel_topic_committed
             })
         {
             return;
         }
         topics.by_excel_id.remove(&owner);
-        if let Some(topic) = topics.by_key.get_mut(key) {
+        if let Some(topic) = topics.by_key.get_mut(&key) {
             // The formula already owns the object and token. Roll back only
             // the COM topic assignment so a failed value write can be retried.
             topic.excel_topic = None;
@@ -533,12 +580,16 @@ impl HandleRuntime {
     }
 
     #[cfg(test)]
-    pub fn rollback(&self, key: &str) {
+    pub fn rollback(&self, rtd_key: &str) {
         let token = {
             let mut topics = self.topics.write();
-            let Some(topic) = topics.by_key.remove(key) else {
+            let Ok(key) = Self::topic_key_for_rtd(&topics, rtd_key) else {
                 return;
             };
+            let Some(topic) = topics.by_key.remove(&key) else {
+                return;
+            };
+            topics.by_rtd_key.remove(topic.rtd_key.as_ref());
             if let Some(owner) = topic.excel_topic {
                 topics.by_excel_id.remove(&owner);
             }
@@ -561,7 +612,11 @@ impl HandleRuntime {
             let Some(key) = topics.by_excel_id.remove(&owner) else {
                 return;
             };
-            topics.by_key.remove(&key).map(|topic| topic.token)
+            let topic = topics.by_key.remove(&key);
+            topic.map(|topic| {
+                topics.by_rtd_key.remove(topic.rtd_key.as_ref());
+                topic.token
+            })
         };
         if let Some(token) = token {
             self.registry
@@ -583,6 +638,7 @@ impl HandleRuntime {
             topics.closed = true;
             topics.generation = topics.generation.wrapping_add(1);
             topics.by_key.clear();
+            topics.by_rtd_key.clear();
             topics.by_excel_id.clear();
 
             topics
@@ -624,11 +680,12 @@ impl HandleRuntime {
                 .by_key
                 .iter()
                 .filter(|(_, topic)| topic.server_generation == Some(server_generation))
-                .map(|(key, _)| key.clone())
+                .map(|(key, _)| *key)
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| {
                     let topic = topics.by_key.remove(&key)?;
+                    topics.by_rtd_key.remove(topic.rtd_key.as_ref());
                     if let Some(owner) = topic.excel_topic {
                         topics.by_excel_id.remove(&owner);
                     }
@@ -650,6 +707,7 @@ impl HandleRuntime {
                 .drain()
                 .map(|(_, topic)| topic.token)
                 .collect::<Vec<_>>();
+            topics.by_rtd_key.clear();
             topics.by_excel_id.clear();
             tokens
         };

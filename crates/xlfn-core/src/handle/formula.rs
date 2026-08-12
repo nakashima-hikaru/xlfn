@@ -1,38 +1,97 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {
     pub(crate) sheet_id: xlfn_sys::IDSHEET,
     pub(crate) row: i32,
     pub(crate) column: i32,
 }
 
-pub(crate) fn format_formula_topic_key(
-    caller: FormulaCaller,
-    udf_id: &'static str,
-    argument_digest: &[u8; 32],
-) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    // 20 digits for a 64-bit IDSHEET, 11 for each i32 coordinate, four
-    // separators, and the 64-character digest. This upper bound keeps the
-    // complete key in one allocation on both supported pointer widths.
-    const NUMERIC_KEY_CAPACITY: usize = 20 + 11 + 11 + 4;
-    let mut result =
-        String::with_capacity(NUMERIC_KEY_CAPACITY + udf_id.len() + argument_digest.len() * 2);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FormulaTopicKey {
+    pub(crate) caller: FormulaCaller,
+    pub(crate) udf_id: &'static str,
+    pub(crate) argument_digest: [u8; 32],
+}
 
-    write!(
-        &mut result,
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
-        caller.sheet_id, caller.row, caller.column, udf_id,
-    )
-    .expect("writing to String cannot fail");
-
-    for byte in argument_digest {
-        result.push(HEX[(byte >> 4) as usize] as char);
-        result.push(HEX[(byte & 0x0f) as usize] as char);
+impl FormulaTopicKey {
+    pub(crate) fn new(
+        caller: FormulaCaller,
+        udf_id: &'static str,
+        argument_digest: &[u8; 32],
+    ) -> Self {
+        Self {
+            caller,
+            udf_id,
+            argument_digest: *argument_digest,
+        }
     }
 
-    result
+    /// Serialize the structured identity at the Excel RTD boundary.
+    ///
+    /// This representation is part of the Excel protocol and must remain
+    /// byte-for-byte compatible with the previous formula topic formatter.
+    pub(crate) fn format_rtd_key(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        // 20 digits for a 64-bit IDSHEET, 11 for each i32 coordinate, four
+        // separators, and the 64-character digest. This upper bound keeps the
+        // complete key in one allocation on both supported pointer widths.
+        const NUMERIC_KEY_CAPACITY: usize = 20 + 11 + 11 + 4;
+        let mut result = String::with_capacity(
+            NUMERIC_KEY_CAPACITY + self.udf_id.len() + self.argument_digest.len() * 2,
+        );
+
+        write!(
+            &mut result,
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
+            self.caller.sheet_id, self.caller.row, self.caller.column, self.udf_id,
+        )
+        .expect("writing to String cannot fail");
+
+        for byte in self.argument_digest {
+            result.push(HEX[(byte >> 4) as usize] as char);
+            result.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+
+        result
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum HandleTopicKey {
+    Formula(FormulaTopicKey),
+}
+
+impl HandleTopicKey {
+    pub(crate) fn format_rtd_key(&self) -> String {
+        match self {
+            Self::Formula(key) => key.format_rtd_key(),
+        }
+    }
+
+    // Unit tests still use short human-readable labels to exercise the
+    // lifecycle state machine. Convert those labels at the test boundary so
+    // the runtime itself only ever stores structured identities.
+    #[cfg(test)]
+    pub(crate) fn from_test_label(label: &str) -> Self {
+        let digest = *blake3::hash(label.as_bytes()).as_bytes();
+        Self::Formula(FormulaTopicKey::new(
+            FormulaCaller {
+                sheet_id: 0,
+                row: 0,
+                column: 0,
+            },
+            "TEST.HANDLE",
+            &digest,
+        ))
+    }
+}
+
+#[cfg(test)]
+impl From<String> for HandleTopicKey {
+    fn from(label: String) -> Self {
+        Self::from_test_label(&label)
+    }
 }
 
 pub(crate) fn resolve_formula_caller(
@@ -189,7 +248,11 @@ pub(crate) fn formula_topic_key(
     callbacks: &crate::host_callback::HostCallbackSession,
     udf_id: &'static str,
     argument_digest: &[u8; 32],
-) -> XllResult<String> {
+) -> XllResult<HandleTopicKey> {
     let caller = resolve_formula_caller(callbacks)?;
-    Ok(format_formula_topic_key(caller, udf_id, argument_digest))
+    Ok(HandleTopicKey::Formula(FormulaTopicKey::new(
+        caller,
+        udf_id,
+        argument_digest,
+    )))
 }

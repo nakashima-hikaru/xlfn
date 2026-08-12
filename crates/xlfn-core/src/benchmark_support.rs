@@ -366,7 +366,9 @@ impl FingerprintBenchmark {
 // Handle prepare benchmarks
 // ---------------------------------------------------------------------------
 
-use crate::handle::{ExcelHandleObject, FormulaCaller, HandleRuntime, format_formula_topic_key};
+use crate::handle::{
+    ExcelHandleObject, FormulaCaller, FormulaTopicKey, HandleRuntime, HandleTopicKey,
+};
 use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
 struct BenchHandleObject {
@@ -380,6 +382,20 @@ const HANDLE_CONTENTION_WORKERS: usize = 4;
 // during a longer default run; this does not preallocate the slot storage.
 const HANDLE_CONTENTION_CAPACITY: usize = u32::MAX as usize;
 
+fn benchmark_topic_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
+    let mut digest = [0_u8; 32];
+    digest[..8].copy_from_slice(&id.to_le_bytes());
+    HandleTopicKey::Formula(FormulaTopicKey::new(
+        FormulaCaller {
+            sheet_id: 1,
+            row: 0,
+            column: 0,
+        },
+        udf_id,
+        &digest,
+    ))
+}
+
 fn cleanup_handle_runtime(runtime: &HandleRuntime) {
     runtime.terminate_all_topics();
     let _ = runtime.close();
@@ -388,7 +404,7 @@ fn cleanup_handle_runtime(runtime: &HandleRuntime) {
 /// A batch whose runtime and formula keys are prepared before the timed call.
 pub struct HandleColdBatch {
     runtime: Arc<HandleRuntime>,
-    keys: Vec<String>,
+    keys: Vec<HandleTopicKey>,
 }
 
 impl HandleColdBatch {
@@ -398,7 +414,9 @@ impl HandleColdBatch {
                 HandleRuntime::try_new_with_ingress(iterations.max(1), None)
                     .expect("benchmark host provides an OS CSPRNG"),
             ),
-            keys: (0..iterations).map(|i| format!("cold:{i}")).collect(),
+            keys: (0..iterations)
+                .map(|i| benchmark_topic_key("BENCH.COLD", i as u64))
+                .collect(),
         }
     }
 
@@ -427,7 +445,7 @@ impl Drop for HandleColdBatch {
 /// A warm-hit benchmark with its seed publication outside the timed section.
 pub struct HandleWarmBenchmark {
     runtime: Arc<HandleRuntime>,
-    key: String,
+    key: HandleTopicKey,
 }
 
 impl HandleWarmBenchmark {
@@ -436,10 +454,10 @@ impl HandleWarmBenchmark {
             HandleRuntime::try_new_with_ingress(1, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
-        let key = "warm:0".to_owned();
+        let key = benchmark_topic_key("BENCH.WARM", 0);
         runtime
             .prepare_observed(
-                key.clone(),
+                key,
                 || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
                 |_, _| Ok(()),
             )
@@ -452,7 +470,7 @@ impl HandleWarmBenchmark {
             let result = self
                 .runtime
                 .prepare_observed(
-                    self.key.clone(),
+                    self.key,
                     || -> crate::XllResult<Arc<BenchHandleObject>> {
                         unreachable!("warm factory must not run")
                     },
@@ -662,12 +680,15 @@ impl HandleFormulaBenchmark {
     }
 }
 
-fn formula_topic_key(arguments: &PreparedFormulaArguments, caller: FormulaCaller) -> String {
+fn formula_topic_key(
+    arguments: &PreparedFormulaArguments,
+    caller: FormulaCaller,
+) -> HandleTopicKey {
     // SAFETY: the root XLOPER12 and all backing storage were allocated before
     // the benchmark began and remain owned by `arguments` for this call.
     let digest = unsafe { crate::formula_fingerprint::fingerprint(&arguments.raw_args) }
         .expect("benchmark XLOPER12 arguments must fingerprint successfully");
-    format_formula_topic_key(caller, HANDLE_FORMULA_UDF_ID, &digest)
+    HandleTopicKey::Formula(FormulaTopicKey::new(caller, HANDLE_FORMULA_UDF_ID, &digest))
 }
 
 impl Drop for HandleFormulaBenchmark {
@@ -701,14 +722,14 @@ impl HandleDistinctKeyBenchmark {
         );
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let keys = (0..worker_count)
-            .map(|worker| Arc::<str>::from(format!("warm:{worker}")))
+            .map(|worker| benchmark_topic_key("BENCH.DISTINCT", worker as u64))
             .collect::<Vec<_>>();
 
         for key in &keys {
             let factory_calls = Arc::clone(&factory_calls);
             runtime
                 .prepare_observed(
-                    key.to_string(),
+                    *key,
                     move || {
                         factory_calls.fetch_add(1, Ordering::Relaxed);
                         Ok(Arc::new(BenchHandleObject { _payload: 0 }))
@@ -733,7 +754,7 @@ impl HandleDistinctKeyBenchmark {
                     for _ in 0..iterations_per_worker {
                         let result = worker_runtime
                             .prepare_observed(
-                                key.to_string(),
+                                key,
                                 || {
                                     worker_factory_calls.fetch_add(1, Ordering::Relaxed);
                                     Ok(Arc::new(BenchHandleObject { _payload: 0 }))
@@ -797,7 +818,7 @@ impl Drop for HandleDistinctKeyBenchmark {
 }
 
 struct ContendedHandleBatch {
-    key: Arc<str>,
+    key: HandleTopicKey,
 }
 
 /// A persistent worker pool for measuring same-key contention without thread
@@ -829,7 +850,7 @@ impl HandleContendedBenchmark {
                 while let Ok(batch) = worker_rx.recv() {
                     let result = worker_runtime
                         .prepare_observed(
-                            batch.key.to_string(),
+                            batch.key,
                             || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
                             |_, _| Ok(()),
                         )
@@ -853,12 +874,10 @@ impl HandleContendedBenchmark {
 
     pub fn run(&self) {
         let id = self.next_key.fetch_add(1, Ordering::Relaxed);
-        let key: Arc<str> = format!("contended:{id}").into();
+        let key = benchmark_topic_key("BENCH.CONTENDED", id as u64);
         for start in &self.start_tx {
             start
-                .send(ContendedHandleBatch {
-                    key: Arc::clone(&key),
-                })
+                .send(ContendedHandleBatch { key })
                 .expect("benchmark worker received start signal");
         }
         for _ in 0..self.start_tx.len() {
@@ -1037,13 +1056,13 @@ impl Drop for HandleGuardContentionBenchmark {
     }
 }
 
-/// Benchmark object for measuring formula topic key formatting cost.
-pub struct FormatFormulaTopicKeyBenchmark {
+/// Benchmark object for measuring structured formula topic key creation cost.
+pub struct CreateFormulaTopicKeyBenchmark {
     caller: FormulaCaller,
     digest: [u8; 32],
 }
 
-impl FormatFormulaTopicKeyBenchmark {
+impl CreateFormulaTopicKeyBenchmark {
     pub fn new() -> Self {
         Self {
             caller: FormulaCaller {
@@ -1055,8 +1074,43 @@ impl FormatFormulaTopicKeyBenchmark {
         }
     }
 
+    pub fn run(&self) {
+        std::hint::black_box(FormulaTopicKey::new(
+            self.caller,
+            HANDLE_FORMULA_UDF_ID,
+            &self.digest,
+        ));
+    }
+}
+
+impl Default for CreateFormulaTopicKeyBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Benchmark object for measuring formula RTD key serialization cost.
+pub struct FormatFormulaTopicKeyBenchmark {
+    key: FormulaTopicKey,
+}
+
+impl FormatFormulaTopicKeyBenchmark {
+    pub fn new() -> Self {
+        Self {
+            key: FormulaTopicKey::new(
+                FormulaCaller {
+                    sheet_id: 7,
+                    row: 42,
+                    column: 11,
+                },
+                HANDLE_FORMULA_UDF_ID,
+                &[42u8; 32],
+            ),
+        }
+    }
+
     pub fn run(&self) -> String {
-        format_formula_topic_key(self.caller, HANDLE_FORMULA_UDF_ID, &self.digest)
+        self.key.format_rtd_key()
     }
 }
 
