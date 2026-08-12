@@ -118,7 +118,10 @@ impl Drop for AsyncSpawnBenchmark {
 
 #[derive(Clone, Copy, Debug)]
 pub enum SyncBenchKind {
-    AdmissionOnly,
+    IngressUdfOnly,
+    RuntimeEnterOnly,
+    FullAdmission,
+    ActiveUdfSnapshot,
     ScalarReturnNoSubscriber,
     ScalarReturnSubscriberTargetDisabled,
     ScalarReturnUdfTraceEnabled,
@@ -222,13 +225,35 @@ impl SyncBoundaryWorkerPool {
 
                 while s_rx.recv().is_ok() {
                     match kind {
-                        SyncBenchKind::AdmissionOnly => {
+                        SyncBenchKind::IngressUdfOnly => {
                             for _ in 0..iterations_per_thread {
-                                let (_guard, accepted, _concurrent_calls) =
+                                let (guard, accepted) =
+                                    crate::ingress::global_ingress().enter_udf_with(|| {});
+                                std::hint::black_box(accepted);
+                                drop(guard);
+                            }
+                        }
+                        SyncBenchKind::RuntimeEnterOnly => {
+                            for _ in 0..iterations_per_thread {
+                                if let Ok(call) = r.enter() {
+                                    std::hint::black_box(&call);
+                                }
+                            }
+                        }
+                        SyncBenchKind::FullAdmission => {
+                            for _ in 0..iterations_per_thread {
+                                let (guard, accepted) =
                                     crate::ingress::global_ingress().enter_udf_with(|| {});
                                 if accepted && let Ok(call) = r.enter() {
                                     std::hint::black_box(&call);
                                 }
+                                drop(guard);
+                            }
+                        }
+                        SyncBenchKind::ActiveUdfSnapshot => {
+                            for _ in 0..iterations_per_thread {
+                                let active = crate::ingress::global_ingress().active_udfs();
+                                std::hint::black_box(active);
                             }
                         }
                         SyncBenchKind::ScalarReturnNoSubscriber

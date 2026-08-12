@@ -420,8 +420,7 @@ impl ExportIngress {
 
     /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
     /// refinement linearization point as the accepting state transition.
-    /// Returns `(guard, accepted, concurrent_calls)`.
-    pub fn enter_udf_with<F>(&self, on_accepted: F) -> (ExportCallGuard<'_>, bool, usize)
+    pub fn enter_udf_with<F>(&self, on_accepted: F) -> (ExportCallGuard<'_>, bool)
     where
         F: FnOnce(),
     {
@@ -438,18 +437,18 @@ impl ExportIngress {
             .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return (self.rejected_guard(), false, 0);
+            return (self.rejected_guard(), false);
         }
         let stripe_index = current_ingress_stripe();
         let stripe = &self.stripes[stripe_index];
         if !stripe.try_enter() {
-            return (self.rejected_guard(), false, 0);
+            return (self.rejected_guard(), false);
         }
         stripe.enter_udf();
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
             self.release_reservation(stripe_index, true);
-            return (self.rejected_guard(), false, 0);
+            return (self.rejected_guard(), false);
         }
         let accepted = phase == PHASE_OPEN;
         if accepted {
@@ -458,7 +457,6 @@ impl ExportIngress {
                 .expect("ingress acceptance hook called once");
             hook();
         }
-        let concurrent_calls = self.active_udfs();
         (
             ExportCallGuard {
                 ingress: self,
@@ -467,7 +465,6 @@ impl ExportIngress {
                 udf: true,
             },
             accepted,
-            concurrent_calls,
         )
     }
 

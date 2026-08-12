@@ -19,11 +19,10 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: IntoExcelValue + Send + 'static,
 {
-    let (_export_guard, accepted, _concurrent_calls) = crate::ingress::global_ingress()
-        .enter_udf_with(|| {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
-        });
+    let (_export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
 
     if !accepted {
         return;
@@ -72,7 +71,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
     let timer = crate::execution::CallTimer::start();
     let started_at = std::time::SystemTime::now();
 
-    let concurrent_calls = guard.concurrent_calls();
+    let concurrent_calls = crate::ingress::global_ingress().active_udfs();
     let metadata = CallMetadata {
         udf_id,
         excel_name,
