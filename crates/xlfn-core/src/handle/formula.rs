@@ -68,30 +68,20 @@ impl HandleTopicKey {
             Self::Formula(key) => key.format_rtd_key(),
         }
     }
-
-    // Unit tests still use short human-readable labels to exercise the
-    // lifecycle state machine. Convert those labels at the test boundary so
-    // the runtime itself only ever stores structured identities.
-    #[cfg(test)]
-    pub(crate) fn from_test_label(label: &str) -> Self {
-        let digest = *blake3::hash(label.as_bytes()).as_bytes();
-        Self::Formula(FormulaTopicKey::new(
-            FormulaCaller {
-                sheet_id: 0,
-                row: 0,
-                column: 0,
-            },
-            "TEST.HANDLE",
-            &digest,
-        ))
-    }
 }
 
 #[cfg(test)]
-impl From<String> for HandleTopicKey {
-    fn from(label: String) -> Self {
-        Self::from_test_label(&label)
-    }
+pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
+    let digest = *blake3::hash(label.as_bytes()).as_bytes();
+    HandleTopicKey::Formula(FormulaTopicKey::new(
+        FormulaCaller {
+            sheet_id: 0,
+            row: 0,
+            column: 0,
+        },
+        "TEST.HANDLE",
+        &digest,
+    ))
 }
 
 pub(crate) fn resolve_formula_caller(

@@ -1491,7 +1491,7 @@ mod tests {
 
         let handles = runtime.handles().unwrap();
         handles
-            .prepare("lean-checker-handle".to_owned(), || {
+            .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
                 Ok(std::sync::Arc::new(TraceHandle))
             })
             .unwrap();
@@ -1869,7 +1869,7 @@ mod tests {
         let runtime = Runtime::new();
         let handles = runtime.handles().unwrap();
         let (token, _) = handles
-            .prepare("state-owned".to_owned(), || {
+            .prepare(crate::handle::test_topic_key("state-owned"), || {
                 Ok(std::sync::Arc::new(StateOwnedHandleObject))
             })
             .unwrap();
@@ -2119,7 +2119,7 @@ mod tests {
         runtime
             .handles()
             .unwrap()
-            .prepare("ordered".to_owned(), || {
+            .prepare(crate::handle::test_topic_key("ordered"), || {
                 Ok(std::sync::Arc::new(OrderedHandle {
                     events: std::sync::Arc::clone(&events),
                 }))

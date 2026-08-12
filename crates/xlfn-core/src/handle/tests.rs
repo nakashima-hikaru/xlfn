@@ -90,12 +90,14 @@ fn formula_topic_key_changes_with_every_identity_component() {
 #[test]
 fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("reverse-map");
+    let expected_rtd_key = key.format_rtd_key();
     let observed = Arc::new(Mutex::new(None::<String>));
     let observed_for_callback = Arc::clone(&observed);
 
     let (token, created) = runtime
         .prepare_observed(
-            "reverse-map".to_owned(),
+            key,
             || Ok(Arc::new(DataRecord(7))),
             move |rtd_key, observed_token| {
                 assert!(!observed_token.is_empty());
@@ -110,6 +112,7 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         .lock()
         .clone()
         .expect("observation key was recorded");
+    assert_eq!(rtd_key, expected_rtd_key);
     let topics = runtime.topics.read();
     let identity = topics
         .by_rtd_key
@@ -377,14 +380,14 @@ fn escaped_handle_destructor_panic_poisons_terminal_close() {
     }
 
     let runtime = HandleRuntime::new(2);
-    let (token, _) = runtime
-        .prepare("escaped-panic".to_owned(), || Ok(Arc::new(PanicOnDrop)))
-        .unwrap();
+    let key = test_topic_key("escaped-panic");
+    let rtd_key = key.format_rtd_key();
+    let (token, _) = runtime.prepare(key, || Ok(Arc::new(PanicOnDrop))).unwrap();
     let escaped = runtime.lookup::<PanicOnDrop>(&token).unwrap();
 
     // Remove the formula-owned registry root first. The escaped Handle now
     // owns the final Arc and must contain its destructor panic itself.
-    runtime.rollback("escaped-panic");
+    runtime.rollback(&rtd_key);
     drop(escaped);
 
     assert!(matches!(runtime.close(), Err(XllError::Panic)));
@@ -430,10 +433,12 @@ where
 #[test]
 fn repeated_formula_identity_runs_factory_exactly_once() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("same");
+    let rtd_key = key.format_rtd_key();
     let calls = AtomicUsize::new(0);
 
     let (first, created) = runtime
-        .prepare("same".to_owned(), || {
+        .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(Arc::new(DataRecord(1)))
         })
@@ -441,7 +446,7 @@ fn repeated_formula_identity_runs_factory_exactly_once() {
     assert!(created);
 
     let (second, created) = runtime
-        .prepare("same".to_owned(), || {
+        .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(Arc::new(DataRecord(2)))
         })
@@ -452,7 +457,7 @@ fn repeated_formula_identity_runs_factory_exactly_once() {
 
     assert_eq!(runtime.lookup::<DataRecord>(&first).unwrap().0, 1);
 
-    runtime.connect(1, 41, "same").unwrap();
+    runtime.connect(1, 41, &rtd_key).unwrap();
     runtime.disconnect(1, 41);
     assert_eq!(runtime.len(), 0);
     assert!(matches!(
@@ -466,7 +471,7 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
     let runtime: crate::Runtime<()> = crate::Runtime::new();
     let handles = runtime.handles().unwrap();
     let (token, _) = handles
-        .prepare("argument".to_owned(), || Ok(Arc::new(DataRecord(19))))
+        .prepare(test_topic_key("argument"), || Ok(Arc::new(DataRecord(19))))
         .unwrap();
     let (_encoded, mut raw) = token_value(&token);
 
@@ -481,12 +486,12 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     let runtime: crate::Runtime<()> = crate::Runtime::new();
     let handles = runtime.handles().unwrap();
+    let key = test_topic_key("argument-errors");
+    let rtd_key = key.format_rtd_key();
     let (token, _) = handles
-        .prepare("argument-errors".to_owned(), || {
-            Ok(Arc::new(DataRecord(23)))
-        })
+        .prepare(key, || Ok(Arc::new(DataRecord(23))))
         .unwrap();
-    handles.connect(1, 91, "argument-errors").unwrap();
+    handles.connect(1, 91, &rtd_key).unwrap();
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
     // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
@@ -550,16 +555,20 @@ fn optional_handle_conversion_preserves_blank_and_missing_policy() {
 fn existing_handle_publication_creates_an_independent_formula_owner() {
     let runtime = HandleRuntime::new(8);
     let shared = Arc::new(DataRecord(31));
+    let source_key = test_topic_key("source");
+    let source_rtd_key = source_key.format_rtd_key();
     let (source_token, _) = runtime
-        .prepare("source".to_owned(), || Ok(Arc::clone(&shared)))
+        .prepare(source_key, || Ok(Arc::clone(&shared)))
         .unwrap();
-    runtime.connect(1, 1, "source").unwrap();
+    runtime.connect(1, 1, &source_rtd_key).unwrap();
 
     let resolved = runtime.lookup::<DataRecord>(&source_token).unwrap();
+    let alias_key = test_topic_key("alias");
+    let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, _) = runtime
-        .prepare("alias".to_owned(), || Ok(resolved.into_arc()))
+        .prepare(alias_key, || Ok(resolved.into_arc()))
         .unwrap();
-    runtime.connect(1, 2, "alias").unwrap();
+    runtime.connect(1, 2, &alias_rtd_key).unwrap();
     assert_ne!(source_token, alias_token);
 
     runtime.disconnect(1, 1);
@@ -576,21 +585,25 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
 #[test]
 fn failed_rtd_connection_rolls_back_pending_object() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("pending");
+    let rtd_key = key.format_rtd_key();
     runtime
-        .prepare("pending".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
-    runtime.rollback("pending");
+    runtime.rollback(&rtd_key);
     assert_eq!(runtime.len(), 0);
 }
 
 #[test]
 fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("uncalculated");
+    let rtd_key = key.format_rtd_key();
     runtime
-        .prepare("uncalculated".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
-    runtime.connect(1, 9, "uncalculated").unwrap();
-    runtime.rollback("uncalculated");
+    runtime.connect(1, 9, &rtd_key).unwrap();
+    runtime.rollback(&rtd_key);
     assert_eq!(runtime.len(), 0);
     runtime.disconnect(1, 9);
     assert_eq!(runtime.len(), 0);
@@ -599,18 +612,20 @@ fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
 #[test]
 fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("transactional");
+    let rtd_key = key.format_rtd_key();
     let (token, _) = runtime
-        .prepare("transactional".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
 
-    let connection = runtime.connect_transaction(1, 10, "transactional").unwrap();
+    let connection = runtime.connect_transaction(1, 10, &rtd_key).unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
 
     assert_eq!(runtime.len(), 1);
     assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 1);
 
-    let retry = runtime.connect_transaction(1, 10, "transactional").unwrap();
+    let retry = runtime.connect_transaction(1, 10, &rtd_key).unwrap();
     assert_eq!(retry.token(), token);
     retry.commit().unwrap();
     runtime.disconnect(1, 10);
@@ -620,24 +635,20 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
 #[test]
 fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("concurrent-transaction");
+    let rtd_key = key.format_rtd_key();
     runtime
-        .prepare("concurrent-transaction".to_owned(), || {
-            Ok(Arc::new(DataRecord(3)))
-        })
+        .prepare(key, || Ok(Arc::new(DataRecord(3))))
         .unwrap();
 
-    let connection = runtime
-        .connect_transaction(1, 12, "concurrent-transaction")
-        .unwrap();
+    let connection = runtime.connect_transaction(1, 12, &rtd_key).unwrap();
     assert!(matches!(
-        runtime.connect_transaction(1, 12, "concurrent-transaction"),
+        runtime.connect_transaction(1, 12, &rtd_key),
         Err(XllError::Overloaded)
     ));
     connection.commit().unwrap();
 
-    let repeated = runtime
-        .connect_transaction(1, 12, "concurrent-transaction")
-        .unwrap();
+    let repeated = runtime.connect_transaction(1, 12, &rtd_key).unwrap();
     repeated.commit().unwrap();
     runtime.disconnect(1, 12);
     assert_eq!(runtime.len(), 0);
@@ -646,16 +657,14 @@ fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
 #[test]
 fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("existing-transaction");
+    let rtd_key = key.format_rtd_key();
     let (token, _) = runtime
-        .prepare("existing-transaction".to_owned(), || {
-            Ok(Arc::new(DataRecord(2)))
-        })
+        .prepare(key, || Ok(Arc::new(DataRecord(2))))
         .unwrap();
-    runtime.connect(1, 11, "existing-transaction").unwrap();
+    runtime.connect(1, 11, &rtd_key).unwrap();
 
-    let connection = runtime
-        .connect_transaction(1, 11, "existing-transaction")
-        .unwrap();
+    let connection = runtime.connect_transaction(1, 11, &rtd_key).unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
 
@@ -667,15 +676,19 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
 #[test]
 fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     let runtime = HandleRuntime::new(8);
+    let first_key = test_topic_key("first");
+    let first_rtd_key = first_key.format_rtd_key();
+    let second_key = test_topic_key("second");
+    let second_rtd_key = second_key.format_rtd_key();
     runtime
-        .prepare("first".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
     runtime
-        .prepare("second".to_owned(), || Ok(Arc::new(DataRecord(2))))
+        .prepare(second_key, || Ok(Arc::new(DataRecord(2))))
         .unwrap();
-    runtime.connect(1, 9, "first").unwrap();
+    runtime.connect(1, 9, &first_rtd_key).unwrap();
     assert!(matches!(
-        runtime.connect(1, 9, "second"),
+        runtime.connect(1, 9, &second_rtd_key),
         Err(XllError::InvalidHandle)
     ));
     runtime.disconnect(1, 9);
@@ -695,14 +708,17 @@ impl Drop for CountedDataRecord {
 #[test]
 fn different_formula_keys_create_distinct_handles() {
     let runtime = HandleRuntime::new(8);
+    let first_key = test_topic_key("sheet:A1:rate=1");
+    let second_key = test_topic_key("sheet:A2:rate=1");
+    let changed_key = test_topic_key("sheet:A1:rate=2");
     let (first, _) = runtime
-        .prepare("sheet:A1:rate=1".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
     let (second, _) = runtime
-        .prepare("sheet:A2:rate=1".to_owned(), || Ok(Arc::new(DataRecord(1))))
+        .prepare(second_key, || Ok(Arc::new(DataRecord(1))))
         .unwrap();
     let (changed, _) = runtime
-        .prepare("sheet:A1:rate=2".to_owned(), || Ok(Arc::new(DataRecord(2))))
+        .prepare(changed_key, || Ok(Arc::new(DataRecord(2))))
         .unwrap();
     assert_ne!(first, second);
     assert_ne!(first, changed);
@@ -712,12 +728,12 @@ fn different_formula_keys_create_distinct_handles() {
 fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("sheet:A1");
+    let rtd_key = key.format_rtd_key();
     let (token, _) = runtime
-        .prepare("sheet:A1".to_owned(), || {
-            Ok(Arc::new(CountedDataRecord(Arc::clone(&drops))))
-        })
+        .prepare(key, || Ok(Arc::new(CountedDataRecord(Arc::clone(&drops)))))
         .unwrap();
-    runtime.connect(1, 7, "sheet:A1").unwrap();
+    runtime.connect(1, 7, &rtd_key).unwrap();
     let consumer = runtime.lookup::<CountedDataRecord>(&token).unwrap();
     runtime.disconnect(1, 7);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -731,13 +747,13 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
 fn terminate_and_close_release_every_remaining_topic_once() {
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = HandleRuntime::new(8);
-    for key in ["one", "two"] {
+    for label in ["one", "two"] {
+        let key = test_topic_key(label);
+        let rtd_key = key.format_rtd_key();
         runtime
-            .prepare(key.to_owned(), || {
-                Ok(Arc::new(CountedDataRecord(Arc::clone(&drops))))
-            })
+            .prepare(key, || Ok(Arc::new(CountedDataRecord(Arc::clone(&drops)))))
             .unwrap();
-        runtime.claim_server(key, 1).unwrap();
+        runtime.claim_server(&rtd_key, 1).unwrap();
     }
     runtime.terminate_topics(1);
     assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -750,7 +766,7 @@ fn panicking_factory_does_not_publish_a_topic() {
     let runtime = HandleRuntime::new(8);
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = runtime
-            .prepare::<DataRecord, _>("panic".to_owned(), || panic!("injected factory panic"));
+            .prepare::<DataRecord, _>(test_topic_key("panic"), || panic!("injected factory panic"));
     }));
     assert!(panic.is_err());
     assert_eq!(runtime.len(), 0);
@@ -759,10 +775,10 @@ fn panicking_factory_does_not_publish_a_topic() {
 #[test]
 fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("factory-reentry");
     let (token, created) = runtime
-        .prepare("factory-reentry".to_owned(), || {
-            let nested =
-                runtime.prepare("factory-reentry".to_owned(), || Ok(Arc::new(DataRecord(2))));
+        .prepare(key, || {
+            let nested = runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
             Ok(Arc::new(DataRecord(1)))
         })
@@ -774,10 +790,11 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
 #[test]
 fn different_key_factory_reentry_returns_an_error_without_waiting() {
     let runtime = HandleRuntime::new(8);
+    let outer_key = test_topic_key("outer-factory");
+    let inner_key = test_topic_key("inner-factory");
     let (token, created) = runtime
-        .prepare("outer-factory".to_owned(), || {
-            let nested =
-                runtime.prepare("inner-factory".to_owned(), || Ok(Arc::new(DataRecord(2))));
+        .prepare(outer_key, || {
+            let nested = runtime.prepare(inner_key, || Ok(Arc::new(DataRecord(2))));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
             Ok(Arc::new(DataRecord(1)))
         })
@@ -790,14 +807,13 @@ fn different_key_factory_reentry_returns_an_error_without_waiting() {
 #[test]
 fn same_thread_observer_reentry_returns_an_error_without_waiting() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("observer-reentry");
     let (token, created) = runtime
         .prepare_observed(
-            "observer-reentry".to_owned(),
+            key,
             || Ok(Arc::new(DataRecord(1))),
             |_, _| {
-                let nested = runtime.prepare("observer-reentry".to_owned(), || {
-                    Ok(Arc::new(DataRecord(2)))
-                });
+                let nested = runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
                 assert!(matches!(nested, Err(XllError::ReentrantCall)));
                 Ok(())
             },
@@ -810,13 +826,14 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
 #[test]
 fn different_key_observer_reentry_returns_an_error_without_waiting() {
     let runtime = HandleRuntime::new(8);
+    let outer_key = test_topic_key("outer-observer");
+    let inner_key = test_topic_key("inner-observer");
     let (token, created) = runtime
         .prepare_observed(
-            "outer-observer".to_owned(),
+            outer_key,
             || Ok(Arc::new(DataRecord(1))),
             |_, _| {
-                let nested =
-                    runtime.prepare("inner-observer".to_owned(), || Ok(Arc::new(DataRecord(2))));
+                let nested = runtime.prepare(inner_key, || Ok(Arc::new(DataRecord(2))));
                 assert!(matches!(nested, Err(XllError::ReentrantCall)));
                 Ok(())
             },
@@ -830,8 +847,9 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
 #[test]
 fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("observed");
     let first = runtime.prepare_observed(
-        "observed".to_owned(),
+        key,
         || Ok(Arc::new(DataRecord(1))),
         |_, _| {
             Err(XllError::ExcelApi {
@@ -844,11 +862,7 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
     assert_eq!(runtime.len(), 0);
 
     let (token, created) = runtime
-        .prepare_observed(
-            "observed".to_owned(),
-            || Ok(Arc::new(DataRecord(2))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(2))), |_, _| Ok(()))
         .unwrap();
     assert!(created);
     assert_eq!(runtime.lookup::<DataRecord>(&token).unwrap().0, 2);
@@ -857,18 +871,15 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
 #[test]
 fn cache_hit_observe_failure_does_not_invalidate_object() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("observed-memoized");
     let (token, created) = runtime
-        .prepare_observed(
-            "observed-memoized".to_owned(),
-            || Ok(Arc::new(DataRecord(1))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
     let calls = AtomicUsize::new(0);
     let result = runtime.prepare_observed(
-        "observed-memoized".to_owned(),
+        key,
         || {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(Arc::new(DataRecord(2)))
@@ -893,18 +904,15 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
 #[test]
 fn cache_hit_observe_failure_preserves_existing_topic() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("observe-retry");
     let (token, created) = runtime
-        .prepare_observed(
-            "observe-retry".to_owned(),
-            || Ok(Arc::new(DataRecord(10))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(10))), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
     // Observation failure on warm hit
     let result = runtime.prepare_observed(
-        "observe-retry".to_owned(),
+        key,
         || Ok(Arc::new(DataRecord(20))),
         |_, _| {
             Err(XllError::ExcelApi {
@@ -917,11 +925,7 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
 
     // Retry with successful observation still reuses the same object
     let (retry_token, created) = runtime
-        .prepare_observed(
-            "observe-retry".to_owned(),
-            || Ok(Arc::new(DataRecord(30))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(30))), |_, _| Ok(()))
         .unwrap();
     assert!(!created);
     assert_eq!(retry_token, token);
@@ -932,7 +936,7 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
 fn observation_cannot_commit_a_topic_removed_reentrantly() {
     let runtime = HandleRuntime::new(8);
     let result = runtime.prepare_observed(
-        "removed-during-observation".to_owned(),
+        test_topic_key("removed-during-observation"),
         || Ok(Arc::new(DataRecord(1))),
         |key, _| {
             runtime.rollback(key);
@@ -952,9 +956,10 @@ fn concurrent_waiter_retries_after_observation_failure() {
     let (observing_tx, observing_rx) = mpsc::channel();
     let (finish_tx, finish_rx) = mpsc::channel();
     let first_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("concurrent-observe");
     let first = std::thread::spawn(move || {
         first_runtime.prepare_observed(
-            "concurrent-observe".to_owned(),
+            key,
             || Ok(Arc::new(DataRecord(1))),
             |_, _| {
                 observing_tx.send(()).unwrap();
@@ -972,11 +977,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
     let second_runtime = Arc::clone(&runtime);
     let second = std::thread::spawn(move || {
         waiting_tx.send(()).unwrap();
-        second_runtime.prepare_observed(
-            "concurrent-observe".to_owned(),
-            || Ok(Arc::new(DataRecord(2))),
-            |_, _| Ok(()),
-        )
+        second_runtime.prepare_observed(key, || Ok(Arc::new(DataRecord(2))), |_, _| Ok(()))
     });
     waiting_rx.recv().unwrap();
 
@@ -986,7 +987,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
             let topics = runtime.topics.read();
             topics
                 .initializing
-                .get(&HandleTopicKey::from_test_label("concurrent-observe"))
+                .get(&test_topic_key("concurrent-observe"))
                 .is_some_and(|initialization| Arc::strong_count(initialization) >= 2)
         };
         if waiter_is_blocked {
@@ -1019,6 +1020,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
 
     let (in_factory_tx, in_factory_rx) = mpsc::channel();
     let barrier = Arc::new(Barrier::new(2));
+    let key = test_topic_key("concurrent_key");
 
     let runtime1 = Arc::clone(&runtime);
     let factory_calls1 = Arc::clone(&factory_calls);
@@ -1026,7 +1028,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
 
     let t1 = std::thread::spawn(move || {
         runtime1
-            .prepare("concurrent_key".to_owned(), || {
+            .prepare(key, || {
                 factory_calls1.fetch_add(1, Ordering::SeqCst);
                 in_factory_tx.send(()).unwrap();
                 barrier1.wait();
@@ -1041,7 +1043,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
     let factory_calls2 = Arc::clone(&factory_calls);
     let t2 = std::thread::spawn(move || {
         runtime2
-            .prepare("concurrent_key".to_owned(), || {
+            .prepare(key, || {
                 factory_calls2.fetch_add(1, Ordering::SeqCst);
                 Ok(Arc::new(DataRecord(200)))
             })
@@ -1068,10 +1070,9 @@ fn handle_dependency_chain_propagates_identity_change() {
     let runtime = HandleRuntime::new(16);
 
     // Upstream: different argument digest → different key → different token
+    let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
     let (upstream_a, created) = runtime
-        .prepare("sheet:A1:CURVE.CREATE:digest_a".to_owned(), || {
-            Ok(Arc::new(DataRecord(10)))
-        })
+        .prepare(upstream_a_key, || Ok(Arc::new(DataRecord(10))))
         .unwrap();
     assert!(created);
 
@@ -1079,23 +1080,24 @@ fn handle_dependency_chain_propagates_identity_change() {
     // MODEL.CREATE(Handle<Curve>, params). The raw upstream token becomes
     // part of the argument digest, so a different upstream token yields
     // a different downstream key.
-    let downstream_key_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
+    let downstream_label_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
+    let downstream_key_a = test_topic_key(&downstream_label_a);
     let (downstream_a, created) = runtime
         .prepare(downstream_key_a, || Ok(Arc::new(DataRecord(100))))
         .unwrap();
     assert!(created);
 
     // Upstream changes (different arguments → different key)
+    let upstream_b_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_b");
     let (upstream_b, created) = runtime
-        .prepare("sheet:A1:CURVE.CREATE:digest_b".to_owned(), || {
-            Ok(Arc::new(DataRecord(20)))
-        })
+        .prepare(upstream_b_key, || Ok(Arc::new(DataRecord(20))))
         .unwrap();
     assert!(created);
     assert_ne!(upstream_a, upstream_b);
 
     // Downstream key also changes because the upstream token changed
-    let downstream_key_b = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_b);
+    let downstream_label_b = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_b);
+    let downstream_key_b = test_topic_key(&downstream_label_b);
     let (downstream_b, created) = runtime
         .prepare(downstream_key_b, || Ok(Arc::new(DataRecord(200))))
         .unwrap();
@@ -1113,10 +1115,12 @@ fn close_waits_for_all_escaped_handle_leases() {
     use std::time::Duration;
 
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("leased");
+    let rtd_key = key.format_rtd_key();
     let (token, _) = runtime
-        .prepare("leased".to_owned(), || Ok(Arc::new(DataRecord(41))))
+        .prepare(key, || Ok(Arc::new(DataRecord(41))))
         .unwrap();
-    runtime.connect(1, 1, "leased").unwrap();
+    runtime.connect(1, 1, &rtd_key).unwrap();
 
     let first = runtime.lookup::<DataRecord>(&token).unwrap();
     let second = first.clone();
@@ -1152,6 +1156,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     use std::time::{Duration, Instant};
 
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("closing");
     let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (factory_started_tx, factory_started_rx) = mpsc::channel();
     let (release_factory_tx, release_factory_rx) = mpsc::channel();
@@ -1160,7 +1165,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     let creator_observed = Arc::clone(&observed);
     let creator = std::thread::spawn(move || {
         creator_runtime.prepare_observed(
-            "closing".to_owned(),
+            key,
             || {
                 factory_started_tx.send(()).unwrap();
                 release_factory_rx.recv().unwrap();
@@ -1177,7 +1182,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     let waiter_runtime = Arc::clone(&runtime);
     let (waiter_done_tx, waiter_done_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let result = waiter_runtime.prepare("closing".to_owned(), || Ok(Arc::new(DataRecord(2))));
+        let result = waiter_runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
         waiter_done_tx.send(result).unwrap();
     });
 
@@ -1187,7 +1192,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
             .topics
             .read()
             .initializing
-            .get(&HandleTopicKey::from_test_label("closing"))
+            .get(&key)
             .is_some_and(|initialization| Arc::strong_count(initialization) >= 4);
         if blocked {
             break;
@@ -1230,12 +1235,12 @@ fn nested_handle_in_registry_does_not_deadlock_on_close() {
 
     let runtime = Arc::new(HandleRuntime::new(16));
     let (inner_token, _) = runtime
-        .prepare("inner".to_string(), || Ok(Arc::new(InnerObj)))
+        .prepare(test_topic_key("inner"), || Ok(Arc::new(InnerObj)))
         .unwrap();
     let inner_handle = runtime.lookup::<InnerObj>(&inner_token).unwrap();
 
     let (outer_token, _) = runtime
-        .prepare("outer".to_string(), move || {
+        .prepare(test_topic_key("outer"), move || {
             Ok(Arc::new(OuterObj {
                 _inner: inner_handle,
             }))
@@ -1378,13 +1383,10 @@ fn registry_close_with_leases_waits_for_active_handle_and_blocks_new_lookups() {
 #[test]
 fn warm_hit_does_not_enter_single_flight_initialization() {
     let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("warm-fast");
 
     let (token, created) = runtime
-        .prepare_observed(
-            "warm-fast".to_owned(),
-            || Ok(Arc::new(DataRecord(1))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
         .unwrap();
 
     assert!(created);
@@ -1393,7 +1395,7 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
 
     let (second, created) = runtime
         .prepare_observed(
-            "warm-fast".to_owned(),
+            key,
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 Ok(Arc::new(DataRecord(2)))
@@ -1427,13 +1429,10 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     use std::time::Duration;
 
     let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("warm-close");
 
     runtime
-        .prepare_observed(
-            "warm-close".to_owned(),
-            || Ok(Arc::new(DataRecord(1))),
-            |_, _| Ok(()),
-        )
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
         .unwrap();
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -1442,7 +1441,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     let warm_runtime = Arc::clone(&runtime);
     let warm = std::thread::spawn(move || {
         warm_runtime.prepare_observed::<DataRecord, _>(
-            "warm-close".to_owned(),
+            key,
             || panic!("warm factory must not run"),
             |_, _| {
                 entered_tx.send(()).unwrap();

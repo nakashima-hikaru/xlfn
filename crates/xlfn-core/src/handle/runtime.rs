@@ -409,22 +409,11 @@ impl HandleRuntime {
 
     #[cfg(any(target_os = "windows", test))]
     fn topic_key_for_rtd(topics: &TopicState, rtd_key: &str) -> XllResult<HandleTopicKey> {
-        if let Some(&key) = topics.by_rtd_key.get(rtd_key) {
-            return Ok(key);
-        }
-
-        // Existing unit tests use readable labels instead of the serialized
-        // RTD representation. Keep that adapter test-only; production always
-        // resolves the exact string Excel supplied through by_rtd_key.
-        #[cfg(test)]
-        {
-            let key = HandleTopicKey::from_test_label(rtd_key);
-            if topics.by_key.contains_key(&key) {
-                return Ok(key);
-            }
-        }
-
-        Err(XllError::StaleHandle)
+        topics
+            .by_rtd_key
+            .get(rtd_key)
+            .copied()
+            .ok_or(XllError::StaleHandle)
     }
 
     #[cfg(any(target_os = "windows", test))]
