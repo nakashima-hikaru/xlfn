@@ -203,16 +203,8 @@ fn wrapper_arguments(
             CrtPolicy::Inherit => {}
         }
         if is_cdylib_link(&args) {
-            match write_temp_def_file() {
-                Ok(def_path) => {
-                    args.push(OsString::from("-C"));
-                    args.push(OsString::from(format!(
-                        "link-arg=/DEF:{}",
-                        def_path.display()
-                    )));
-                }
-                Err(_error) => {}
-            }
+            args.push(OsString::from("-C"));
+            args.push(OsString::from("link-arg=/NOIMPLIB"));
         }
     }
     args
@@ -227,14 +219,6 @@ fn is_cdylib_link(args: &[OsString]) -> bool {
                 .and_then(|argument| argument.strip_prefix("--crate-type="))
                 .is_some_and(|crate_type| crate_type.split(',').any(|t| t == "cdylib"))
         })
-}
-
-fn write_temp_def_file() -> std::io::Result<PathBuf> {
-    let temp_dir = std::env::temp_dir();
-    let def_path = temp_dir.join("xlfn_xll_module.def");
-    let content = xlfn_package::ModuleDefinition::default_xll();
-    std::fs::write(&def_path, content)?;
-    Ok(def_path)
 }
 
 fn rustc_invocation_targets(args: &[OsString], selected_target: &OsStr) -> bool {
@@ -385,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn cdylib_link_injects_def_file() {
+    fn cdylib_link_disables_import_library() {
         let input = vec![
             "rustc".into(),
             "--target".into(),
@@ -398,10 +382,11 @@ mod tests {
             CrtPolicy::Inherit,
             OsStr::new("x86_64-pc-windows-msvc"),
         );
+        assert!(output.iter().any(|arg| arg == "link-arg=/NOIMPLIB"));
         assert!(
-            output
+            !output
                 .iter()
-                .any(|arg| arg.to_string_lossy().contains("link-arg=/DEF:"))
+                .any(|arg| arg.to_string_lossy().starts_with("link-arg=/DEF:"))
         );
     }
 
