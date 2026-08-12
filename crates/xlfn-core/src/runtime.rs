@@ -380,17 +380,10 @@ impl<S> Runtime<S> {
                 .unwrap_or_else(|_| opening_publication_lost())?;
         }
 
-        #[cfg(any(test, feature = "shutdown-refinement"))]
         if !can_commit {
-            self.open_attempt_id.store(0, Ordering::Release);
-            attempt.active = false;
-            debug_assert_eq!(self.phase(), LifecyclePhase::Closing);
-            debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
-                    attempt: attempt.attempt_id,
-                },
-            );
+            self.reject_open_attempt(attempt);
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_rejected_open(attempt.attempt_id);
         }
 
         if can_commit {
@@ -429,6 +422,22 @@ impl<S> Runtime<S> {
 
     pub(crate) fn registration_state_unknown(&self) -> bool {
         self.registration_state_unknown.load(Ordering::Acquire)
+    }
+
+    fn reject_open_attempt(&self, attempt: &mut OpenAttemptGuard<'_, S>) {
+        self.open_attempt_id.store(0, Ordering::Release);
+        attempt.active = false;
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    fn record_rejected_open(&self, attempt_id: u64) {
+        debug_assert_eq!(self.phase(), LifecyclePhase::Closing);
+        debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
+        self.record_composition_event(
+            crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
+                attempt: attempt_id,
+            },
+        );
     }
 
     fn fail_and_record(&self, attempt_id: u64) -> bool {
@@ -1624,6 +1633,8 @@ pub(crate) mod tests {
             runtime.finish_open(&mut opening, Vec::new()),
             Err(XllError::Closing)
         ));
+        assert_eq!(runtime.open_attempt_id.load(Ordering::Acquire), 0);
+        assert!(!opening.is_active());
 
         closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         closer.join().unwrap();
