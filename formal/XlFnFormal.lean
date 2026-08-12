@@ -16,3 +16,7 @@ import XlFnFormal.Lifecycle.Checker
 import XlFnFormal.Lifecycle.Counterexample
 import XlFnFormal.Lifecycle.Certificate
 import XlFnFormal.Composition.Model
+import XlFnFormal.Composition.Transition
+import XlFnFormal.Composition.Trace
+import XlFnFormal.Composition.Invariant
+import XlFnFormal.Composition.Safety

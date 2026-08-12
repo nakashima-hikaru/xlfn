@@ -157,20 +157,39 @@ wakeups, scheduler fairness, or eventual progress. In particular, the Rust
 `close_waiter_is_not_lost_when_open_rollback_finishes` concurrency test remains
 the obligation that checks waiter blocking, notification, and eventual return.
 
-`Lifecycle/Certificate.lean` records the two cleanup certificate shapes. A
+`Lifecycle/Certificate.lean` records the three cleanup certificate shapes. A
 committed generation requires a quiescent Shutdown state at `finalize`; an
-uncommitted open rollback carries only a resource-quiescence witness because
-no Shutdown ghost generation exists.
+uncommitted final close and an open rollback carry only a resource-quiescence
+witness because no Shutdown ghost generation exists on those paths.
 
 `Composition/Model.lean` introduces:
 
 ```lean
+structure ShutdownSession where
+  generation : Lifecycle.AttemptId
+  state : Shutdown.State
+
 structure State where
   lifecycle : Lifecycle.State
-  currentShutdown : Option Shutdown.State
+  currentShutdown : Option ShutdownSession
 ```
 
 The option is a current-session marker, not a test of historical
 `generation ≠ 0`: a failed attempt after a previous committed generation
 leaves the historical generation unchanged while the current marker remains
-`none`. Composition transitions are added in the next refinement batch.
+`none`. A committed open stores the concrete resource snapshot supplied by
+the transition; it does not use a fixed empty resource value.
+
+`Composition/Transition.lean` keeps the Rust linearization points separate:
+`commitOpen` creates a generation, `finishCommittedShutdown` moves the
+Shutdown session to `closed`, `publishCommittedClosed` publishes the
+lifecycle state, `retireCommittedShutdown` models the returned-success
+record, and `releaseCleanupOwner` is the final return-safety point. The
+uncommitted final-close and open-rollback transitions remain session-free.
+The intermediate `closed + some Closed` state is therefore intentional and
+requires the final-close cleanup owner.
+
+`Composition/Invariant.lean` proves `Valid` preservation and reachable-trace
+validity, including lifecycle/Shutdown generation equality. `Composition/Safety.lean`
+proves the quiescence result for all three successful close paths and that a
+`ReturnSafe` state cannot retain an active Shutdown session.

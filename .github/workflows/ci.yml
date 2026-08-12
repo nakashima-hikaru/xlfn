@@ -13,8 +13,8 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
-    rust:
-        name: Rust and guide
+    portable-quality:
+        name: Portable quality and tooling
         runs-on: ubuntu-latest
         steps:
             - name: Check out repository
@@ -27,6 +27,12 @@ jobs:
               with:
                   python-version: "3.13"
 
+            - name: Install development tools
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
+                  fallback: none
+
             - name: Verify generated Windows bindings
               run: |
                   cargo run --locked --package xlfn-windows-bindings-gen
@@ -36,26 +42,41 @@ jobs:
                     crates/xlfn-package/src/win32.rs \
                     crates/cargo-xlfn/src/win32.rs
 
-            - name: Install development tools
-              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
-              with:
-                  tool: just,cargo-nextest,cargo-hack,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
-                  fallback: none
-
             - name: Check dependency advisories, licenses, bans, and sources
               run: just deny
 
             - name: Check formatting
               run: just fmt
 
+            - name: Check public API compatibility
+              run: just semver
+
+            - name: Build the user guide
+              run: mdbook build guide
+
+            - name: Validate the user guide
+              run: python guide/check.py
+
+    rust-quality-windows:
+        name: Rust quality (windows-latest)
+        runs-on: windows-latest
+        env:
+            RUSTFLAGS: -Dlinker-messages
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Install development tools
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just,cargo-nextest,cargo-hack
+                  fallback: none
+
             - name: Run Clippy
               run: just clippy
 
             - name: Check feature combinations
               run: just features
-
-            - name: Check public API compatibility
-              run: just semver
 
             - name: Check benchmark compilation
               run: just bench-check
@@ -74,6 +95,7 @@ jobs:
                   --ignored
 
             - name: Check and lint standalone consumers
+              shell: pwsh
               run: |
                   cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
                   cargo clippy --manifest-path examples/basic-xll/Cargo.toml --all-targets --locked -- -D warnings
@@ -81,12 +103,6 @@ jobs:
                   cargo clippy --manifest-path examples/rtd-source/Cargo.toml --all-targets --locked -- -D warnings
                   cargo check --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked
                   cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked -- -D warnings
-
-            - name: Build the user guide
-              run: mdbook build guide
-
-            - name: Validate the user guide
-              run: python guide/check.py
 
     windows-artifact:
         name: Windows artifact (${{ matrix.target }})
