@@ -572,6 +572,29 @@ impl PreparedFormulaArguments {
         };
         (root, None, Some(storage))
     }
+
+    pub fn fingerprint(&self) -> [u8; 32] {
+        // SAFETY: `raw_args` points to the root XLOPER12 and its backing storage,
+        // which remain live for the lifetime of `PreparedFormulaArguments`.
+        unsafe { crate::formula_fingerprint::fingerprint(&self.raw_args) }
+            .expect("benchmark XLOPER12 arguments must fingerprint successfully")
+    }
+}
+
+pub struct XloperFingerprintBenchmark {
+    arguments: PreparedFormulaArguments,
+}
+
+impl XloperFingerprintBenchmark {
+    pub fn new(case: HandleFormulaBenchCase) -> Self {
+        Self {
+            arguments: PreparedFormulaArguments::new(case),
+        }
+    }
+
+    pub fn run(&self) -> [u8; 32] {
+        self.arguments.fingerprint()
+    }
 }
 
 pub struct HandleFormulaBenchmark {

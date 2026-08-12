@@ -141,11 +141,49 @@ trait FingerprintSink: Sized {
                 self.write_u64(array.rows as u64)?;
                 self.write_u64(array.columns as u64)?;
                 let elements = (array.rows as usize) * (array.columns as usize);
+
+                const BATCH_CAPACITY: usize = 64;
+                let mut chunk_buffer = [0u8; BATCH_CAPACITY * 9];
+                let mut chunk_len = 0;
+
                 for index in 0..elements {
                     // SAFETY: XlValueRef::array validated the contiguous
                     // element range and the index is within its dimensions.
-                    let element = unsafe { XlValueRef::from_raw(array.values.add(index)) }?;
-                    self.write_value(element, true)?;
+                    let elem_ptr = unsafe { array.values.add(index) };
+                    // SAFETY: `elem_ptr` points to a readable XLOPER12 in the validated array.
+                    let is_num = unsafe { (*elem_ptr).base_type() == XLTYPE_NUM };
+                    if is_num {
+                        // SAFETY: XLTYPE_NUM selects the number union member.
+                        let number = unsafe { (*elem_ptr).value.number };
+                        let bits = if number == 0.0 {
+                            0.0_f64.to_bits()
+                        } else if number.is_nan() {
+                            0x7ff8_0000_0000_0000
+                        } else {
+                            number.to_bits()
+                        };
+                        chunk_buffer[chunk_len] = TAG_NUMBER;
+                        chunk_buffer[chunk_len + 1..chunk_len + 9]
+                            .copy_from_slice(&bits.to_le_bytes());
+                        chunk_len += 9;
+
+                        if chunk_len == chunk_buffer.len() {
+                            self.write(&chunk_buffer)?;
+                            chunk_len = 0;
+                        }
+                    } else {
+                        if chunk_len > 0 {
+                            self.write(&chunk_buffer[..chunk_len])?;
+                            chunk_len = 0;
+                        }
+                        // SAFETY: `elem_ptr` is a readable XLOPER12 within the validated array.
+                        let element = unsafe { XlValueRef::from_raw(elem_ptr) }?;
+                        self.write_value(element, true)?;
+                    }
+                }
+
+                if chunk_len > 0 {
+                    self.write(&chunk_buffer[..chunk_len])?;
                 }
                 Ok(())
             }
@@ -445,5 +483,53 @@ mod tests {
         }
 
         assert_eq!(encoder.finish(), *direct.finalize().as_bytes());
+    }
+
+    #[test]
+    fn batched_numeric_array_matches_unbatched_byte_stream() {
+        let mut cells = vec![
+            XLOPER12::number(0.0),
+            XLOPER12::number(-0.0),
+            XLOPER12::number(f64::from_bits(0x7ff8_0000_0000_0001)),
+            XLOPER12::number(42.5),
+            XLOPER12::boolean(true),
+            XLOPER12::error(xlfn_sys::XLERR_VALUE),
+            XLOPER12::missing(),
+            XLOPER12::nil(),
+        ];
+        // Extend with 200 numbers to cross the 64-element batch boundary multiple times
+        for i in 0..200 {
+            cells.push(XLOPER12::number(i as f64));
+        }
+
+        let mut array = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: cells.len() as i32,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+
+        // Compute actual digest via fingerprint()
+        let actual_digest = digest(&mut array);
+
+        // Manually construct expected bytes without batching
+        let mut expected_encoder = BufferedFingerprintEncoder::new();
+        expected_encoder.write(DOMAIN).unwrap();
+        expected_encoder.write_u64(1).unwrap(); // 1 argument
+        expected_encoder.write_tag(TAG_ARRAY).unwrap();
+        expected_encoder.write_u64(cells.len() as u64).unwrap(); // rows
+        expected_encoder.write_u64(1).unwrap(); // columns
+
+        for cell in &cells {
+            // SAFETY: `cell` is a readable stack-allocated XLOPER12.
+            let value = unsafe { XlValueRef::from_raw(cell as *const _ as *mut _) }.unwrap();
+            expected_encoder.write_value(value, true).unwrap();
+        }
+
+        assert_eq!(actual_digest, expected_encoder.finish());
     }
 }
