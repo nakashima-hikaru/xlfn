@@ -90,6 +90,20 @@ pub struct CacheEndpoint<Marker, K, V> {
     _value: PhantomData<fn() -> V>,
 }
 
+pub struct BoundCacheEndpoint<Marker, K, V> {
+    cache: Arc<CalculationCache<K, V>>,
+    _marker: PhantomData<fn() -> Marker>,
+}
+
+impl<Marker, K, V> Clone for BoundCacheEndpoint<Marker, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            cache: Arc::clone(&self.cache),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<Marker, K, V> CacheEndpoint<Marker, K, V> {
     #[must_use]
     pub const fn new(id: &'static str) -> Self {
@@ -111,6 +125,25 @@ impl<Marker: 'static, K: 'static, V: 'static> CacheEndpoint<Marker, K, V> {
     #[must_use]
     pub fn key(&self) -> (TypeId, &'static str) {
         (TypeId::of::<(Marker, K, V)>(), self.id)
+    }
+}
+
+impl<Marker, K, V> BoundCacheEndpoint<Marker, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    pub fn get_or_try_insert<F, W>(&self, key: K, weight: W, compute: F) -> XllResult<Arc<V>>
+    where
+        F: FnOnce() -> XllResult<V>,
+        W: FnOnce(&V) -> usize,
+    {
+        self.cache.get_or_try_insert_with(key, weight, compute)
+    }
+
+    #[must_use]
+    pub fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.cache.get(key)
     }
 }
 
@@ -144,7 +177,6 @@ type CacheMap = HashMap<(TypeId, &'static str), Arc<dyn ErasedCache>>;
 
 pub struct CacheRegistry {
     weight_budget_per_endpoint: usize,
-    generation: CacheGeneration,
     caches: RwLock<CacheMap>,
 }
 
@@ -153,99 +185,58 @@ impl CacheRegistry {
     pub fn new(weight_budget_per_endpoint: usize) -> Self {
         Self {
             weight_budget_per_endpoint,
-            generation: CacheGeneration::new(),
             caches: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn cached<Marker, K, V, F, W>(
+    pub fn bind<Marker, K, V>(
         &self,
         endpoint: &CacheEndpoint<Marker, K, V>,
-        key: K,
-        weight: W,
-        compute: F,
-    ) -> XllResult<Arc<V>>
+    ) -> XllResult<BoundCacheEndpoint<Marker, K, V>>
     where
         Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
-        F: FnOnce() -> XllResult<V>,
-        W: FnOnce(&V) -> usize,
-    {
-        let registry_epoch = self.generation.snapshot();
-        self.cached_at_epoch(endpoint, key, weight, compute, registry_epoch)
-    }
-
-    fn cached_at_epoch<Marker, K, V, F, W>(
-        &self,
-        endpoint: &CacheEndpoint<Marker, K, V>,
-        key: K,
-        weight: W,
-        compute: F,
-        registry_epoch: u64,
-    ) -> XllResult<Arc<V>>
-    where
-        Marker: 'static,
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        F: FnOnce() -> XllResult<V>,
-        W: FnOnce(&V) -> usize,
     {
         let cache_key = endpoint.key();
-        let cache = if self.generation.snapshot() != registry_epoch {
-            None
-        } else {
+        let cache = {
             let caches = self.caches.read();
-            if self.generation.snapshot() != registry_epoch {
-                None
-            } else if let Some(stored) = caches.get(&cache_key) {
-                Some(Self::downcast_cache::<K, V>(stored)?)
+            if let Some(stored) = caches.get(&cache_key) {
+                Self::downcast_cache::<K, V>(stored)?
             } else {
                 drop(caches);
                 let mut caches = self.caches.write();
-                if self.generation.snapshot() != registry_epoch {
-                    None
-                } else {
-                    let stored = caches.entry(cache_key).or_insert_with(|| {
-                        Arc::new(StoredCache(Arc::new(CalculationCache::<K, V>::new(
-                            self.weight_budget_per_endpoint,
-                        )))) as Arc<dyn ErasedCache>
-                    });
-                    Some(Self::downcast_cache::<K, V>(stored)?)
-                }
+                let stored = caches.entry(cache_key).or_insert_with(|| {
+                    Arc::new(StoredCache(Arc::new(CalculationCache::<K, V>::new(
+                        self.weight_budget_per_endpoint,
+                    )))) as Arc<dyn ErasedCache>
+                });
+                Self::downcast_cache::<K, V>(stored)?
             }
         };
-        // A clear that linearized before this endpoint was inserted could not
-        // include the new cache in its snapshot. Complete the caller's work,
-        // but do not retain a result that started in the old registry epoch.
-        let Some((cache, cache_epoch)) = cache else {
-            return compute().map(Arc::new);
-        };
-        cache.get_or_try_insert_at_epoch(key, weight, compute, cache_epoch)
+        Ok(BoundCacheEndpoint {
+            cache,
+            _marker: PhantomData,
+        })
     }
 
-    fn downcast_cache<K, V>(
-        stored: &Arc<dyn ErasedCache>,
-    ) -> XllResult<(Arc<CalculationCache<K, V>>, u64)>
+    fn downcast_cache<K, V>(stored: &Arc<dyn ErasedCache>) -> XllResult<Arc<CalculationCache<K, V>>>
     where
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let cache = stored
+        stored
             .as_any()
             .downcast_ref::<StoredCache<K, V>>()
             .map(|stored| Arc::clone(&stored.0))
             .ok_or(XllError::Internal {
                 diagnostic_id: 0x4341_4348_4554_5950,
-            })?;
-        let cache_epoch = cache.generation.snapshot();
-        Ok((cache, cache_epoch))
+            })
     }
 
     pub fn clear(&self) {
         let caches = {
             let caches = self.caches.write();
-            self.generation.advance();
             caches
                 .values()
                 .map(|cache| (Arc::clone(cache), cache.advance_generation()))
@@ -438,12 +429,21 @@ mod tests {
         static TEXT: CacheEndpoint<Marker, String, String> = CacheEndpoint::new("shared-id");
         let registry = CacheRegistry::new(64);
 
-        assert_eq!(*registry.cached(&NUMBERS, 1, |_| 4, || Ok(7)).unwrap(), 7);
+        assert_eq!(
+            *registry
+                .bind(&NUMBERS)
+                .unwrap()
+                .get_or_try_insert(1, |_| 4, || Ok(7))
+                .unwrap(),
+            7
+        );
         assert_eq!(
             registry
-                .cached(&TEXT, String::from("key"), String::len, || Ok(
-                    String::from("value")
-                ),)
+                .bind(&TEXT)
+                .unwrap()
+                .get_or_try_insert(String::from("key"), String::len, || Ok(String::from(
+                    "value"
+                )))
                 .unwrap()
                 .as_str(),
             "value"
@@ -730,10 +730,19 @@ mod tests {
             CacheEndpoint::<Second, u32, String>::new("SECOND");
 
         let registry = CacheRegistry::new(1024);
-        assert_eq!(*registry.cached(&FIRST, 1, |_| 4, || Ok(7)).unwrap(), 7);
+        assert_eq!(
+            *registry
+                .bind(&FIRST)
+                .unwrap()
+                .get_or_try_insert(1, |_| 4, || Ok(7))
+                .unwrap(),
+            7
+        );
         assert_eq!(
             registry
-                .cached(&SECOND, 1, String::len, || Ok("seven".to_owned()))
+                .bind(&SECOND)
+                .unwrap()
+                .get_or_try_insert(1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
@@ -749,10 +758,19 @@ mod tests {
         let text = CacheEndpoint::<Text, u32, String>::new("DUPLICATE");
         let registry = CacheRegistry::new(1024);
 
-        assert_eq!(*registry.cached(&number, 1, |_| 4, || Ok(7)).unwrap(), 7);
+        assert_eq!(
+            *registry
+                .bind(&number)
+                .unwrap()
+                .get_or_try_insert(1, |_| 4, || Ok(7))
+                .unwrap(),
+            7
+        );
         assert_eq!(
             registry
-                .cached(&text, 1, String::len, || Ok("seven".to_owned()))
+                .bind(&text)
+                .unwrap()
+                .get_or_try_insert(1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
@@ -777,9 +795,9 @@ mod tests {
         static ENDPOINT: CacheEndpoint<Reentrant, u32, ReenterOnDrop> =
             CacheEndpoint::<Reentrant, u32, ReenterOnDrop>::new("REENTRANT");
         let registry = Arc::new(CacheRegistry::new(8));
-        let value = registry
-            .cached(
-                &ENDPOINT,
+        let endpoint = registry.bind(&ENDPOINT).unwrap();
+        let value = endpoint
+            .get_or_try_insert(
                 1,
                 |_| 8,
                 || {
@@ -794,28 +812,43 @@ mod tests {
     }
 
     #[test]
-    fn registry_clear_blocks_retention_by_a_new_endpoint_from_the_old_epoch() {
+    fn registry_clear_invalidates_bound_endpoint_values() {
         enum FirstUse {}
         static ENDPOINT: CacheEndpoint<FirstUse, u32, u32> =
             CacheEndpoint::<FirstUse, u32, u32>::new("FIRST_USE");
 
         let registry = Arc::new(CacheRegistry::new(8));
-        let old_epoch = registry.generation.snapshot();
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let worker_registry = Arc::clone(&registry);
-        let worker_barrier = Arc::clone(&barrier);
+        let endpoint = registry.bind(&ENDPOINT).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_endpoint = endpoint.clone();
         let worker = thread::spawn(move || {
-            worker_barrier.wait();
-            worker_registry
-                .cached_at_epoch(&ENDPOINT, 1, |_| 4, || Ok(7), old_epoch)
+            worker_endpoint
+                .get_or_try_insert(
+                    1,
+                    |_| 4,
+                    || {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(7)
+                    },
+                )
                 .unwrap()
         });
 
+        started_rx.recv().unwrap();
         registry.clear();
-        barrier.wait();
+        release_tx.send(()).unwrap();
 
         assert_eq!(*worker.join().unwrap(), 7);
-        assert_eq!(*registry.cached(&ENDPOINT, 1, |_| 4, || Ok(9)).unwrap(), 9);
+        assert_eq!(
+            *registry
+                .bind(&ENDPOINT)
+                .unwrap()
+                .get_or_try_insert(1, |_| 4, || Ok(9))
+                .unwrap(),
+            9
+        );
     }
 
     #[test]

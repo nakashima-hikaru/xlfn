@@ -948,7 +948,7 @@ pub struct XlArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
     pub(crate) cells: Box<[XLOPER12]>,
-    pub(crate) storage: Option<Box<ReturnStorage>>,
+    pub(crate) storage: Option<ReturnStorage>,
     pub(crate) payload_bytes: usize,
 }
 
@@ -1046,7 +1046,7 @@ pub struct XlArrayBuilder {
     columns: usize,
     cells: Box<[std::mem::MaybeUninit<XLOPER12>]>,
     initialized: usize,
-    storage: Option<Box<ReturnStorage>>,
+    storage: Option<ReturnStorage>,
     payload_bytes: usize,
 }
 
@@ -1110,24 +1110,22 @@ impl XlArrayBuilder {
     }
 
     fn push_string(&mut self, text: String) -> XllResult<()> {
-        let counted = crate::utf16::encode_counted(
+        let utf16_length = crate::utf16::checked_utf16_len(
             &text,
             "<array output>",
             crate::utf16::EXCEL_STRING_LIMIT,
         )?;
-
-        let string_bytes = counted
-            .len()
+        let string_bytes = utf16_length
+            .checked_add(1)
+            .ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or(XllError::Domain {
                 code: DomainErrorCode::Overflow,
             })?;
 
-        let additional = std::mem::size_of::<Box<[u16]>>()
-            .checked_add(string_bytes)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
+        let additional = string_bytes;
 
         let next_bytes = self
             .payload_bytes
@@ -1146,10 +1144,13 @@ impl XlArrayBuilder {
             ));
         }
 
-        let storage = self
-            .storage
-            .get_or_insert_with(|| Box::new(ReturnStorage::new()));
-        let pointer = storage.alloc_u16_slice(&counted);
+        let storage = self.storage.get_or_insert_with(ReturnStorage::new);
+        let pointer = storage.alloc_counted_utf16_with_length(
+            &text,
+            "<array output>",
+            crate::utf16::EXCEL_STRING_LIMIT,
+            utf16_length,
+        )?;
         self.push_oper(XLOPER12 {
             value: xlfn_sys::XLOPER12Value { string: pointer },
             xltype: XLTYPE_STR,

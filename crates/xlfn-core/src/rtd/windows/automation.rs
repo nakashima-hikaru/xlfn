@@ -734,7 +734,8 @@ pub(super) unsafe fn write_refresh_data(
 
         // SAFETY: `value_variant` is initialized writable VARIANT storage owned
         // by this stack frame and `update.value` remains readable.
-        let value_status = unsafe { write_value_variant(&mut value_variant, &update.value) };
+        let value_status =
+            unsafe { write_value_variant(&mut value_variant, update.value.as_ref()) };
 
         if value_status != S_OK {
             // SAFETY: `value_variant` is initialized and locally owned.

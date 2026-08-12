@@ -120,7 +120,9 @@ pub mod diagnostics {
 pub mod advanced {
     /// Calculation-scoped caches.
     pub mod cache {
-        pub use xlfn_core::{CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64};
+        pub use xlfn_core::{
+            BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
+        };
     }
 
     /// Exported-function execution metadata and instrumentation.

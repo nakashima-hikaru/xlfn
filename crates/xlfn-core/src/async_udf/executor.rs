@@ -144,7 +144,7 @@ impl ExecutorHandle {
             });
         }
 
-        let current = self.inner.current.load_full();
+        let current = self.inner.current.load();
 
         #[cfg(test)]
         {
@@ -217,7 +217,7 @@ impl ExecutorHandle {
             unused_mut,
             reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
         )]
-        let mut completion = reservation.commit(Arc::clone(&current), id);
+        let mut completion = reservation.commit(Arc::clone(&*current), id);
 
         drop(admission);
 

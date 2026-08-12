@@ -1435,7 +1435,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
             assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
             assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, update.topic_id);
 
-            match &update.value {
+            match update.value.as_ref() {
                 RtdValue::Number(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
                     assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, *expected);

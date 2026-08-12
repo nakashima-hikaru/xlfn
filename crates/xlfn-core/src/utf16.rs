@@ -4,6 +4,24 @@ use smallvec::SmallVec;
 pub(crate) const EXCEL_STRING_LIMIT: usize = 32_767;
 const INLINE_UTF16_CAPACITY: usize = 64;
 
+pub(crate) fn checked_utf16_len(
+    text: &str,
+    argument: &'static str,
+    limit: usize,
+) -> XllResult<usize> {
+    let length = text.encode_utf16().count();
+    if length > limit {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit,
+                actual: length,
+            },
+        ));
+    }
+    Ok(length)
+}
+
 /// Compares UTF-16 code units using the same ASCII-only folding as
 /// `str::eq_ignore_ascii_case`, without first allocating a UTF-8 `String`.
 #[doc(hidden)]
@@ -29,7 +47,7 @@ pub(crate) fn encode_bounded(
     argument: &'static str,
     limit: usize,
 ) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
-    let mut units = SmallVec::with_capacity(text.len().min(limit));
+    let mut units = SmallVec::new();
     let mut length = 0_usize;
     for unit in text.encode_utf16() {
         length += 1;
@@ -54,7 +72,7 @@ pub(crate) fn encode_counted(
     argument: &'static str,
     limit: usize,
 ) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
-    let mut units = SmallVec::with_capacity(text.len().min(limit).saturating_add(1));
+    let mut units = SmallVec::new();
     units.push(0);
     let mut length = 0_usize;
     for unit in text.encode_utf16() {
@@ -88,6 +106,18 @@ mod tests {
                 .as_slice(),
             [2, 0x4fa1, 0x683c]
         );
+    }
+
+    #[test]
+    fn counted_encoding_sizes_inline_storage_in_utf16_units() {
+        let encoded = encode_counted(
+            "日本語日本語日本語日本語日本語日本語日本語日本語",
+            "test",
+            32_767,
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), 25);
+        assert!(!encoded.spilled());
     }
 
     #[test]

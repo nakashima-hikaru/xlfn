@@ -272,14 +272,6 @@ pub(crate) fn close_from_runtime() {
     MODULE_CALLBACK_GATE.close();
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
-pub(crate) fn is_open() -> bool {
-    matches!(
-        MODULE_CALLBACK_GATE.state.lock().borrow().lifecycle,
-        CallbackGateLifecycle::Open
-    )
-}
-
 pub(crate) fn enter_callback<'a>(
     invocation: &'a CallbackInvocationToken,
 ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {

@@ -119,19 +119,68 @@ impl Drop for AsyncSpawnBenchmark {
 #[derive(Clone, Copy, Debug)]
 pub enum SyncBenchKind {
     AdmissionOnly,
-    ScalarReturn,
+    ScalarReturnNoSubscriber,
+    ScalarReturnSubscriberTargetDisabled,
+    ScalarReturnUdfTraceEnabled,
+    ScalarReturnCustomLayer,
+}
+
+struct BenchmarkLayer;
+
+struct BenchmarkLayerGuard;
+
+impl crate::UdfLayer for BenchmarkLayer {
+    fn enter(&self, _: &crate::CallMetadata) -> crate::XllResult<Box<dyn crate::UdfLayerGuard>> {
+        Ok(Box::new(BenchmarkLayerGuard))
+    }
+}
+
+impl crate::UdfLayerGuard for BenchmarkLayerGuard {
+    fn exit(self: Box<Self>, _: &crate::CallOutcome<'_>) {}
+}
+
+#[derive(Clone, Copy)]
+struct BenchmarkSubscriber {
+    enabled: bool,
+}
+
+impl tracing::Subscriber for BenchmarkSubscriber {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        self.enabled
+            && metadata.target() == crate::execution::UDF_TRACE_TARGET
+            && *metadata.level() <= tracing::Level::INFO
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn install_benchmark_subscriber(enabled: bool) -> tracing::dispatcher::DefaultGuard {
+    let dispatch = tracing::Dispatch::new(BenchmarkSubscriber { enabled });
+    tracing::dispatcher::set_default(&dispatch)
 }
 
 pub struct SyncBoundaryWorkerPool {
     _runtime: &'static crate::Runtime<()>,
     threads: usize,
-    start_tx: Vec<std::sync::mpsc::SyncSender<SyncBenchKind>>,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl SyncBoundaryWorkerPool {
-    pub fn new(threads: usize, iterations_per_thread: usize) -> Self {
+    pub fn new(threads: usize, iterations_per_thread: usize, kind: SyncBenchKind) -> Self {
         let ingress = crate::ingress::global_ingress();
         if ingress.phase() != crate::ingress::PHASE_CLOSED {
             ingress.begin_close_with(|| {});
@@ -143,6 +192,9 @@ impl SyncBoundaryWorkerPool {
             .begin_open_if_epoch(close_epoch)
             .expect("begin_open");
         runtime.publish_state(());
+        if matches!(kind, SyncBenchKind::ScalarReturnCustomLayer) {
+            runtime.publish_layers(vec![Arc::new(BenchmarkLayer)]);
+        }
         runtime
             .finish_open(&mut open_attempt, Vec::new())
             .expect("finish_open");
@@ -152,13 +204,23 @@ impl SyncBoundaryWorkerPool {
         let mut workers = Vec::with_capacity(threads);
 
         for _ in 0..threads {
-            let (s_tx, s_rx) = std::sync::mpsc::sync_channel::<SyncBenchKind>(1);
+            let (s_tx, s_rx) = std::sync::mpsc::sync_channel::<()>(1);
             let d_tx = done_tx.clone();
             start_tx.push(s_tx);
 
             let r = runtime;
             let handle = std::thread::spawn(move || {
-                while let Ok(kind) = s_rx.recv() {
+                let _subscriber_guard = match kind {
+                    SyncBenchKind::ScalarReturnSubscriberTargetDisabled => {
+                        Some(install_benchmark_subscriber(false))
+                    }
+                    SyncBenchKind::ScalarReturnUdfTraceEnabled => {
+                        Some(install_benchmark_subscriber(true))
+                    }
+                    _ => None,
+                };
+
+                while s_rx.recv().is_ok() {
                     match kind {
                         SyncBenchKind::AdmissionOnly => {
                             for _ in 0..iterations_per_thread {
@@ -169,7 +231,10 @@ impl SyncBoundaryWorkerPool {
                                 }
                             }
                         }
-                        SyncBenchKind::ScalarReturn => {
+                        SyncBenchKind::ScalarReturnNoSubscriber
+                        | SyncBenchKind::ScalarReturnSubscriberTargetDisabled
+                        | SyncBenchKind::ScalarReturnUdfTraceEnabled
+                        | SyncBenchKind::ScalarReturnCustomLayer => {
                             for _ in 0..iterations_per_thread {
                                 let ptr = crate::return_value::udf_boundary_named(
                                     r,
@@ -203,9 +268,9 @@ impl SyncBoundaryWorkerPool {
         }
     }
 
-    pub fn run_batch(&self, kind: SyncBenchKind) {
+    pub fn run_batch(&self) {
         for tx in &self.start_tx {
-            tx.send(kind).expect("worker thread received start signal");
+            tx.send(()).expect("worker thread received start signal");
         }
         for _ in 0..self.threads {
             self.done_rx
@@ -693,6 +758,158 @@ fn formula_topic_key(
 
 impl Drop for HandleFormulaBenchmark {
     fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handle lookup benchmarks
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub enum HandleLookupBenchCase {
+    WarmSameToken,
+    DistinctTokens,
+    InvalidMac,
+    StaleGeneration,
+}
+
+impl HandleLookupBenchCase {
+    pub const ALL: [Self; 4] = [
+        Self::WarmSameToken,
+        Self::DistinctTokens,
+        Self::InvalidMac,
+        Self::StaleGeneration,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::WarmSameToken => "warm_same_token",
+            Self::DistinctTokens => "distinct_tokens",
+            Self::InvalidMac => "invalid_mac",
+            Self::StaleGeneration => "stale_generation",
+        }
+    }
+}
+
+pub struct HandleLookupBenchmark {
+    runtime: Arc<HandleRuntime>,
+    worker_count: usize,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleLookupBenchmark {
+    pub fn new(
+        case: HandleLookupBenchCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let mut tokens = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let key = benchmark_topic_key("BENCH.LOOKUP", worker as u64);
+            let token = runtime
+                .prepare_observed(
+                    key,
+                    || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                    |_, _| Ok(()),
+                )
+                .expect("handle lookup warm seed publication failed")
+                .0;
+            tokens.push(Arc::<str>::from(token));
+        }
+
+        match case {
+            HandleLookupBenchCase::WarmSameToken => tokens.truncate(1),
+            HandleLookupBenchCase::DistinctTokens => {}
+            HandleLookupBenchCase::InvalidMac => {
+                for token in &mut tokens {
+                    let mut invalid = token.to_string();
+                    let replacement = if invalid.ends_with('0') { '1' } else { '0' };
+                    invalid.pop();
+                    invalid.push(replacement);
+                    *token = Arc::<str>::from(invalid);
+                }
+            }
+            HandleLookupBenchCase::StaleGeneration => {
+                for token in &tokens {
+                    runtime
+                        .registry
+                        .remove_any(token.as_ref())
+                        .expect("stale handle benchmark seed removal failed");
+                }
+            }
+        }
+
+        let tokens = Arc::new(tokens);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_tokens = Arc::clone(&tokens);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    let token_index = worker.min(worker_tokens.len() - 1);
+                    let token = worker_tokens[token_index].as_ref();
+                    for _ in 0..iterations_per_worker {
+                        let result = worker_runtime.lookup::<BenchHandleObject>(token);
+                        let _ = std::hint::black_box(result);
+                    }
+                    done_tx
+                        .send(())
+                        .expect("handle lookup benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            worker_count,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("handle lookup benchmark worker received start signal");
+        }
+        for _ in 0..self.worker_count {
+            self.done_rx
+                .recv()
+                .expect("handle lookup benchmark worker finished batch");
+        }
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.worker_count * self.iterations_per_worker
+    }
+}
+
+impl Drop for HandleLookupBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
         cleanup_handle_runtime(&self.runtime);
     }
 }

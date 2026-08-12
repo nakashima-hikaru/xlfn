@@ -216,11 +216,6 @@ impl ReturnTracker {
         self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK == 0
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    pub(crate) fn refinement_obligations(&self) -> u64 {
-        (self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK) as u64
-    }
-
     pub(crate) fn admission_closed(&self) -> bool {
         self.state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
     }
@@ -434,7 +429,7 @@ struct ReturnBlock {
     // This must remain first: Excel receives a pointer to this field and
     // xlAutoFree12 casts it back to ReturnBlock.
     oper: XLOPER12,
-    storage: Option<Box<ReturnStorage>>,
+    storage: Option<ReturnStorage>,
     array: Option<Box<[XLOPER12]>>,
     ownership: ReturnOwnership,
     magic: u64,
@@ -443,7 +438,7 @@ struct ReturnBlock {
 #[derive(Debug)]
 struct PreparedReturn {
     oper: XLOPER12,
-    storage: Option<Box<ReturnStorage>>,
+    storage: Option<ReturnStorage>,
     array: Option<Box<[XLOPER12]>>,
 }
 
@@ -615,7 +610,7 @@ impl Drop for ReturnBlock {
 
 fn encode_scalar(
     value: OwnedExcelValue,
-    storage: &mut Option<Box<ReturnStorage>>,
+    storage: &mut Option<ReturnStorage>,
     allocation_bytes: &mut usize,
 ) -> XllResult<XLOPER12> {
     match value {
@@ -633,19 +628,21 @@ fn encode_scalar(
             Ok(XLOPER12::error(crate::ExcelError::NotAvailable.code()))
         }
         OwnedExcelValue::String(text) => {
-            let counted =
-                crate::utf16::encode_counted(&text, "<return>", crate::utf16::EXCEL_STRING_LIMIT)?;
-            let string_bytes = counted
-                .len()
+            let utf16_length = crate::utf16::checked_utf16_len(
+                &text,
+                "<return>",
+                crate::utf16::EXCEL_STRING_LIMIT,
+            )?;
+            let string_bytes = utf16_length
+                .checked_add(1)
+                .ok_or(XllError::Domain {
+                    code: crate::DomainErrorCode::Overflow,
+                })?
                 .checked_mul(std::mem::size_of::<u16>())
                 .ok_or(XllError::Domain {
                     code: crate::DomainErrorCode::Overflow,
                 })?;
-            let additional = std::mem::size_of::<Box<[u16]>>()
-                .checked_add(string_bytes)
-                .ok_or(XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
-                })?;
+            let additional = string_bytes;
             *allocation_bytes =
                 allocation_bytes
                     .checked_add(additional)
@@ -653,8 +650,13 @@ fn encode_scalar(
                         code: crate::DomainErrorCode::Overflow,
                     })?;
             enforce_return_limit(*allocation_bytes)?;
-            let storage = storage.get_or_insert_with(|| Box::new(ReturnStorage::new()));
-            let pointer = storage.alloc_u16_slice(&counted);
+            let storage = storage.get_or_insert_with(ReturnStorage::new);
+            let pointer = storage.alloc_counted_utf16_with_length(
+                &text,
+                "<return>",
+                crate::utf16::EXCEL_STRING_LIMIT,
+                utf16_length,
+            )?;
             Ok(XLOPER12 {
                 value: XLOPER12Value { string: pointer },
                 xltype: XLTYPE_STR,

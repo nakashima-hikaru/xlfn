@@ -455,6 +455,19 @@ impl HandleRegistry {
     }
 
     pub(crate) fn parse_token(&self, token: &str) -> XllResult<ParsedToken> {
+        let registry_address = std::ptr::from_ref(self).addr();
+        if let Some(parsed) =
+            verified_token_cache_lookup(registry_address, self.session, &self.secret, token)
+        {
+            return Ok(parsed);
+        }
+
+        let parsed = self.parse_token_uncached(token)?;
+        verified_token_cache_store(registry_address, self.session, &self.secret, token, parsed);
+        Ok(parsed)
+    }
+
+    fn parse_token_uncached(&self, token: &str) -> XllResult<ParsedToken> {
         let mut fields = token.splitn(7, ':');
         let prefix = fields.next().ok_or(XllError::InvalidHandle)?;
         let version = fields.next().ok_or(XllError::InvalidHandle)?;

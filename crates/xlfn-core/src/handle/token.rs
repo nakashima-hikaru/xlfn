@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 
 pub(crate) fn drop_handle_values(
     values: impl IntoIterator<Item = Arc<dyn Any + Send + Sync>>,
@@ -48,7 +49,92 @@ pub(crate) const fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct ParsedToken {
     pub(crate) slot: u32,
     pub(crate) generation: u64,
+}
+
+pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
+const VERIFIED_TOKEN_CACHE_SIZE: usize = 8;
+
+#[derive(Clone, Copy)]
+struct VerifiedTokenCacheEntry {
+    registry_address: usize,
+    session: u64,
+    secret: [u8; 32],
+    hash: u64,
+    token: [u8; HANDLE_TOKEN_LENGTH],
+    parsed: ParsedToken,
+}
+
+thread_local! {
+    static VERIFIED_TOKEN_CACHE: RefCell<[
+        Option<VerifiedTokenCacheEntry>;
+        VERIFIED_TOKEN_CACHE_SIZE
+    ]> = const { RefCell::new([None; VERIFIED_TOKEN_CACHE_SIZE]) };
+}
+
+fn token_hash(bytes: &[u8]) -> u64 {
+    // This is only a direct-mapped cache index. The complete fixed-width token
+    // and registry secret are compared before a hit is accepted, so collisions
+    // cannot bypass token authentication.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+pub(crate) fn verified_token_cache_lookup(
+    registry_address: usize,
+    session: u64,
+    secret: &[u8; 32],
+    token: &str,
+) -> Option<ParsedToken> {
+    let bytes = token.as_bytes();
+    if bytes.len() != HANDLE_TOKEN_LENGTH {
+        return None;
+    }
+    let hash = token_hash(bytes);
+    let index = (hash as usize) & (VERIFIED_TOKEN_CACHE_SIZE - 1);
+    VERIFIED_TOKEN_CACHE.with(|cache| {
+        let entry = cache.borrow()[index];
+        entry.and_then(|entry| {
+            (entry.registry_address == registry_address
+                && entry.session == session
+                && entry.secret == *secret
+                && entry.hash == hash
+                && entry.token.as_slice() == bytes)
+                .then_some(entry.parsed)
+        })
+    })
+}
+
+pub(crate) fn verified_token_cache_store(
+    registry_address: usize,
+    session: u64,
+    secret: &[u8; 32],
+    token: &str,
+    parsed: ParsedToken,
+) {
+    let bytes = token.as_bytes();
+    if bytes.len() != HANDLE_TOKEN_LENGTH {
+        return;
+    }
+    let hash = token_hash(bytes);
+    let index = (hash as usize) & (VERIFIED_TOKEN_CACHE_SIZE - 1);
+    let mut token_bytes = [0_u8; HANDLE_TOKEN_LENGTH];
+    token_bytes.copy_from_slice(bytes);
+    VERIFIED_TOKEN_CACHE.with(|cache| {
+        cache.borrow_mut()[index] = Some(VerifiedTokenCacheEntry {
+            registry_address,
+            session,
+            secret: *secret,
+            hash,
+            token: token_bytes,
+            parsed,
+        });
+    });
 }

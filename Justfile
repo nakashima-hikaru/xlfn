@@ -57,11 +57,14 @@ deny:
     cargo deny check
 
 semver:
-    # The 0.2.0 release intentionally permits the xlfn::sys breaking cleanup.
+    # The current pre-1.0 release intentionally permits breaking public API
+    # cleanup, including the CacheRegistry endpoint redesign. Use the strict
+    # major compatibility mode so removed APIs cannot be mistaken for a
+    # compatible refactor.
     cargo semver-checks \
         --workspace \
         --baseline-rev 0.1.0 \
-        --release-type minor
+        --release-type major
 
 quick: fmt clippy test
 
@@ -80,6 +83,9 @@ bench-sync:
 
 bench-handle:
     cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
+
+bench-handle-lookup:
+    cargo bench --package xlfn-core --bench handle_lookup --features bench-internals --locked
 
 bench-handle-formula:
     cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked

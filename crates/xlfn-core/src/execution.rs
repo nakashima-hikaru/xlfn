@@ -48,6 +48,12 @@ pub struct CallMetadata {
 pub(crate) const UDF_TRACE_TARGET: &str = "xlfn::udf";
 
 pub(crate) fn udf_trace_enabled() -> bool {
+    // The common no-global-subscriber path does not need an unwind guard.
+    // `enabled!` still observes a thread-scoped dispatcher, so this shortcut
+    // does not change scoped instrumentation semantics.
+    if !tracing::dispatcher::has_been_set() {
+        return tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO);
+    }
     catch_unwind(AssertUnwindSafe(
         || tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO),
     ))

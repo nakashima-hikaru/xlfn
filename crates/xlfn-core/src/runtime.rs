@@ -457,21 +457,19 @@ impl<S> Runtime<S> {
                 return Err(XllError::Closing);
             }
 
-            let state = self.state.load_full();
-            match state {
-                Some(state) => {
-                    #[cfg(any(test, feature = "shutdown-refinement"))]
-                    self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
-                    Ok(CallGuard {
-                        runtime: self,
-                        state,
-                        concurrent_calls,
-                    })
-                }
-                None => Err(XllError::Internal {
+            let state = self.state.load();
+            if state.is_none() {
+                return Err(XllError::Internal {
                     diagnostic_id: 0x4d49_5353_5354_4154,
-                }),
+                });
             }
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
+            Ok(CallGuard {
+                runtime: self,
+                state,
+                concurrent_calls,
+            })
         })
     }
 
@@ -1390,14 +1388,17 @@ pub struct CallGuard<'runtime, S> {
         reason = "Runtime reference used for shutdown refinement ghost event recording"
     )]
     runtime: &'runtime Runtime<S>,
-    state: Arc<S>,
+    state: arc_swap::Guard<Option<Arc<S>>>,
     concurrent_calls: usize,
 }
 
 impl<S> CallGuard<'_, S> {
     #[must_use]
     pub fn state(&self) -> &S {
-        &self.state
+        self.state
+            .as_ref()
+            .expect("a live CallGuard always observes published runtime state")
+            .as_ref()
     }
 
     #[must_use]
@@ -1408,7 +1409,11 @@ impl<S> CallGuard<'_, S> {
     #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn state_arc(&self) -> Arc<S> {
-        Arc::clone(&self.state)
+        Arc::clone(
+            self.state
+                .as_ref()
+                .expect("a live CallGuard always observes published runtime state"),
+        )
     }
 }
 

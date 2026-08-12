@@ -1,5 +1,7 @@
 use std::panic::AssertUnwindSafe;
 
+use crate::{InputError, XllError, XllResult};
+
 /// Allocation storage shared by one encoded Excel return value.
 ///
 /// The arena only contains raw return payloads (`u16` UTF-16 units). Those
@@ -17,7 +19,35 @@ impl ReturnStorage {
         }
     }
 
-    pub(crate) fn alloc_u16_slice(&self, values: &[u16]) -> *mut u16 {
-        self.arena.alloc_slice_copy(values).as_mut_ptr()
+    pub(crate) fn alloc_counted_utf16_with_length(
+        &self,
+        text: &str,
+        argument: &'static str,
+        limit: usize,
+        length: usize,
+    ) -> XllResult<*mut u16> {
+        let length = u16::try_from(length).map_err(|_| {
+            XllError::input(
+                argument,
+                InputError::TooLarge {
+                    limit,
+                    actual: length,
+                },
+            )
+        })?;
+        let mut encoded = text.encode_utf16();
+        let units = self
+            .arena
+            .alloc_slice_fill_with(length as usize + 1, |index| {
+                if index == 0 {
+                    length
+                } else {
+                    encoded
+                        .next()
+                        .expect("the UTF-16 length was counted before allocation")
+                }
+            });
+        debug_assert!(encoded.next().is_none());
+        Ok(units.as_mut_ptr())
     }
 }

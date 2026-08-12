@@ -78,7 +78,7 @@ pub use addin::{
 };
 #[cfg(feature = "async")]
 pub use async_udf::{async_udf_boundary_named, cancel_async_calculation, end_async_calculation};
-pub use cache::{CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64};
+pub use cache::{BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64};
 pub use callback_value::{CallbackValueReleaseState, ExcelCallbackValue};
 #[cfg(any(feature = "async", test))]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};

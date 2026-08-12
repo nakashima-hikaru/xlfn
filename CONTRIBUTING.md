@@ -26,10 +26,12 @@ the execution model retained by the Windows artifact job.
 against the published `0.1.0` tag. The CI checkout fetches the full history so
 that this baseline is available in pull requests as well as on `main`.
 
-The `0.2.0` release intentionally removes the `xlfn::sys` facade and uses
-minor-release rules for that breaking cleanup. Future patch releases should
-preserve the supported Rust API; another intentional breaking change should be
-paired with the appropriate version and semver audit update. CLI behavior and
+The current `0.2.0` line is pre-1.0 and intentionally permits breaking public
+API cleanup, including the typed cache endpoint redesign. `just semver` uses
+the strict major compatibility mode so removed APIs are reported unless the
+change is intentional and documented. Future patch releases should preserve
+the supported Rust API; another intentional breaking change should be paired
+with the appropriate version and semver audit update. CLI behavior and
 procedural-macro diagnostics are separate compatibility contracts and are not
 covered by this audit.
 
@@ -95,17 +97,22 @@ just bench
 just bench-async
 just bench-sync
 just bench-handle
+just bench-handle-lookup
 just bench-check
 ```
 
-Bencher is the long-term history store. To publish, configure the repository
+Bencher is the long-term history store and the benchmark workflow maintains a
+10% relative latency threshold on the main branch. PR runs clone those
+thresholds from the base branch and fail on an alert. To publish, configure the repository
 Actions secret `BENCHER_API_KEY` and repository variable `BENCHER_PROJECT`.
 Fork pull requests run the benchmark command without publishing because their
 secrets are unavailable. Criterion baselines are for local A/B comparisons;
 do not commit generated `estimates.json` files.
 
-The initial benchmark workflow is informational. Establish main-branch noise
-before adding regression thresholds or blocking alerts.
+The threshold is intentionally broad until main-branch noise is characterized;
+narrow it only after reviewing several stable runs. The built-in Criterion
+latency measure is shared by the benchmark groups, so the threshold is a
+repository-wide first guard rather than a per-family policy.
 
 ## CI command contract
 

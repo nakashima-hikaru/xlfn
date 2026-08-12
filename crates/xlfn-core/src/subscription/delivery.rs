@@ -34,7 +34,7 @@ pub(crate) struct QueuedUpdate {
 pub(crate) struct RtdUpdate {
     pub(crate) sequence: u64,
     pub(crate) topic_id: i32,
-    pub(crate) value: RtdValue,
+    pub(crate) value: Arc<RtdValue>,
 }
 
 #[cfg(test)]
@@ -43,7 +43,7 @@ impl RtdUpdate {
         Self {
             sequence: 0,
             topic_id,
-            value,
+            value: Arc::new(value),
         }
     }
 }

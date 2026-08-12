@@ -1,6 +1,5 @@
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 #[cfg(test)]
 use std::thread::ThreadId;
@@ -10,17 +9,115 @@ pub const PHASE_OPEN: u8 = 1;
 pub const PHASE_CLOSING: u8 = 2;
 pub const PHASE_CLOSED: u8 = 3;
 
-const PHASE_SHIFT: u32 = 62;
-const EXPORT_SHIFT: u32 = 32;
-const EXPORT_BITS: u32 = 30;
-const UDF_BITS: u32 = 32;
+const INGRESS_STRIPE_COUNT: usize = 32;
+const STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
+const STRIPE_COUNT_MASK: usize = STRIPE_SEALED - 1;
 
-const UDF_MASK: u64 = (1_u64 << UDF_BITS) - 1;
-const EXPORT_MASK: u64 = ((1_u64 << EXPORT_BITS) - 1) << EXPORT_SHIFT;
-const ACTIVE_MASK: u64 = (1_u64 << PHASE_SHIFT) - 1;
+thread_local! {
+    static INGRESS_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
+}
 
-const EXPORT_ONE: u64 = 1_u64 << EXPORT_SHIFT;
-const UDF_ONE: u64 = 1_u64;
+fn current_ingress_stripe() -> usize {
+    INGRESS_STRIPE.with(|stripe| {
+        let current = stripe.get();
+        if current != usize::MAX {
+            return current;
+        }
+        let assigned =
+            NEXT_INGRESS_STRIPE.fetch_add(1, Ordering::Relaxed) & (INGRESS_STRIPE_COUNT - 1);
+        stripe.set(assigned);
+        assigned
+    })
+}
+
+static NEXT_INGRESS_STRIPE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug)]
+#[repr(C, align(128))]
+struct IngressStripe {
+    // The high bit closes this stripe against new reservations during the
+    // terminal drain. The low bits count every live external export.
+    active: AtomicUsize,
+    udf_active: AtomicUsize,
+}
+
+impl IngressStripe {
+    const fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            udf_active: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_enter(&self) -> bool {
+        let mut observed = self.active.load(Ordering::Acquire);
+        loop {
+            if observed & STRIPE_SEALED != 0 {
+                return false;
+            }
+            if observed & STRIPE_COUNT_MASK == STRIPE_COUNT_MASK {
+                std::process::abort();
+            }
+            match self.active.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    fn enter_udf(&self) {
+        self.udf_active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .unwrap_or_else(|_| std::process::abort());
+    }
+
+    fn leave_udf(&self) {
+        self.udf_active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_sub(1)
+            })
+            .unwrap_or_else(|_| std::process::abort());
+    }
+
+    fn seal(&self) {
+        let mut observed = self.active.load(Ordering::Acquire);
+        loop {
+            if observed & STRIPE_SEALED != 0 {
+                return;
+            }
+            match self.active.compare_exchange_weak(
+                observed,
+                observed | STRIPE_SEALED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    fn reopen(&self) {
+        debug_assert_eq!(self.active.load(Ordering::Acquire) & STRIPE_COUNT_MASK, 0);
+        debug_assert_eq!(self.udf_active.load(Ordering::Acquire), 0);
+        self.active.store(0, Ordering::Release);
+    }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire) & STRIPE_COUNT_MASK
+    }
+
+    fn active_udfs(&self) -> usize {
+        self.udf_active.load(Ordering::Acquire)
+    }
+}
 
 #[cfg(test)]
 struct TestEpochGate {
@@ -92,26 +189,6 @@ impl Drop for TestModuleLease {
     }
 }
 
-const fn pack_state(phase: u8, active: u64) -> u64 {
-    ((phase as u64) << PHASE_SHIFT) | active
-}
-
-const fn phase_of(state: u64) -> u8 {
-    (state >> PHASE_SHIFT) as u8
-}
-
-const fn active_exports_of(state: u64) -> u64 {
-    (state & EXPORT_MASK) >> EXPORT_SHIFT
-}
-
-const fn active_udfs_of(state: u64) -> u64 {
-    state & UDF_MASK
-}
-
-const fn active_of(state: u64) -> u64 {
-    state & ACTIVE_MASK
-}
-
 /// Proof token certifying that all module export entries have been drained.
 #[derive(Debug)]
 pub struct ExportsDrained {
@@ -130,11 +207,13 @@ pub struct ExportsDrained {
 /// the CLOSED transition.
 #[derive(Debug)]
 pub struct ExportIngress {
-    // The phase and active-call count share one atomic word. This makes entry
-    // independent of the shutdown mutex while preserving a linearization
-    // point between an entry and the closing transition.
-    state: AtomicU64,
+    // The phase is global, while reservations are striped. Each stripe is
+    // independently sealed by terminal drain, so ordinary UDF entry does not
+    // contend on one cache line and close cannot overtake a reservation that
+    // has already started.
+    phase: AtomicU8,
     epoch: AtomicU64,
+    stripes: [IngressStripe; INGRESS_STRIPE_COUNT],
     // The mutex is used only by the rare shutdown wait and by the final guard
     // drop that wakes that wait. It is not taken by ordinary entry calls.
     wait_lock: Mutex<()>,
@@ -183,8 +262,9 @@ impl Default for ExportIngress {
 impl ExportIngress {
     pub const fn new() -> Self {
         Self {
-            state: AtomicU64::new(pack_state(PHASE_CLOSED, 0)),
+            phase: AtomicU8::new(PHASE_CLOSED),
             epoch: AtomicU64::new(0),
+            stripes: [const { IngressStripe::new() }; INGRESS_STRIPE_COUNT],
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             opening_lock: Mutex::new(()),
@@ -210,16 +290,16 @@ impl ExportIngress {
             TEST_EPOCH_GATE.acquire();
             self.test_epoch_active.store(1, Ordering::Release);
         }
-        let state = self.state.load(Ordering::Acquire);
-        if phase_of(state) != PHASE_CLOSED || active_of(state) != 0 {
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase != PHASE_CLOSED || self.active_calls() != 0 {
             #[cfg(test)]
             if owns_test_epoch {
                 self.test_epoch_active.store(0, Ordering::Release);
                 TEST_EPOCH_GATE.release();
             }
-            assert_eq!(phase_of(state), PHASE_CLOSED, "ingress opening before seal");
+            assert_eq!(phase, PHASE_CLOSED, "ingress opening before seal");
             assert_eq!(
-                active_of(state),
+                self.active_calls(),
                 0,
                 "ingress opening with live export guards"
             );
@@ -229,8 +309,10 @@ impl ExportIngress {
                 epoch.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());
-        self.state
-            .store(pack_state(PHASE_OPENING, 0), Ordering::Release);
+        for stripe in &self.stripes {
+            stripe.reopen();
+        }
+        self.phase.store(PHASE_OPENING, Ordering::Release);
     }
 
     /// Completes opening as one publication transaction.
@@ -260,7 +342,7 @@ impl ExportIngress {
             .wait_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        while active_exports_of(self.state.load(Ordering::Acquire)) != 0 {
+        while self.active_calls() != 0 {
             wait_guard = self
                 .idle
                 .wait(wait_guard)
@@ -268,7 +350,7 @@ impl ExportIngress {
         }
         drop(wait_guard);
 
-        if phase_of(self.state.load(Ordering::Acquire)) != PHASE_OPENING {
+        if self.phase.load(Ordering::Acquire) != PHASE_OPENING {
             return Err(OpeningPublicationLost);
         }
 
@@ -276,9 +358,9 @@ impl ExportIngress {
         if result.is_err() {
             return Ok(result);
         }
-        match self.state.compare_exchange(
-            pack_state(PHASE_OPENING, 0),
-            pack_state(PHASE_OPEN, 0),
+        match self.phase.compare_exchange(
+            PHASE_OPENING,
+            PHASE_OPEN,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
@@ -293,7 +375,7 @@ impl ExportIngress {
     where
         F: FnOnce(),
     {
-        let observed_phase = phase_of(self.state.load(Ordering::Acquire));
+        let observed_phase = self.phase.load(Ordering::Acquire);
         let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
                 .lock()
@@ -305,51 +387,35 @@ impl ExportIngress {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
-        let mut observed = self.state.load(Ordering::Acquire);
-        loop {
-            let phase = phase_of(observed);
-            if phase == PHASE_CLOSED {
-                return (
-                    ExportCallGuard {
-                        ingress: self,
-                        epoch: self.epoch.load(Ordering::Acquire),
-                        decrement: 0,
-                    },
-                    false,
-                );
-            }
-
-            let active_exports = active_exports_of(observed);
-            if active_exports == ((1_u64 << EXPORT_BITS) - 1) {
-                std::process::abort();
-            }
-            let next = observed + EXPORT_ONE;
-            match self.state.compare_exchange_weak(
-                observed,
-                next,
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    let accepted = phase == PHASE_OPEN;
-                    if accepted {
-                        let hook = on_accepted
-                            .take()
-                            .expect("ingress acceptance hook called once");
-                        hook();
-                    }
-                    return (
-                        ExportCallGuard {
-                            ingress: self,
-                            epoch: self.epoch.load(Ordering::Acquire),
-                            decrement: EXPORT_ONE,
-                        },
-                        accepted,
-                    );
-                }
-                Err(current) => observed = current,
-            }
+        if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
+            return (self.rejected_guard(), false);
         }
+        let stripe_index = current_ingress_stripe();
+        let stripe = &self.stripes[stripe_index];
+        if !stripe.try_enter() {
+            return (self.rejected_guard(), false);
+        }
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == PHASE_CLOSED {
+            self.release_reservation(stripe_index, false);
+            return (self.rejected_guard(), false);
+        }
+        let accepted = phase == PHASE_OPEN;
+        if accepted {
+            let hook = on_accepted
+                .take()
+                .expect("ingress acceptance hook called once");
+            hook();
+        }
+        (
+            ExportCallGuard {
+                ingress: self,
+                epoch: self.epoch.load(Ordering::Acquire),
+                stripe: Some(stripe_index),
+                udf: false,
+            },
+            accepted,
+        )
     }
 
     /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
@@ -359,7 +425,7 @@ impl ExportIngress {
     where
         F: FnOnce(),
     {
-        let observed_phase = phase_of(self.state.load(Ordering::Acquire));
+        let observed_phase = self.phase.load(Ordering::Acquire);
         let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
                 .lock()
@@ -371,55 +437,38 @@ impl ExportIngress {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
-        let mut observed = self.state.load(Ordering::Acquire);
-        loop {
-            let phase = phase_of(observed);
-            if phase == PHASE_CLOSED {
-                return (
-                    ExportCallGuard {
-                        ingress: self,
-                        epoch: self.epoch.load(Ordering::Acquire),
-                        decrement: 0,
-                    },
-                    false,
-                    0,
-                );
-            }
-
-            let active_exports = active_exports_of(observed);
-            let active_udfs = active_udfs_of(observed);
-            if active_exports == ((1_u64 << EXPORT_BITS) - 1) || active_udfs == UDF_MASK {
-                std::process::abort();
-            }
-            let next = observed + EXPORT_ONE + UDF_ONE;
-            match self.state.compare_exchange_weak(
-                observed,
-                next,
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    let accepted = phase == PHASE_OPEN;
-                    if accepted {
-                        let hook = on_accepted
-                            .take()
-                            .expect("ingress acceptance hook called once");
-                        hook();
-                    }
-                    let concurrent_calls = active_udfs_of(next) as usize;
-                    return (
-                        ExportCallGuard {
-                            ingress: self,
-                            epoch: self.epoch.load(Ordering::Acquire),
-                            decrement: EXPORT_ONE + UDF_ONE,
-                        },
-                        accepted,
-                        concurrent_calls,
-                    );
-                }
-                Err(current) => observed = current,
-            }
+        if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
+            return (self.rejected_guard(), false, 0);
         }
+        let stripe_index = current_ingress_stripe();
+        let stripe = &self.stripes[stripe_index];
+        if !stripe.try_enter() {
+            return (self.rejected_guard(), false, 0);
+        }
+        stripe.enter_udf();
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == PHASE_CLOSED {
+            self.release_reservation(stripe_index, true);
+            return (self.rejected_guard(), false, 0);
+        }
+        let accepted = phase == PHASE_OPEN;
+        if accepted {
+            let hook = on_accepted
+                .take()
+                .expect("ingress acceptance hook called once");
+            hook();
+        }
+        let concurrent_calls = self.active_udfs();
+        (
+            ExportCallGuard {
+                ingress: self,
+                epoch: self.epoch.load(Ordering::Acquire),
+                stripe: Some(stripe_index),
+                udf: true,
+            },
+            accepted,
+            concurrent_calls,
+        )
     }
 
     /// Stops accepting new export calls and runs `on_closed` at the same
@@ -448,7 +497,7 @@ impl ExportIngress {
         on_attempt();
         #[cfg(test)]
         self.close_waiters.fetch_add(1, Ordering::AcqRel);
-        let observed_phase = phase_of(self.state.load(Ordering::Acquire));
+        let observed_phase = self.phase.load(Ordering::Acquire);
         let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
                 .lock()
@@ -463,15 +512,14 @@ impl ExportIngress {
         self.close_waiters.fetch_sub(1, Ordering::AcqRel);
         with_diagnostic_linearization(|| {
             let mut on_closed = Some(on_closed);
-            let mut observed = self.state.load(Ordering::Acquire);
+            let mut observed = self.phase.load(Ordering::Acquire);
             loop {
-                if !matches!(phase_of(observed), PHASE_OPEN | PHASE_OPENING) {
+                if !matches!(observed, PHASE_OPEN | PHASE_OPENING) {
                     return;
                 }
-                let next = pack_state(PHASE_CLOSING, active_of(observed));
-                match self.state.compare_exchange_weak(
+                match self.phase.compare_exchange_weak(
                     observed,
-                    next,
+                    PHASE_CLOSING,
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
@@ -512,42 +560,46 @@ impl ExportIngress {
     {
         assert!(
             !matches!(
-                phase_of(self.state.load(Ordering::Acquire)),
+                self.phase.load(Ordering::Acquire),
                 PHASE_OPEN | PHASE_OPENING
             ),
             "ingress sealed before begin_close"
         );
         let mut wait_guard = self.wait_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut before_close = Some(before_close);
-        loop {
-            while active_exports_of(self.state.load(Ordering::Acquire)) != 0 {
-                wait_guard = self
-                    .idle
-                    .wait(wait_guard)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
+        while self.active_calls() != 0 {
+            wait_guard = self
+                .idle
+                .wait(wait_guard)
+                .unwrap_or_else(|e| e.into_inner());
+        }
 
-            if let Some(before_close) = before_close.take() {
-                before_close();
-            }
+        if let Some(before_close) = before_close.take() {
+            before_close();
+        }
 
-            // An entry arriving after the active==0 observation is still
-            // allowed in CLOSING. Require the exact zero-active state so that
-            // such an entry makes this CAS fail instead of being discarded.
-            match self.state.compare_exchange(
-                pack_state(PHASE_CLOSING, 0),
-                pack_state(PHASE_CLOSED, 0),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(observed) => match phase_of(observed) {
-                    PHASE_CLOSED => break,
-                    PHASE_CLOSING => continue,
-                    PHASE_OPEN | PHASE_OPENING => panic!("ingress sealed before begin_close"),
-                    _ => std::process::abort(),
-                },
-            }
+        // Closing entries may have started after the zero observation. Seal
+        // every stripe to prevent a late reservation from being missed by the
+        // terminal CLOSED transition, then drain those reservations.
+        for stripe in &self.stripes {
+            stripe.seal();
+        }
+        while self.active_calls() != 0 {
+            wait_guard = self
+                .idle
+                .wait(wait_guard)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+
+        match self.phase.compare_exchange(
+            PHASE_CLOSING,
+            PHASE_CLOSED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(PHASE_CLOSED) => {}
+            Err(PHASE_OPEN | PHASE_OPENING) => panic!("ingress sealed before begin_close"),
+            Err(_) => std::process::abort(),
         }
         drop(wait_guard);
         #[cfg(test)]
@@ -562,59 +614,74 @@ impl ExportIngress {
     }
 
     pub fn phase(&self) -> u8 {
-        phase_of(self.state.load(Ordering::Acquire))
+        self.phase.load(Ordering::Acquire)
     }
 
     pub(crate) fn allows_diagnostic_mutation(&self) -> bool {
-        let state = self.state.load(Ordering::Acquire);
-        phase_of(state) == PHASE_OPENING
-            || phase_of(state) == PHASE_OPEN
-            || (phase_of(state) == PHASE_CLOSED && self.epoch.load(Ordering::Acquire) == 0)
+        let phase = self.phase.load(Ordering::Acquire);
+        phase == PHASE_OPENING
+            || phase == PHASE_OPEN
+            || (phase == PHASE_CLOSED && self.epoch.load(Ordering::Acquire) == 0)
     }
 
     pub fn active_calls(&self) -> usize {
-        active_exports_of(self.state.load(Ordering::Acquire)) as usize
+        self.stripes.iter().map(IngressStripe::active).sum()
     }
 
     pub fn active_udfs(&self) -> usize {
-        active_udfs_of(self.state.load(Ordering::Acquire)) as usize
+        self.stripes.iter().map(IngressStripe::active_udfs).sum()
+    }
+
+    fn rejected_guard(&self) -> ExportCallGuard<'_> {
+        ExportCallGuard {
+            ingress: self,
+            epoch: self.epoch.load(Ordering::Acquire),
+            stripe: None,
+            udf: false,
+        }
+    }
+
+    fn release_reservation(&self, stripe_index: usize, udf: bool) {
+        let stripe = &self.stripes[stripe_index];
+        if udf {
+            stripe.leave_udf();
+        }
+        let previous = stripe
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                let active = state & STRIPE_COUNT_MASK;
+                active
+                    .checked_sub(1)
+                    .map(|next| (state & STRIPE_SEALED) | next)
+            })
+            .unwrap_or_else(|_| std::process::abort());
+        if previous & STRIPE_COUNT_MASK == 1 {
+            let _wait_guard = self.wait_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if self.active_calls() == 0 {
+                self.idle.notify_all();
+            }
+        }
     }
 }
 
 pub struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
-    decrement: u64,
+    stripe: Option<usize>,
+    udf: bool,
 }
 
 impl Drop for ExportCallGuard<'_> {
     fn drop(&mut self) {
-        if self.decrement == 0 {
+        let Some(stripe_index) = self.stripe else {
             return;
-        }
+        };
         assert_eq!(
             self.ingress.epoch.load(Ordering::Acquire),
             self.epoch,
             "export guard crossed ingress epochs"
         );
-        let previous = self
-            .ingress
-            .state
-            .fetch_sub(self.decrement, Ordering::Release);
-        let active_exports = active_exports_of(previous);
-        if active_exports == 0 {
-            std::process::abort();
-        }
-        if active_exports == 1 {
-            // Acquiring this lock only for the final active call closes the
-            // notify/wait race without putting a mutex on the UDF entry path.
-            let _wait_guard = self
-                .ingress
-                .wait_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            self.ingress.idle.notify_all();
-        }
+        self.ingress.release_reservation(stripe_index, self.udf);
     }
 }
 

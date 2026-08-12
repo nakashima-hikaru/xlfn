@@ -225,7 +225,7 @@ fn server_locality_refresh_lock_independence() {
         .expect("server_b.begin_refresh should not block on server_a state lock");
 
     assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, RtdValue::Number(42.0));
+    assert_eq!(batch.updates[0].value.as_ref(), &RtdValue::Number(42.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -343,7 +343,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
 
     let batch = server_b.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, RtdValue::Number(20.0));
+    assert_eq!(batch.updates[0].value.as_ref(), &RtdValue::Number(20.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 

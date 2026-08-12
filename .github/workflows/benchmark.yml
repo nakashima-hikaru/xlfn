@@ -72,6 +72,11 @@ jobs:
             --testbed "$BENCHER_TESTBED" \
             --adapter rust_criterion \
             --github-actions "$GITHUB_TOKEN" \
+            --threshold-measure latency \
+            --threshold-test percentage \
+            --threshold-min-sample-size 5 \
+            --threshold-upper-boundary 0.10 \
+            --error-on-alert \
             --ci-only-on-alert \
             "just bench"
 
@@ -94,6 +99,7 @@ jobs:
             --testbed "$BENCHER_TESTBED" \
             --adapter rust_criterion \
             --github-actions "$GITHUB_TOKEN" \
+            --error-on-alert \
             --ci-only-on-alert \
             "just bench"
 

@@ -72,7 +72,7 @@ impl RtdServerHandle {
 
             self.inner.publish_epoch.fetch_add(1, Ordering::AcqRel);
 
-            let mut deliverable = Vec::new();
+            let mut by_topic: FxHashMap<i32, (u64, Arc<RtdValue>)> = FxHashMap::default();
             for shard_mutex in self.inner.shards.iter() {
                 let shard = shard_mutex.lock();
                 for buf in [0, 1] {
@@ -82,21 +82,16 @@ impl RtdServerHandle {
                             .get(topic_id)
                             .is_some_and(|active| active.committed)
                         {
-                            deliverable.push((queued.sequence, topic_id.0, queued.value.clone()));
-                        }
-                    }
-                }
-            }
-
-            let mut by_topic: FxHashMap<i32, (u64, Arc<RtdValue>)> = FxHashMap::default();
-            for (sequence, topic_id, value) in deliverable {
-                match by_topic.entry(topic_id) {
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert((sequence, value));
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut slot) => {
-                        if sequence > slot.get().0 {
-                            slot.insert((sequence, value));
+                            match by_topic.entry(topic_id.0) {
+                                std::collections::hash_map::Entry::Vacant(slot) => {
+                                    slot.insert((queued.sequence, Arc::clone(&queued.value)));
+                                }
+                                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                    if queued.sequence > slot.get().0 {
+                                        slot.insert((queued.sequence, Arc::clone(&queued.value)));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -107,7 +102,7 @@ impl RtdServerHandle {
                 .map(|(topic_id, (sequence, value))| RtdUpdate {
                     sequence,
                     topic_id,
-                    value: (*value).clone(),
+                    value,
                 })
                 .collect();
             updates_vec.sort_unstable_by_key(|u| u.sequence);
