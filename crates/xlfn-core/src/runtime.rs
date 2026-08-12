@@ -8,6 +8,17 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+#[cold]
+fn opening_publication_lost() -> ! {
+    #[cfg(not(test))]
+    {
+        tracing::error!("lifecycle opening publication lost its ingress linearization");
+        std::process::abort();
+    }
+    #[cfg(test)]
+    panic!("lifecycle opening publication lost its ingress linearization");
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum LifecyclePhase {
@@ -297,8 +308,6 @@ impl<S> Runtime<S> {
             .collect();
         self.registrations.lock().extend(new_items);
         let can_commit = self.phase() == LifecyclePhase::Opening;
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        let mut committed_resources = None;
         if can_commit {
             let ingress = crate::ingress::global_ingress();
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -317,19 +326,30 @@ impl<S> Runtime<S> {
                         crate::diagnostics::connect_ghost(Arc::clone(&ghost), |snapshot| {
                             resources.diagnostics_running = snapshot.running;
                             resources.diagnostics_pending = snapshot.pending;
-                            #[cfg(any(test, feature = "shutdown-refinement"))]
-                            let trace_resources = resources.clone();
                             ghost
-                                .begin_generation(attempt.attempt_id, resources)
+                                .begin_generation(attempt.attempt_id, resources.clone())
                                 .map_err(|_| XllError::Internal {
                                     diagnostic_id: 0x4748_4f53_5447_454e,
-                                })
-                                .map(|()| {
-                                    #[cfg(any(test, feature = "shutdown-refinement"))]
-                                    {
-                                        committed_resources = Some(trace_resources);
-                                    }
-                                })
+                                })?;
+                            self.phase
+                                .store(LifecyclePhase::Open as u8, Ordering::Release);
+                            self.generation.store(attempt.attempt_id, Ordering::Release);
+                            self.open_attempt_id.store(0, Ordering::Release);
+                            attempt.active = false;
+                            // The abstract open publication is complete before
+                            // any concurrent producer can observe this ghost.
+                            // The diagnostic, RTD, return, handle, subscription,
+                            // and async hooks are installed only after this event.
+                            debug_assert_eq!(self.phase(), LifecyclePhase::Open);
+                            debug_assert_eq!(self.generation(), attempt.attempt_id);
+                            debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
+                            self.record_composition_event(
+                                crate::composition_refinement::CompositionEvent::CommitOpen {
+                                    attempt: attempt.attempt_id,
+                                    resources,
+                                },
+                            );
+                            Ok(())
                         })?;
                         crate::rtd::set_ghost(Arc::clone(&ghost));
                         if let Some(tracker) = self.returns.get() {
@@ -343,12 +363,9 @@ impl<S> Runtime<S> {
                         }
                         #[cfg(feature = "async")]
                         self.async_manager.set_ghost(Arc::clone(&ghost));
-                        self.phase
-                            .store(LifecyclePhase::Open as u8, Ordering::Release);
-                        self.generation.store(attempt.attempt_id, Ordering::Release);
-                        Ok(())
+                        Ok::<(), XllError>(())
                     })
-                    .map_err(|_| XllError::Closing)??;
+                    .unwrap_or_else(|_| opening_publication_lost())?;
             }
             #[cfg(not(any(test, feature = "shutdown-refinement")))]
             ingress
@@ -356,26 +373,17 @@ impl<S> Runtime<S> {
                     self.phase
                         .store(LifecyclePhase::Open as u8, Ordering::Release);
                     self.generation.store(attempt.attempt_id, Ordering::Release);
+                    self.open_attempt_id.store(0, Ordering::Release);
+                    attempt.active = false;
                     Ok::<(), XllError>(())
                 })
-                .map_err(|_| XllError::Closing)??;
+                .unwrap_or_else(|_| opening_publication_lost())?;
         }
-        self.open_attempt_id.store(0, Ordering::Release);
-        attempt.active = false;
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        if can_commit {
-            debug_assert_eq!(self.phase(), LifecyclePhase::Open);
-            debug_assert_eq!(self.generation(), attempt.attempt_id);
-            debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::CommitOpen {
-                    attempt: attempt.attempt_id,
-                    resources: committed_resources
-                        .expect("committed open must initialize composition resources"),
-                },
-            );
-        } else {
+        if !can_commit {
+            self.open_attempt_id.store(0, Ordering::Release);
+            attempt.active = false;
             debug_assert_eq!(self.phase(), LifecyclePhase::Closing);
             debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
             self.record_composition_event(
@@ -460,7 +468,6 @@ impl<S> Runtime<S> {
     }
 
     pub fn enter(&self) -> XllResult<CallGuard<'_, S>> {
-        let concurrent_calls = crate::ingress::global_ingress().active_udfs();
         crate::ingress::global_ingress().with_linearization(|| {
             if self.phase() != LifecyclePhase::Open {
                 return Err(XllError::Closing);
@@ -477,7 +484,6 @@ impl<S> Runtime<S> {
             Ok(CallGuard {
                 runtime: self,
                 state,
-                concurrent_calls,
             })
         })
     }
@@ -1398,7 +1404,6 @@ pub struct CallGuard<'runtime, S> {
     )]
     runtime: &'runtime Runtime<S>,
     state: arc_swap::Guard<Option<Arc<S>>>,
-    concurrent_calls: usize,
 }
 
 impl<S> CallGuard<'_, S> {
@@ -1408,11 +1413,6 @@ impl<S> CallGuard<'_, S> {
             .as_ref()
             .expect("a live CallGuard always observes published runtime state")
             .as_ref()
-    }
-
-    #[must_use]
-    pub const fn concurrent_calls(&self) -> usize {
-        self.concurrent_calls
     }
 
     #[cfg(feature = "async")]

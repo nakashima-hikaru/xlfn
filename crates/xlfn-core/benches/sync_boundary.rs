@@ -1,37 +1,42 @@
 use std::time::Duration;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn_core::benchmark_support::{SyncBenchKind, SyncBoundaryWorkerPool};
 
 const ITERATIONS_PER_THREAD: usize = 1000;
 
 fn sync_boundary_benchmarks(c: &mut Criterion) {
-    let mut group_admission = c.benchmark_group("sync_boundary/admission");
-    group_admission.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_admission.throughput(Throughput::Elements(attempts as u64));
-        group_admission.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                b.iter_batched_ref(
-                    || {
-                        SyncBoundaryWorkerPool::new(
-                            threads,
-                            ITERATIONS_PER_THREAD,
-                            SyncBenchKind::AdmissionOnly,
-                        )
-                    },
-                    |pool| {
-                        pool.run_batch();
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+    for (kind, name) in [
+        (
+            SyncBenchKind::IngressUdfOnly,
+            "sync_boundary/ingress_udf_only",
+        ),
+        (
+            SyncBenchKind::RuntimeEnterOnly,
+            "sync_boundary/runtime_enter_only",
+        ),
+        (SyncBenchKind::FullAdmission, "sync_boundary/admission"),
+        (
+            SyncBenchKind::ActiveUdfSnapshot,
+            "sync_boundary/active_udf_snapshot",
+        ),
+    ] {
+        let mut group_admission = c.benchmark_group(name);
+        group_admission.measurement_time(Duration::from_secs(10));
+        for threads in [1_usize, 2, 4, 8, 16, 32] {
+            let attempts = threads * ITERATIONS_PER_THREAD;
+            group_admission.throughput(Throughput::Elements(attempts as u64));
+            group_admission.bench_with_input(
+                BenchmarkId::from_parameter(threads),
+                &threads,
+                |b, &threads| {
+                    let pool = SyncBoundaryWorkerPool::new(threads, ITERATIONS_PER_THREAD, kind);
+                    b.iter(|| pool.run_batch());
+                },
+            );
+        }
+        group_admission.finish();
     }
-    group_admission.finish();
 
     for (kind, name) in [
         (
@@ -60,13 +65,8 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
                 BenchmarkId::from_parameter(threads),
                 &threads,
                 |b, &threads| {
-                    b.iter_batched_ref(
-                        || SyncBoundaryWorkerPool::new(threads, ITERATIONS_PER_THREAD, kind),
-                        |pool| {
-                            pool.run_batch();
-                        },
-                        BatchSize::SmallInput,
-                    );
+                    let pool = SyncBoundaryWorkerPool::new(threads, ITERATIONS_PER_THREAD, kind);
+                    b.iter(|| pool.run_batch());
                 },
             );
         }

@@ -1148,6 +1148,29 @@ mod tests {
         );
     }
 
+    fn assert_commit_open_precedes_lift_shutdown(trace: &str) {
+        let document: serde_json::Value =
+            serde_json::from_str(trace).expect("composition trace must be valid JSON");
+        let events = document["events"]
+            .as_array()
+            .expect("composition trace must contain an events array");
+        let mut committed = false;
+        for event in events {
+            if event.get("beginOpen").is_some() {
+                committed = false;
+            }
+            if event.get("liftShutdown").is_some() {
+                assert!(
+                    committed,
+                    "LiftShutdown was recorded before CommitOpen: {trace}"
+                );
+            }
+            if event.get("commitOpen").is_some() {
+                committed = true;
+            }
+        }
+    }
+
     struct RetryClose;
 
     struct RetryState {
@@ -1719,6 +1742,25 @@ mod tests {
     }
 
     #[test]
+    fn composition_commit_open_precedes_lift_shutdown_events() {
+        let _runtime_test_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime = Runtime::<()>::new();
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveCall);
+
+        assert_eq!(close_addin::<CleanClose>(&runtime), 1);
+        assert_commit_open_precedes_lift_shutdown(&runtime.composition_trace_json());
+    }
+
+    #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
     fn rust_composition_already_closed_trace_is_accepted_by_lean_checker() {
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
@@ -1757,10 +1799,12 @@ mod tests {
             assert_eq!(close_addin::<CleanClose>(&runtime), 1);
         }
 
+        let trace = runtime.composition_trace_json();
+        assert_commit_open_precedes_lift_shutdown(&trace);
         check_composition_trace_with_lean(
             &checker,
             "reopen",
-            &runtime.composition_trace_json(),
+            &trace,
             "rust-composition-reopen-trace.json",
         );
     }
@@ -2024,8 +2068,7 @@ mod tests {
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), Vec::new());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        let (_export_guard, accepted, _concurrent_calls) =
-            crate::ingress::global_ingress().enter_udf_with(|| {});
+        let (_export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {});
         assert!(accepted);
         let call = runtime.enter().unwrap();
         let closer_runtime = std::sync::Arc::clone(&runtime);

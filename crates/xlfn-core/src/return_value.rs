@@ -842,11 +842,10 @@ where
     F: FnOnce(&S) -> XllResult<T>,
     T: IntoExcelValue,
 {
-    let (_guard, accepted, _concurrent_calls) =
-        crate::ingress::global_ingress().enter_udf_with(|| {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
-            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
-        });
+    let (_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
+    });
     if !accepted {
         return closing_error_pointer();
     }
@@ -899,6 +898,8 @@ where
         return udf_boundary_uninstrumented(guard, producer, udf_id, operation);
     }
 
+    let concurrent_calls = crate::ingress::global_ingress().active_udfs();
+
     udf_boundary_instrumented(
         runtime,
         guard,
@@ -906,7 +907,10 @@ where
         udf_id,
         excel_name,
         operation,
-        instrumentation,
+        InstrumentedUdfContext {
+            instrumentation,
+            concurrent_calls,
+        },
     )
 }
 
@@ -937,6 +941,11 @@ where
     }
 }
 
+struct InstrumentedUdfContext {
+    instrumentation: crate::execution::InstrumentationPlan,
+    concurrent_calls: usize,
+}
+
 fn udf_boundary_instrumented<S, F, T>(
     runtime: &Runtime<S>,
     guard: &crate::runtime::CallGuard<'_, S>,
@@ -944,15 +953,18 @@ fn udf_boundary_instrumented<S, F, T>(
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
-    instrumentation: crate::execution::InstrumentationPlan,
+    context: InstrumentedUdfContext,
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
     T: IntoExcelValue,
 {
+    let InstrumentedUdfContext {
+        instrumentation,
+        concurrent_calls,
+    } = context;
     let call_id = CallId::from(runtime.next_call_id());
     let calculation_id = runtime.calculation_id();
-    let concurrent_calls = guard.concurrent_calls();
     let timer = crate::execution::CallTimer::start();
 
     let trace_metadata = crate::execution::UdfTraceMetadata {
