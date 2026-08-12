@@ -23,7 +23,35 @@ impl Default for TopicState {
 pub(crate) struct Initialization {
     pub(crate) owner: ThreadId,
     pub(crate) owner_done: AtomicBool,
+    pub(crate) wait: Mutex<()>,
     pub(crate) completed: Condvar,
+}
+
+impl Initialization {
+    fn wait_until_done(&self) {
+        let mut wait = self.wait.lock();
+        while !self.owner_done.load(Ordering::Acquire) {
+            self.completed.wait(&mut wait);
+        }
+    }
+
+    fn wait_until_done_or_closed(&self, topics: &RwLock<TopicState>) {
+        let mut wait = self.wait.lock();
+        while !self.owner_done.load(Ordering::Acquire) && !topics.read().closed {
+            self.completed.wait(&mut wait);
+        }
+    }
+
+    fn complete(&self) {
+        let _wait = self.wait.lock();
+        self.owner_done.store(true, Ordering::Release);
+        self.completed.notify_all();
+    }
+
+    fn notify_closed(&self) {
+        let _wait = self.wait.lock();
+        self.completed.notify_all();
+    }
 }
 
 pub(crate) enum PrepareDecision {
@@ -68,7 +96,7 @@ impl Drop for HandleInitializationGuard {
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct HandleRuntime {
     pub(crate) registry: HandleRegistry,
-    pub(crate) topics: Mutex<TopicState>,
+    pub(crate) topics: RwLock<TopicState>,
     pub(crate) prepares: HandlePrepareState,
     pub(crate) leases: Arc<HandleLeaseState>,
     pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
@@ -86,7 +114,7 @@ impl HandleRuntime {
     ) -> XllResult<Self> {
         Ok(Self {
             registry: HandleRegistry::try_new(maximum_handles)?,
-            topics: Mutex::new(TopicState::default()),
+            topics: RwLock::new(TopicState::default()),
             prepares: HandlePrepareState::new(),
             leases: Arc::new(HandleLeaseState::new()),
             _module_ingress: module_ingress,
@@ -153,7 +181,7 @@ impl HandleRuntime {
     ) -> XllResult<(String, bool)> {
         observe(key, &token)?;
 
-        let topics = self.topics.lock();
+        let topics = self.topics.read();
 
         if topics.closed || topics.generation != generation {
             return Err(XllError::Closing);
@@ -184,7 +212,7 @@ impl HandleRuntime {
         let _handle_operation = self.leases.acquire();
 
         let decision = loop {
-            let mut topics = self.topics.lock();
+            let topics = self.topics.read();
 
             if topics.closed {
                 return Err(XllError::Closing);
@@ -198,7 +226,8 @@ impl HandleRuntime {
                     return Err(XllError::ReentrantCall);
                 }
 
-                initialization.completed.wait(&mut topics);
+                drop(topics);
+                initialization.wait_until_done_or_closed(&self.topics);
                 continue;
             }
 
@@ -207,18 +236,47 @@ impl HandleRuntime {
             //    enough to use as the memoized value.
             //
             if let Some(topic) = topics.by_key.get(&key) {
-                break PrepareDecision::Existing {
+                let decision = PrepareDecision::Existing {
                     token: topic.token.clone(),
                     generation: topics.generation,
                 };
+                drop(topics);
+                break decision;
             }
 
             //
             // 3. Real miss. Become the single-flight owner.
             //
+            drop(topics);
+            let mut topics = self.topics.write();
+
+            if topics.closed {
+                return Err(XllError::Closing);
+            }
+
+            if let Some(initialization) = topics.initializing.get(&key).cloned() {
+                if initialization.owner == std::thread::current().id() {
+                    return Err(XllError::ReentrantCall);
+                }
+
+                drop(topics);
+                initialization.wait_until_done_or_closed(&self.topics);
+                continue;
+            }
+
+            if let Some(topic) = topics.by_key.get(&key) {
+                let decision = PrepareDecision::Existing {
+                    token: topic.token.clone(),
+                    generation: topics.generation,
+                };
+                drop(topics);
+                break decision;
+            }
+
             let initialization = Arc::new(Initialization {
                 owner: std::thread::current().id(),
                 owner_done: AtomicBool::new(false),
+                wait: Mutex::new(()),
                 completed: Condvar::new(),
             });
 
@@ -246,21 +304,17 @@ impl HandleRuntime {
         let initializing = scopeguard::guard(
             (&self.topics, key.as_str(), Arc::clone(&initialization)),
             |(topics, key, owned)| {
-                let mut topics = topics.lock();
-                let removed = topics
-                    .initializing
-                    .get(key)
-                    .filter(|current| Arc::ptr_eq(current, &owned))
-                    .is_some()
-                    .then(|| topics.initializing.remove(key))
-                    .flatten();
-                drop(topics);
-                owned.owner_done.store(true, Ordering::Release);
-                if let Some(initialization) = removed {
-                    initialization.completed.notify_all();
-                } else {
-                    owned.completed.notify_all();
+                {
+                    let mut topics = topics.write();
+                    if topics
+                        .initializing
+                        .get(key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &owned))
+                    {
+                        topics.initializing.remove(key);
+                    }
                 }
+                owned.complete();
             },
         );
 
@@ -280,7 +334,7 @@ impl HandleRuntime {
         let unpublished = scopeguard::guard(
             (&self.registry, &self.topics, key.as_str(), token.as_str()),
             |(registry, topics, key, token)| {
-                let mut topics = topics.lock();
+                let mut topics = topics.write();
                 if let Some(topic) = topics.by_key.get(key).filter(|topic| topic.token == token) {
                     if let Some(owner) = topic.excel_topic {
                         topics.by_excel_id.remove(&owner);
@@ -292,7 +346,7 @@ impl HandleRuntime {
             },
         );
 
-        let mut topics = self.topics.lock();
+        let mut topics = self.topics.write();
         if topics.closed || topics.generation != generation {
             return Err(XllError::Closing);
         }
@@ -310,14 +364,14 @@ impl HandleRuntime {
         drop(topics);
 
         {
-            let topics = self.topics.lock();
+            let topics = self.topics.read();
             if topics.closed || topics.generation != generation {
                 return Err(XllError::Closing);
             }
         }
         observe(&key, &token)?;
 
-        let topics = self.topics.lock();
+        let topics = self.topics.read();
         if topics.closed || topics.generation != generation {
             return Err(XllError::Closing);
         }
@@ -336,7 +390,7 @@ impl HandleRuntime {
 
     #[cfg(any(target_os = "windows", test))]
     pub fn claim_server(&self, key: &str, server_generation: u64) -> XllResult<()> {
-        let mut topics = self.topics.lock();
+        let mut topics = self.topics.write();
         if topics.closed {
             return Err(XllError::Closing);
         }
@@ -403,7 +457,7 @@ impl HandleRuntime {
             server_generation,
             topic_id: excel_topic_id,
         };
-        let mut topics = self.topics.lock();
+        let mut topics = self.topics.write();
         if topics.closed {
             return Err(XllError::Closing);
         }
@@ -444,7 +498,7 @@ impl HandleRuntime {
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn commit_connection(&self, owner: HandleTopicOwner, key: &str) -> XllResult<()> {
-        let mut topics = self.topics.lock();
+        let mut topics = self.topics.write();
         if topics.closed {
             return Err(XllError::Closing);
         }
@@ -461,7 +515,7 @@ impl HandleRuntime {
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: &str) {
-        let mut topics = self.topics.lock();
+        let mut topics = self.topics.write();
         if topics.by_excel_id.get(&owner).map(String::as_str) != Some(key)
             || !topics.by_key.get(key).is_some_and(|topic| {
                 topic.excel_topic == Some(owner) && !topic.excel_topic_committed
@@ -481,7 +535,7 @@ impl HandleRuntime {
     #[cfg(test)]
     pub fn rollback(&self, key: &str) {
         let token = {
-            let mut topics = self.topics.lock();
+            let mut topics = self.topics.write();
             let Some(topic) = topics.by_key.remove(key) else {
                 return;
             };
@@ -503,7 +557,7 @@ impl HandleRuntime {
             topic_id: excel_topic_id,
         };
         let token = {
-            let mut topics = self.topics.lock();
+            let mut topics = self.topics.write();
             let Some(key) = topics.by_excel_id.remove(&owner) else {
                 return;
             };
@@ -524,7 +578,7 @@ impl HandleRuntime {
 
     pub fn close(&self) -> XllResult<()> {
         let initializations = {
-            let mut topics = self.topics.lock();
+            let mut topics = self.topics.write();
 
             topics.closed = true;
             topics.generation = topics.generation.wrapping_add(1);
@@ -542,18 +596,14 @@ impl HandleRuntime {
         // Wake cold-path waiters.
         //
         for initialization in &initializations {
-            initialization.completed.notify_all();
+            initialization.notify_closed();
         }
 
         //
         // Preserve the current cold-owner synchronization.
         //
         for initialization in initializations {
-            let mut topics = self.topics.lock();
-
-            while !initialization.owner_done.load(Ordering::Acquire) {
-                initialization.completed.wait(&mut topics);
-            }
+            initialization.wait_until_done();
         }
 
         //
@@ -569,7 +619,7 @@ impl HandleRuntime {
     #[cfg(any(target_os = "windows", test))]
     pub fn terminate_topics(&self, server_generation: u64) {
         let tokens = {
-            let mut topics = self.topics.lock();
+            let mut topics = self.topics.write();
             let keys = topics
                 .by_key
                 .iter()
@@ -594,7 +644,7 @@ impl HandleRuntime {
 
     pub fn terminate_all_topics(&self) {
         let tokens = {
-            let mut topics = self.topics.lock();
+            let mut topics = self.topics.write();
             let tokens = topics
                 .by_key
                 .drain()
