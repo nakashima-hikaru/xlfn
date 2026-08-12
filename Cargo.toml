@@ -54,6 +54,7 @@ loom = "0.7.2"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
 object = { version = "0.40.0", default-features = false, features = ["pe", "read", "std"] }
 parking_lot = "0.12.5"
+proc-macro-crate = "3.5.0"
 proc-macro2 = "1.0.107"
 proptest = "1.11.0"
 quote = "1.0.47"

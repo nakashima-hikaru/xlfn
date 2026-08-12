@@ -17,6 +17,34 @@ use syn::{
     ReturnType, Token, parse_macro_input,
 };
 
+fn parse_expr_path(expr: &Expr) -> syn::Result<syn::Path> {
+    match expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(lit_str),
+            ..
+        }) => lit_str.parse::<syn::Path>(),
+        Expr::Path(expr_path) => Ok(expr_path.path.clone()),
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "expected a string literal or crate path",
+        )),
+    }
+}
+
+fn resolve_crate_path(explicit_crate: Option<&syn::Path>) -> proc_macro2::TokenStream {
+    if let Some(path) = explicit_crate {
+        return quote!(#path);
+    }
+    match proc_macro_crate::crate_name("xlfn") {
+        Ok(proc_macro_crate::FoundCrate::Itself) => quote!(crate),
+        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::xlfn),
+    }
+}
+
 #[derive(Default)]
 struct FunctionOptions {
     name: Option<String>,
@@ -28,6 +56,7 @@ struct FunctionOptions {
     macro_sheet: bool,
     volatile: bool,
     hidden: bool,
+    krate: Option<syn::Path>,
 }
 
 #[derive(Default)]
@@ -45,6 +74,7 @@ struct AddinOptions {
     name: Option<String>,
     id: Option<String>,
     category: Option<String>,
+    krate: Option<syn::Path>,
 }
 
 fn gating_tokens(attributes: &[syn::Attribute]) -> proc_macro2::TokenStream {
@@ -107,7 +137,7 @@ pub fn excel_addin(attributes: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(ExcelHandleObject)]
+#[proc_macro_derive(ExcelHandleObject, attributes(excel_handle))]
 pub fn derive_excel_handle_object(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match expand_excel_handle_object(input) {
@@ -127,6 +157,7 @@ pub fn derive_excel_enum(item: TokenStream) -> TokenStream {
 
 fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut ascii_case_insensitive = false;
+    let mut krate_opt = None;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("excel_enum") {
             continue;
@@ -138,11 +169,19 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 }
                 ascii_case_insensitive = true;
                 Ok(())
+            } else if meta.path.is_ident("crate") {
+                if krate_opt.is_some() {
+                    return Err(meta.error("duplicate `crate` option"));
+                }
+                let expr: Expr = meta.value()?.parse()?;
+                krate_opt = Some(parse_expr_path(&expr)?);
+                Ok(())
             } else {
-                Err(meta.error("expected `ascii_case_insensitive`"))
+                Err(meta.error("expected `ascii_case_insensitive` or `crate = \"...\"`"))
             }
         })?;
     }
+    let krate = resolve_crate_path(krate_opt.as_ref());
     let Data::Enum(data) = &input.data else {
         return Err(syn::Error::new_spanned(
             &input.ident,
@@ -210,7 +249,7 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             .collect::<Vec<_>>();
         if ascii_case_insensitive {
             quote! {
-                if ::xlfn::__private::utf16_eq_ignore_ascii_case(
+                if #krate::__private::utf16_eq_ignore_ascii_case(
                     __text.as_utf16(),
                     &[#(#units),*],
                 ) {
@@ -230,69 +269,69 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .map(|(variant, name)| quote!(Self::#variant => #name))
         .collect::<Vec<_>>();
     Ok(quote! {
-        impl #from_excel_impl_generics ::xlfn::convert::FromExcel<'__xlfn_call>
+        impl #from_excel_impl_generics #krate::convert::FromExcel<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
         {
             fn from_excel(
-                __value: ::xlfn::convert::XlValueRef<'__xlfn_call>,
+                __value: #krate::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
-                __context: &::xlfn::convert::CallContext,
-            ) -> ::xlfn::error::XllResult<Self> {
+                __context: &#krate::convert::CallContext,
+            ) -> #krate::error::XllResult<Self> {
                 let __text = __value.as_str_with_argument(__argument)?;
                 #(#comparisons)*
                 if __text.chars().any(|__decoded| __decoded.is_err()) {
-                    ::core::result::Result::Err(::xlfn::error::XllError::input(
+                    ::core::result::Result::Err(#krate::error::XllError::input(
                         __argument,
-                        ::xlfn::error::InputError::InvalidUtf16,
+                        #krate::error::InputError::InvalidUtf16,
                     ))
                 } else {
-                    ::core::result::Result::Err(::xlfn::error::XllError::input(
+                    ::core::result::Result::Err(#krate::error::XllError::input(
                         __argument,
-                        ::xlfn::error::InputError::Malformed("unknown enum value"),
+                        #krate::error::InputError::Malformed("unknown enum value"),
                     ))
                 }
             }
         }
 
-        impl #base_impl_generics ::xlfn::convert::IntoExcelValue
+        impl #base_impl_generics #krate::convert::IntoExcelValue
             for #ident #type_generics #base_where_clause
         {
             fn into_excel_value(
                 self,
-            ) -> ::xlfn::error::XllResult<::xlfn::convert::OwnedExcelValue> {
+            ) -> #krate::error::XllResult<#krate::convert::OwnedExcelValue> {
                 let __text = match self {
                     #(#outputs,)*
                 };
-                <&str as ::xlfn::convert::IntoExcelValue>::into_excel_value(__text)
+                <&str as #krate::convert::IntoExcelValue>::into_excel_value(__text)
             }
         }
 
-        impl #base_impl_generics ::xlfn::convert::ExcelReturn
+        impl #base_impl_generics #krate::convert::ExcelReturn
             for #ident #type_generics #base_where_clause
         {
             type Output = Self;
 
             fn into_excel(
                 self,
-                _: &mut ::xlfn::__private::ReturnContext<'_, '_>,
-            ) -> ::xlfn::error::XllResult<Self::Output> {
+                _: &mut #krate::__private::ReturnContext<'_, '_>,
+            ) -> #krate::error::XllResult<Self::Output> {
                 ::core::result::Result::Ok(self)
             }
         }
 
-        impl #base_impl_generics ::xlfn::convert::MainThreadReturn
+        impl #base_impl_generics #krate::convert::MainThreadReturn
             for #ident #type_generics #base_where_clause
         {}
-        impl #base_impl_generics ::xlfn::convert::ThreadSafeReturn
+        impl #base_impl_generics #krate::convert::ThreadSafeReturn
             for #ident #type_generics #base_where_clause
         {}
-        impl #base_impl_generics ::xlfn::convert::MacroSheetReturn
+        impl #base_impl_generics #krate::convert::MacroSheetReturn
             for #ident #type_generics #base_where_clause
         {}
-        impl #base_impl_generics ::xlfn::convert::AsyncReturn
+        impl #base_impl_generics #krate::convert::AsyncReturn
             for #ident #type_generics #base_where_clause
         {}
-        impl #base_impl_generics ::xlfn::convert::VolatileReturn
+        impl #base_impl_generics #krate::convert::VolatileReturn
             for #ident #type_generics #base_where_clause
         {}
 
@@ -300,35 +339,54 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 }
 
 fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let mut krate_opt = None;
+    for attribute in &input.attrs {
+        if !attribute.path().is_ident("excel_handle") {
+            continue;
+        }
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate") {
+                if krate_opt.is_some() {
+                    return Err(meta.error("duplicate `crate` option"));
+                }
+                let expr: Expr = meta.value()?.parse()?;
+                krate_opt = Some(parse_expr_path(&expr)?);
+                Ok(())
+            } else {
+                Err(meta.error("expected `crate = \"...\"`"))
+            }
+        })?;
+    }
+    let krate = resolve_crate_path(krate_opt.as_ref());
     let ident = input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
-        impl #impl_generics ::xlfn::handle::ExcelHandleObject
+        impl #impl_generics #krate::handle::ExcelHandleObject
             for #ident #type_generics #where_clause
         {}
 
-        impl #impl_generics ::xlfn::convert::ExcelReturn
+        impl #impl_generics #krate::convert::ExcelReturn
             for #ident #type_generics #where_clause
         {
             type Output = ::std::string::String;
 
             fn invoke(
-                __context: &mut ::xlfn::__private::ReturnContext<'_, '_>,
+                __context: &mut #krate::__private::ReturnContext<'_, '_>,
                 __operation: impl ::core::ops::FnOnce()
-                    -> ::xlfn::error::XllResult<Self>,
-            ) -> ::xlfn::error::XllResult<Self::Output> {
+                    -> #krate::error::XllResult<Self>,
+            ) -> #krate::error::XllResult<Self::Output> {
                 __context.publish_new_handle(__operation)
             }
 
             fn into_excel(
                 self,
-                __context: &mut ::xlfn::__private::ReturnContext<'_, '_>,
-            ) -> ::xlfn::error::XllResult<Self::Output> {
+                __context: &mut #krate::__private::ReturnContext<'_, '_>,
+            ) -> #krate::error::XllResult<Self::Output> {
                 __context.publish_new_handle(|| ::core::result::Result::Ok(self))
             }
         }
 
-        impl #impl_generics ::xlfn::convert::MainThreadReturn
+        impl #impl_generics #krate::convert::MainThreadReturn
             for #ident #type_generics #where_clause
         {}
     })
@@ -339,6 +397,7 @@ fn expand_excel_function(
     mut function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let options = parse_function_options(attributes)?;
+    let krate = resolve_crate_path(options.krate.as_ref());
     let gating = gating_tokens(&function.attrs);
     let is_async = function.sig.asyncness.is_some();
     let return_type = match &function.sig.output {
@@ -383,9 +442,9 @@ fn expand_excel_function(
         .unwrap_or_else(|| doc_comment(&function.attrs));
     let help_topic = options.help_topic.unwrap_or_default();
     let visibility = if options.hidden {
-        quote!(::xlfn::__private::FunctionVisibility::Hidden)
+        quote!(#krate::__private::FunctionVisibility::Hidden)
     } else {
-        quote!(::xlfn::__private::FunctionVisibility::Public)
+        quote!(#krate::__private::FunctionVisibility::Public)
     };
     let export_ident = format_ident!("xll_{}", udf_id);
     let descriptor_ident = format_ident!("__XLFN_DESCRIPTOR_{}", udf_id);
@@ -689,21 +748,21 @@ fn expand_excel_function(
     );
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
-            quote!(::xlfn::context::ThreadSafeContext::new(__state))
+            quote!(#krate::context::ThreadSafeContext::new(__state))
         }
-        ContextKind::MainThread => quote!(::xlfn::context::MainThreadContext::new(
+        ContextKind::MainThread => quote!(#krate::context::MainThreadContext::new(
             __state,
             &crate::__XLFN_RUNTIME,
             __call_scope,
         )),
         ContextKind::MacroSheet => {
-            quote!(::xlfn::context::MacroSheetContext::new(
+            quote!(#krate::context::MacroSheetContext::new(
                 __state,
                 __call_scope
             ))
         }
         ContextKind::Async => {
-            quote!(::xlfn::context::AsyncContext::new(__state, __cancellation))
+            quote!(#krate::context::AsyncContext::new(__state, __cancellation))
         }
     });
     let macro_sheet = options.macro_sheet || matches!(context, Some(ContextKind::MacroSheet));
@@ -729,8 +788,8 @@ fn expand_excel_function(
     let async_result_expression = quote! {
         let __result = #invocation.await;
         let mut __return_context =
-            ::xlfn::__private::ReturnContext::new();
-        ::xlfn::convert::ExcelReturn::invoke(
+            #krate::__private::ReturnContext::new();
+        #krate::convert::ExcelReturn::invoke(
             &mut __return_context,
             || ::core::result::Result::Ok(__result),
         )
@@ -746,23 +805,23 @@ fn expand_excel_function(
     });
     let argument_abis = reference_arguments.iter().map(|reference| {
         if *reference {
-            quote!(::xlfn::__private::ArgumentAbi::RawReference)
+            quote!(#krate::__private::ArgumentAbi::RawReference)
         } else {
-            quote!(::xlfn::__private::ArgumentAbi::CoercedValue)
+            quote!(#krate::__private::ArgumentAbi::CoercedValue)
         }
     });
     let volatile = options.volatile;
     let mode_assertion = if is_async {
-        quote!(::xlfn::__private::assert_async_return::<#return_type>();)
+        quote!(#krate::__private::assert_async_return::<#return_type>();)
     } else if macro_sheet {
-        quote!(::xlfn::__private::assert_macro_sheet_return::<#return_type>();)
+        quote!(#krate::__private::assert_macro_sheet_return::<#return_type>();)
     } else if thread_safe {
-        quote!(::xlfn::__private::assert_thread_safe_return::<#return_type>();)
+        quote!(#krate::__private::assert_thread_safe_return::<#return_type>();)
     } else {
-        quote!(::xlfn::__private::assert_main_thread_return::<#return_type>();)
+        quote!(#krate::__private::assert_main_thread_return::<#return_type>();)
     };
     let volatile_assertion =
-        volatile.then(|| quote!(::xlfn::__private::assert_volatile_return::<#return_type>();));
+        volatile.then(|| quote!(#krate::__private::assert_volatile_return::<#return_type>();));
     let return_assertion = quote! {
         #mode_assertion
         #volatile_assertion
@@ -779,21 +838,21 @@ fn expand_excel_function(
                     // SAFETY: Excel supplies the live reference pointer and
                     // raw argument slot for this ABI call.
                     unsafe {
-                        ::xlfn::__private::reference_from_raw(#argument, #raw)
+                        #krate::__private::reference_from_raw(#argument, #raw)
                     }
                 }
             } else {
                 let async_assertion = is_async.then(|| {
-                    quote!(::xlfn::__private::assert_async_parameter::<#ty>();)
+                    quote!(#krate::__private::assert_async_parameter::<#ty>();)
                 });
                 quote! {
                     {
                         #async_assertion
-                        ::xlfn::__private::assert_excel_parameter::<#ty>(__call_scope);
+                        #krate::__private::assert_excel_parameter::<#ty>(__call_scope);
                         // SAFETY: Excel supplies the live XLOPER12 pointer and
                         // raw argument slot for this ABI call.
                         unsafe {
-                            ::xlfn::__private::argument_from_raw_with_context(
+                            #krate::__private::argument_from_raw_with_context(
                                 __call_scope,
                                 &crate::__XLFN_RUNTIME,
                                 #argument,
@@ -811,17 +870,17 @@ fn expand_excel_function(
                 let default_expr = options.default.as_ref();
                 let blank_arm = if blank_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(::xlfn::convert::CellPresence::Blank => #default,)
+                    quote!(#krate::convert::CellPresence::Blank => #default,)
                 } else if blank_error {
-                    quote!(::xlfn::convert::CellPresence::Blank => return ::core::result::Result::Err(::xlfn::error::XllError::input(#argument, ::xlfn::error::InputError::Malformed("blank cell is not allowed"))),)
+                    quote!(#krate::convert::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
                 } else {
                     quote!()
                 };
                 let missing_arm = if missing_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(::xlfn::convert::CellPresence::Missing => #default,)
+                    quote!(#krate::convert::CellPresence::Missing => #default,)
                 } else if missing_error {
-                    quote!(::xlfn::convert::CellPresence::Missing => return ::core::result::Result::Err(::xlfn::error::XllError::input(#argument, ::xlfn::error::InputError::Malformed("missing argument is not allowed"))),)
+                    quote!(#krate::convert::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
                 } else {
                     quote!()
                 };
@@ -829,7 +888,7 @@ fn expand_excel_function(
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
                     let #converted: #ty = match unsafe {
-                        ::xlfn::__private::cell_presence_from_raw(#argument, #raw)
+                        #krate::__private::cell_presence_from_raw(#argument, #raw)
                     }? {
                         #blank_arm
                         #missing_arm
@@ -846,17 +905,17 @@ fn expand_excel_function(
 
     let boundary = if is_async {
         quote! {
-            ::xlfn::__xlfn_async_only! {
+            #krate::__xlfn_async_only! {
                 // SAFETY: `__async_handle` is provided by Excel via the extern "system"
                 // entry point generated by this macro and points to a valid async handle.
                 unsafe {
-                    ::xlfn::__private::async_udf_boundary_named(
+                    #krate::__private::async_udf_boundary_named(
                         &crate::__XLFN_RUNTIME,
                         #udf_id,
                         #excel_name,
                         __async_handle,
                         |__state, __cancellation| {
-                            ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                            #krate::__private::with_excel_call_scope(|__call_scope| {
                                 #context_setup
                                 #(#conversions)*
                                 ::core::result::Result::Ok(async move {
@@ -872,27 +931,27 @@ fn expand_excel_function(
     } else {
         let raw_argument_count = raw_names.len();
         quote! {
-            ::xlfn::__private::udf_boundary_named(
+            #krate::__private::udf_boundary_named(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
                 |__state| {
                     #return_assertion
                     let __raw_arguments:
-                        [*mut ::xlfn::sys::XLOPER12; #raw_argument_count] =
+                        [*mut #krate::sys::XLOPER12; #raw_argument_count] =
                         [#(#raw_names),*];
                     // SAFETY: the raw argument array and runtime belong to
                     // this Excel ABI invocation.
-                    ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                    #krate::__private::with_excel_call_scope(|__call_scope| {
                         let mut __return_context = unsafe {
-                            ::xlfn::__private::ReturnContext::for_call(
+                            #krate::__private::ReturnContext::for_call(
                                 &crate::__XLFN_RUNTIME,
                                 #udf_id,
                                 &__raw_arguments,
                                 __call_scope,
                             )
                         };
-                        ::xlfn::convert::ExcelReturn::invoke(
+                        #krate::convert::ExcelReturn::invoke(
                             &mut __return_context,
                             || {
                                 #context_setup
@@ -914,8 +973,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut ::xlfn::sys::XLOPER12,)*
-                __async_handle: *mut ::xlfn::sys::XLOPER12,
+                #(#raw_names: *mut #krate::sys::XLOPER12,)*
+                __async_handle: *mut #krate::sys::XLOPER12,
             ) {
                 #boundary
             }
@@ -929,8 +988,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut ::xlfn::sys::XLOPER12),*
-            ) -> *mut ::xlfn::sys::XLOPER12 {
+                #(#raw_names: *mut #krate::sys::XLOPER12),*
+            ) -> *mut #krate::sys::XLOPER12 {
                 #boundary
             }
         }
@@ -942,18 +1001,18 @@ fn expand_excel_function(
         #gating
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
-        static #descriptor_ident: ::xlfn::__private::RegistrationDescriptor =
-            ::xlfn::__private::RegistrationDescriptor {
+        static #descriptor_ident: #krate::__private::RegistrationDescriptor =
+            #krate::__private::RegistrationDescriptor {
                 export_name: stringify!(#export_ident),
                 excel_name: #excel_name,
-                signature: ::xlfn::__private::RegistrationSignature {
+                signature: #krate::__private::RegistrationSignature {
                     result: if #is_async {
-                        ::xlfn::__private::ResultAbi::AsyncVoid
+                        #krate::__private::ResultAbi::AsyncVoid
                     } else {
-                        ::xlfn::__private::ResultAbi::Xloper
+                        #krate::__private::ResultAbi::Xloper
                     },
                     arguments: &[#(#argument_abis),*],
-                    flags: ::xlfn::__private::RegistrationFlags {
+                    flags: #krate::__private::RegistrationFlags {
                         thread_safe: #thread_safe,
                         macro_sheet: #macro_sheet,
                         volatile: #volatile,
@@ -965,7 +1024,7 @@ fn expand_excel_function(
                 visibility: #visibility,
                 arguments: &[
                     #(
-                        ::xlfn::__private::ArgumentDescriptor {
+                        #krate::__private::ArgumentDescriptor {
                             name: #argument_name_literals,
                             description: #argument_descriptions,
                         }
@@ -974,7 +1033,7 @@ fn expand_excel_function(
             };
 
         #gating
-        ::xlfn::__private::inventory::submit! {
+        #krate::__private::inventory::submit! {
             #descriptor_ident
         }
 
@@ -1005,6 +1064,7 @@ fn expand_excel_addin(
     item: ItemStruct,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let options = parse_addin_options(attributes)?;
+    let krate = resolve_crate_path(options.krate.as_ref());
     let gating = gating_tokens(&item.attrs);
     if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
@@ -1023,7 +1083,7 @@ fn expand_excel_addin(
         #item
 
         #gating
-        impl ::xlfn::addin::AddinMetadata for #ident {
+        impl #krate::addin::AddinMetadata for #ident {
             const ID: &'static str = #id;
             const DISPLAY_NAME: &'static str = #display_name;
             const DEFAULT_CATEGORY: &'static str = #category;
@@ -1031,16 +1091,16 @@ fn expand_excel_addin(
 
         #gating
         #[doc(hidden)]
-        static __XLFN_RUNTIME: ::xlfn::__private::Runtime<
-            <#ident as ::xlfn::addin::Addin>::State,
-        > = ::xlfn::__private::Runtime::new();
+        static __XLFN_RUNTIME: #krate::__private::Runtime<
+            <#ident as #krate::addin::Addin>::State,
+        > = #krate::__private::Runtime::new();
 
         #gating
         #[doc(hidden)]
         static __XLFN_ADDIN_ID: ::std::sync::OnceLock<
             ::core::result::Result<
-                ::xlfn::__private::AddinId,
-                ::xlfn::__private::InvalidAddinId,
+                #krate::__private::AddinId,
+                #krate::__private::InvalidAddinId,
             >
         > = ::std::sync::OnceLock::new();
 
@@ -1059,22 +1119,22 @@ fn expand_excel_addin(
             *b"xlAutoOpen\0xlAutoClose\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
 
         #gating
-        ::xlfn::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
+        #krate::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
             let __addin_id = match crate::__XLFN_ADDIN_ID.get_or_init(|| {
-                ::xlfn::__private::AddinId::parse(
-                    <#ident as ::xlfn::addin::AddinMetadata>::ID,
+                #krate::__private::AddinId::parse(
+                    <#ident as #krate::addin::AddinMetadata>::ID,
                 )
             }) {
                 Ok(__addin_id) => __addin_id,
                 Err(_) => return 0,
             };
             let mut __descriptors =
-                ::xlfn::__private::inventory::iter::<
-                    ::xlfn::__private::RegistrationDescriptor
+                #krate::__private::inventory::iter::<
+                    #krate::__private::RegistrationDescriptor
                 >
                 .into_iter()
                 .copied()
@@ -1082,15 +1142,15 @@ fn expand_excel_addin(
             for __descriptor in &mut __descriptors {
                 if __descriptor.category.is_empty() {
                     __descriptor.category =
-                        <#ident as ::xlfn::addin::AddinMetadata>::DEFAULT_CATEGORY;
+                        <#ident as #krate::addin::AddinMetadata>::DEFAULT_CATEGORY;
                 }
             }
             __descriptors.sort_unstable_by_key(|__descriptor| __descriptor.excel_name);
-            ::xlfn::__private::open_addin::<#ident>(
+            #krate::__private::open_addin::<#ident>(
                 &crate::__XLFN_RUNTIME,
                 __addin_id,
                 env!("CARGO_PKG_VERSION"),
-                ::xlfn::__private::BUILD_TARGET,
+                #krate::__private::BUILD_TARGET,
                 &__descriptors,
             )
         }
@@ -1098,7 +1158,7 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
-            ::xlfn::__private::close_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::close_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -1108,11 +1168,11 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoFree12(
-            __pointer: *mut ::xlfn::sys::XLOPER12,
+            __pointer: *mut #krate::sys::XLOPER12,
         ) {
             // SAFETY: Excel passes the live return pointer produced by this XLL.
             let __free_operation =
-                unsafe { ::xlfn::__private::free_return_boundary(__pointer) };
+                unsafe { #krate::__private::free_return_boundary(__pointer) };
             ::core::mem::drop(__free_operation);
         }
 
@@ -1123,16 +1183,16 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAddInManagerInfo12(
-            __action: *mut ::xlfn::sys::XLOPER12,
-        ) -> *mut ::xlfn::sys::XLOPER12 {
-            ::xlfn::__private::ffi_boundary(
+            __action: *mut #krate::sys::XLOPER12,
+        ) -> *mut #krate::sys::XLOPER12 {
+            #krate::__private::ffi_boundary(
                 &crate::__XLFN_RUNTIME,
                 || {
-                    ::xlfn::__private::with_excel_call_scope(|__call_scope| {
+                    #krate::__private::with_excel_call_scope(|__call_scope| {
                         // SAFETY: Excel supplies `__action` as a live XLOPER12
                         // for this ABI call.
                         let __action: f64 = unsafe {
-                            ::xlfn::__private::argument_from_raw(
+                            #krate::__private::argument_from_raw(
                                 __call_scope,
                                 "action",
                                 __action,
@@ -1140,12 +1200,12 @@ fn expand_excel_addin(
                         };
                         if __action == 1.0 {
                             ::core::result::Result::Ok(
-                                <#ident as ::xlfn::addin::AddinMetadata>::DISPLAY_NAME.to_owned(),
+                                <#ident as #krate::addin::AddinMetadata>::DISPLAY_NAME.to_owned(),
                             )
                         } else {
-                            ::core::result::Result::Err(::xlfn::error::XllError::input(
+                            ::core::result::Result::Err(#krate::error::XllError::input(
                                 "action",
-                                ::xlfn::error::InputError::OutOfRange,
+                                #krate::error::InputError::OutOfRange,
                             ))
                         }
                     })
@@ -1163,7 +1223,7 @@ fn expand_excel_addin(
             // SAFETY: Excel/COM supplies the three live ABI pointers for this
             // entry point, and the boundary validates their use.
             unsafe {
-                ::xlfn::__private::dll_get_class_object(
+                #krate::__private::dll_get_class_object(
                     __class_id,
                     __interface_id,
                     __output,
@@ -1174,7 +1234,7 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn DllCanUnloadNow() -> i32 {
-            ::xlfn::__private::dll_can_unload_now()
+            #krate::__private::dll_can_unload_now()
         }
     })
 }
@@ -1279,10 +1339,16 @@ fn parse_function_options(tokens: proc_macro2::TokenStream) -> syn::Result<Funct
                 }
                 options.help_topic = Some(string_value(&value.value, "help_topic")?);
             }
+            Meta::NameValue(value) if value.path.is_ident("crate") => {
+                if options.krate.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate `crate`"));
+                }
+                options.krate = Some(parse_expr_path(&value.value)?);
+            }
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `id`, `category`, `description`, `help_topic`, `thread_safe`, `macro_sheet`, `volatile`, or `hidden`",
+                    "expected `name`, `id`, `category`, `description`, `help_topic`, `thread_safe`, `macro_sheet`, `volatile`, `hidden`, or `crate`",
                 ));
             }
         }
@@ -1335,10 +1401,16 @@ fn parse_addin_options(tokens: proc_macro2::TokenStream) -> syn::Result<AddinOpt
                 }
                 options.category = Some(string_value(&value.value, "category")?);
             }
+            Meta::NameValue(value) if value.path.is_ident("crate") => {
+                if options.krate.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate `crate`"));
+                }
+                options.krate = Some(parse_expr_path(&value.value)?);
+            }
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `id`, or `category`",
+                    "expected `name`, `id`, `category`, or `crate`",
                 ));
             }
         }
@@ -1895,5 +1967,31 @@ mod tests {
         .to_string();
         assert!(expanded.contains("blank cell is not allowed"));
         assert!(expanded.contains("missing argument is not allowed"));
+    }
+
+    #[test]
+    fn explicit_crate_override_replaces_default_crate_path() {
+        let func_expanded = expand_excel_function(
+            quote!(name = "TEST.CUSTOM", crate = "my_custom_xlfn"),
+            function(quote!(
+                fn custom(value: f64) -> f64 {
+                    value
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(func_expanded.contains("my_custom_xlfn :: __private"));
+        assert!(func_expanded.contains("my_custom_xlfn :: convert"));
+
+        let addin_item: ItemStruct = syn::parse2(quote!(
+            struct MyAddin;
+        ))
+        .unwrap();
+        let addin_expanded = expand_excel_addin(quote!(crate = my_custom_xlfn), addin_item)
+            .unwrap()
+            .to_string();
+        assert!(addin_expanded.contains("my_custom_xlfn :: addin :: AddinMetadata"));
+        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: Runtime"));
     }
 }
