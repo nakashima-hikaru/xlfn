@@ -218,7 +218,7 @@ jobs:
                   --locked
 
     lean:
-        name: Lean shutdown model
+        name: Lean formal models
         runs-on: ubuntu-latest
         needs: windows-artifact
         steps:

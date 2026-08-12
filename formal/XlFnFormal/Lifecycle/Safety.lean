@@ -138,8 +138,7 @@ theorem Step.generation_change_requires_finishOpen
     ∃ attempt,
       event = .finishOpen attempt ∧
       t.generation = attempt := by
-  cases hStep <;>
-    simp_all [State.IdentifierValid]
+  cases hStep <;> simp_all
 
 theorem Steps.open_target_requires_finishOpen
     {s t : State} {events : List Event}
@@ -169,7 +168,7 @@ theorem Steps.open_after_closed_requires_finishOpen
 
 theorem Steps.returnSafe_has_no_active_owner
     {s t : State} {events : List Event}
-    (hSteps : Steps s events t)
+    (_hSteps : Steps s events t)
     (hSafe : t.ReturnSafe) :
     t.cleanupOwner = none :=
   hSafe.2.2

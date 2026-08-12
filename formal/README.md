@@ -1,9 +1,8 @@
-# xlfn shutdown formalization
+# xlfn formal verification
 
-This directory contains the Lean 4 specification of the XLL shutdown
-protocol. The abstract machine starts immediately after a successful
-`Runtime::finish_open`; Rust opening and rollback states are implementation
-states and are certified separately.
+This directory contains Lean 4 specifications of the XLL lifecycle and
+shutdown protocols. The models separate lifecycle synchronization from
+resource shutdown and then provide a composition layer for the two paths.
 
 ## Toolchain
 
@@ -146,8 +145,32 @@ records the three unsafe relaxations: ignoring the epoch, committing open
 while closing, and reopening while a published-closed cleanup owner is still
 active.
 
-This protocol is intentionally not composed with the Shutdown ghost machine
-yet. A successful open creates a committed generation and can use the
-Shutdown formalization; an open canceled by final close has no Shutdown ghost
-generation and instead follows the open-rollback certificate path. The next
-composition batch can model those two certificates explicitly.
+`Model.lean` also defines `State.Valid`, which strengthens `WellFormed` with
+non-zero open-attempt and committed-generation identifiers, and
+`State.initialState`, the logical counterpart of `Runtime::new()`. The logical
+`AttemptId` and `Epoch` counters are non-wrapping `Nat`s. A Rust refinement
+must establish that its `u64` counters do not wrap, or convert overflow into
+fail-stop before emitting an abstract event.
+
+The model is a safety transition system. It does not model condition-variable
+wakeups, scheduler fairness, or eventual progress. In particular, the Rust
+`close_waiter_is_not_lost_when_open_rollback_finishes` concurrency test remains
+the obligation that checks waiter blocking, notification, and eventual return.
+
+`Lifecycle/Certificate.lean` records the two cleanup certificate shapes. A
+committed generation requires a quiescent Shutdown state at `finalize`; an
+uncommitted open rollback carries only a resource-quiescence witness because
+no Shutdown ghost generation exists.
+
+`Composition/Model.lean` introduces:
+
+```lean
+structure State where
+  lifecycle : Lifecycle.State
+  currentShutdown : Option Shutdown.State
+```
+
+The option is a current-session marker, not a test of historical
+`generation ≠ 0`: a failed attempt after a previous committed generation
+leaves the historical generation unchanged while the current marker remains
+`none`. Composition transitions are added in the next refinement batch.
