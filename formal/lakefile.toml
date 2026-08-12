@@ -8,3 +8,7 @@ name = "XlFnFormal"
 [[lean_exe]]
 name = "shutdown_trace_checker"
 root = "XlFnFormal.Shutdown.TraceChecker"
+
+[[lean_exe]]
+name = "composition_trace_checker"
+root = "XlFnFormal.Composition.TraceChecker"

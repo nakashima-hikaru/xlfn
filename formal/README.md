@@ -201,3 +201,40 @@ state cannot retain an active Shutdown session, and that a successful return
 is unload-certified. `Composition/Checker.lean` provides the executable
 `apply?` together with soundness and completeness against the relational
 `Step` model.
+
+`Composition/Refinement.lean` lifts those results across a concrete state
+machine. Its `CompositionRefinement` records the abstraction function,
+linearization-point event relation, an explicit no-counter-wrap obligation,
+and the obligation that a concrete successful return reaches `ReturnSafe`;
+`concrete_successful_xlAutoClose_is_safe` then supplies the end-to-end theorem
+for a concrete trace. A Rust adapter must discharge the counter obligation
+before mapping wrapping `u64` operations into the logical `Nat` transitions.
+
+`Composition/TraceChecker.lean` replays an event-only composition trace. The
+trace schema is intentionally smaller than the shutdown trace because every
+intermediate full state is reconstructed by `Composition.apply?`:
+
+```json
+{
+  "schema_version": 1,
+  "initial": "initial",
+  "events": [],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}
+```
+
+Parameterized events carry their concrete attempt/resource payloads, and
+`liftShutdown` nests an existing Shutdown event. The three replay fixtures in
+`fixtures/composition/` cover committed close, uncommitted final close, and
+open rollback. They can be checked with:
+
+```text
+lake exe composition_trace_checker < fixtures/composition/committed.json
+```
+
+The generic refinement boundary is now in place. A Rust producer still needs
+to emit these composition events at the lifecycle linearization points and
+to convert the observed close/rollback certificate snapshots into the event
+resource payloads; that adapter is deliberately separate from the executable
+abstract checker.

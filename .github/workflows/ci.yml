@@ -268,6 +268,17 @@ jobs:
               working-directory: formal
               run: lake build shutdown_trace_checker
 
+            - name: Build the composition trace checker executable
+              working-directory: formal
+              run: lake build composition_trace_checker
+
+            - name: Validate composition three-path fixtures
+              shell: bash
+              run: |
+                  for trace in formal/fixtures/composition/*.json; do
+                    formal/.lake/build/bin/composition_trace_checker < "$trace"
+                  done
+
             - name: Validate Windows RTD shutdown traces
               shell: bash
               run: |

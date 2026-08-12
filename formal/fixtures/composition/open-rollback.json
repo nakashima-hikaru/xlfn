@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "initial": "initial",
+  "events": [
+    {"beginOpen": {"sampledEpoch": 0, "attempt": 1}},
+    {"failOpen": {"attempt": 1}},
+    "acquireOpenRollbackOwner",
+    {"finishOpenRollback": {
+      "ingressOpen": false,
+      "externalEntries": 0,
+      "registrations": 0,
+      "eventRegistrations": 0,
+      "registrationStateKnown": true,
+      "callbackGateOpen": false,
+      "activeCalls": 0,
+      "returnBlocks": 0,
+      "returnBlocksInFree": 0,
+      "returnFreeOperations": 0,
+      "asyncTasks": 0,
+      "asyncExecutorRunning": false,
+      "rtdOperations": 0,
+      "subscriptions": 0,
+      "callbacks": 0,
+      "rtdClassFactories": 0,
+      "rtdServers": 0,
+      "rtdServerLocks": 0,
+      "handleOperations": 0,
+      "handles": 0,
+      "stateUnique": true,
+      "addinQuiesced": true,
+      "stateOwnedByRuntime": false,
+      "diagnosticsPending": 0,
+      "diagnosticsRunning": false,
+      "cleanupIssues": 0
+    }},
+    "releaseCleanupOwner"
+  ],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}

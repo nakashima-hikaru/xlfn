@@ -229,6 +229,42 @@ theorem Reachable.unloadCertificationConsistent
   | step _ hStep ih =>
       exact Step.unloadCertificationConsistent_preserved ih hStep
 
+def State.Invariant (s : State) : Prop :=
+  s.Valid ∧ s.UnloadCertificationConsistent
+
+theorem State.initialState_invariant :
+    State.initialState.Invariant := by
+  exact ⟨State.initialState_valid,
+    State.initialState_unloadCertificationConsistent⟩
+
+theorem Step.invariant_preserved
+    {s t : State} {event : Event}
+    (hInvariant : s.Invariant)
+    (hStep : Step s event t) :
+    t.Invariant := by
+  exact ⟨
+    Step.valid_preserved hInvariant.1 hStep,
+    Step.unloadCertificationConsistent_preserved hInvariant.2 hStep
+  ⟩
+
+theorem Reachable.invariant
+    {initial current : State}
+    (hInitial : initial.Invariant)
+    (hReachable : Reachable initial current) :
+    current.Invariant := by
+  induction hReachable with
+  | initial =>
+      exact hInitial
+  | step _ hStep ih =>
+      exact Step.invariant_preserved ih hStep
+
+theorem Steps.invariant
+    {initial final : State} {events : List Event}
+    (hInitial : initial.Invariant)
+    (hSteps : Steps initial events final) :
+    final.Invariant :=
+  Reachable.invariant hInitial hSteps.reachable
+
 theorem Steps.valid
     {initial final : State} {events : List Event}
     (hInitial : initial.Valid)
