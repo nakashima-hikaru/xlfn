@@ -52,6 +52,7 @@ structure State where
   phase : Phase
   slots : List SlotState
   activePrepares : Nat
+  activeInitializers : Nat
   activeLeases : Nat
   deriving DecidableEq, Repr
 
@@ -71,9 +72,16 @@ def SlotNoLive : SlotState → Prop
 def NoLiveSlots (slots : List SlotState) : Prop :=
   ∀ slot ∈ slots, SlotNoLive slot
 
+def MayInsert (s : State) : Prop :=
+  s.phase = .«open» ∨ (s.phase = .drainingPrepares ∧ s.activeInitializers > 0)
+
+instance (s : State) : Decidable s.MayInsert :=
+  inferInstanceAs (Decidable (s.phase = .«open» ∨ (s.phase = .drainingPrepares ∧ s.activeInitializers > 0)))
+
 def CloseCertified (s : State) : Prop :=
   s.phase = .closed ∧
   s.activePrepares = 0 ∧
+  s.activeInitializers = 0 ∧
   s.activeLeases = 0 ∧
   NoLiveSlots s.slots
 
@@ -82,6 +90,7 @@ def initialState (session : SessionId) : State :=
     phase := .«open»
     slots := []
     activePrepares := 0
+    activeInitializers := 0
     activeLeases := 0 }
 
 theorem initialState_noLiveSlots (session : SessionId) :

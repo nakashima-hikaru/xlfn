@@ -7,22 +7,22 @@ namespace XlFnFormal.Handle
 def race_s0 (session : SessionId) : State := State.initialState session
 
 def race1_s1 (session : SessionId) : State :=
-  { session := session, phase := .«open», slots := [.live 1], activePrepares := 0, activeLeases := 0 }
+  { session := session, phase := .«open», slots := [.live 1], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
 
 def race1_s2 (session : SessionId) : State :=
-  { session := session, phase := .registryClosed, slots := [.vacant 2], activePrepares := 0, activeLeases := 0 }
+  { session := session, phase := .registryClosed, slots := [.vacant 2], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
 
 def race1_s3 (session : SessionId) : State :=
-  { session := session, phase := .closed, slots := [.vacant 2], activePrepares := 0, activeLeases := 0 }
+  { session := session, phase := .closed, slots := [.vacant 2], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
 
 theorem Step_race1_step1 (session : SessionId) :
     Step (race_s0 session) Event.insertFresh (race1_s1 session) := by
-  have hPhase : (race_s0 session).phase = .«open» ∨ (race_s0 session).phase = .drainingPrepares := Or.inl rfl
-  exact Step.insertFresh hPhase
+  have hMay : (race_s0 session).MayInsert := Or.inl rfl
+  exact Step.insertFresh hMay
 
 theorem Step_race1_step2 (session : SessionId) :
     Step (race1_s1 session) Event.closeRegistry (race1_s2 session) := by
-  exact Step.closeRegistry (Or.inl rfl) rfl
+  exact Step.closeRegistry (Or.inl rfl) rfl rfl
 
 theorem Step_race1_step3 (session : SessionId) :
     Step (race1_s2 session) Event.finishClose (race1_s3 session) := by
@@ -43,22 +43,23 @@ theorem insert_wins_race_is_quiescent (session : SessionId) :
       (Step_race1_step1 session))
       (Step_race1_step2 session))
       (Step_race1_step3 session)
-  · refine ⟨rfl, rfl, rfl, ?_⟩
+  · refine ⟨rfl, rfl, rfl, rfl, ?_⟩
     intro slot hMem
     rcases List.mem_singleton.mp hMem with rfl
     exact trivial
 
 def race2_s1 (session : SessionId) : State :=
-  { session := session, phase := .registryClosed, slots := [], activePrepares := 0, activeLeases := 0 }
+  { session := session, phase := .registryClosed, slots := [], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
 
 def race2_s2 (session : SessionId) : State :=
-  { session := session, phase := .closed, slots := [], activePrepares := 0, activeLeases := 0 }
+  { session := session, phase := .closed, slots := [], activePrepares := 0, activeInitializers := 0, activeLeases := 0 }
 
 theorem Step_race2_step1 (session : SessionId) :
     Step (race_s0 session) Event.closeRegistry (race2_s1 session) := by
   have hPhase : (race_s0 session).phase = .«open» ∨ (race_s0 session).phase = .drainingPrepares := Or.inl rfl
+  have hNoInits : (race_s0 session).activeInitializers = 0 := rfl
   have hNoPrepares : (race_s0 session).activePrepares = 0 := rfl
-  exact Step.closeRegistry hPhase hNoPrepares
+  exact Step.closeRegistry hPhase hNoInits hNoPrepares
 
 theorem Step_race2_step2 (session : SessionId) :
     Step (race2_s1 session) Event.finishClose (race2_s2 session) := by
@@ -80,32 +81,32 @@ theorem close_wins_race_rejects_insert (session : SessionId) :
   · exact Reachable.step (Reachable.step Reachable.init
       (Step_race2_step1 session))
       (Step_race2_step2 session)
-  · refine ⟨rfl, rfl, rfl, ?_⟩
+  · refine ⟨rfl, rfl, rfl, rfl, ?_⟩
     intro slot hMem
     cases hMem
   · intro s' hStep
     cases hStep
-    rename_i hPhase
-    cases hPhase with
+    rename_i hMay
+    cases hMay with
     | inl hO => contradiction
-    | inr hDP => contradiction
+    | inr hDP => exact Nat.lt_irrefl 0 hDP.2
   · intro gen s' hStep
     cases hStep
-    rename_i hPhase _ _
-    cases hPhase with
+    rename_i hMay _ _
+    cases hMay with
     | inl hO => contradiction
-    | inr hDP => contradiction
+    | inr hDP => exact Nat.lt_irrefl 0 hDP.2
   · intro s' hStep
     cases hStep
-    rename_i hPhase
-    cases hPhase with
+    rename_i hMay
+    cases hMay with
     | inl hO => contradiction
-    | inr hDP => contradiction
+    | inr hDP => exact Nat.lt_irrefl 0 hDP.2
   · intro gen s' hStep
     cases hStep
-    rename_i hPhase _ _
-    cases hPhase with
+    rename_i hMay _ _
+    cases hMay with
     | inl hO => contradiction
-    | inr hDP => contradiction
+    | inr hDP => exact Nat.lt_irrefl 0 hDP.2
 
 end XlFnFormal.Handle

@@ -7,6 +7,10 @@ namespace XlFnFormal.Handle
 inductive Event where
   | beginPrepare
   | endPrepare
+  | beginInitialize
+  | finishInitialize
+  | publishTopic
+  | rollbackPending
   | insertFresh
   | insertReuse (slot : SlotId) (generation : Generation)
   | removeReuse (token : Token) (nextGeneration : Generation)
@@ -21,7 +25,7 @@ inductive Event where
 inductive Step : State → Event → State → Prop where
   | beginPrepare
       {s : State}
-      (hPhase : s.phase = .«open») :
+      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares) :
       Step s .beginPrepare { s with activePrepares := s.activePrepares + 1 }
 
   | endPrepare
@@ -29,9 +33,31 @@ inductive Step : State → Event → State → Prop where
       (hPrep : s.activePrepares > 0) :
       Step s .endPrepare { s with activePrepares := s.activePrepares - 1 }
 
+  | beginInitialize
+      {s : State}
+      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
+      (hPrep : s.activePrepares > 0) :
+      Step s .beginInitialize { s with activeInitializers := s.activeInitializers + 1 }
+
+  | finishInitialize
+      {s : State}
+      (hInit : s.activeInitializers > 0) :
+      Step s .finishInitialize { s with activeInitializers := s.activeInitializers - 1 }
+
+  | publishTopic
+      {s : State}
+      (hPhase : s.phase = .«open»)
+      (hInit : s.activeInitializers > 0) :
+      Step s .publishTopic s
+
+  | rollbackPending
+      {s : State}
+      (hInit : s.activeInitializers > 0) :
+      Step s .rollbackPending s
+
   | insertFresh
       {s : State}
-      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares) :
+      (hMay : s.MayInsert) :
       Step s .insertFresh
         { s with slots := s.slots ++ [.live 1] }
 
@@ -39,7 +65,7 @@ inductive Step : State → Event → State → Prop where
       {s : State}
       {slotId : SlotId}
       {gen : Generation}
-      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
+      (hMay : s.MayInsert)
       (hInBounds : slotId < s.slots.length)
       (hVacant : s.slots.get ⟨slotId, hInBounds⟩ = .vacant gen) :
       Step s (.insertReuse slotId gen)
@@ -91,6 +117,7 @@ inductive Step : State → Event → State → Prop where
   | closeRegistry
       {s : State}
       (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
+      (hNoInits : s.activeInitializers = 0)
       (hNoPrepares : s.activePrepares = 0) :
       Step s .closeRegistry
         { s with

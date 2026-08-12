@@ -8,7 +8,7 @@ namespace XlFnFormal.Handle
 def apply? (s : State) (e : Event) : Option State :=
   match e with
   | .beginPrepare =>
-      if s.phase = .«open» then
+      if s.phase = .«open» ∨ s.phase = .drainingPrepares then
         some { s with activePrepares := s.activePrepares + 1 }
       else
         none
@@ -19,14 +19,38 @@ def apply? (s : State) (e : Event) : Option State :=
       else
         none
 
+  | .beginInitialize =>
+      if (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares > 0 then
+        some { s with activeInitializers := s.activeInitializers + 1 }
+      else
+        none
+
+  | .finishInitialize =>
+      if s.activeInitializers > 0 then
+        some { s with activeInitializers := s.activeInitializers - 1 }
+      else
+        none
+
+  | .publishTopic =>
+      if s.phase = .«open» ∧ s.activeInitializers > 0 then
+        some s
+      else
+        none
+
+  | .rollbackPending =>
+      if s.activeInitializers > 0 then
+        some s
+      else
+        none
+
   | .insertFresh =>
-      if s.phase = .«open» ∨ s.phase = .drainingPrepares then
+      if s.MayInsert then
         some { s with slots := s.slots ++ [.live 1] }
       else
         none
 
   | .insertReuse slotId gen =>
-      if hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ slotId < s.slots.length then
+      if hPre : s.MayInsert ∧ slotId < s.slots.length then
         if hVacant : s.slots.get ⟨slotId, hPre.2⟩ = .vacant gen then
           some { s with slots := s.slots.set slotId (.live gen) }
         else
@@ -74,7 +98,7 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .closeRegistry =>
-      if (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares = 0 then
+      if (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activeInitializers = 0 ∧ s.activePrepares = 0 then
         some { s with
           phase := .registryClosed
           slots := s.slots.map closeSlot }
@@ -90,7 +114,7 @@ def apply? (s : State) (e : Event) : Option State :=
 theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Step s e s' := by
   cases e with
   | beginPrepare =>
-      by_cases hPre : s.phase = .«open»
+      by_cases hPre : s.phase = .«open» ∨ s.phase = .drainingPrepares
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
@@ -107,8 +131,44 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · simp only [apply?] at h
         rw [if_neg hPre] at h
         cases h
+  | beginInitialize =>
+      by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares > 0
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.beginInitialize hPre.1 hPre.2
+      · simp only [apply?] at h
+        rw [if_neg hPre] at h
+        cases h
+  | finishInitialize =>
+      by_cases hPre : s.activeInitializers > 0
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.finishInitialize hPre
+      · simp only [apply?] at h
+        rw [if_neg hPre] at h
+        cases h
+  | publishTopic =>
+      by_cases hPre : s.phase = .«open» ∧ s.activeInitializers > 0
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.publishTopic hPre.1 hPre.2
+      · simp only [apply?] at h
+        rw [if_neg hPre] at h
+        cases h
+  | rollbackPending =>
+      by_cases hPre : s.activeInitializers > 0
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.rollbackPending hPre
+      · simp only [apply?] at h
+        rw [if_neg hPre] at h
+        cases h
   | insertFresh =>
-      by_cases hPre : s.phase = .«open» ∨ s.phase = .drainingPrepares
+      by_cases hPre : s.MayInsert
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
@@ -117,7 +177,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [if_neg hPre] at h
         cases h
   | insertReuse slotId gen =>
-      by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ slotId < s.slots.length
+      by_cases hPre : s.MayInsert ∧ slotId < s.slots.length
       · by_cases hVacant : s.slots.get ⟨slotId, hPre.2⟩ = .vacant gen
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_pos hVacant] at h
@@ -187,11 +247,11 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [if_neg hPre] at h
         cases h
   | closeRegistry =>
-      by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares = 0
+      by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activeInitializers = 0 ∧ s.activePrepares = 0
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
-        exact Step.closeRegistry hPre.1 hPre.2
+        exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2
       · simp only [apply?] at h
         rw [if_neg hPre] at h
         cases h
