@@ -448,7 +448,6 @@ fn expand_excel_function(
     };
     let export_ident = format_ident!("xll_{}", udf_id);
     let descriptor_ident = format_ident!("__XLFN_DESCRIPTOR_{}", udf_id);
-    let export_directive_ident = format_ident!("__XLFN_EXPORT_{}", udf_id);
     let export_manifest_entry_ident = format_ident!("__XLFN_EXP_{}", udf_id);
     let export_name_nul = format!("xll_{udf_id}\0");
     let export_name_bytes =
@@ -736,16 +735,6 @@ fn expand_excel_function(
         .iter()
         .map(|options| options.reference)
         .collect::<Vec<_>>();
-    let abi_argument_count = argument_names.len() + usize::from(is_async);
-    let x86_export_directive = format!(
-        " /EXPORT:{0}=_{0}@{1}",
-        export_ident,
-        abi_argument_count * 4
-    );
-    let x86_export_directive = syn::LitByteStr::new(
-        x86_export_directive.as_bytes(),
-        proc_macro2::Span::call_site(),
-    );
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
             quote!(#krate::context::ThreadSafeContext::new(__state))
@@ -1038,15 +1027,6 @@ fn expand_excel_function(
         }
 
         #gating
-        #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
-        #[doc(hidden)]
-        #[allow(non_upper_case_globals, reason = "Generated export directive identifier")]
-        #[used]
-        #[unsafe(link_section = ".drectve")]
-        static #export_directive_ident: [u8; #x86_export_directive.len()] =
-            *#x86_export_directive;
-
-        #gating
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
         #[used]
@@ -1105,11 +1085,11 @@ fn expand_excel_addin(
         > = ::std::sync::OnceLock::new();
 
         #gating
-        #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
         #[used]
         #[unsafe(link_section = ".drectve")]
-        static __XLFN_LIFECYCLE_EXPORTS: [u8; b" /EXPORT:xlAutoOpen=_xlAutoOpen@0 /EXPORT:xlAutoClose=_xlAutoClose@0 /EXPORT:xlAutoFree12=_xlAutoFree12@4 /EXPORT:xlAddInManagerInfo12=_xlAddInManagerInfo12@4 /EXPORT:DllGetClassObject=_DllGetClassObject@12 /EXPORT:DllCanUnloadNow=_DllCanUnloadNow@0".len()] =
-            *b" /EXPORT:xlAutoOpen=_xlAutoOpen@0 /EXPORT:xlAutoClose=_xlAutoClose@0 /EXPORT:xlAutoFree12=_xlAutoFree12@4 /EXPORT:xlAddInManagerInfo12=_xlAddInManagerInfo12@4 /EXPORT:DllGetClassObject=_DllGetClassObject@12 /EXPORT:DllCanUnloadNow=_DllCanUnloadNow@0";
+        static __XLFN_MSVC_LINKER_OPTIONS: [u8; b" /IGNORE:4104".len()] =
+            *b" /IGNORE:4104";
 
         #gating
         #[used]
@@ -1745,7 +1725,6 @@ mod tests {
         assert!(expanded.contains("__xlfn_async_only !"));
         assert!(!expanded.contains("AsyncFeature"));
         assert!(expanded.contains("assert_async_return"));
-        assert!(expanded.contains("@8"));
     }
 
     #[test]
@@ -1849,7 +1828,7 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 6);
+        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 5);
     }
 
     #[test]

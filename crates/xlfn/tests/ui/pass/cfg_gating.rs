@@ -1,18 +1,16 @@
-use xlfn::prelude::*;
-
-#[excel_function(name = "TEST.CFG.DISABLED")]
+#[xlfn::excel_function(name = "TEST.CFG.DISABLED")]
 #[cfg(any())]
 fn cfg_disabled() -> f64 {
     1.0
 }
 
-#[excel_function(name = "TEST.CFG_ATTR.DISABLED")]
+#[xlfn::excel_function(name = "TEST.CFG_ATTR.DISABLED")]
 #[cfg_attr(all(), cfg(any()))]
 fn cfg_attr_disabled() -> f64 {
     2.0
 }
 
-#[excel_addin(name = "Disabled", id = "disabled", category = "Test")]
+#[xlfn::excel_addin(name = "Disabled", id = "disabled", category = "Test")]
 #[cfg(any())]
 pub struct DisabledAddin;
 

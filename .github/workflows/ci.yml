@@ -91,6 +91,8 @@ jobs:
     windows-artifact:
         name: Windows artifact (${{ matrix.target }})
         runs-on: windows-latest
+        env:
+            RUSTFLAGS: -Dlinker-messages
         strategy:
             fail-fast: false
             matrix:
@@ -114,6 +116,7 @@ jobs:
             - name: Run Windows-targeted tests
               shell: pwsh
               env:
+                  RUSTFLAGS: -Dlinker-messages
                   XLFN_WINDOWS_RTD_TRACE: ${{ github.workspace }}\windows-rtd-shutdown-trace-${{ matrix.target }}.json
               run: |
                   cargo test `
@@ -132,6 +135,8 @@ jobs:
 
             - name: Build and validate the basic example XLL across CRT policies
               shell: pwsh
+              env:
+                  RUSTFLAGS: -Dlinker-messages
               run: |
                   foreach ($crt in @("static", "dynamic", "inherit")) {
                     cargo run --locked --package cargo-xlfn -- check `
@@ -144,6 +149,8 @@ jobs:
 
             - name: Build and validate the async/RTD fixture XLL across CRT policies
               shell: pwsh
+              env:
+                  RUSTFLAGS: -Dlinker-messages
               run: |
                   foreach ($crt in @("static", "dynamic", "inherit")) {
                     cargo run --locked --package cargo-xlfn -- check `
@@ -157,6 +164,8 @@ jobs:
     excel-abi-probe:
         name: Excel SDK ABI probe (${{ matrix.target }})
         runs-on: windows-latest
+        env:
+            RUSTFLAGS: -Dlinker-messages
         strategy:
             fail-fast: false
             matrix:
@@ -199,6 +208,8 @@ jobs:
 
             - name: Run the SDK-backed ABI probe
               shell: pwsh
+              env:
+                  RUSTFLAGS: -Dlinker-messages
               run: >
                   cargo test
                   --manifest-path probes/excel-abi-probe/Cargo.toml

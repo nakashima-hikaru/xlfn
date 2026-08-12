@@ -29,16 +29,11 @@ macro_rules! __xlfn_async_only {
 #[macro_export]
 macro_rules! __xlfn_async_exports {
     ($runtime:expr) => {
-        #[cfg(all(target_os = "windows", target_arch = "x86", target_env = "msvc"))]
-        #[used]
-        #[unsafe(link_section = ".drectve")]
-        static __XLFN_ASYNC_EXPORTS: [u8; b" /EXPORT:__xlfn_calculation_canceled=___xlfn_calculation_canceled@0 /EXPORT:__xlfn_calculation_ended=___xlfn_calculation_ended@0".len()] =
-            *b" /EXPORT:__xlfn_calculation_canceled=___xlfn_calculation_canceled@0 /EXPORT:__xlfn_calculation_ended=___xlfn_calculation_ended@0";
-
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_ASYNC_MANIFEST: [u8; b"__xlfn_calculation_canceled\0__xlfn_calculation_ended\0".len()] =
+        static __XLFN_ASYNC_MANIFEST: [u8;
+            b"__xlfn_calculation_canceled\0__xlfn_calculation_ended\0".len()] =
             *b"__xlfn_calculation_canceled\0__xlfn_calculation_ended\0";
 
         #[doc(hidden)]
