@@ -131,6 +131,11 @@ impl CompositionTrace {
         machine.terminal_pending = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn events(&self) -> Vec<CompositionEvent> {
+        self.inner.lock().events.clone()
+    }
+
     pub(crate) fn trace_json(&self) -> Result<String, serde_json::Error> {
         let machine = self.inner.lock();
         let document = TraceDocument {

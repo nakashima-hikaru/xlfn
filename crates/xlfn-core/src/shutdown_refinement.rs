@@ -1004,7 +1004,12 @@ impl ShutdownGhost {
     }
 
     pub(crate) fn apply(&self, event: GhostEvent) -> Result<(), GhostViolation> {
-        let result = self.inner.lock().apply(event.clone());
+        // Keep the GhostMachine guard through the LiftShutdown append. The
+        // lock order is GhostMachine.inner -> composition ->
+        // CompositionTrace.inner, so concurrent ghost transitions cannot be
+        // observed in a different order by the composition replay.
+        let mut machine = self.inner.lock();
+        let result = machine.apply(event.clone());
         if result.is_ok()
             && !matches!(event, GhostEvent::FinishClose)
             && let Some(composition) = self.composition.lock().as_ref().cloned()
@@ -1045,6 +1050,11 @@ impl ShutdownGhost {
 
     pub(crate) fn active(&self) -> bool {
         self.inner.lock().active
+    }
+
+    #[cfg(test)]
+    pub(crate) fn events(&self) -> Vec<GhostEvent> {
+        self.inner.lock().events.clone()
     }
 
     #[cfg(test)]
@@ -1194,5 +1204,53 @@ mod tests {
         let trace = machine.trace();
         assert_eq!(trace.outcome, "returned_success");
         assert_eq!(machine.state().phase, GhostPhase::Closed);
+    }
+
+    #[test]
+    fn composition_lift_subsequence_preserves_ghost_event_order() {
+        let ghost = ShutdownGhost::new();
+        let composition =
+            std::sync::Arc::new(crate::composition_refinement::CompositionTrace::new());
+        ghost.set_composition(std::sync::Arc::clone(&composition));
+        ghost
+            .begin_generation(42, GhostResources::opened(0, 0))
+            .unwrap();
+
+        for event in [
+            GhostEvent::StartDiagnostics,
+            GhostEvent::BeginClose,
+            GhostEvent::CallsDrained,
+            GhostEvent::ReturnsDrained,
+            GhostEvent::AsyncDrained,
+            GhostEvent::SubscriptionsDrained,
+            GhostEvent::CloseCallbackGate,
+            GhostEvent::HostDetached,
+            GhostEvent::ProveStateUnique,
+            GhostEvent::ProveAddinQuiesced,
+            GhostEvent::StateClosed,
+            GhostEvent::HandlesDrained,
+            GhostEvent::StopDiagnostics,
+            GhostEvent::DiagnosticsDrained,
+            GhostEvent::RtdDrained,
+            GhostEvent::FinishClose,
+        ] {
+            ghost.apply(event).unwrap();
+        }
+
+        let expected = ghost
+            .events()
+            .into_iter()
+            .filter(|event| !matches!(event, GhostEvent::FinishClose))
+            .collect::<Vec<_>>();
+        let lifted = composition
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::composition_refinement::CompositionEvent::LiftShutdown(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(lifted, expected);
     }
 }
