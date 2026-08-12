@@ -13,6 +13,10 @@ def maxGeneration : Generation := 2 ^ 64 - 1
 def nextGeneration? (g : Generation) : Option Generation :=
   if g < maxGeneration then some (g + 1) else none
 
+theorem max_generation_has_no_successor :
+    nextGeneration? maxGeneration = none := by
+  simp [nextGeneration?, maxGeneration]
+
 inductive SlotState where
   | vacant (generation : Generation)
   | live (generation : Generation)

@@ -38,6 +38,58 @@ theorem aba_reuse_prevents_stale_token_lookup
   have hNe : token1.generation ≠ 2 := by rw [hStale]; decide
   exact mismatched_generation_cannot_lookup hLive2 hNe
 
+def aba_s1 (session : SessionId) : State :=
+  { session := session, phase := .«open», slots := [.live 1], activePrepares := 0, activeLeases := 0 }
+
+def aba_s2 (session : SessionId) : State :=
+  { session := session, phase := .«open», slots := [.vacant 2], activePrepares := 0, activeLeases := 0 }
+
+def aba_s3 (session : SessionId) : State :=
+  { session := session, phase := .«open», slots := [.live 2], activePrepares := 0, activeLeases := 0 }
+
+theorem Step_aba_step1 (session : SessionId) :
+    Step (State.initialState session) Event.insertFresh (aba_s1 session) := by
+  have hPhase : (State.initialState session).phase = .«open» ∨ (State.initialState session).phase = .drainingPrepares := Or.inl rfl
+  exact Step.insertFresh hPhase
+
+theorem Step_aba_step2 (session : SessionId) :
+    Step (aba_s1 session) (Event.removeReuse { session := session, slot := 0, generation := 1 } 2) (aba_s2 session) := by
+  have hAuth : (aba_s1 session).AuthenticatedFor { session := session, slot := 0, generation := 1 } := rfl
+  have hInBounds : 0 < (aba_s1 session).slots.length := by dsimp [aba_s1]; decide
+  have hLive : (aba_s1 session).slots.get ⟨0, hInBounds⟩ = .live 1 := rfl
+  have hNextGen : nextGeneration? 1 = some 2 := rfl
+  exact Step.removeReuse hAuth hInBounds hLive hNextGen
+
+theorem Step_aba_step3 (session : SessionId) :
+    Step (aba_s2 session) (Event.insertReuse 0 2) (aba_s3 session) := by
+  have hPhase : (aba_s2 session).phase = .«open» ∨ (aba_s2 session).phase = .drainingPrepares := Or.inl rfl
+  have hInBounds : 0 < (aba_s2 session).slots.length := by dsimp [aba_s2]; decide
+  have hVacant : (aba_s2 session).slots.get ⟨0, hInBounds⟩ = .vacant 2 := rfl
+  exact Step.insertReuse hPhase hInBounds hVacant
+
+theorem remove_reuse_reinsert_prevents_aba
+    (session : SessionId) :
+    ∃ s1 s2 s3,
+      Step (State.initialState session) .insertFresh s1 ∧
+      Step s1
+        (.removeReuse
+          { session := session, slot := 0, generation := 1 }
+          2)
+        s2 ∧
+      Step s2 (.insertReuse 0 2) s3 ∧
+      ¬ ∃ s4,
+        Step s3
+          (.beginLookup
+            { session := session, slot := 0, generation := 1 })
+          s4 := by
+  have hInBounds3 : 0 < (aba_s3 session).slots.length := by dsimp [aba_s3]; decide
+  have hLive3 : (aba_s3 session).slots.get ⟨0, hInBounds3⟩ = .live 2 := rfl
+  refine ⟨aba_s1 session, aba_s2 session, aba_s3 session, ?_, ?_, ?_, ?_⟩
+  · exact Step_aba_step1 session
+  · exact Step_aba_step2 session
+  · exact Step_aba_step3 session
+  · exact aba_reuse_prevents_stale_token_lookup hInBounds3 hLive3 rfl
+
 theorem removed_token_cannot_become_valid_again
     {s : State} {token : Token} {hInBounds : token.slot < s.slots.length}
     (hRetired : s.slots.get ⟨token.slot, hInBounds⟩ = .retired) :
@@ -48,10 +100,32 @@ theorem removed_token_cannot_become_valid_again
   rw [hRetired] at hLive
   cases hLive
 
+theorem exhausted_slot_is_permanently_retired
+    {s s' : State} {token : Token}
+    (hStep : Step s (.removeRetire token) s')
+    (hInBounds : token.slot < s'.slots.length) :
+    s'.slots.get ⟨token.slot, hInBounds⟩ = .retired ∧
+    (∀ gen s'', ¬ Step s' (.insertReuse token.slot gen) s'') ∧
+    (∀ s'', ¬ Step s' (.beginLookup token) s'') := by
+  cases hStep with
+  | removeRetire hAuth hInBoundsOrig hLive hExhausted =>
+      have hGet : (s.slots.set token.slot .retired).get ⟨token.slot, hInBounds⟩ = .retired := by
+        simp
+      refine ⟨hGet, ?_, ?_⟩
+      · intro gen s'' hInsert
+        cases hInsert
+        rename_i _ _ hVacant
+        rw [hGet] at hVacant
+        cases hVacant
+      · intro s'' hLookup
+        cases hLookup
+        rename_i _ _ _ hLookupLive
+        rw [hGet] at hLookupLive
+        cases hLookupLive
+
 theorem registry_close_invalidates_all_tokens
     {init s : State} {token : Token} (hReach : Reachable init s) (hInvInit : PhaseInvariant init)
-    (hClosed : s.phase = .registryClosed ∨ s.phase = .closed)
-    (_hInBounds : token.slot < s.slots.length) :
+    (hClosed : s.phase = .registryClosed ∨ s.phase = .closed) :
     ¬ ∃ s', Step s (.beginLookup token) s' := by
   have hInv := reachable_phaseInvariant hReach hInvInit
   cases hClosed with
