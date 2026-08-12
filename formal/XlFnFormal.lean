@@ -20,3 +20,4 @@ import XlFnFormal.Composition.Transition
 import XlFnFormal.Composition.Trace
 import XlFnFormal.Composition.Invariant
 import XlFnFormal.Composition.Safety
+import XlFnFormal.Composition.Checker

@@ -1,4 +1,5 @@
 use crate::host_callback::HostCallbackSession;
+use crate::return_storage::ReturnStorage;
 use crate::{
     DomainErrorCode, ExcelError, InputError, IntoXllError, ReturnContext, Shape, XllError,
     XllResult,
@@ -947,7 +948,7 @@ pub struct XlArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
     pub(crate) cells: Box<[XLOPER12]>,
-    pub(crate) strings: Box<[Box<[u16]>]>,
+    pub(crate) storage: Option<Box<ReturnStorage>>,
     pub(crate) payload_bytes: usize,
 }
 
@@ -1045,7 +1046,7 @@ pub struct XlArrayBuilder {
     columns: usize,
     cells: Box<[std::mem::MaybeUninit<XLOPER12>]>,
     initialized: usize,
-    strings: Vec<Box<[u16]>>,
+    storage: Option<Box<ReturnStorage>>,
     payload_bytes: usize,
 }
 
@@ -1078,7 +1079,7 @@ impl XlArrayBuilder {
             columns,
             cells: Box::<[XLOPER12]>::new_uninit_slice(len),
             initialized: 0,
-            strings: Vec::new(),
+            storage: None,
             payload_bytes: cell_bytes,
         })
     }
@@ -1145,10 +1146,10 @@ impl XlArrayBuilder {
             ));
         }
 
-        let mut counted = counted.into_boxed_slice();
-        let pointer = counted.as_mut_ptr();
-
-        self.strings.push(counted);
+        let storage = self
+            .storage
+            .get_or_insert_with(|| Box::new(ReturnStorage::new()));
+        let pointer = storage.alloc_u16_slice(&counted);
         self.push_oper(XLOPER12 {
             value: xlfn_sys::XLOPER12Value { string: pointer },
             xltype: XLTYPE_STR,
@@ -1248,7 +1249,7 @@ impl XlArrayBuilder {
             rows: self.rows,
             columns: self.columns,
             cells,
-            strings: self.strings.into_boxed_slice(),
+            storage: self.storage,
             payload_bytes: self.payload_bytes,
         })
     }
@@ -2290,7 +2291,7 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
-            strings: Box::default(),
+            storage: None,
             payload_bytes: 0,
         };
         let right = XlArrayOutput {
@@ -2309,7 +2310,7 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
-            strings: Box::default(),
+            storage: None,
             payload_bytes: 0,
         };
         assert_eq!(left, right);

@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SourceAddress(usize);
@@ -35,14 +36,14 @@ pub(crate) struct ResolvedSourceIdentity {
 }
 
 pub(crate) struct SourceIdentityRegistry {
-    pub(crate) by_address: HashMap<SourceAddress, SourceIdentityEntry>,
+    pub(crate) by_address: FxHashMap<SourceAddress, SourceIdentityEntry>,
     pub(crate) next_id: u64,
 }
 
 impl SourceIdentityRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            by_address: HashMap::new(),
+            by_address: FxHashMap::default(),
             next_id: 1,
         }
     }

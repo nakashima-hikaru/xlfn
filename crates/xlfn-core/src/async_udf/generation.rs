@@ -14,7 +14,7 @@ pub(crate) fn task_shard(id: u64) -> usize {
 }
 
 pub(crate) struct TaskShard {
-    pub(crate) tasks: Mutex<HashMap<u64, TaskControl>>,
+    pub(crate) tasks: Mutex<FxHashMap<u64, TaskControl>>,
 }
 
 pub(crate) const ADMISSION_CLOSED: usize = 1usize << (usize::BITS - 1);
@@ -104,7 +104,7 @@ impl GenerationState {
     pub(crate) fn new(id: u64) -> Self {
         let shards = (0..TASK_SHARDS)
             .map(|_| TaskShard {
-                tasks: Mutex::new(HashMap::new()),
+                tasks: Mutex::new(FxHashMap::default()),
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -144,5 +144,5 @@ impl GenerationState {
 
 pub(crate) struct ExecutorControl {
     pub(crate) phase: ControlPhase,
-    pub(crate) generations: HashMap<u64, Arc<GenerationState>>,
+    pub(crate) generations: FxHashMap<u64, Arc<GenerationState>>,
 }

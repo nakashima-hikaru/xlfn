@@ -172,13 +172,17 @@ structure ShutdownSession where
 structure State where
   lifecycle : Lifecycle.State
   currentShutdown : Option ShutdownSession
+  unloadCertified : Bool
 ```
 
 The option is a current-session marker, not a test of historical
 `generation ≠ 0`: a failed attempt after a previous committed generation
 leaves the historical generation unchanged while the current marker remains
 `none`. A committed open stores the concrete resource snapshot supplied by
-the transition; it does not use a fixed empty resource value.
+the transition; it does not use a fixed empty resource value. The
+`unloadCertified` ghost fact is cleared when opening begins and is set only by
+the successful close publication paths; it remains available after a
+committed session is retired.
 
 `Composition/Transition.lean` keeps the Rust linearization points separate:
 `commitOpen` creates a generation, `finishCommittedShutdown` moves the
@@ -190,6 +194,10 @@ The intermediate `closed + some Closed` state is therefore intentional and
 requires the final-close cleanup owner.
 
 `Composition/Invariant.lean` proves `Valid` preservation and reachable-trace
-validity, including lifecycle/Shutdown generation equality. `Composition/Safety.lean`
-proves the quiescence result for all three successful close paths and that a
-`ReturnSafe` state cannot retain an active Shutdown session.
+validity, including lifecycle/Shutdown generation equality and preservation of
+the unload-certification ghost invariant. `Composition/Safety.lean` proves
+the quiescence result for all three successful close paths, that a `ReturnSafe`
+state cannot retain an active Shutdown session, and that a successful return
+is unload-certified. `Composition/Checker.lean` provides the executable
+`apply?` together with soundness and completeness against the relational
+`Step` model.

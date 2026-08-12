@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone)]
 pub(crate) struct RtdServerHandle {
@@ -87,7 +88,7 @@ impl RtdServerHandle {
                 }
             }
 
-            let mut by_topic: HashMap<i32, (u64, Arc<RtdValue>)> = HashMap::new();
+            let mut by_topic: FxHashMap<i32, (u64, Arc<RtdValue>)> = FxHashMap::default();
             for (sequence, topic_id, value) in deliverable {
                 match by_topic.entry(topic_id) {
                     std::collections::hash_map::Entry::Vacant(slot) => {

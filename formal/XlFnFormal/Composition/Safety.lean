@@ -13,28 +13,28 @@ theorem successful_committed_close_is_quiescent
     (hStep : Step s .finishCommittedShutdown t) :
     ∃ session,
       t.currentShutdown = some session ∧
-      session.state.phase = .closed ∧
-      session.state.resources.Quiescent := by
+    session.state.phase = .closed ∧
+    session.state.resources.Quiescent := by
   cases hStep with
-  | @finishCommittedShutdown session shutdown' hSession hPhase hNoAttempt hShutdown =>
-      have hPost := Shutdown.Step.finishClose_postcondition hShutdown
-      exact ⟨{ session with state := shutdown' }, rfl, hPost.1, hPost.2⟩
+  | @finishCommittedShutdown session hSession hCertificate =>
+      exact ⟨ShutdownSession.closed session, rfl,
+        rfl, hCertificate.shutdown_ready.2⟩
 
 theorem successful_uncommitted_close_is_quiescent
     {s t : State} {resources : Shutdown.Resources}
     (hStep : Step s (.finishUncommittedFinalClose resources) t) :
     t.lifecycle.phase = .closed ∧ resources.Quiescent := by
   cases hStep with
-  | finishUncommittedFinalClose hNoSession hPhase hNoAttempt hOwner hQuiescent =>
-      exact ⟨rfl, hQuiescent⟩
+  | finishUncommittedFinalClose hNoSession hCertificate =>
+      exact ⟨rfl, hCertificate.resources_quiescent⟩
 
 theorem successful_open_rollback_is_quiescent
     {s t : State} {resources : Shutdown.Resources}
     (hStep : Step s (.finishOpenRollback resources) t) :
     t.lifecycle.phase = .closed ∧ resources.Quiescent := by
   cases hStep with
-  | finishOpenRollback hNoSession hPhase hNoAttempt hOwner hQuiescent =>
-      exact ⟨rfl, hQuiescent⟩
+  | finishOpenRollback hNoSession hCertificate =>
+      exact ⟨rfl, hCertificate.resources_quiescent⟩
 
 theorem published_closed_session_has_final_close_owner
     {s t : State}
@@ -66,7 +66,7 @@ theorem returnSafe_has_no_active_shutdown
       have hConsistent := hValid.2.1
       simp [State.SessionConsistent, hSafe.1, hSafe.2.2, hSession] at hConsistent
 
-theorem successful_xlAutoClose_is_safe
+theorem returnSafe_reachable_state_has_no_active_shutdown
     {initial final : State}
     (hInitial : initial.Valid)
     (hReachable : Reachable initial final)
@@ -74,5 +74,37 @@ theorem successful_xlAutoClose_is_safe
     final.currentShutdown = none := by
   exact returnSafe_has_no_active_shutdown
     (Reachable.valid hInitial hReachable) hSafe
+
+theorem reachable_returnSafe_is_unloadCertified
+    {final : State}
+    (hReachable : Reachable State.initialState final)
+    (hSafe : final.lifecycle.ReturnSafe) :
+    final.unloadCertified = true := by
+  have hConsistent := Reachable.unloadCertificationConsistent
+    State.initialState_unloadCertificationConsistent hReachable
+  have hPhase := hSafe.1
+  have h := hConsistent
+  simp [State.UnloadCertificationConsistent, hPhase] at h
+  exact h
+
+/-- A successful abstract `xlAutoClose` return is represented by a reachable
+    state whose lifecycle has reached the return-safe point.  The ghost fact
+    is retained in the result even after the committed Shutdown session is
+    retired. -/
+def SuccessfulReturn (final : State) : Prop :=
+  Reachable State.initialState final ∧ final.lifecycle.ReturnSafe
+
+theorem successful_xlAutoClose_is_safe
+    {final : State}
+    (hSuccess : SuccessfulReturn final) :
+    final.lifecycle.ReturnSafe ∧
+    final.currentShutdown = none ∧
+    final.unloadCertified = true := by
+  rcases hSuccess with ⟨hReachable, hSafe⟩
+  have hNoShutdown := returnSafe_reachable_state_has_no_active_shutdown
+    State.initialState_valid hReachable hSafe
+  have hCertified := reachable_returnSafe_is_unloadCertified
+    hReachable hSafe
+  exact ⟨hSafe, hNoShutdown, hCertified⟩
 
 end XlFnFormal.Composition

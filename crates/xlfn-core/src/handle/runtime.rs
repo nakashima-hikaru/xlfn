@@ -1,9 +1,9 @@
 use super::*;
 
 pub(crate) struct TopicState {
-    pub(crate) by_key: HashMap<String, Topic>,
-    pub(crate) by_excel_id: HashMap<HandleTopicOwner, String>,
-    pub(crate) initializing: HashMap<String, Arc<Initialization>>,
+    pub(crate) by_key: FxHashMap<String, Topic>,
+    pub(crate) by_excel_id: FxHashMap<HandleTopicOwner, String>,
+    pub(crate) initializing: FxHashMap<String, Arc<Initialization>>,
     pub(crate) generation: u64,
     pub(crate) closed: bool,
 }
@@ -11,9 +11,9 @@ pub(crate) struct TopicState {
 impl Default for TopicState {
     fn default() -> Self {
         Self {
-            by_key: HashMap::new(),
-            by_excel_id: HashMap::new(),
-            initializing: HashMap::new(),
+            by_key: FxHashMap::default(),
+            by_excel_id: FxHashMap::default(),
+            initializing: FxHashMap::default(),
             generation: 1,
             closed: false,
         }

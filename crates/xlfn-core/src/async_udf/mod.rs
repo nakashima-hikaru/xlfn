@@ -13,7 +13,7 @@ use async_task::Runnable;
 use futures_util::FutureExt;
 use futures_util::future::{AbortHandle, Abortable};
 use parking_lot::{Condvar, Mutex};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;

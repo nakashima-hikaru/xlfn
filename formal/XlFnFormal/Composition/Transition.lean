@@ -31,7 +31,7 @@ inductive Step : State → Event → State → Prop where
       (hStep : Lifecycle.Step s.lifecycle
         (.beginOpen sampledEpoch attempt) t) :
       Step s (.beginOpen sampledEpoch attempt)
-        { lifecycle := t, currentShutdown := none }
+        { lifecycle := t, currentShutdown := none, unloadCertified := false }
 
   | finishOpenRejectedByClose
       {s : State}
@@ -41,7 +41,7 @@ inductive Step : State → Event → State → Prop where
       (hStep : Lifecycle.Step s.lifecycle
         (.finishOpenRejectedByClose attempt) t) :
       Step s (.finishOpenRejectedByClose attempt)
-        { lifecycle := t, currentShutdown := none }
+        { lifecycle := t, currentShutdown := none, unloadCertified := false }
 
   | failOpen
       {s : State}
@@ -49,7 +49,8 @@ inductive Step : State → Event → State → Prop where
       {t : Lifecycle.State}
       (hNoSession : s.currentShutdown = none)
       (hStep : Lifecycle.Step s.lifecycle (.failOpen attempt) t) :
-      Step s (.failOpen attempt) { s with lifecycle := t, currentShutdown := none }
+      Step s (.failOpen attempt)
+        { s with lifecycle := t, currentShutdown := none, unloadCertified := false }
 
   | requestFinalClose
       {s : State}
@@ -87,7 +88,8 @@ inductive Step : State → Event → State → Prop where
               generation := attempt }
           currentShutdown := some
             { generation := attempt
-              state := Shutdown.State.opened resources } }
+              state := Shutdown.State.opened resources }
+          unloadCertified := false }
 
   | liftShutdown
       {s : State}
@@ -105,13 +107,12 @@ inductive Step : State → Event → State → Prop where
   | finishCommittedShutdown
       {s : State}
       {session : ShutdownSession}
-      {shutdown' : Shutdown.State}
       (hSession : s.currentShutdown = some session)
-      (hPhase : s.lifecycle.phase = .closing)
-      (hNoAttempt : s.lifecycle.openAttempt = none)
-      (hStep : Shutdown.Step session.state .finishClose shutdown') :
+      (certificate :
+        Lifecycle.CommittedCloseCertificate
+          s.lifecycle session.generation session.state) :
       Step s .finishCommittedShutdown
-        { s with currentShutdown := some { session with state := shutdown' } }
+        { s with currentShutdown := some (ShutdownSession.closed session) }
 
   | publishCommittedClosed
       {s : State}
@@ -122,7 +123,9 @@ inductive Step : State → Event → State → Prop where
       (hOwner : s.lifecycle.cleanupOwner = some .finalClose)
       (hShutdownClosed : session.state.phase = .closed) :
       Step s .publishCommittedClosed
-        { s with lifecycle := { s.lifecycle with phase := .closed } }
+        { s with
+            lifecycle := { s.lifecycle with phase := .closed }
+            unloadCertified := true }
 
   | retireCommittedShutdown
       {s : State}
@@ -138,23 +141,25 @@ inductive Step : State → Event → State → Prop where
       {s : State}
       {resources : Shutdown.Resources}
       (hNoSession : s.currentShutdown = none)
-      (hPhase : s.lifecycle.phase = .closing)
-      (hNoAttempt : s.lifecycle.openAttempt = none)
-      (hOwner : s.lifecycle.cleanupOwner = some .finalClose)
-      (hQuiescent : resources.Quiescent) :
+      (certificate :
+        Lifecycle.UncommittedCloseCertificate s.lifecycle resources) :
       Step s (.finishUncommittedFinalClose resources)
-        { s with lifecycle := { s.lifecycle with phase := .closed }, currentShutdown := none }
+        { s with
+            lifecycle := { s.lifecycle with phase := .closed }
+            currentShutdown := none
+            unloadCertified := true }
 
   | finishOpenRollback
       {s : State}
       {resources : Shutdown.Resources}
       (hNoSession : s.currentShutdown = none)
-      (hPhase : s.lifecycle.phase = .openRollbackPending ∨ s.lifecycle.phase = .closing)
-      (hNoAttempt : s.lifecycle.openAttempt = none)
-      (hOwner : s.lifecycle.cleanupOwner = some .openRollback)
-      (hQuiescent : resources.Quiescent) :
+      (certificate :
+        Lifecycle.OpenRollbackCertificate s.lifecycle resources) :
       Step s (.finishOpenRollback resources)
-        { s with lifecycle := { s.lifecycle with phase := .closed }, currentShutdown := none }
+        { s with
+            lifecycle := { s.lifecycle with phase := .closed }
+            currentShutdown := none
+            unloadCertified := true }
 
   | releaseCleanupOwner
       {s : State}

@@ -53,6 +53,7 @@ mod lifecycle;
 mod reference;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod registration;
+mod return_storage;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod return_value;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]

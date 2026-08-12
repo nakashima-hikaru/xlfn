@@ -1,8 +1,8 @@
 use crate::{DomainErrorCode, ExcelCallbackStatus, ReturnContext, XllError, XllResult};
 use parking_lot::{Condvar, Mutex, RwLock};
+use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Deref;
 use std::panic::{AssertUnwindSafe, catch_unwind};

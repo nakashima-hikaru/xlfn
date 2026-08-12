@@ -59,7 +59,7 @@ impl Executor {
             current: ArcSwap::from(Arc::clone(&initial_generation)),
             control: Mutex::new(ExecutorControl {
                 phase: ControlPhase::Running,
-                generations: HashMap::from([(generation, initial_generation)]),
+                generations: [(generation, initial_generation)].into_iter().collect(),
             }),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),

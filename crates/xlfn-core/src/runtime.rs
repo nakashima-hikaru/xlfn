@@ -36,6 +36,8 @@ pub struct Runtime<S> {
     next_lifecycle_attempt: AtomicU64,
     generation: AtomicU64,
     open_attempt_id: AtomicU64,
+    // Invalidates opens that sampled an earlier lifecycle boundary. Close
+    // owner exclusivity is tracked separately by `close_attempt_active`.
     close_epoch: AtomicU64,
     state: ArcSwapOption<S>,
     layers: ArcSwapOption<SharedUdfLayers>,
@@ -383,6 +385,8 @@ impl<S> Runtime<S> {
         // Every final-close invocation invalidates open operations that started
         // before it, including an operation that is between rollback recovery
         // and acquisition of its open-attempt token while the phase is Closed.
+        // This epoch is deliberately not part of CloseCertificate: a waiting
+        // final-close caller may advance it while the active owner finishes.
         self.close_epoch.fetch_add(1, Ordering::AcqRel);
         if let Some(tracker) = self.returns.get() {
             tracker.close_admission();
@@ -680,7 +684,6 @@ pub struct CloseCertificate {
     )]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     runtime_address: usize,
-    close_attempt_id: u64,
     generation: u64,
 }
 
@@ -871,7 +874,6 @@ impl<S> Runtime<S> {
             diagnostics_stopped: prerequisites.diagnostics_stopped,
             addin_quiesced: prerequisites.addin_quiesced,
             runtime_address: std::ptr::from_ref(self).addr(),
-            close_attempt_id: self.close_epoch.load(Ordering::Acquire),
             generation: self.generation.load(Ordering::Acquire),
         })
     }
@@ -880,11 +882,6 @@ impl<S> Runtime<S> {
         if certificate.runtime_address != std::ptr::from_ref(self).addr() {
             return Err(XllError::Internal {
                 diagnostic_id: 0x434c_4f53_4552_554e,
-            });
-        }
-        if certificate.close_attempt_id != self.close_epoch.load(Ordering::Acquire) {
-            return Err(XllError::Internal {
-                diagnostic_id: 0x434c_4f53_4545,
             });
         }
         if certificate.generation != self.generation() {
@@ -1336,6 +1333,67 @@ pub(crate) mod tests {
 
         closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         closer.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_certificate_survives_a_concurrent_close_epoch_bump() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::new());
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish((), Vec::new());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let close_attempt = runtime.begin_final_close().unwrap();
+        runtime.wait_for_returns();
+        runtime.close_handles().unwrap();
+        runtime.close_subscriptions().unwrap();
+        assert!(runtime.take_state().is_some());
+
+        let ingress = crate::ingress::global_ingress();
+        ingress.begin_close_with(|| {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if runtime.ghost_generation_active() {
+                runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
+            }
+        });
+        let exports = ingress.seal_and_drain();
+        runtime.disable_ghost_for_test();
+        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let certificate = runtime
+            .certify_close(ClosePrerequisites {
+                exports,
+                rtd,
+                host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
+                async_stopped: crate::shutdown::AsyncStopped::new(),
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
+                diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
+                addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+            })
+            .unwrap();
+
+        // A second final-close invocation invalidates stale open attempts, but
+        // it must not invalidate the certificate held by the active close
+        // owner. The second caller waits until that owner is released.
+        let close_epoch = runtime.close_epoch();
+        let concurrent_runtime = Arc::clone(&runtime);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            assert!(concurrent_runtime.begin_final_close().is_none());
+        });
+        started_rx.recv().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.close_epoch() == close_epoch && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_ne!(runtime.close_epoch(), close_epoch);
+
+        runtime.finish_close(certificate).unwrap();
+        drop(close_attempt);
+        waiter.join().unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 

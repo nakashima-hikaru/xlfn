@@ -12,12 +12,30 @@ structure ShutdownSession where
   state : Shutdown.State
   deriving DecidableEq, Repr
 
+namespace ShutdownSession
+
+def withState (session : ShutdownSession) (state : Shutdown.State) : ShutdownSession :=
+  { session with state }
+
+def closed (session : ShutdownSession) : ShutdownSession :=
+  withState session { session.state with phase := .closed }
+
+end ShutdownSession
+
 structure State where
   lifecycle : Lifecycle.State
   currentShutdown : Option ShutdownSession
+  /-- Ghost evidence that the runtime has established unload safety for the
+      current lifecycle publication.  It is intentionally retained after a
+      successful close so the return theorem does not depend on a retired
+      Shutdown session remaining in memory. -/
+  unloadCertified : Bool
   deriving DecidableEq, Repr
 
 namespace State
+
+def withShutdown (s : State) (shutdown : Option ShutdownSession) : State :=
+  { s with currentShutdown := shutdown }
 
 def ShutdownSessionPublished : Shutdown.Phase → Prop
   | .open => True
@@ -60,9 +78,13 @@ def Valid (s : State) : Prop :=
   s.SessionConsistent ∧
   s.CurrentShutdownCertified
 
+def UnloadCertificationConsistent (s : State) : Prop :=
+  s.unloadCertified = true ↔ s.lifecycle.phase = .closed
+
 def initialState : State :=
   { lifecycle := Lifecycle.State.initialState
-    currentShutdown := none }
+    currentShutdown := none
+    unloadCertified := true }
 
 theorem initialState_wellFormed : initialState.WellFormed := by
   exact ⟨Lifecycle.State.initialState_wellFormed, by
@@ -73,6 +95,13 @@ theorem initialState_valid : initialState.Valid := by
   exact ⟨Lifecycle.State.initialState_valid, by
     simp [initialState, SessionConsistent, Lifecycle.State.initialState], by
     simp [initialState, CurrentShutdownCertified]⟩
+
+theorem initialState_unloadCertificationConsistent :
+    initialState.UnloadCertificationConsistent := by
+  simp [initialState, UnloadCertificationConsistent, Lifecycle.State.initialState]
+
+theorem initialState_unloadCertified : initialState.unloadCertified = true := by
+  rfl
 
 theorem committed_session_phase_is_open
     {s : State} {session : ShutdownSession}

@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ErasedSink {
@@ -89,9 +90,9 @@ pub(crate) const SERVER_LIFECYCLE_TERMINATED: u8 = 2;
 
 #[derive(Default)]
 pub(crate) struct TopicShard {
-    pub(crate) active_by_topic: HashMap<TopicId, ActiveSubscription>,
-    pub(crate) topic_by_key: HashMap<SubscriptionKey, TopicId>,
-    pub(crate) pending: [HashMap<TopicId, QueuedUpdate>; 2],
+    pub(crate) active_by_topic: FxHashMap<TopicId, ActiveSubscription>,
+    pub(crate) topic_by_key: FxHashMap<SubscriptionKey, TopicId>,
+    pub(crate) pending: [FxHashMap<TopicId, QueuedUpdate>; 2],
 }
 
 #[derive(Clone)]

@@ -53,6 +53,7 @@ arc-swap.workspace = true
 async-channel = { workspace = true, optional = true }
 async-task = { workspace = true, optional = true }
 blake3.workspace = true
+bumpalo.workspace = true
 constant_time_eq.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
@@ -63,6 +64,7 @@ parking_lot.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rustc-hash.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

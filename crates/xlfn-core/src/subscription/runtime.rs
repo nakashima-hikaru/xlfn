@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -9,7 +10,7 @@ pub(crate) struct SubscriptionRuntime {
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(crate) runtime_gate: Arc<OperationGate>,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
-    pub(crate) servers: Mutex<HashMap<ServerGeneration, Arc<ServerRuntime>>>,
+    pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<ServerRuntime>>>,
     pub(crate) active_quota: Arc<Quota>,
     pub(crate) queued_update_quota: Arc<Quota>,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
@@ -55,7 +56,7 @@ impl SubscriptionRuntime {
                 identities: SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
-            servers: Mutex::new(HashMap::new()),
+            servers: Mutex::new(FxHashMap::default()),
             active_quota: Arc::new(Quota::new(limits.max_active)),
             queued_update_quota: Arc::new(Quota::new(limits.max_queued_updates)),
             cleanup_failure: Mutex::new(None),
