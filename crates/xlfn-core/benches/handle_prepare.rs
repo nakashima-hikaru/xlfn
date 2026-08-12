@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn_core::benchmark_support::{
     HandleColdBatch, HandleContendedBenchmark, HandleDistinctKeyBenchmark, HandleWarmBenchmark,
@@ -8,6 +10,7 @@ const DISTINCT_ITERATIONS_PER_WORKER: usize = 1_000;
 
 fn handle_prepare_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_prepare");
+    group.measurement_time(Duration::from_secs(10));
 
     group.bench_function("cold_miss", |b| {
         b.iter_batched_ref(

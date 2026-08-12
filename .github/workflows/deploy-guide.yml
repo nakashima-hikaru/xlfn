@@ -30,10 +30,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install mdBook
-        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2
+        uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
         with:
-          # Update this pin only through an explicit dependency PR.
-          mdbook-version: 0.5.4
+          tool: mdbook@0.5.4
+          fallback: none
 
       - name: Validate the user guide
         run: python guide/check.py

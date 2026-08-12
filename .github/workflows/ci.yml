@@ -36,14 +36,14 @@ jobs:
                     crates/xlfn-package/src/win32.rs \
                     crates/cargo-xlfn/src/win32.rs
 
-            - name: Check dependency advisories, licenses, bans, and sources
-              uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just,cargo-nextest,cargo-hack,cargo-semver-checks@0.50.0
+                  tool: just,cargo-nextest,cargo-hack,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
                   fallback: none
+
+            - name: Check dependency advisories, licenses, bans, and sources
+              run: just deny
 
             - name: Check formatting
               run: just fmt
@@ -81,12 +81,6 @@ jobs:
                   cargo clippy --manifest-path examples/rtd-source/Cargo.toml --all-targets --locked -- -D warnings
                   cargo check --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked
                   cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked -- -D warnings
-
-            - name: Install mdBook
-              uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2
-              with:
-                  # Keep this in sync with deploy-guide.yml; update through an explicit dependency PR.
-                  mdbook-version: 0.5.4
 
             - name: Build the user guide
               run: mdbook build guide

@@ -53,6 +53,10 @@ jobs:
             echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
           fi
 
+      - name: Check benchmark compilation
+        shell: bash
+        run: just bench-check
+
       - name: Track benchmarks with Bencher (main / nightly)
         if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'
         shell: bash
