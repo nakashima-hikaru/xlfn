@@ -8,29 +8,28 @@
 
 **xlfn** is a Rust framework for building native Microsoft Excel XLL add-ins.
 
-Write worksheet functions as typed Rust functions and let xlfn handle the Excel 12 / `XLOPER12` boundary, including registration, value conversion, return-value ownership, panic containment, handles, asynchronous UDFs, RTD, shutdown, and packaging.
+Define worksheet functions as typed Rust functions while xlfn handles the Excel 12 / `XLOPER12` boundary, registration, value conversion, runtime lifecycle, and packaging.
 
-xlfn produces native XLLs and does **not** require the .NET runtime.
+xlfn supports both 32-bit and 64-bit Excel and does **not** require a .NET runtime.
 
-> [!IMPORTANT]
-> xlfn is currently at version `0.2.0`. The project is pre-1.0, so the public API may change between minor releases; production deployments should be tested against the exact Windows and Excel versions they support.
+**[User Guide](https://nakashima-hikaru.github.io/xlfn/)**
 
-## Why xlfn?
+> [!NOTE]
+> xlfn is pre-1.0. Public APIs may change between minor releases.
 
-The Excel XLL API offers low overhead and direct access to native code, but using it safely requires substantial infrastructure around calling conventions, tagged unions, memory ownership, registration, COM-based RTD, and DLL shutdown.
+## Features
 
-xlfn provides that infrastructure behind a typed Rust API:
+- **Typed worksheet functions** — define Excel functions as ordinary Rust functions with generated registration, typed argument and result conversion, metadata, and signature validation.
 
-- write worksheet functions as ordinary Rust functions;
-- use native binaries without a .NET runtime dependency;
-- catch panics before they cross the Excel ABI;
-- reject invalid function signatures and execution modes where possible;
-- return typed, formula-owned handles;
-- build native asynchronous UDFs and streaming RTD functions;
-- support both 32-bit and 64-bit Excel;
-- validate packaged XLLs, exports, imports, architectures, and sidecar DLLs.
+- **Execution-aware APIs** — express main-thread, thread-safe, macro-sheet, and asynchronous execution requirements through explicit capabilities and contexts.
 
-xlfn focuses on native worksheet-function infrastructure. It does not provide a Ribbon, task panes, IntelliSense, or a general Office automation framework.
+- **Stateful and long-running calculation** — use formula-owned typed handles, native asynchronous UDFs, streaming RTD subscriptions, and calculation caches.
+
+- **Runtime safety** — contain panics at the Excel boundary and coordinate return-value ownership, add-in lifecycle, shutdown, diagnostics, and concurrent activity.
+
+- **Native deployment** — build native XLLs for both 32-bit and 64-bit Excel, with transactional packaging and validation of PE architecture, exports, imports, and optional sidecar DLLs.
+
+xlfn focuses on native worksheet-function and calculation infrastructure. It does not provide Ribbon UI, task panes, IntelliSense, or a general Office automation framework.
 
 ## Quick start
 
@@ -42,24 +41,24 @@ xlfn focuses on native worksheet-function infrastructure. It does not provide a 
 - `i686-pc-windows-msvc` for 32-bit Excel
 - `x86_64-pc-windows-msvc` for 64-bit Excel
 
-Choose the target based on the **Excel process bitness**, not the Windows bitness. A 64-bit Windows installation may run either 32-bit or 64-bit Excel.
+Choose the Rust target based on the **Excel process bitness**, not the Windows bitness. A 64-bit Windows installation may run either 32-bit or 64-bit Excel.
 
 ### Create an add-in
 
-1. Add the Rust targets for your Excel process bitness:
+Add the Rust targets for the Excel architectures you want to support:
 
 ```powershell
 rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 ```
 
-2. Create a new library crate using standard Cargo tooling:
+Create a library crate:
 
 ```powershell
 cargo new --lib my-xll
 cd my-xll
 ```
 
-3. Configure `Cargo.toml` to build a `cdylib` and add `xlfn` as a dependency:
+Configure it as a `cdylib` and add xlfn:
 
 ```toml
 [lib]
@@ -69,13 +68,13 @@ crate-type = ["cdylib"]
 xlfn = "0.2.0"
 ```
 
-4. (Recommended) Install `cargo-xlfn` for optional artifact validation and packaging tooling:
+Install `cargo-xlfn` for XLL packaging and artifact validation:
 
 ```powershell
 cargo install cargo-xlfn --locked
 ```
 
-5. Package for 64-bit Excel:
+Package for 64-bit Excel:
 
 ```powershell
 cargo xlfn package --target x86_64-pc-windows-msvc
@@ -87,19 +86,25 @@ For 32-bit Excel:
 cargo xlfn package --target i686-pc-windows-msvc
 ```
 
-To package both:
+Or package both architectures:
 
 ```powershell
 cargo xlfn package --all
 ```
 
-*(Note: You can also build directly using `cargo build --target x86_64-pc-windows-msvc`, but `cargo xlfn` provides automated XLL PE validation and transactional directory packaging.)*
+The packaged XLLs are written under:
 
-Load the generated `.xll` from `package/win-x64` or `package/win-x86` using:
+```text
+package/
+├── win-x64/
+└── win-x86/
+```
+
+Load the appropriate `.xll` in Excel using:
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
-See the [quick-start guide](guide/src/quick-start.md) for sidecar packaging, deployment, and troubleshooting.
+See the [User Guide](https://nakashima-hikaru.github.io/xlfn/) for project setup, deployment, compatibility, and troubleshooting.
 
 ## Example
 
@@ -140,92 +145,49 @@ pub fn add(
 
 The generated XLL exports the required Excel entry points and registers the function as `EXAMPLE.ADD`.
 
-Inputs are decoded through typed conversion traits. Rust values and `Result<T, E>` values are converted back into Excel-compatible results.
-
-## Features
-
-- [Execution modes and contexts](guide/src/execution-modes.md)
-- [Typed formula-owned handles](guide/src/handles.md)
-- [Native asynchronous functions](guide/src/async-functions.md)
-- [Streaming RTD](guide/src/rtd.md)
-- [Custom value conversions](guide/src/custom-conversions.md)
-- [Add-in lifecycle and state](guide/src/lifecycle.md)
-- Diagnostics and panic containment
-- Package staging and PE validation
-- Static or dynamic MSVC CRT policies
+Arguments are decoded through typed conversion traits, and Rust return values are converted back into Excel-compatible results.
 
 ## Comparison
 
-| Approach                 | Best suited for                                                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **xlfn**                 | Native Rust XLLs with typed boundaries, handles, async UDFs, RTD, and validated packaging                                               |
-| **Excel-DNA**            | .NET-based add-ins that need access to the broader .NET and Office ecosystem                                                            |
-| **Direct C/C++ XLL SDK** | Teams that want complete low-level control and are prepared to implement the ABI, ownership, lifecycle, and packaging layers themselves |
+|                                 | **xlfn**                        | **Excel-DNA**                   | **Direct XLL SDK**        |
+| ------------------------------- | ------------------------------- | ------------------------------- | ------------------------- |
+| Primary ecosystem               | Rust                            | .NET                            | C / C++                   |
+| Worksheet functions             | Typed Rust API                  | Managed framework API           | Raw Excel C API           |
+| Excel ABI handling              | Framework-managed               | Framework-managed               | Application-managed       |
+| Handles / long-lived objects    | Typed formula-owned handles     | Framework facilities            | Application-defined       |
+| Async / streaming calculation   | Native async UDFs and RTD       | Supported                       | Application-defined       |
+| UI / broader Office integration | Not a goal                      | Broad                           | Manual / COM              |
+| Packaging validation            | Integrated with `cargo xlfn`    | Framework tooling               | Application-defined       |
+| Best fit                        | Native Rust calculation add-ins | .NET and broader Office add-ins | Maximum low-level control |
 
-xlfn is not intended to replace the broader UI and automation ecosystems around Excel. Its focus is a small, native, type-safe foundation for worksheet functions and native calculation engines.
+xlfn deliberately focuses on a small, native, type-safe foundation for worksheet functions and calculation engines rather than the broader Excel UI and Office automation surface.
 
-## Raw Excel ABI
+## Formal verification
 
-`xlfn` does not expose the raw Excel ABI. Applications that intentionally need
-raw ABI access should depend on `xlfn-sys` directly:
+Parts of xlfn's lifecycle and shutdown protocols are formally modeled in Lean 4.
 
-```toml
-[dependencies]
-xlfn-sys = "0.2"
-```
+The [`formal/`](formal) project contains:
 
-```rust
-use xlfn_sys::XLOPER12;
-```
+- a model of the resource shutdown protocol;
+- a separate model of lifecycle synchronization around open and final close;
+- a composition model connecting lifecycle and shutdown behavior;
+- safety and invariant proofs;
+- executable trace checkers; and
+- refinement obligations connecting concrete runtime behavior to the abstract models.
 
-## Formal shutdown model
+CI builds the Lean project and checks generated runtime traces against the executable models.
 
-The [`formal/`](formal) directory contains an executable Lean 4 model of the shutdown protocol.
+The formalization proves properties of the abstract models and their stated refinement boundaries. It is **not** a proof of the complete Rust implementation or of arbitrary application code running inside an add-in.
 
-The model proves properties of the abstract lifecycle state machine, including that successful shutdown reaches a quiescent state and that terminal states cannot reopen unexpectedly.
-
-This is not yet a proof of the entire Rust implementation. The [formal model README](formal/README.md) documents the proved theorems, assumptions, and remaining refinement work.
-
-CI builds the Lean project, runs `leanchecker`, and rejects committed `sorry` or `admit` placeholders.
-
-## Documentation
-
-- [User guide](https://nakashima-hikaru.github.io/xlfn/)
-- [Quick start](guide/src/quick-start.md)
-- [Compatibility](guide/src/compatibility.md)
-- [CLI reference](guide/src/cli-reference.md)
-- [Testing and release qualification](guide/src/testing.md)
-- [Contributor checks](CONTRIBUTING.md)
-- [Security model](guide/src/security.md)
-- [Basic example](examples/basic-xll)
-
-## Status
-
-xlfn currently includes:
-
-- typed function registration and value conversion;
-- lifecycle and unload coordination;
-- formula-owned handles;
-- asynchronous UDFs;
-- RTD;
-- diagnostics and caches;
-- distribution staging and native artifact validation;
-- a Lean 4 shutdown model.
-
-Application-specific domain logic, native-library bindings, services, worker processes, and downstream protocols remain the responsibility of the add-in.
-
-Because the project is pre-1.0, API stability is not guaranteed between minor
-releases. Automated tests and artifact validation do not replace testing in the
-exact Excel channels, locales, architectures, and deployment environments used
-in production.
+See [`formal/README.md`](formal/README.md) for the models, proved properties, assumptions, and remaining refinement obligations.
 
 ## Security
 
 See [SECURITY.md](SECURITY.md) for supported versions and vulnerability reporting.
 
-The detailed runtime and deployment trust model is described in the [security guide](guide/src/security.md).
+XLLs and bundled DLLs are executable code. Release artifacts should be controlled and code-signed as appropriate.
 
-XLLs and bundled DLLs are executable code. Release artifacts should be controlled and code-signed as appropriate. Build-manifest hashes alone are not a runtime trust boundary.
+The detailed runtime and deployment trust model is documented in the [User Guide](https://nakashima-hikaru.github.io/xlfn/security.html).
 
 ## License
 
