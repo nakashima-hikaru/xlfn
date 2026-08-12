@@ -85,7 +85,10 @@ fn handle_key_benchmarks(c: &mut Criterion) {
     let create_benchmark = CreateFormulaTopicKeyBenchmark::new();
 
     group.bench_function("create_formula_topic_key", |b| {
-        b.iter(|| std::hint::black_box(create_benchmark.run()));
+        b.iter(|| {
+            create_benchmark.run();
+            std::hint::black_box(())
+        });
     });
 
     let format_benchmark = FormatFormulaTopicKeyBenchmark::new();
