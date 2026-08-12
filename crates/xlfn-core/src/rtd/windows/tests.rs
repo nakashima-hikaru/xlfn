@@ -1652,9 +1652,7 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
         // `queried` is a writable output slot.
         assert_eq!(
             // SAFETY: see the pointer and lifetime justification above.
-            unsafe {
-                ((*unknown_vtable).QueryInterface)(server_unknown.as_ptr(), &iid, &mut queried)
-            },
+            unsafe { (unknown_vtable.QueryInterface)(server_unknown.as_ptr(), &iid, &mut queried) },
             S_OK
         );
         let _queried = TestUnknownReference::new(queried);

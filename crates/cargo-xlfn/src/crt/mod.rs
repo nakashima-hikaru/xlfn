@@ -204,7 +204,7 @@ fn wrapper_arguments(
         }
         if is_cdylib_link(&args) {
             args.push(OsString::from("-C"));
-            args.push(OsString::from("link-arg=/NOIMPLIB"));
+            args.push(OsString::from("link-arg=/IGNORE:4104"));
         }
     }
     args
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn cdylib_link_disables_import_library() {
+    fn cdylib_link_suppresses_com_private_export_warning() {
         let input = vec![
             "rustc".into(),
             "--target".into(),
@@ -382,7 +382,7 @@ mod tests {
             CrtPolicy::Inherit,
             OsStr::new("x86_64-pc-windows-msvc"),
         );
-        assert!(output.iter().any(|arg| arg == "link-arg=/NOIMPLIB"));
+        assert!(output.iter().any(|arg| arg == "link-arg=/IGNORE:4104"));
         assert!(
             !output
                 .iter()
