@@ -15,7 +15,7 @@ exclude = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
@@ -24,13 +24,13 @@ publish = true
 
 [workspace.dependencies]
 # Member crates
-cargo-xlfn = { version = "0.1.0", path = "crates/cargo-xlfn" }
-xlfn-common = { version = "0.1.0", path = "crates/xlfn-common" }
-xlfn = { version = "0.1.0", path = "crates/xlfn" }
-xlfn-core = { version = "0.1.0", path = "crates/xlfn-core" }
-xlfn-macros = { version = "0.1.0", path = "crates/xlfn-macros" }
-xlfn-package = { version = "0.1.0", path = "crates/xlfn-package" }
-xlfn-sys = { version = "0.1.0", path = "crates/xlfn-sys" }
+cargo-xlfn = { version = "0.2.0", path = "crates/cargo-xlfn" }
+xlfn-common = { version = "0.2.0", path = "crates/xlfn-common" }
+xlfn = { version = "0.2.0", path = "crates/xlfn" }
+xlfn-core = { version = "0.2.0", path = "crates/xlfn-core" }
+xlfn-macros = { version = "0.2.0", path = "crates/xlfn-macros" }
+xlfn-package = { version = "0.2.0", path = "crates/xlfn-package" }
+xlfn-sys = { version = "0.2.0", path = "crates/xlfn-sys" }
 
 # Third-party dependencies
 anyhow = "1.0.104"

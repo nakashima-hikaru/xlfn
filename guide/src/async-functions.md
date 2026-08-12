@@ -6,7 +6,7 @@ The optional `async` feature maps Rust futures to Excel's native asynchronous UD
 
 ```toml
 [dependencies]
-xlfn = { version = "0.1", features = ["async"] }
+xlfn = { version = "0.2", features = ["async"] }
 ```
 
 The project uses Excel 2010 or later as the operational baseline for this capability. Qualify the exact Excel versions and channels that you distribute to.

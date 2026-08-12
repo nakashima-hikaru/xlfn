@@ -8,7 +8,7 @@ For the source version documented by this guide:
 
 | Item | Value |
 |---|---|
-| workspace version | `0.1.0` |
+| workspace version | `0.2.0` |
 | Rust edition | 2024 |
 | minimum/pinned Rust toolchain | `1.97.1` |
 | license | MIT OR Apache-2.0 |
@@ -60,16 +60,33 @@ Examples:
 
 ```toml
 [dependencies]
-xlfn = "0.1"
+xlfn = "0.2"
 ```
 
 ```toml
 [dependencies]
-xlfn = { version = "0.1", features = ["async"] }
+xlfn = { version = "0.2", features = ["async"] }
 ```
 
 Qualify every feature combination that you distribute. Async changes the expected export set;
 bundle contents and application-adapter dependencies have separate packaging and trust requirements.
+
+## Raw Excel ABI access
+
+The `xlfn` facade does not expose the raw Excel ABI. Applications that
+intentionally need raw ABI types or calls should declare `xlfn-sys` directly:
+
+```toml
+[dependencies]
+xlfn-sys = "0.2"
+```
+
+```rust
+use xlfn_sys::XLOPER12;
+```
+
+Generated code may use hidden items under `xlfn::__private`, but that module is
+an implementation detail and is not a supported application API.
 
 ## Build-profile requirements
 
@@ -88,14 +105,14 @@ Procedural macro output currently refers to the facade as `::xlfn`. Use the cano
 
 ```toml
 [dependencies]
-xlfn = "0.1"
+xlfn = "0.2"
 ```
 
 Do not rename it with a dependency alias unless the macro implementation for the selected release explicitly documents alias resolution.
 
 ## Source and binary compatibility
 
-Version `0.1.x` is pre-1.0. Treat public Rust APIs, macro diagnostics, package metadata, and generated artifacts as subject to intentional breaking change between minor releases. Pin versions for production builds and review release notes before upgrading.
+The `0.x` line is pre-1.0. Treat public Rust APIs, macro diagnostics, package metadata, and generated artifacts as subject to intentional breaking change between minor releases. Pin versions for production builds and review release notes before upgrading.
 
 Workbook compatibility is a separate concern. The following are workbook-visible public API:
 

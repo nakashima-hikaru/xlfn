@@ -100,7 +100,7 @@ rust-version = "1.97.1"
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = { version = "0.1", features = ["async"] }
+xlfn = { version = "0.2", features = ["async"] }
 
 [package.metadata.xlfn]
 artifact-name = "DataTools"

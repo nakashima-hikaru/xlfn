@@ -25,7 +25,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "basic-xlfn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "xlfn",
 ]
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inventory",
  "xlfn-core",
@@ -604,11 +604,11 @@ dependencies = [
 
 [[package]]
 name = "xlfn-common"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "xlfn-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "smallvec",
  "static_assertions",

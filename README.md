@@ -13,7 +13,7 @@ Write worksheet functions as typed Rust functions and let xlfn handle the Excel 
 xlfn produces native XLLs and does **not** require the .NET runtime.
 
 > [!IMPORTANT]
-> xlfn is currently at version `0.1.0`. The public API may change, and production deployments should be tested against the exact Windows and Excel versions they support.
+> xlfn is currently at version `0.2.0`. The project is pre-1.0, so the public API may change between minor releases; production deployments should be tested against the exact Windows and Excel versions they support.
 
 ## Why xlfn?
 
@@ -66,7 +66,7 @@ cd my-xll
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = "0.1.0"
+xlfn = "0.2.0"
 ```
 
 4. (Recommended) Install `cargo-xlfn` for optional artifact validation and packaging tooling:
@@ -164,6 +164,20 @@ Inputs are decoded through typed conversion traits. Rust values and `Result<T, E
 
 xlfn is not intended to replace the broader UI and automation ecosystems around Excel. Its focus is a small, native, type-safe foundation for worksheet functions and native calculation engines.
 
+## Raw Excel ABI
+
+`xlfn` does not expose the raw Excel ABI. Applications that intentionally need
+raw ABI access should depend on `xlfn-sys` directly:
+
+```toml
+[dependencies]
+xlfn-sys = "0.2"
+```
+
+```rust
+use xlfn_sys::XLOPER12;
+```
+
 ## Formal shutdown model
 
 The [`formal/`](formal) directory contains an executable Lean 4 model of the shutdown protocol.
@@ -200,7 +214,10 @@ xlfn currently includes:
 
 Application-specific domain logic, native-library bindings, services, worker processes, and downstream protocols remain the responsibility of the add-in.
 
-Because the project is still at `0.1.0`, API stability is not guaranteed. Automated tests and artifact validation do not replace testing in the exact Excel channels, locales, architectures, and deployment environments used in production.
+Because the project is pre-1.0, API stability is not guaranteed between minor
+releases. Automated tests and artifact validation do not replace testing in the
+exact Excel channels, locales, architectures, and deployment environments used
+in production.
 
 ## Security
 

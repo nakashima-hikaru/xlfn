@@ -57,11 +57,11 @@ deny:
     cargo deny check
 
 semver:
-    # Keep this baseline on the latest published release tag.
+    # The 0.2.0 release intentionally permits the xlfn::sys breaking cleanup.
     cargo semver-checks \
         --workspace \
         --baseline-rev 0.1.0 \
-        --release-type patch
+        --release-type minor
 
 quick: fmt clippy test
 

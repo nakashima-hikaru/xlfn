@@ -4,6 +4,9 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Lifecycle
 
+/-! These are logical, non-wrapping counters.  The Rust bridge must either
+    establish that the corresponding `u64` operation cannot wrap or turn an
+    overflow into a fail-stop before emitting an abstract transition. -/
 abbrev AttemptId := Nat
 abbrev Epoch := Nat
 
@@ -72,6 +75,30 @@ def WellFormed (s : State) : Prop :=
   s.AttemptOwnerDisjoint ∧
   s.PhaseConsistent ∧
   s.OwnerConsistent
+
+def IdentifierValid (s : State) : Prop :=
+  (∀ id, s.openAttempt = some id → id ≠ 0) ∧
+  (s.phase = .open → s.generation ≠ 0)
+
+def Valid (s : State) : Prop :=
+  s.WellFormed ∧ s.IdentifierValid
+
+def initialState : State :=
+  { phase := .closed
+    closeEpoch := 0
+    openAttempt := none
+    cleanupOwner := none
+    generation := 0 }
+
+theorem initialState_wellFormed : initialState.WellFormed := by
+  simp [initialState, WellFormed, AttemptOwnerDisjoint,
+    PhaseConsistent, OwnerConsistent]
+
+theorem initialState_identifierValid : initialState.IdentifierValid := by
+  simp [initialState, IdentifierValid]
+
+theorem initialState_valid : initialState.Valid := by
+  exact ⟨initialState_wellFormed, initialState_identifierValid⟩
 
 end State
 

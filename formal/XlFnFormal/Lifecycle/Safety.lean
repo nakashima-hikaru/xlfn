@@ -4,6 +4,13 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Lifecycle
 
+theorem Step.requestFinalClose_changes_epoch
+    {s t : State}
+    (hStep : Step s .requestFinalClose t) :
+    t.closeEpoch = s.closeEpoch + 1 := by
+  cases hStep
+  rfl
+
 theorem requestFinalClose_invalidates_sampled_epoch
     {s t : State}
     (hStep : Step s .requestFinalClose t) :
@@ -105,5 +112,66 @@ theorem closing_without_owner_can_acquire_owner
     t.cleanupOwner = some .finalClose := by
   cases hStep
   rfl
+
+theorem acquireFinalCloseOwner_enabled
+    {s : State}
+    (hPhase : s.phase = .closing)
+    (hNoAttempt : s.openAttempt = none)
+    (hNoOwner : s.cleanupOwner = none) :
+    ∃ t, Step s .acquireFinalCloseOwner t := by
+  exact ⟨{ s with cleanupOwner := some .finalClose },
+    Step.acquireFinalCloseOwner hPhase hNoAttempt hNoOwner⟩
+
+theorem acquireOpenRollbackOwner_enabled
+    {s : State}
+    (hPhase : s.phase = .openRollbackPending)
+    (hNoAttempt : s.openAttempt = none)
+    (hNoOwner : s.cleanupOwner = none) :
+    ∃ t, Step s .acquireOpenRollbackOwner t := by
+  exact ⟨{ s with cleanupOwner := some .openRollback },
+    Step.acquireOpenRollbackOwner hPhase hNoAttempt hNoOwner⟩
+
+theorem Step.generation_change_requires_finishOpen
+    {s t : State} {event : Event}
+    (hStep : Step s event t)
+    (hChanged : t.generation ≠ s.generation) :
+    ∃ attempt,
+      event = .finishOpen attempt ∧
+      t.generation = attempt := by
+  cases hStep <;>
+    simp_all [State.IdentifierValid]
+
+theorem Steps.open_target_requires_finishOpen
+    {s t : State} {events : List Event}
+    (hNotOpen : s.phase ≠ .open)
+    (hSteps : Steps s events t)
+    (hOpen : t.phase = .open) :
+    ∃ attempt, .finishOpen attempt ∈ events := by
+  induction hSteps with
+  | refl =>
+      exact False.elim (hNotOpen hOpen)
+  | @cons source middle target event tail hStep hTail ih =>
+      by_cases hMiddleOpen : middle.phase = .open
+      · have hOrigin := target_open_requires_finishOpen hStep hMiddleOpen
+        rcases hOrigin with ⟨attempt, hEvent⟩
+        exact ⟨attempt, by simp [hEvent]⟩
+      · have hTailOrigin := ih hMiddleOpen hOpen
+        rcases hTailOrigin with ⟨attempt, hEvent⟩
+        exact ⟨attempt, by simp [hEvent]⟩
+
+theorem Steps.open_after_closed_requires_finishOpen
+    {s t : State} {events : List Event}
+    (hClosed : s.phase = .closed)
+    (hSteps : Steps s events t)
+    (hOpen : t.phase = .open) :
+    ∃ attempt, .finishOpen attempt ∈ events :=
+  Steps.open_target_requires_finishOpen (by simp [hClosed]) hSteps hOpen
+
+theorem Steps.returnSafe_has_no_active_owner
+    {s t : State} {events : List Event}
+    (hSteps : Steps s events t)
+    (hSafe : t.ReturnSafe) :
+    t.cleanupOwner = none :=
+  hSafe.2.2
 
 end XlFnFormal.Lifecycle

@@ -26,12 +26,12 @@ the execution model retained by the Windows artifact job.
 against the published `0.1.0` tag. The CI checkout fetches the full history so
 that this baseline is available in pull requests as well as on `main`.
 
-The current `0.1.0`-to-`main` audit passes even with patch-release rules, so
-the next release can be `0.1.1`; a major-version bump is not required by the
-Rust public API. If a future change intentionally breaks that API, either add
-a compatibility layer or update the baseline and release version to `0.2.0`
-as part of that release. CLI behavior and procedural-macro diagnostics are
-separate compatibility contracts and are not covered by this audit.
+The `0.2.0` release intentionally removes the `xlfn::sys` facade and uses
+minor-release rules for that breaking cleanup. Future patch releases should
+preserve the supported Rust API; another intentional breaking change should be
+paired with the appropriate version and semver audit update. CLI behavior and
+procedural-macro diagnostics are separate compatibility contracts and are not
+covered by this audit.
 
 Standalone consumers should also be checked when their interfaces change:
 

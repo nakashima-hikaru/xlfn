@@ -927,7 +927,7 @@ fn expand_excel_function(
                 |__state| {
                     #return_assertion
                     let __raw_arguments:
-                        [*mut #krate::sys::XLOPER12; #raw_argument_count] =
+                        [*mut #krate::__private::XLOPER12; #raw_argument_count] =
                         [#(#raw_names),*];
                     // SAFETY: the raw argument array and runtime belong to
                     // this Excel ABI invocation.
@@ -962,8 +962,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::sys::XLOPER12,)*
-                __async_handle: *mut #krate::sys::XLOPER12,
+                #(#raw_names: *mut #krate::__private::XLOPER12,)*
+                __async_handle: *mut #krate::__private::XLOPER12,
             ) {
                 #boundary
             }
@@ -977,8 +977,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::sys::XLOPER12),*
-            ) -> *mut #krate::sys::XLOPER12 {
+                #(#raw_names: *mut #krate::__private::XLOPER12),*
+            ) -> *mut #krate::__private::XLOPER12 {
                 #boundary
             }
         }
@@ -1141,7 +1141,7 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoFree12(
-            __pointer: *mut #krate::sys::XLOPER12,
+            __pointer: *mut #krate::__private::XLOPER12,
         ) {
             // SAFETY: Excel passes the live return pointer produced by this XLL.
             let __free_operation =
@@ -1156,8 +1156,8 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAddInManagerInfo12(
-            __action: *mut #krate::sys::XLOPER12,
-        ) -> *mut #krate::sys::XLOPER12 {
+            __action: *mut #krate::__private::XLOPER12,
+        ) -> *mut #krate::__private::XLOPER12 {
             #krate::__private::ffi_boundary(
                 &crate::__XLFN_RUNTIME,
                 || {

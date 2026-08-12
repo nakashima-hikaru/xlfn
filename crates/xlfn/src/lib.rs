@@ -153,7 +153,10 @@ pub mod prelude {
     pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
 }
 
-/// Implementation details consumed by attribute macros, not a stable API.
+/// Implementation details consumed by generated code, not a stable API.
+///
+/// Items in this module are not part of xlfn's supported public API and may
+/// change without notice.
 #[doc(hidden)]
 pub mod __private {
     pub const BUILD_TARGET: &str = if cfg!(all(
@@ -188,9 +191,5 @@ pub mod __private {
     pub use xlfn_core::{
         async_udf_boundary_named, cancel_async_calculation, end_async_calculation,
     };
-}
-
-#[doc(hidden)]
-pub mod sys {
-    pub use xlfn_sys::*;
+    pub use xlfn_sys::XLOPER12;
 }

@@ -41,7 +41,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = "0.1"
+xlfn = "0.2"
 ```
 
 For a local checkout during development, use a path dependency instead:
