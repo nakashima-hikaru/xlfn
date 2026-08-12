@@ -12,6 +12,10 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
             "sync_boundary/ingress_udf_only",
         ),
         (
+            SyncBenchKind::IngressUdfPreheld,
+            "sync_boundary/ingress_udf_preheld",
+        ),
+        (
             SyncBenchKind::RuntimeEnterOnly,
             "sync_boundary/runtime_enter_only",
         ),

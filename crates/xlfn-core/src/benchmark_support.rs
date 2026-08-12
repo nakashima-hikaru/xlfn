@@ -119,6 +119,7 @@ impl Drop for AsyncSpawnBenchmark {
 #[derive(Clone, Copy, Debug)]
 pub enum SyncBenchKind {
     IngressUdfOnly,
+    IngressUdfPreheld,
     RuntimeEnterOnly,
     FullAdmission,
     ActiveUdfSnapshot,
@@ -232,6 +233,22 @@ impl SyncBoundaryWorkerPool {
                                 std::hint::black_box(accepted);
                                 drop(guard);
                             }
+                        }
+                        SyncBenchKind::IngressUdfPreheld => {
+                            let (outer, accepted) =
+                                crate::ingress::global_ingress().enter_with(|| {});
+
+                            assert!(accepted);
+
+                            for _ in 0..iterations_per_thread {
+                                let (guard, accepted) =
+                                    crate::ingress::global_ingress().enter_udf_with(|| {});
+
+                                std::hint::black_box(accepted);
+                                drop(guard);
+                            }
+
+                            drop(outer);
                         }
                         SyncBenchKind::RuntimeEnterOnly => {
                             for _ in 0..iterations_per_thread {
