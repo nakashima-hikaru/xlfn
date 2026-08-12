@@ -120,6 +120,42 @@ impl GhostResources {
         }
     }
 
+    /// Abstract resource image supplied by a concrete quiescence certificate.
+    ///
+    /// The runtime stores this image in its close/rollback certificate at the
+    /// point where all concrete typestate proofs have been issued; it is not a
+    /// best-effort observation of mutable runtime fields at finish time.
+    pub(crate) const fn quiescent_snapshot() -> Self {
+        Self {
+            ingress_open: false,
+            external_entries: 0,
+            registrations: 0,
+            event_registrations: 0,
+            registration_state_known: true,
+            callback_gate_open: false,
+            active_calls: 0,
+            return_blocks: 0,
+            return_blocks_in_free: 0,
+            return_free_operations: 0,
+            async_tasks: 0,
+            async_executor_running: false,
+            rtd_operations: 0,
+            subscriptions: 0,
+            callbacks: 0,
+            rtd_class_factories: 0,
+            rtd_servers: 0,
+            rtd_server_locks: 0,
+            handle_operations: 0,
+            handles: 0,
+            state_unique: true,
+            addin_quiesced: true,
+            state_owned_by_runtime: false,
+            diagnostics_pending: 0,
+            diagnostics_running: false,
+            cleanup_issues: 0,
+        }
+    }
+
     fn host_detached(&self) -> bool {
         !self.ingress_open
             && self.registrations == 0

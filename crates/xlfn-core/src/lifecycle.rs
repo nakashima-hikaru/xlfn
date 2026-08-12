@@ -1773,26 +1773,28 @@ mod tests {
 
         let uncommitted = std::sync::Arc::new(Runtime::new());
         let mut opening = uncommitted.begin_open().unwrap();
-        let request_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let request_barrier_for_hook = std::sync::Arc::clone(&request_barrier);
-        uncommitted.set_composition_request_hook(Some(std::sync::Arc::new(move || {
-            request_barrier_for_hook.wait();
-        })));
         let closing_runtime = std::sync::Arc::clone(&uncommitted);
         let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let close_waiter = std::thread::spawn(move || {
             let close_attempt = closing_runtime
                 .begin_final_close()
                 .expect("final close must acquire after open rejection");
             owner_tx.send(()).expect("final close owner signal");
+            release_rx.recv().expect("final close release signal");
             drop(close_attempt);
         });
-        request_barrier.wait();
-        let _ = uncommitted.begin_close();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while uncommitted.phase() != crate::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(uncommitted.phase(), crate::LifecyclePhase::Closing);
         assert!(uncommitted.finish_open(&mut opening, Vec::new()).is_err());
         owner_rx.recv().expect("final close owner was not acquired");
+        release_tx.send(()).expect("final close release signal");
         close_waiter.join().expect("final close waiter panicked");
-        uncommitted.set_composition_request_hook(None);
         assert_eq!(close_addin::<CleanClose>(&uncommitted), 1);
         check(
             "uncommitted final close",
