@@ -923,7 +923,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let waiter_is_blocked = {
-            let topics = runtime.topics.lock();
+            let topics = runtime.topics.read();
             topics
                 .initializing
                 .get("concurrent-observe")
@@ -1125,7 +1125,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     loop {
         let blocked = runtime
             .topics
-            .lock()
+            .read()
             .initializing
             .get("closing")
             .is_some_and(|initialization| Arc::strong_count(initialization) >= 4);
@@ -1139,7 +1139,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     let close_runtime = Arc::clone(&runtime);
     let closer = std::thread::spawn(move || close_runtime.close());
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !runtime.topics.lock().closed {
+    while !runtime.topics.read().closed {
         assert!(
             Instant::now() < deadline,
             "close did not mark runtime closed"
@@ -1339,7 +1339,7 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
                 Ok(Arc::new(DataRecord(2)))
             },
             |key, _| {
-                let topics = runtime.topics.lock();
+                let topics = runtime.topics.read();
 
                 assert!(
                     !topics.initializing.contains_key(key),
@@ -1396,7 +1396,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
         closed_tx.send(closing_runtime.close()).unwrap();
     });
 
-    while !runtime.topics.lock().closed {
+    while !runtime.topics.read().closed {
         std::thread::yield_now();
     }
 
