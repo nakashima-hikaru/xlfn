@@ -884,3 +884,184 @@ impl Drop for HandleContendedBenchmark {
         cleanup_handle_runtime(&self.runtime);
     }
 }
+
+/// A persistent worker pool for measuring key allocation / string creation overhead.
+pub struct HandleKeyAllocationBenchmark {
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleKeyAllocationBenchmark {
+    pub fn new(worker_count: usize, iterations_per_worker: usize) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let keys = (0..worker_count)
+            .map(|worker| Arc::<str>::from(format!("warm:{worker}")))
+            .collect::<Vec<_>>();
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for key in keys {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_worker {
+                        let owned = key.to_string();
+                        std::hint::black_box(owned);
+                    }
+                    done_tx
+                        .send(())
+                        .expect("benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("key-allocation benchmark worker received start signal");
+        }
+        for _ in 0..self.start_tx.len() {
+            self.done_rx
+                .recv()
+                .expect("key-allocation benchmark worker finished batch");
+        }
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.start_tx.len() * self.iterations_per_worker
+    }
+}
+
+impl Drop for HandleKeyAllocationBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// A persistent worker pool for measuring prepare and lease guard contention.
+pub struct HandleGuardContentionBenchmark {
+    runtime: Arc<HandleRuntime>,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleGuardContentionBenchmark {
+    pub fn new(worker_count: usize, iterations_per_worker: usize) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_worker {
+                        let prepare = worker_runtime.prepares.enter();
+                        let lease = worker_runtime.leases.acquire();
+                        std::hint::black_box((&prepare, &lease));
+                    }
+                    done_tx
+                        .send(())
+                        .expect("benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("guard-contention benchmark worker received start signal");
+        }
+        for _ in 0..self.start_tx.len() {
+            self.done_rx
+                .recv()
+                .expect("guard-contention benchmark worker finished batch");
+        }
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.start_tx.len() * self.iterations_per_worker
+    }
+}
+
+impl Drop for HandleGuardContentionBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+/// Benchmark object for measuring formula topic key formatting cost.
+pub struct FormatFormulaTopicKeyBenchmark {
+    caller: FormulaCaller,
+    digest: [u8; 32],
+}
+
+impl FormatFormulaTopicKeyBenchmark {
+    pub fn new() -> Self {
+        Self {
+            caller: FormulaCaller {
+                sheet_id: 7,
+                row: 42,
+                column: 11,
+            },
+            digest: [42u8; 32],
+        }
+    }
+
+    pub fn run(&self) -> String {
+        format_formula_topic_key(self.caller, HANDLE_FORMULA_UDF_ID, &self.digest)
+    }
+}
+
+impl Default for FormatFormulaTopicKeyBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
