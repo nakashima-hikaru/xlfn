@@ -24,7 +24,6 @@ pub(crate) struct ActiveSubscription {
 }
 
 pub(crate) struct QueuedUpdate {
-    pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
     pub(crate) sequence: u64,
     pub(crate) value: Arc<RtdValue>,
@@ -118,7 +117,6 @@ pub(crate) struct RefreshState {
     pub(crate) next_notification_ticket: u64,
     pub(crate) callback: Option<NotificationCallback>,
     pub(crate) phase: DeliveryPhase,
-    pub(crate) in_flight: Option<Vec<QueuedUpdate>>,
 }
 
 impl RefreshState {

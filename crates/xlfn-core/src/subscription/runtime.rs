@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub(crate) struct SubscriptionRuntime {

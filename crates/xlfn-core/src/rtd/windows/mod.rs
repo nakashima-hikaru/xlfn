@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::RtdValue;
+#[cfg(test)]
 use crate::XllError;
 #[cfg(test)]
 use crate::XllResult;
@@ -21,6 +22,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
@@ -50,11 +52,11 @@ use automation::{
     checked_topic_part_count, checked_topic_part_length, topic_key_from_safearray,
     unwrap_dispatch_variant, write_bstr_variant, write_refresh_data,
 };
-use class_factory::IID_ICLASS_FACTORY;
 pub(super) use class_factory::dll_get_class_object;
 #[cfg(test)]
 use class_factory::{
-    CLASS_FACTORY_VTABLE, ClassFactory, ClassFactoryVtable, factory_lock_server, factory_release,
+    CLASS_FACTORY_VTABLE, ClassFactory, ClassFactoryVtable, IID_ICLASS_FACTORY,
+    factory_lock_server, factory_release,
 };
 #[cfg(test)]
 use com_abi::IUnknown_Vtbl;
@@ -70,16 +72,16 @@ use registration::{
     read_registry_string, scavenge_owned_registrations, set_registry_value, wide_nul,
 };
 use server::{
-    ACTIVE_SERVER, ActiveServer, IID_IRTD_UPDATE_EVENT, RtdServer, SERVER_STARTED, connect_data,
-    discard_unpublished_server, disconnect_data, ensure_server, heartbeat, refresh_data,
-    server_add_ref, server_query_interface, server_release, server_start, server_terminate,
+    ACTIVE_SERVER, ActiveServer, IID_IRTD_UPDATE_EVENT, RtdServer, connect_data, disconnect_data,
+    heartbeat, refresh_data, server_add_ref, server_query_interface, server_release, server_start,
+    server_terminate,
 };
 #[cfg(test)]
 use server::{
     FAIL_DEFERRED_TERMINATION_SPAWN, IID_IDISPATCH, IID_IRTD_SERVER,
     PANIC_DEFERRED_TERMINATION_CLEANUP, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED,
-    SERVER_START_FAILED, SERVER_STARTING, ServerStartReservation,
-    synchronize_callback_notification,
+    SERVER_START_FAILED, SERVER_STARTED, SERVER_STARTING, ServerStartReservation,
+    discard_unpublished_server, ensure_server, synchronize_callback_notification,
 };
 pub(super) use server::{shutdown, shutdown_subscriptions};
 #[cfg(test)]

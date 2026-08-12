@@ -356,7 +356,6 @@ impl ServerRuntime {
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(QueuedUpdate {
-                        topic_id,
                         connection_generation: conn_gen,
                         sequence,
                         value: Arc::clone(&value),
