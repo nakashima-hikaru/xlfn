@@ -7,7 +7,8 @@ namespace XlFnFormal.Handle
 inductive Event where
   | beginPrepare
   | endPrepare
-  | insert (slot : SlotId) (generation : Generation)
+  | insertFresh
+  | insertReuse (slot : SlotId) (generation : Generation)
   | removeReuse (token : Token) (nextGeneration : Generation)
   | removeRetire (token : Token)
   | beginLookup (token : Token)
@@ -28,14 +29,20 @@ inductive Step : State → Event → State → Prop where
       (hPrep : s.activePrepares > 0) :
       Step s .endPrepare { s with activePrepares := s.activePrepares - 1 }
 
-  | insert
+  | insertFresh
+      {s : State}
+      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares) :
+      Step s .insertFresh
+        { s with slots := s.slots ++ [.live 1] }
+
+  | insertReuse
       {s : State}
       {slotId : SlotId}
       {gen : Generation}
       (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
       (hInBounds : slotId < s.slots.length)
       (hVacant : s.slots.get ⟨slotId, hInBounds⟩ = .vacant gen) :
-      Step s (.insert slotId gen)
+      Step s (.insertReuse slotId gen)
         { s with slots := s.slots.set slotId (.live gen) }
 
   | removeReuse
@@ -45,7 +52,7 @@ inductive Step : State → Event → State → Prop where
       (hAuth : s.AuthenticatedFor token)
       (hInBounds : token.slot < s.slots.length)
       (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
-      (hNextGen : nextGen = token.generation + 1) :
+      (hNextGen : nextGeneration? token.generation = some nextGen) :
       Step s (.removeReuse token nextGen)
         { s with slots := s.slots.set token.slot (.vacant nextGen) }
 
@@ -54,7 +61,8 @@ inductive Step : State → Event → State → Prop where
       {token : Token}
       (hAuth : s.AuthenticatedFor token)
       (hInBounds : token.slot < s.slots.length)
-      (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation) :
+      (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
+      (hExhausted : nextGeneration? token.generation = none) :
       Step s (.removeRetire token)
         { s with slots := s.slots.set token.slot .retired }
 
@@ -87,10 +95,7 @@ inductive Step : State → Event → State → Prop where
       Step s .closeRegistry
         { s with
             phase := .registryClosed
-            slots := s.slots.map (fun slot =>
-              match slot with
-              | .live g => SlotState.vacant (g + 1)
-              | other => other) }
+            slots := s.slots.map closeSlot }
 
   | finishClose
       {s : State}

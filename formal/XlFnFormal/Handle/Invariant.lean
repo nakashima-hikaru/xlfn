@@ -11,11 +11,17 @@ def PhaseInvariant (s : State) : Prop :=
   | .registryClosed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0
   | .closed => State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeLeases = 0
 
-theorem map_closeRegistry_noLiveSlots (slots : List SlotState) :
-    State.NoLiveSlots (slots.map (fun slot => match slot with | .live g => SlotState.vacant (g + 1) | other => other)) := by
+theorem map_closeSlot_noLiveSlots (slots : List SlotState) :
+    State.NoLiveSlots (slots.map closeSlot) := by
   intro slot hMem
   rcases List.mem_map.mp hMem with ⟨orig, _, rfl⟩
-  cases orig <;> simp [State.SlotNoLive]
+  cases orig
+  · dsimp [closeSlot]
+    split <;> exact trivial
+  · dsimp [closeSlot]
+    split <;> exact trivial
+  · dsimp [closeSlot]
+    exact trivial
 
 theorem noLiveSlots_contradiction {s : State} {i : SlotId} {hIn : i < s.slots.length} {g : Generation}
     (hNoLive : State.NoLiveSlots s.slots)
@@ -45,7 +51,12 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
           have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 ∧ s.activeLeases = 0 := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv
           rw [hInv'.2.1] at hPrep; contradiction
-  | insert hPhase hInBounds hVacant =>
+  | insertFresh hPhase =>
+      dsimp [PhaseInvariant]
+      cases hPhase with
+      | inl hO => rw [hO]; dsimp
+      | inr hDP => rw [hDP]; dsimp
+  | insertReuse hPhase hInBounds hVacant =>
       dsimp [PhaseInvariant]
       cases hPhase with
       | inl hO => rw [hO]; dsimp
@@ -63,7 +74,7 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
           have hNoLive : State.NoLiveSlots s.slots := by
             unfold PhaseInvariant at hInv; rw [hP] at hInv; exact hInv.1
           exfalso; exact noLiveSlots_contradiction hNoLive hLive
-  | removeRetire hAuth hInBounds hLive =>
+  | removeRetire hAuth hInBounds hLive hExhausted =>
       dsimp [PhaseInvariant]
       cases hP : s.phase with
       | «open» => exact trivial
@@ -103,7 +114,7 @@ theorem Step.phaseInvariant_preserved {s s' : State} {e : Event} (hStep : Step s
       dsimp [PhaseInvariant]
   | closeRegistry hPhase hNoPrepares =>
       dsimp [PhaseInvariant]
-      exact ⟨map_closeRegistry_noLiveSlots s.slots, hNoPrepares⟩
+      exact ⟨map_closeSlot_noLiveSlots s.slots, hNoPrepares⟩
   | finishClose hPhase hNoLeases =>
       dsimp [PhaseInvariant]
       have hInv' : State.NoLiveSlots s.slots ∧ s.activePrepares = 0 := by

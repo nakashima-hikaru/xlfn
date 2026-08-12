@@ -8,16 +8,32 @@ abbrev SessionId := Nat
 abbrev SlotId := Nat
 abbrev Generation := Nat
 
-structure Token where
-  session : SessionId
-  slot : SlotId
-  generation : Generation
-  deriving DecidableEq, Repr
+def maxGeneration : Generation := 2 ^ 64 - 1
+
+def nextGeneration? (g : Generation) : Option Generation :=
+  if g < maxGeneration then some (g + 1) else none
 
 inductive SlotState where
   | vacant (generation : Generation)
   | live (generation : Generation)
   | retired
+  deriving DecidableEq, Repr
+
+def closeSlot : SlotState → SlotState
+  | .vacant g =>
+      match nextGeneration? g with
+      | some next => .vacant next
+      | none => .retired
+  | .live g =>
+      match nextGeneration? g with
+      | some next => .vacant next
+      | none => .retired
+  | .retired => .retired
+
+structure Token where
+  session : SessionId
+  slot : SlotId
+  generation : Generation
   deriving DecidableEq, Repr
 
 inductive Phase where
@@ -57,19 +73,17 @@ def CloseCertified (s : State) : Prop :=
   s.activeLeases = 0 ∧
   NoLiveSlots s.slots
 
-def initialState (session : SessionId) (numSlots : Nat) : State :=
+def initialState (session : SessionId) : State :=
   { session := session
     phase := .«open»
-    slots := List.replicate numSlots (.vacant 0)
+    slots := []
     activePrepares := 0
     activeLeases := 0 }
 
-theorem initialState_noLiveSlots (session : SessionId) (numSlots : Nat) :
-    NoLiveSlots (initialState session numSlots).slots := by
+theorem initialState_noLiveSlots (session : SessionId) :
+    NoLiveSlots (initialState session).slots := by
   intro slot hSlot
   simp [initialState] at hSlot
-  rw [hSlot.2]
-  exact trivial
 
 end State
 

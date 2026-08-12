@@ -19,7 +19,13 @@ def apply? (s : State) (e : Event) : Option State :=
       else
         none
 
-  | .insert slotId gen =>
+  | .insertFresh =>
+      if s.phase = .«open» ∨ s.phase = .drainingPrepares then
+        some { s with slots := s.slots ++ [.live 1] }
+      else
+        none
+
+  | .insertReuse slotId gen =>
       if hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ slotId < s.slots.length then
         if hVacant : s.slots.get ⟨slotId, hPre.2⟩ = .vacant gen then
           some { s with slots := s.slots.set slotId (.live gen) }
@@ -29,7 +35,7 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .removeReuse token nextGen =>
-      if hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGen = token.generation + 1 then
+      if hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = some nextGen then
         if hLive : s.slots.get ⟨token.slot, hPre.2.1⟩ = .live token.generation then
           some { s with slots := s.slots.set token.slot (.vacant nextGen) }
         else
@@ -38,8 +44,8 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .removeRetire token =>
-      if hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length then
-        if hLive : s.slots.get ⟨token.slot, hPre.2⟩ = .live token.generation then
+      if hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = none then
+        if hLive : s.slots.get ⟨token.slot, hPre.2.1⟩ = .live token.generation then
           some { s with slots := s.slots.set token.slot .retired }
         else
           none
@@ -71,10 +77,7 @@ def apply? (s : State) (e : Event) : Option State :=
       if (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ s.activePrepares = 0 then
         some { s with
           phase := .registryClosed
-          slots := s.slots.map (fun slot =>
-            match slot with
-            | .live g => SlotState.vacant (g + 1)
-            | other => other) }
+          slots := s.slots.map closeSlot }
       else
         none
 
@@ -104,13 +107,22 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · simp only [apply?] at h
         rw [if_neg hPre] at h
         cases h
-  | insert slotId gen =>
+  | insertFresh =>
+      by_cases hPre : s.phase = .«open» ∨ s.phase = .drainingPrepares
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.insertFresh hPre
+      · simp only [apply?] at h
+        rw [if_neg hPre] at h
+        cases h
+  | insertReuse slotId gen =>
       by_cases hPre : (s.phase = .«open» ∨ s.phase = .drainingPrepares) ∧ slotId < s.slots.length
       · by_cases hVacant : s.slots.get ⟨slotId, hPre.2⟩ = .vacant gen
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_pos hVacant] at h
           cases h
-          exact Step.insert hPre.1 hPre.2 hVacant
+          exact Step.insertReuse hPre.1 hPre.2 hVacant
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_neg hVacant] at h
           cases h
@@ -118,7 +130,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [dif_neg hPre] at h
         cases h
   | removeReuse token nextGen =>
-      by_cases hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGen = token.generation + 1
+      by_cases hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = some nextGen
       · by_cases hLive : s.slots.get ⟨token.slot, hPre.2.1⟩ = .live token.generation
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_pos hLive] at h
@@ -131,12 +143,12 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
         rw [dif_neg hPre] at h
         cases h
   | removeRetire token =>
-      by_cases hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length
-      · by_cases hLive : s.slots.get ⟨token.slot, hPre.2⟩ = .live token.generation
+      by_cases hPre : s.AuthenticatedFor token ∧ token.slot < s.slots.length ∧ nextGeneration? token.generation = none
+      · by_cases hLive : s.slots.get ⟨token.slot, hPre.2.1⟩ = .live token.generation
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_pos hLive] at h
           cases h
-          exact Step.removeRetire hPre.1 hPre.2 hLive
+          exact Step.removeRetire hPre.1 hPre.2.1 hLive hPre.2.2
         · simp only [apply?] at h
           rw [dif_pos hPre, dif_neg hLive] at h
           cases h
