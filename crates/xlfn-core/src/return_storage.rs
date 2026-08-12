@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+
 /// Allocation storage shared by one encoded Excel return value.
 ///
 /// The arena only contains raw return payloads (`u16` UTF-16 units). Those
@@ -5,13 +7,13 @@
 /// one unit preserves the return block's ownership boundary.
 #[derive(Debug)]
 pub(crate) struct ReturnStorage {
-    pub(crate) arena: bumpalo::Bump,
+    pub(crate) arena: AssertUnwindSafe<bumpalo::Bump>,
 }
 
 impl ReturnStorage {
     pub(crate) fn new() -> Self {
         Self {
-            arena: bumpalo::Bump::new(),
+            arena: AssertUnwindSafe(bumpalo::Bump::new()),
         }
     }
 

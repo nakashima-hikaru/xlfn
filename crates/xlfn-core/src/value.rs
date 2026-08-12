@@ -1860,7 +1860,15 @@ impl<T: IntoExcelValue> IntoExcelValue for Column<T> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use static_assertions::assert_impl_all;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value};
+
+    assert_impl_all!(
+        OwnedExcelValue: std::panic::UnwindSafe, std::panic::RefUnwindSafe
+    );
+    assert_impl_all!(
+        XlArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
+    );
 
     fn convert<T>(raw: &mut XLOPER12) -> XllResult<T>
     where
