@@ -108,3 +108,46 @@ See the repository [lifecycle guide](../guide/src/lifecycle.md),
 [testing guide](../guide/src/testing.md), and
 [security model](../guide/src/security.md) for implementation-facing
 lifecycle and deployment requirements.
+
+## Lifecycle synchronization protocol
+
+`XlFnFormal/Lifecycle` formalizes the concurrency protocol around opening and
+final closing independently of resource shutdown. The model tracks the phase,
+close epoch, open attempt, cleanup owner, and committed generation:
+
+```text
+closed ──beginOpen──> opening ──finishOpen──> open
+   ↑                       │                    │
+   │                       └─failOpen──> openRollbackPending
+   │                                            │
+   └────────────finishOpenRollback─────────────┘
+
+open / opening / openRollbackPending ──requestFinalClose──> closing
+                                                               │
+                                                        finishFinalClose
+                                                               ↓
+                                                             closed
+```
+
+`requestFinalClose` on `closed` only advances the close epoch; it does not
+acquire a cleanup owner or perform another close.
+
+`finishOpenRejectedByClose` and the closing form of `failOpen` clear the
+uncommitted open attempt without publishing a generation. A final-close or
+open-rollback owner may publish `closed` while its guard is still active;
+`releaseCleanupOwner` is the separate return-safety point. Consequently
+`State.ReturnSafe` requires `phase = closed`, no open attempt, and no cleanup
+owner. `State.CanBeginOpen` also requires an exact close-epoch match.
+
+`Invariant.lean` proves `WellFormed` preservation, `Safety.lean` captures the
+lifecycle race properties, and `Checker.lean` provides an executable
+`apply?` with soundness and completeness theorems. `Counterexample.lean`
+records the three unsafe relaxations: ignoring the epoch, committing open
+while closing, and reopening while a published-closed cleanup owner is still
+active.
+
+This protocol is intentionally not composed with the Shutdown ghost machine
+yet. A successful open creates a committed generation and can use the
+Shutdown formalization; an open canceled by final close has no Shutdown ghost
+generation and instead follows the open-rollback certificate path. The next
+composition batch can model those two certificates explicitly.
