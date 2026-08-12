@@ -227,9 +227,11 @@ intermediate full state is reconstructed by `Composition.apply?`:
 ```
 
 Parameterized events carry their concrete attempt/resource payloads, and
-`liftShutdown` nests an existing Shutdown event. The four replay fixtures in
+`liftShutdown` nests an existing Shutdown event. The six replay fixtures in
 `fixtures/composition/` cover committed close, uncommitted final close, open
-rollback, and committed-owner takeover. They can be checked with:
+rollback, committed-owner takeover, an already-closed successful return, and
+two committed close/open cycles in one runtime lifetime. They can be checked
+with:
 
 ```text
 lake exe composition_trace_checker < fixtures/composition/committed.json
@@ -237,8 +239,11 @@ lake exe composition_trace_checker < fixtures/composition/committed.json
 
 The generic refinement boundary is now in place. The Rust feature-gated
 `composition_refinement` producer emits composition events at the lifecycle
-linearization points and converts the observed close/rollback certificate
-state into resource payloads. The CI Lean job feeds those generated traces to
-`composition_trace_checker`, including the committed-owner takeover path. The
+linearization points and converts the concrete quiescence certificates into
+certificate-derived abstract resource images. A trace spans the full
+`Runtime` lifetime, so close/open cycles retain the prior `closeEpoch` history;
+an already-closed `xlAutoClose` return is recorded at its actual boundary.
+The CI Lean job feeds those generated traces to `composition_trace_checker`,
+including the committed-owner takeover, already-closed, and reopen paths. The
 producer uses checked attempt allocation and fail-stop close-epoch advancing,
 so the concrete side does not rely on wrapping `u64` counters.

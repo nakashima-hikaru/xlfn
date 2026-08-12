@@ -144,6 +144,15 @@ impl<S> Runtime<S> {
         self.composition_trace().finish_return();
     }
 
+    // This is called by the xlAutoClose boundary after close_addin_inner has
+    // returned AlreadyClosed; begin_final_close only records its lifecycle
+    // request and does not claim the host call returned successfully.
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn record_composition_already_closed_return(&self) {
+        self.mark_composition_return_pending();
+        self.finish_composition_return();
+    }
+
     #[cfg(any(test, feature = "shutdown-refinement"))]
     fn mark_composition_terminal_pending(&self) {
         self.composition_trace().mark_terminal_pending();

@@ -580,7 +580,11 @@ where
         }
     };
     match success {
-        CloseSuccess::AlreadyClosed => 1,
+        CloseSuccess::AlreadyClosed => {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_composition_already_closed_return();
+            1
+        }
         #[cfg(not(any(test, feature = "shutdown-refinement")))]
         CloseSuccess::Closed {
             witness: _witness,
@@ -1105,6 +1109,44 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COMPOSITION_TRACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn check_composition_trace_with_lean(
+        checker: &std::ffi::OsString,
+        label: &str,
+        trace: &str,
+        artifact_name: &str,
+    ) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
+            let path = std::path::Path::new(&directory).join(artifact_name);
+            std::fs::write(path, trace).expect("write Rust composition trace");
+        }
+        let mut child = Command::new(checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("failed to start composition checker for {label}: {error}")
+            });
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .unwrap_or_else(|error| panic!("failed to write {label} composition trace: {error}"));
+        let output = child.wait_with_output().unwrap_or_else(|error| {
+            panic!("failed to wait for {label} composition checker: {error}")
+        });
+        assert!(
+            output.status.success(),
+            "Lean checker rejected {label} Rust composition trace: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     struct RetryClose;
 
@@ -1673,6 +1715,53 @@ mod tests {
             "Lean checker rejected Rust composition trace: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_already_closed_trace_is_accepted_by_lean_checker() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<()>::new();
+
+        assert_eq!(close_addin::<CleanClose>(&runtime), 1);
+        check_composition_trace_with_lean(
+            &checker,
+            "already closed",
+            &runtime.composition_trace_json(),
+            "rust-composition-already-closed-trace.json",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_reopen_trace_is_accepted_by_lean_checker() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<()>::new();
+
+        for label in ["first", "second"] {
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let mut opening = runtime.begin_open().unwrap();
+            runtime.publish((), Vec::new());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+            crate::diagnostics::report_no_unwind(label, &XllError::Panic);
+            assert_eq!(close_addin::<CleanClose>(&runtime), 1);
+        }
+
+        check_composition_trace_with_lean(
+            &checker,
+            "reopen",
+            &runtime.composition_trace_json(),
+            "rust-composition-reopen-trace.json",
         );
     }
 

@@ -52,12 +52,14 @@ struct TraceDocument {
 }
 
 struct Machine {
+    // Composition history belongs to the Runtime lifetime, not to one
+    // xlAutoClose transaction. A later beginOpen therefore replays after the
+    // closeEpoch and generation transitions emitted by earlier cycles.
     events: Vec<CompositionEvent>,
     trace_truncated: bool,
     returned_success: bool,
     return_pending: bool,
     terminal_pending: bool,
-    active: bool,
 }
 
 impl Machine {
@@ -68,23 +70,20 @@ impl Machine {
             returned_success: false,
             return_pending: false,
             terminal_pending: false,
-            active: false,
         }
     }
 
-    fn reset(&mut self) {
-        self.events.clear();
-        self.trace_truncated = false;
+    fn begin_open(&mut self, sampled_epoch: u64, attempt: u64) {
         self.returned_success = false;
         self.return_pending = false;
         self.terminal_pending = false;
-        self.active = true;
+        self.push(CompositionEvent::BeginOpen {
+            sampled_epoch,
+            attempt,
+        });
     }
 
     fn push(&mut self, event: CompositionEvent) {
-        if !self.active {
-            return;
-        }
         if self.events.len() < MAX_TRACE_EVENTS {
             self.events.push(event);
         } else {
@@ -106,13 +105,7 @@ impl CompositionTrace {
 
     pub(crate) fn begin_open(&self, sampled_epoch: u64, attempt: u64) {
         let mut machine = self.inner.lock();
-        if !machine.active {
-            machine.reset();
-        }
-        machine.push(CompositionEvent::BeginOpen {
-            sampled_epoch,
-            attempt,
-        });
+        machine.begin_open(sampled_epoch, attempt);
     }
 
     pub(crate) fn record(&self, event: CompositionEvent) {
@@ -121,26 +114,21 @@ impl CompositionTrace {
 
     pub(crate) fn mark_return_pending(&self) {
         let mut machine = self.inner.lock();
-        if machine.active {
-            machine.return_pending = true;
-        }
+        machine.return_pending = true;
     }
 
     pub(crate) fn finish_return(&self) {
         let mut machine = self.inner.lock();
-        if machine.active && (machine.return_pending || machine.terminal_pending) {
+        if machine.return_pending || machine.terminal_pending {
             machine.returned_success = machine.return_pending;
             machine.return_pending = false;
             machine.terminal_pending = false;
-            machine.active = false;
         }
     }
 
     pub(crate) fn mark_terminal_pending(&self) {
         let mut machine = self.inner.lock();
-        if machine.active {
-            machine.terminal_pending = true;
-        }
+        machine.terminal_pending = true;
     }
 
     pub(crate) fn trace_json(&self) -> Result<String, serde_json::Error> {

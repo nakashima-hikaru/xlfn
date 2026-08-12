@@ -329,4 +329,6 @@ jobs:
                       rust-composition-owner-takeover-trace.json
                       rust-composition-uncommitted-trace.json
                       rust-composition-open-rollback-trace.json
+                      rust-composition-already-closed-trace.json
+                      rust-composition-reopen-trace.json
                   if-no-files-found: error

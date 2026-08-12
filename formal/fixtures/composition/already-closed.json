@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "initial": "initial",
+  "events": [
+    "requestFinalClose"
+  ],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}
