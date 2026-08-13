@@ -143,6 +143,72 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
 }
 
 #[test]
+fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
+    let runtime = HandleRuntime::new(8);
+    let first_key = test_topic_key("collision-first");
+    let second_key = test_topic_key("collision-second");
+    let first_rtd_key = first_key.format_rtd_key();
+    let second_rtd_key = second_key.format_rtd_key();
+    assert_ne!(first_rtd_key, second_rtd_key);
+
+    let (first_token, created) = runtime
+        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
+        .unwrap();
+    assert!(created);
+
+    // Force the state that a formatter collision would present at the
+    // publication boundary: the existing topic owns the incoming RTD key.
+    {
+        let mut topics = runtime.topics.write();
+        let topic = topics
+            .by_key
+            .get_mut(&first_key)
+            .expect("the first topic must be published");
+        topic.rtd_key = Arc::from(second_rtd_key.as_str());
+        topics.by_rtd_key.remove(first_rtd_key.as_str());
+        topics
+            .by_rtd_key
+            .insert(Arc::from(second_rtd_key.as_str()), first_key);
+    }
+
+    let result = runtime.prepare(second_key, || Ok(Arc::new(DataRecord(2))));
+    assert!(matches!(
+        result,
+        Err(XllError::Internal {
+            diagnostic_id: HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID
+        })
+    ));
+
+    {
+        let topics = runtime.topics.read();
+        assert_eq!(topics.by_key.len(), 1);
+        assert_eq!(
+            topics.by_key.get(&first_key).map(|topic| &topic.token),
+            Some(&first_token)
+        );
+        assert!(!topics.by_key.contains_key(&second_key));
+        assert_eq!(
+            topics.by_rtd_key.get(second_rtd_key.as_str()),
+            Some(&first_key)
+        );
+    }
+
+    // Restore the valid first-topic mapping so the test can release its
+    // registry root through the normal rollback path.
+    {
+        let mut topics = runtime.topics.write();
+        let topic = topics.by_key.get_mut(&first_key).unwrap();
+        topic.rtd_key = Arc::from(first_rtd_key.as_str());
+        topics.by_rtd_key.remove(second_rtd_key.as_str());
+        topics
+            .by_rtd_key
+            .insert(Arc::from(first_rtd_key.as_str()), first_key);
+    }
+    runtime.rollback(&first_rtd_key);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn ref_caller_uses_embedded_sheet_id_without_sheet_callbacks() {
     let _callback_guard = crate::test_callback::lock();
     crate::test_callback::install();

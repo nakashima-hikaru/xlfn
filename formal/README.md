@@ -296,20 +296,26 @@ relationship:
 - `ReverseMapSound`: every reverse entry names a visible topic with the same
   `TopicKey` and `RtdKey`;
 - `ReverseMapComplete`: every visible topic has a matching reverse entry;
-- `RtdKeysUnique`: distinct visible topics cannot share an RTD key.
+- `RtdKeysUnique`: distinct visible topics cannot share an RTD key;
+- `ReverseRtdKeysUnique`: distinct reverse entries cannot share an RTD key.
 
 The executable checker enforces the same reverse-key precondition and update
-shape. `reverse_lookup_resolves_visible_topic` proves that a successful
-`topic_key_for_rtd`-style lookup resolves to a visible topic, while
-`visible_topic_has_reverse_lookup` exposes the converse direction. RTD string
+shape. The Rust publication boundary also rejects an existing `by_key` or
+`by_rtd_key` entry with an internal fail-closed error instead of allowing a
+`HashMap` overwrite. `reverse_lookup_resolves_visible_topic` exposes the
+resolved RTD key and proves that a successful `topic_key_for_rtd`-style lookup
+resolves to a visible topic, while `visible_topic_has_reverse_lookup` proves
+that lookup returns an entry whose key is the topic identity. RTD string
 formatting and byte-level serialization injectivity remain a separate boundary
 proof for a later step.
 
 The H3.1/H3.2 replay fixtures are `fixtures/topics/success.json`,
 `fixtures/topics/seal-before-visible-rollback.json`, and
-`fixtures/topics/seal-after-visible-rollback.json` (with `rollback.json` kept
-as the short compatibility name). Publication fixtures now carry an explicit
-`rtdKey`; they use the same event vocabulary as
+`fixtures/topics/seal-after-visible-rollback.json`, plus
+`fixtures/topics/observe-failure-rollback.json` (with `rollback.json` kept as
+the short compatibility name). Publication fixtures now carry an explicit
+`rtdKey`; the observe-failure path exercises paired `withdrawVisible` removal
+before registry rollback. They use the same event vocabulary as
 `XlFnFormal.Handle.Topics.Checker`, and Lean proves replay and close
-certification for all three paths. The producer-facing JSON parser will be
+certification for all four paths. The producer-facing JSON parser will be
 added when the Rust topic recorder is introduced.

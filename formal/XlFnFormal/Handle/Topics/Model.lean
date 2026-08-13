@@ -87,6 +87,9 @@ def State.ReverseMapComplete (s : State) : Prop :=
 def State.RtdKeysUnique (s : State) : Prop :=
   s.byKey.Pairwise (fun lhs rhs => lhs.rtdKey ≠ rhs.rtdKey)
 
+def State.ReverseRtdKeysUnique (s : State) : Prop :=
+  s.byRtdKey.Pairwise (fun lhs rhs => lhs.rtdKey ≠ rhs.rtdKey)
+
 def State.VisibleTopicRootsValid (s : State) : Prop :=
   ∀ topic ∈ s.byKey, Runtime.TokenLive s.runtime.registry topic.token
 
@@ -128,6 +131,7 @@ def State.Invariant (s : State) : Prop :=
   s.VisibleKeysUnique ∧
   s.VisibleTokensUnique ∧
   s.RtdKeysUnique ∧
+  s.ReverseRtdKeysUnique ∧
   s.ReverseMapSound ∧
   s.ReverseMapComplete ∧
   s.VisibleTopicRootsValid ∧

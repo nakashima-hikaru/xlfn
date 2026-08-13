@@ -79,7 +79,7 @@ theorem committed_topic_root_is_live
   (hTopic : topic ∈ s.byKey)
   (hCommitted : topic.stage = .committed) :
     Runtime.TokenLive s.runtime.registry topic.token :=
-  hInv.2.2.2.2.2.2.2.2.2.1 topic hTopic
+  hInv.2.2.2.2.2.2.2.2.2.2.1 topic hTopic
 
 theorem provisional_topic_has_pending_provenance
     {s : State} {topic : Topic}
@@ -91,26 +91,53 @@ theorem provisional_topic_has_pending_provenance
       s.runtime.findInitializer? init.runtimeId =
         some { id := init.runtimeId, stage := .pending topic.token } :=
   by
-    rcases hInv with ⟨_, _, _, _, _, _, _, _, _, _, hProv⟩
+    rcases hInv with ⟨_, _, _, _, _, _, _, _, _, _, _, hProv⟩
     exact hProv topic hTopic hProvisional
 
 theorem reverse_lookup_resolves_visible_topic
     {s : State} {rtdKey : RtdKey} {entry : ReverseTopic}
     (hInv : s.Invariant)
     (hFind : s.findReverse? rtdKey = some entry) :
-    ∃ topic ∈ s.byKey,
-      topic.key = entry.key ∧ topic.rtdKey = entry.rtdKey := by
-  have hSound : s.ReverseMapSound := hInv.2.2.2.2.2.2.2.1
-  exact hSound entry (mem_of_findReverse_some hFind)
+    entry.rtdKey = rtdKey ∧
+      ∃ topic ∈ s.byKey,
+        topic.key = entry.key ∧ topic.rtdKey = rtdKey := by
+  have hSound : s.ReverseMapSound := hInv.2.2.2.2.2.2.2.2.1
+  have hRtdKey := rtdKey_of_findReverse_some hFind
+  refine ⟨hRtdKey, ?_⟩
+  rcases hSound entry (mem_of_findReverse_some hFind) with
+    ⟨topic, hTopic, hTopicKey, hTopicRtdKey⟩
+  exact ⟨topic, hTopic, hTopicKey, hTopicRtdKey.trans hRtdKey⟩
 
 theorem visible_topic_has_reverse_lookup
     {s : State} {topic : Topic}
     (hInv : s.Invariant)
     (hTopic : topic ∈ s.byKey) :
-    ∃ entry ∈ s.byRtdKey,
-      entry.key = topic.key ∧ entry.rtdKey = topic.rtdKey := by
-  have hComplete : s.ReverseMapComplete := hInv.2.2.2.2.2.2.2.2.1
-  exact hComplete topic hTopic
+    ∃ entry,
+      s.findReverse? topic.rtdKey = some entry ∧
+      entry.key = topic.key := by
+  have hComplete : s.ReverseMapComplete := hInv.2.2.2.2.2.2.2.2.2.1
+  rcases hComplete topic hTopic with ⟨entry, hEntryMem, hEntryKey, hEntryRtdKey⟩
+  have hSome : (s.findReverse? topic.rtdKey).isSome = true := by
+    dsimp [State.findReverse?]
+    rw [List.find?_isSome]
+    exact ⟨entry, hEntryMem, beq_iff_eq.mpr hEntryRtdKey⟩
+  generalize hFind : s.findReverse? topic.rtdKey = output at hSome
+  cases output with
+  | none => simp at hSome
+  | some found =>
+      have hSound : s.ReverseMapSound := hInv.2.2.2.2.2.2.2.2.1
+      rcases hSound found (mem_of_findReverse_some hFind) with
+        ⟨visible, hVisible, hVisibleKey, hVisibleRtdKey⟩
+      have hFoundRtdKey := rtdKey_of_findReverse_some hFind
+      have hVisibleEq : visible = topic := by
+        by_cases hEq : visible = topic
+        · exact hEq
+        · exfalso
+          have hDistinct := distinct_topics_have_rtd_keys
+            hInv.2.2.2.2.2.2.1 hVisible hTopic hEq
+          exact hDistinct (hVisibleRtdKey.trans hFoundRtdKey)
+      refine ⟨found, rfl, ?_⟩
+      exact hVisibleKey.symm.trans (congrArg Topic.key hVisibleEq)
 
 theorem publish_visible_exposes_pending_provenance
     {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
@@ -222,7 +249,7 @@ theorem no_visible_topics_when_closed
       have hMem : head ∈ s.byKey := by
         rw [hByKey]
         exact List.mem_cons_self
-      rcases hInv.2.2.2.2.2.2.2.2.2.1 head hMem with
+      rcases hInv.2.2.2.2.2.2.2.2.2.2.1 head hMem with
         ⟨hSession, ⟨hBounds, hSlot⟩⟩
       have hNoLive := hPhase.2.2.2.2 head.token.slot hBounds
       apply hNoLive
@@ -233,7 +260,7 @@ theorem no_reverse_entries_when_closed
     {s : State} (hInv : s.Invariant)
     (hClosed : s.runtime.phase = .closed) :
     s.byRtdKey = [] := by
-  have hSound : s.ReverseMapSound := hInv.2.2.2.2.2.2.2.1
+  have hSound : s.ReverseMapSound := hInv.2.2.2.2.2.2.2.2.1
   cases hReverse : s.byRtdKey with
   | nil => rfl
   | cons head tail =>

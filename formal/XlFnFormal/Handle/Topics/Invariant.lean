@@ -80,7 +80,7 @@ theorem initial_invariant (session : Registry.SessionId) :
     (initialState session).Invariant := by
   refine ⟨Runtime.initial_runtimeInvariant session,
     List.Pairwise.nil, List.Pairwise.nil, ?_, List.Pairwise.nil,
-    List.Pairwise.nil, List.Pairwise.nil, ?_, ?_, ?_, ?_⟩
+    List.Pairwise.nil, List.Pairwise.nil, List.Pairwise.nil, ?_, ?_, ?_, ?_⟩
   · intro init hMem
     contradiction
   · intro entry hMem
@@ -131,6 +131,16 @@ theorem mem_of_findReverse_some
     entry ∈ s.byRtdKey := by
   dsimp [State.findReverse?] at hFind
   exact Runtime.List.mem_of_find?_eq_some' hFind
+
+theorem rtdKey_of_findReverse_some
+    {s : State} {rtdKey : RtdKey} {entry : ReverseTopic}
+    (hFind : s.findReverse? rtdKey = some entry) :
+    entry.rtdKey = rtdKey := by
+  dsimp [State.findReverse?] at hFind
+  have hPred : (entry.rtdKey == rtdKey) = true := by
+    exact List.find?_some
+      (p := fun candidate : ReverseTopic => candidate.rtdKey == rtdKey) hFind
+  exact beq_iff_eq.mp hPred
 
 theorem mem_of_findInitializing_some
     {s : State} {key : TopicKey} {init : Initializer}
@@ -931,6 +941,28 @@ theorem Step.rtdKeysUnique_preserved
       rollbackPendingRetire | finishInitializer | beginPrepare | endPrepare |
       beginLookup | endLookup | closeRegistry | finishClose => exact hInv
 
+theorem Step.reverseRtdKeysUnique_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.ReverseRtdKeysUnique)
+    (hStep : Step s e s') :
+    s'.ReverseRtdKeysUnique := by
+  cases hStep with
+  | beginInitializer => exact hInv
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i key runtimeId rtdKey
+      dsimp [State.ReverseRtdKeysUnique] at hInv ⊢
+      apply pairwise_append_singleton_topics hInv
+      intro entry hMem
+      exact no_reverse_member hNoRtdKey hMem
+  | commitPublication => exact hInv
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
+      dsimp [State.ReverseRtdKeysUnique, State.removeReverse] at hInv ⊢
+      exact pairwise_filter_topics (fun entry => entry.rtdKey != _) hInv
+  | sealTopics => exact List.Pairwise.nil
+  | insertPendingFresh | insertPendingReuse | rollbackPendingReuse |
+      rollbackPendingRetire | finishInitializer | beginPrepare | endPrepare |
+      beginLookup | endLookup | closeRegistry | finishClose => exact hInv
+
 theorem distinct_topics_have_rtd_keys
     {s : State} {left right : Topic}
     (hInv : s.RtdKeysUnique)
@@ -1129,7 +1161,7 @@ theorem Step.invariant_preserved
     s'.Invariant := by
   rcases hInv with
     ⟨hRuntime, hKeys, hIds, hBacked, hVisibleKeys, hVisibleTokens, hRtdKeys,
-      hReverseSound, hReverseComplete, hRoots, hProv⟩
+      hReverseRtdKeys, hReverseSound, hReverseComplete, hRoots, hProv⟩
   exact ⟨
     Step.runtimeInvariant_preserved hRuntime hStep,
     Step.initializingKeysUnique_preserved hKeys hStep,
@@ -1138,6 +1170,7 @@ theorem Step.invariant_preserved
     Step.visibleKeysUnique_preserved hVisibleKeys hStep,
     Step.visibleTokensUnique_preserved hVisibleTokens hStep,
     Step.rtdKeysUnique_preserved hRtdKeys hReverseComplete hStep,
+    Step.reverseRtdKeysUnique_preserved hReverseRtdKeys hStep,
     Step.reverseMapSound_preserved hReverseSound hVisibleKeys hStep,
     Step.reverseMapComplete_preserved hReverseComplete hRtdKeys hVisibleKeys hStep,
     Step.visibleTopicRootsValid_preserved hRoots hStep,

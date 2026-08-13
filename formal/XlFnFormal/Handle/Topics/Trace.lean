@@ -73,6 +73,15 @@ def seal_after_visible_rollback_trace : List Event :=
    .rollbackPendingReuse fixtureKey 1 2,
    .finishInitializer fixtureKey 1] ++ sealed_close_suffix
 
+def observe_failure_rollback_trace : List Event :=
+  [.beginPrepare,
+   .beginInitializer fixtureKey 1,
+   .insertPendingFresh fixtureKey 1,
+   .publishVisible fixtureKey 1 fixtureRtdKey,
+   .withdrawVisible fixtureKey 1,
+   .rollbackPendingReuse fixtureKey 1 2,
+   .finishInitializer fixtureKey 1] ++ close_suffix
+
 def rollback_trace : List Event := seal_before_visible_rollback_trace
 
 theorem replay_close_certified
@@ -111,6 +120,12 @@ theorem seal_before_visible_rollback_trace_replays :
 
 theorem seal_after_visible_rollback_trace_replays :
     ∃ s, replay? (initialState 0) seal_after_visible_rollback_trace = some s ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  apply replay_phase_is_closed
+  native_decide
+
+theorem observe_failure_rollback_trace_replays :
+    ∃ s, replay? (initialState 0) observe_failure_rollback_trace = some s ∧
       s.runtime.phase = .closed ∧ CloseCertified s := by
   apply replay_phase_is_closed
   native_decide

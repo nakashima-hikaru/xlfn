@@ -11,6 +11,8 @@ pub(crate) struct TopicState {
     pub(crate) closed: bool,
 }
 
+pub(crate) const HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID: u64 = 0x4841_4e44_5254_4443;
+
 impl Default for TopicState {
     fn default() -> Self {
         Self {
@@ -367,6 +369,11 @@ impl HandleRuntime {
             return Err(XllError::Closing);
         }
         let rtd_key: Arc<str> = key.format_rtd_key().into();
+        if topics.by_key.contains_key(&key) || topics.by_rtd_key.contains_key(rtd_key.as_ref()) {
+            return Err(XllError::Internal {
+                diagnostic_id: HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID,
+            });
+        }
         topics.by_key.insert(
             key,
             Topic {
