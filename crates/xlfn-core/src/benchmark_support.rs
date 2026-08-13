@@ -131,6 +131,10 @@ pub enum SyncBenchKind {
     ReturnEncodeScalarOnly,
     #[cfg(feature = "bench-diagnostics")]
     ReturnBoxOnly,
+    #[cfg(feature = "bench-diagnostics")]
+    ReturnPoolOnly,
+    #[cfg(feature = "bench-diagnostics")]
+    ReturnPoolBlockLocal,
 }
 
 #[derive(Clone, Copy)]
@@ -188,6 +192,13 @@ impl SyncBoundaryWorkerPool {
             .expect("finish_open");
         drop(open_attempt);
 
+        #[cfg(feature = "bench-diagnostics")]
+        let benchmark_pool = matches!(
+            kind,
+            SyncBenchKind::ReturnPoolOnly | SyncBenchKind::ReturnPoolBlockLocal
+        )
+        .then(|| Arc::new(crate::return_value::BenchmarkReturnBlockPool::new()));
+
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);
         let mut workers = Vec::with_capacity(threads);
@@ -198,6 +209,8 @@ impl SyncBoundaryWorkerPool {
             start_tx.push(s_tx);
 
             let r = Arc::clone(&runtime);
+            #[cfg(feature = "bench-diagnostics")]
+            let worker_benchmark_pool = benchmark_pool.as_ref().map(Arc::clone);
             let handle = std::thread::spawn(move || {
                 let _subscriber_guard = matches!(kind, SyncBenchKind::ScalarReturnUdfTraceEnabled)
                     .then(install_benchmark_subscriber);
@@ -274,6 +287,24 @@ impl SyncBoundaryWorkerPool {
                                 crate::return_value::benchmark_return_box_only();
                             }
                         }
+                        #[cfg(feature = "bench-diagnostics")]
+                        SyncBenchKind::ReturnPoolOnly => {
+                            let pool = worker_benchmark_pool
+                                .as_ref()
+                                .expect("pool benchmark must own a pool");
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_pooled_box_only(pool);
+                            }
+                        }
+                        #[cfg(feature = "bench-diagnostics")]
+                        SyncBenchKind::ReturnPoolBlockLocal => {
+                            let pool = worker_benchmark_pool
+                                .as_ref()
+                                .expect("pool benchmark must own a pool");
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_pooled_scalar_return(pool);
+                            }
+                        }
                     }
                     d_tx.send(()).unwrap();
                 }
@@ -300,6 +331,11 @@ impl SyncBoundaryWorkerPool {
                 .expect("worker thread finished batch processing");
         }
     }
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub fn return_block_size_bytes() -> usize {
+    crate::return_value::benchmark_return_block_size()
 }
 
 impl Drop for SyncBoundaryWorkerPool {

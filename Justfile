@@ -97,5 +97,8 @@ bench-handle-formula:
 bench-diagnostics:
     cargo bench --package xlfn-core --bench return_diagnostics --features bench-diagnostics --locked
 
+bench-pool-prototype:
+    cargo bench --package xlfn-core --bench return_pool_prototype --features bench-diagnostics --locked
+
 bench-check:
     cargo clippy --package xlfn-core --benches --features "bench-diagnostics async" --locked -- -D warnings

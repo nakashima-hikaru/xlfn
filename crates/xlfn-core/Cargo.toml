@@ -58,6 +58,11 @@ name = "return_diagnostics"
 harness = false
 required-features = ["bench-diagnostics"]
 
+[[bench]]
+name = "return_pool_prototype"
+harness = false
+required-features = ["bench-diagnostics"]
+
 
 [dependencies]
 arc-swap.workspace = true

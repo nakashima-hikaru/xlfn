@@ -637,6 +637,18 @@ impl PreparedReturn {
 
         ReturnBlock::into_non_null(block)
     }
+
+    #[cfg(feature = "bench-diagnostics")]
+    fn publish_benchmark_pool(self, pool: &BenchmarkReturnBlockPool) {
+        let mut block = pool.acquire();
+        block.oper = self.oper;
+        block.storage = self.storage;
+        block.array = self.array;
+        block.ownership = ReturnOwnership::Local;
+        block.magic = RETURN_MAGIC;
+        std::hint::black_box(&block.oper);
+        pool.release(block);
+    }
 }
 
 impl ReturnBlock {
@@ -645,6 +657,72 @@ impl ReturnBlock {
         // SAFETY: Box::into_raw always returns a non-null, properly aligned pointer.
         unsafe { NonNull::new_unchecked(pointer.cast::<XLOPER12>()) }
     }
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) struct BenchmarkReturnBlockPool {
+    // This pool is owned by one diagnostic benchmark runtime. Each stripe is
+    // independently locked, and any worker may return a block to its current
+    // stripe without assuming that allocation and release use the same thread.
+    // The benchmark pool stores exclusive Box ownership as an address token.
+    // XLOPER12 contains raw pointers and is intentionally not Send, while the
+    // pool itself must be shareable by the benchmark worker threads.
+    stripes: [Mutex<Vec<usize>>; RETURN_STRIPE_COUNT],
+}
+
+#[cfg(feature = "bench-diagnostics")]
+impl BenchmarkReturnBlockPool {
+    pub(crate) fn new() -> Self {
+        Self {
+            stripes: std::array::from_fn(|_| Mutex::new(Vec::new())),
+        }
+    }
+
+    fn allocate_block() -> Box<ReturnBlock> {
+        Box::new(ReturnBlock {
+            oper: XLOPER12::number(42.0),
+            storage: None,
+            array: None,
+            ownership: ReturnOwnership::Local,
+            magic: RETURN_MAGIC,
+        })
+    }
+
+    fn acquire(&self) -> Box<ReturnBlock> {
+        let address = self.stripes[current_return_stripe()].lock().pop();
+        match address {
+            Some(address) => {
+                // SAFETY: release stores only pointers produced by
+                // Box::into_raw, and the stripe mutex transfers unique
+                // ownership to this call before reconstruction.
+                unsafe { Box::from_raw(address as *mut ReturnBlock) }
+            }
+            None => Self::allocate_block(),
+        }
+    }
+
+    fn release(&self, block: Box<ReturnBlock>) {
+        let address = Box::into_raw(block) as usize;
+        self.stripes[current_return_stripe()].lock().push(address);
+    }
+}
+
+#[cfg(feature = "bench-diagnostics")]
+impl Drop for BenchmarkReturnBlockPool {
+    fn drop(&mut self) {
+        for stripe in &self.stripes {
+            for address in stripe.lock().drain(..) {
+                // SAFETY: every token was created by Box::into_raw and is
+                // drained exactly once when the pool releases its ownership.
+                unsafe { drop(Box::from_raw(address as *mut ReturnBlock)) };
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) fn benchmark_return_block_size() -> usize {
+    std::mem::size_of::<ReturnBlock>()
 }
 
 /// Total payload requested from the allocator before UTF-16 buffers are added.
@@ -788,6 +866,20 @@ pub(crate) fn benchmark_return_box_only() {
 
     // SAFETY: `pointer` is the unique allocation created immediately above.
     unsafe { drop(Box::from_raw(pointer)) };
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) fn benchmark_pooled_box_only(pool: &BenchmarkReturnBlockPool) {
+    let block = pool.acquire();
+    std::hint::black_box(&block.oper);
+    pool.release(block);
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) fn benchmark_pooled_scalar_return(pool: &BenchmarkReturnBlockPool) {
+    PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+        .expect("scalar benchmark return encoding must succeed")
+        .publish_benchmark_pool(pool);
 }
 
 fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
