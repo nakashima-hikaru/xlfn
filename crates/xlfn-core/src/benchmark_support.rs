@@ -126,6 +126,8 @@ pub enum SyncBenchKind {
     ReturnTrackerArcOnly,
     ReturnTrackerOnly,
     ReturnBlockLocal,
+    ReturnEncodeScalarOnly,
+    ReturnBoxOnly,
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +261,16 @@ impl SyncBoundaryWorkerPool {
                         SyncBenchKind::ReturnBlockLocal => {
                             for _ in 0..iterations_per_thread {
                                 crate::return_value::benchmark_local_scalar_return();
+                            }
+                        }
+                        SyncBenchKind::ReturnEncodeScalarOnly => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_encode_scalar_only();
+                            }
+                        }
+                        SyncBenchKind::ReturnBoxOnly => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_return_box_only();
                             }
                         }
                     }

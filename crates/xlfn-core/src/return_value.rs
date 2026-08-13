@@ -773,6 +773,29 @@ pub(crate) fn benchmark_local_scalar_return() {
     unsafe { free_return(pointer.as_ptr()) };
 }
 
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_encode_scalar_only() {
+    let prepared = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+        .expect("scalar benchmark return encoding must succeed");
+    std::hint::black_box(prepared);
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_return_box_only() {
+    let block = Box::new(ReturnBlock {
+        oper: XLOPER12::number(42.0),
+        storage: None,
+        array: None,
+        ownership: ReturnOwnership::Local,
+        magic: RETURN_MAGIC,
+    });
+    let pointer = Box::into_raw(block);
+    std::hint::black_box(pointer);
+
+    // SAFETY: `pointer` is the unique allocation created immediately above.
+    unsafe { drop(Box::from_raw(pointer)) };
+}
+
 fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
     PreparedReturn::error(error).publish_excel(producer)
 }
