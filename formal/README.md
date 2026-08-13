@@ -306,8 +306,8 @@ shape. The Rust publication boundary also rejects an existing `by_key` or
 resolved RTD key and proves that a successful `topic_key_for_rtd`-style lookup
 resolves to a visible topic, while `visible_topic_has_reverse_lookup` proves
 that lookup returns an entry whose key is the topic identity. RTD string
-formatting and byte-level serialization injectivity remain a separate boundary
-proof for a later step.
+formatting and byte-level serialization are kept as a separate boundary from
+the H3.2 ownership invariant.
 
 The H3.1/H3.2 replay fixtures are `fixtures/topics/success.json`,
 `fixtures/topics/seal-before-visible-rollback.json`, and
@@ -317,5 +317,27 @@ the short compatibility name). Publication fixtures now carry an explicit
 `rtdKey`; the observe-failure path exercises paired `withdrawVisible` removal
 before registry rollback. They use the same event vocabulary as
 `XlFnFormal.Handle.Topics.Checker`, and Lean proves replay and close
-certification for all four paths. The producer-facing JSON parser will be
-added when the Rust topic recorder is introduced.
+certification for all four paths.
+
+## RTD wire serialization boundary
+
+`XlFnFormal/Handle/Topics/Serialization` models the concrete RTD wire identity
+without reusing the abstract H3 topic key. `FormulaTopicKeyWire` stores the
+sheet id as a `Nat` with an explicit 32/64-bit `PointerWidth` bound, row and
+column as bounded `Int` values corresponding to Rust `i32`, the UDF id as its
+UTF-8 byte sequence, and the argument digest as exactly 32 bytes.
+
+`formatRtdKey` emits the concrete byte layout: canonical decimal fields joined
+by byte `0x1f`, followed by the UDF bytes and exactly 64 lower-case hex digest
+bytes. The parser does not split every separator. It consumes the first three
+separators for the numeric fields and locates the final separator plus the
+fixed-size digest suffix, so a separator byte inside the UDF id is preserved.
+`parseRtdKeyFor` is the executable, bounds-checked parser; the unbounded
+`parseRtdKey` is useful for the core byte-level parser theorem.
+
+The safety layer proves canonical decimal and digest parsing, UTF-8 validity
+for encoded strings, `parse_format_roundtrip`, bounded parser soundness, and
+`format_injective`. This serialization proof is intentionally downstream of
+H3.2: reverse-map consistency does not depend on formatter injectivity, while
+the future Rust producer refinement can use these theorems to show that
+concrete RTD keys cannot collide.
