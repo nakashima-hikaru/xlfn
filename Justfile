@@ -51,6 +51,7 @@ features:
         --feature-powerset \
         --depth 2 \
         --exclude-features bench-internals \
+        --exclude-features bench-diagnostics \
         --no-dev-deps
 
 deny:
