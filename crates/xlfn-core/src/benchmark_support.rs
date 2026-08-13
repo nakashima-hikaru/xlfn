@@ -122,6 +122,8 @@ pub enum SyncBenchKind {
     FullAdmission,
     ScalarReturnNoSubscriber,
     ScalarReturnUdfTraceEnabled,
+    ReturnStripeOnly,
+    ReturnTrackerArcOnly,
     ReturnTrackerOnly,
     ReturnBlockLocal,
 }
@@ -240,6 +242,18 @@ impl SyncBoundaryWorkerPool {
                                     .expect("return admission must be open for benchmark");
                                 std::hint::black_box(&producer);
                                 drop(producer);
+                            }
+                        }
+                        SyncBenchKind::ReturnStripeOnly => {
+                            for _ in 0..iterations_per_thread {
+                                r.return_tracker().benchmark_stripe_only();
+                            }
+                        }
+                        SyncBenchKind::ReturnTrackerArcOnly => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_return_tracker_arc_only(
+                                    r.return_tracker(),
+                                );
                             }
                         }
                         SyncBenchKind::ReturnBlockLocal => {

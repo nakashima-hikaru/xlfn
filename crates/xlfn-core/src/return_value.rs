@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use xlfn_sys::{
     XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLRET_ABORT, XLRET_SUCCESS,
     XLRET_UNCALCED, XLTYPE_MULTI, XLTYPE_STR,
@@ -93,6 +94,7 @@ impl CleanupDebtSet {
 const RETURN_STRIPE_COUNT: usize = 32;
 const RETURN_STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
 const RETURN_STRIPE_COUNT_MASK: usize = RETURN_STRIPE_SEALED - 1;
+const RETURN_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 thread_local! {
     static RETURN_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -194,8 +196,7 @@ impl ReturnStripe {
 pub(crate) struct ReturnTracker {
     // Ordinary producer entry and obligation release use one thread-assigned
     // stripe. Shutdown seals all stripes and only then scans them for quiescence.
-    stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
-    waiters: AtomicUsize,
+    stripes: [Arc<ReturnStripe>; RETURN_STRIPE_COUNT],
     wait_lock: Mutex<()>,
     quiescent: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -203,10 +204,12 @@ pub(crate) struct ReturnTracker {
 }
 
 pub(crate) struct ReturnObligation {
+    stripe: Arc<ReturnStripe>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
     tracker: Arc<ReturnTracker>,
-    stripe_index: usize,
 }
 
+#[cfg(any(test, feature = "shutdown-refinement"))]
 impl ReturnObligation {
     #[allow(
         dead_code,
@@ -219,15 +222,14 @@ impl ReturnObligation {
 
 impl Drop for ReturnObligation {
     fn drop(&mut self) {
-        self.tracker.release_obligation(self.stripe_index);
+        self.stripe.release();
     }
 }
 
 impl ReturnTracker {
     pub(crate) fn new_closed() -> Self {
         Self {
-            stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
-            waiters: AtomicUsize::new(0),
+            stripes: std::array::from_fn(|_| Arc::new(ReturnStripe::new_closed())),
             wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -272,15 +274,11 @@ impl ReturnTracker {
         }
         Some(ReturnProducerGuard {
             obligation: Some(ReturnObligation {
+                stripe: Arc::clone(&self.stripes[stripe_index]),
+                #[cfg(any(test, feature = "shutdown-refinement"))]
                 tracker: Arc::clone(self),
-                stripe_index,
             }),
         })
-    }
-
-    fn release_obligation(&self, stripe_index: usize) {
-        self.stripes[stripe_index].release();
-        self.notify_if_quiescent();
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
@@ -288,43 +286,40 @@ impl ReturnTracker {
     }
 
     pub(crate) fn admission_closed(&self) -> bool {
-        self.stripes.iter().all(ReturnStripe::is_sealed)
+        self.stripes.iter().all(|stripe| stripe.is_sealed())
     }
 
     pub(crate) fn wait_for_quiescence(&self) {
         debug_assert!(self.admission_closed());
 
         let mut guard = self.wait_lock.lock();
-        self.waiters.fetch_add(1, Ordering::AcqRel);
 
         while !self.is_quiescent() {
-            self.quiescent.wait(&mut guard);
-        }
-
-        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
-    }
-
-    fn notify_if_quiescent(&self) {
-        if self.waiters.load(Ordering::Acquire) == 0 {
-            return;
-        }
-
-        if !self.is_quiescent() {
-            return;
-        }
-
-        let _guard = self.wait_lock.lock();
-
-        if self.is_quiescent() {
-            self.quiescent.notify_all();
+            self.quiescent
+                .wait_for(&mut guard, RETURN_QUIESCENCE_RECHECK_INTERVAL);
         }
     }
 
     #[cfg(test)]
     fn outstanding_obligations(&self) -> usize {
-        self.stripes.iter().map(ReturnStripe::active).sum()
+        self.stripes.iter().map(|stripe| stripe.active()).sum()
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn benchmark_stripe_only(&self) {
+        let stripe = &self.stripes[current_return_stripe()];
+        assert!(
+            stripe.try_enter(),
+            "return admission must be open for benchmark"
+        );
+        stripe.release();
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_return_tracker_arc_only(tracker: &Arc<ReturnTracker>) {
+    let cloned = Arc::clone(tracker);
+    std::hint::black_box(cloned);
 }
 
 pub(crate) struct ReturnProducerGuard {
