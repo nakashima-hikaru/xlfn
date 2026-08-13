@@ -1,0 +1,50 @@
+import XlFnFormal.Handle.Registry.Invariant
+
+set_option autoImplicit false
+set_option linter.unusedVariables false
+
+namespace XlFnFormal.Handle.Registry
+
+theorem max_generation_has_no_successor :
+    nextGeneration? maxGeneration = none := by
+  dsimp [nextGeneration?, maxGeneration]
+
+theorem retired_is_permanent
+    {s t : State} {slot : SlotId}
+    (hRetired : RetiredAt s slot)
+    (hReach : Reachable s t) :
+    RetiredAt t slot :=
+  Reachable.retiredAt_preserved hRetired hReach
+
+theorem remove_reuse_reinsert_prevents_aba
+    (session : SessionId)
+    (hMax : 1 < maxGeneration) :
+    let s0 := initialState session
+    let token1 : Token := { session := session, slot := 0, generation := 1 }
+    let s1 := { s0 with slots := [.live 1] }
+    let s2 := { s1 with slots := [.vacant 2] }
+    let s3 := { s2 with slots := [.live 2] }
+    Step s0 .insertFresh s1 ∧
+    Step s1 (.removeReuse token1 2) s2 ∧
+    Step s2 (.insertReuse 0 2) s3 ∧
+    ¬ ∃ s', Step s3 (.beginLookup token1) s' := by
+  intro s0 token1 s1 s2 s3
+  have hNext : nextGeneration? 1 = some 2 := by
+    dsimp [nextGeneration?]
+    rw [if_pos hMax]
+  have hStep1 : Step s0 .insertFresh s1 := Step.insertFresh (by rfl)
+  have hInBounds1 : token1.slot < s1.slots.length := by dsimp [token1, s1, s0, initialState]; decide
+  have hLive1 : s1.slots.get ⟨token1.slot, hInBounds1⟩ = .live token1.generation := by rfl
+  have hAuth1 : s1.AuthenticatedFor token1 := by rfl
+  have hStep2 : Step s1 (.removeReuse token1 2) s2 := Step.removeReuse hAuth1 hInBounds1 hLive1 hNext
+  have hInBounds2 : 0 < s2.slots.length := by dsimp [s2, s1, s0, initialState]; decide
+  have hVacant2 : s2.slots.get ⟨0, hInBounds2⟩ = .vacant 2 := by rfl
+  have hStep3 : Step s2 (.insertReuse 0 2) s3 := Step.insertReuse (by rfl) hInBounds2 hVacant2
+  refine ⟨hStep1, hStep2, hStep3, ?_⟩
+  intro ⟨s', hLookup⟩
+  cases hLookup
+  rename_i hLive3
+  dsimp [s3, token1] at hLive3
+  contradiction
+
+end XlFnFormal.Handle.Registry
