@@ -18,8 +18,5 @@ xlfn-core.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true
 
-[dev-dependencies]
-trybuild.workspace = true
-
 [lints]
 workspace = true
