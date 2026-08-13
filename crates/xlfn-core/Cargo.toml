@@ -18,6 +18,7 @@ async = [
     "dep:futures-util",
 ]
 bench-internals = []
+bench-diagnostics = ["bench-internals"]
 
 [lib]
 bench = false
@@ -51,6 +52,11 @@ required-features = ["bench-internals"]
 name = "formula_fingerprint"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "return_diagnostics"
+harness = false
+required-features = ["bench-diagnostics"]
 
 
 [dependencies]

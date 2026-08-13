@@ -256,28 +256,41 @@ deliberately out of scope until H3.2. `State` extends `Runtime.State` with the
 visible topic table and initializer owners, so lifecycle phase and seal gates
 are shared with the H2 model.
 
-Publication is split into a provisional visible phase and a final commit:
+Pending allocation is separate from visible publication:
 
-`beginInitializer → insertPending → publishVisible(provisional) →
+`beginInitializer → insertPendingFresh/Reuse → publishVisible(provisional) →
 commitPublication → finishInitializer`.
 
-Rollback removes the provisional topic before the Runtime pending root is
-resolved. The current checker and safety layer prove these single-flight/root
-obligations:
+`insertPendingFresh/Reuse` only updates the Runtime pending root. The
+`.open`-only `publishVisible` step is the sole transition that appends to
+`byKey`; `sealTopics` clears `byKey` and therefore models the concrete close
+boundary where visible topics are discarded. Pending insertion remains
+available in `drainingPrepares`, matching the seal-before-insert race.
+
+Rollback resolves the Runtime pending root after the visible entry has either
+been withdrawn or cleared by sealing. The current checker and safety layer
+prove these single-flight/root obligations:
 
 - a key has at most one active initializer owner;
 - a key has at most one visible topic and therefore at most one committed topic;
 - distinct visible topics have distinct registry tokens;
+- every H3 initializer is backed by a Runtime initializer with the same id;
 - a provisional topic is linked to the matching `Runtime.InitializerId` and
   `pending(token)` root;
 - every committed topic has a live registry token.
 
 The last property is expressed through `Registry.TokenLive`, so a committed
-topic cannot retain an unpublished or stale registry root. H3.2 will add
-`byKey`/`byRtdKey` consistency and RTD-key uniqueness before Excel ownership
-and server-generation transactions are introduced.
+topic cannot retain an unpublished or stale registry root. `closeRegistry` and
+`finishClose` are included in the model; reachable closed states carry a
+`CloseCertified` certificate containing Runtime quiescence, an empty visible
+topic table, and no H3 initializer owners. H3.2 will add `byKey`/`byRtdKey`
+consistency and RTD-key uniqueness before Excel ownership and server-generation
+transactions are introduced.
 
-The first H3.1 replay fixtures are `fixtures/topics/success.json` and
-`fixtures/topics/rollback.json`. They use the same event vocabulary as
-`XlFnFormal.Handle.Topics.Checker`; the producer-facing JSON parser will be
-added when the Rust topic recorder is introduced.
+The H3.1 replay fixtures are `fixtures/topics/success.json`,
+`fixtures/topics/seal-before-visible-rollback.json`, and
+`fixtures/topics/seal-after-visible-rollback.json` (with `rollback.json` kept
+as the short compatibility name). They use the same event vocabulary as
+`XlFnFormal.Handle.Topics.Checker`; Lean proves replay and close certification
+for all three paths. The producer-facing JSON parser will be added when the
+Rust topic recorder is introduced.

@@ -67,6 +67,11 @@ def State.InitializingKeysUnique (s : State) : Prop :=
 def State.InitializerIdsUnique (s : State) : Prop :=
   s.initializing.Pairwise (fun lhs rhs => lhs.runtimeId ≠ rhs.runtimeId)
 
+def State.InitializersBackedByRuntime (s : State) : Prop :=
+  ∀ init ∈ s.initializing,
+    ∃ runtimeInit ∈ s.runtime.initializers,
+      runtimeInit.id = init.runtimeId
+
 def State.VisibleKeysUnique (s : State) : Prop :=
   s.byKey.Pairwise (fun lhs rhs => lhs.key ≠ rhs.key)
 
@@ -90,6 +95,7 @@ def State.Invariant (s : State) : Prop :=
   Runtime.RuntimeInvariant s.runtime ∧
   s.InitializingKeysUnique ∧
   s.InitializerIdsUnique ∧
+  s.InitializersBackedByRuntime ∧
   s.VisibleKeysUnique ∧
   s.VisibleTokensUnique ∧
   s.VisibleTopicRootsValid ∧

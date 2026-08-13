@@ -305,7 +305,7 @@ impl ReturnTracker {
         self.stripes.iter().map(|stripe| stripe.active()).sum()
     }
 
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-diagnostics")]
     pub(crate) fn benchmark_stripe_only(&self) {
         let stripe = &self.stripes[current_return_stripe()];
         assert!(
@@ -314,12 +314,6 @@ impl ReturnTracker {
         );
         stripe.release();
     }
-}
-
-#[cfg(feature = "bench-internals")]
-pub(crate) fn benchmark_return_tracker_arc_only(tracker: &Arc<ReturnTracker>) {
-    let cloned = Arc::clone(tracker);
-    std::hint::black_box(cloned);
 }
 
 pub(crate) struct ReturnProducerGuard {
@@ -486,7 +480,7 @@ const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
 enum ReturnOwnership {
     Excel(Option<ReturnObligation>),
-    #[cfg(any(feature = "async", feature = "bench-internals", test))]
+    #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
     Local,
 }
 
@@ -628,7 +622,7 @@ impl PreparedReturn {
         ReturnBlock::into_non_null(block).as_ptr()
     }
 
-    #[cfg(any(feature = "async", feature = "bench-internals", test))]
+    #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
     fn publish_local(self) -> NonNull<XLOPER12> {
         let block = Box::new(ReturnBlock {
             oper: self.oper,
@@ -762,7 +756,7 @@ pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<N
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
 
-#[cfg(feature = "bench-internals")]
+#[cfg(feature = "bench-diagnostics")]
 pub(crate) fn benchmark_local_scalar_return() {
     let pointer = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
         .expect("scalar benchmark return encoding must succeed")
@@ -773,14 +767,14 @@ pub(crate) fn benchmark_local_scalar_return() {
     unsafe { free_return(pointer.as_ptr()) };
 }
 
-#[cfg(feature = "bench-internals")]
+#[cfg(feature = "bench-diagnostics")]
 pub(crate) fn benchmark_encode_scalar_only() {
     let prepared = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
         .expect("scalar benchmark return encoding must succeed");
     std::hint::black_box(prepared);
 }
 
-#[cfg(feature = "bench-internals")]
+#[cfg(feature = "bench-diagnostics")]
 pub(crate) fn benchmark_return_box_only() {
     let block = Box::new(ReturnBlock {
         oper: XLOPER12::number(42.0),
@@ -1200,7 +1194,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
                     .expect("Excel return obligation is taken exactly once"),
             })
         }
-        #[cfg(any(feature = "async", feature = "bench-internals", test))]
+        #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
         ReturnOwnership::Local => None,
     }
 }
@@ -1224,7 +1218,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
                 .tracker()
                 .record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
         }
-        #[cfg(any(feature = "async", feature = "bench-internals", test))]
+        #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
         ReturnOwnership::Local => {
             debug_assert!(operation.is_none());
         }

@@ -81,7 +81,10 @@ bench-async:
 bench-sync:
     cargo bench --package xlfn-core --bench sync_boundary --features bench-internals --locked
 
-bench-handle:
+bench-fingerprint:
+    cargo bench --package xlfn-core --bench formula_fingerprint --features bench-internals --locked
+
+bench-handle-prepare:
     cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
 
 bench-handle-lookup:
@@ -90,5 +93,8 @@ bench-handle-lookup:
 bench-handle-formula:
     cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked
 
+bench-diagnostics:
+    cargo bench --package xlfn-core --bench return_diagnostics --features bench-diagnostics --locked
+
 bench-check:
-    cargo clippy --package xlfn-core --benches --features "bench-internals async" --locked -- -D warnings
+    cargo clippy --package xlfn-core --benches --features "bench-diagnostics async" --locked -- -D warnings

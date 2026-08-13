@@ -6,7 +6,7 @@ set_option linter.unusedVariables false
 
 namespace XlFnFormal.Handle.Topics
 
-private def tokenLive? (registry : Registry.State) (token : Registry.Token) : Bool :=
+def tokenLive? (registry : Registry.State) (token : Registry.Token) : Bool :=
   if hSession : token.session = registry.session then
     match registry.slots[token.slot]? with
     | some (.live generation) => generation = token.generation
@@ -55,15 +55,10 @@ private theorem tokenLive?_iff
               exact ⟨hBounds, hSlot⟩
             · intro hLive
               have hEq : Registry.SlotState.live generation =
-                  Registry.SlotState.live token.generation := by
-                exact hSlot.symm.trans hLive.choose_spec
+                  Registry.SlotState.live token.generation := hSlot.symm.trans hLive.choose_spec
               cases hEq
               rfl
   · simp [hSession]
-
-/-! The executable checker keeps the topic table and the Runtime state in lockstep.
-    In particular, a visible provisional topic is admitted only when the Runtime
-    checker has produced the matching pending initializer root. -/
 
 def apply? (s : State) (event : Event) : Option State :=
   match event with
@@ -77,7 +72,7 @@ def apply? (s : State) (event : Event) : Option State :=
       | none => none
   | .sealTopics =>
       match Runtime.apply? s.runtime .sealTopics with
-      | some runtime' => some { s with runtime := runtime' }
+      | some runtime' => some { s with runtime := runtime', byKey := [] }
       | none => none
   | .beginLookup token =>
       match Runtime.apply? s.runtime (.beginLookup token) with
@@ -98,38 +93,34 @@ def apply? (s : State) (event : Event) : Option State :=
               initializing := s.initializing ++ [{ runtimeId := runtimeId, key := key }] }
         | none => none
       else none
-  | .publishVisibleFresh key runtimeId =>
-      match Runtime.apply? s.runtime (.insertPendingFresh runtimeId) with
-      | some runtime' =>
-          match runtime'.findInitializer? runtimeId with
-          | some { id := foundId, stage := .pending token } =>
-              if foundId = runtimeId ∧
-                  s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-                  s.findTopic? key = none ∧
-                  (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
-                  tokenLive? runtime'.registry token = true then
-                some { s with
-                  runtime := runtime'
-                  byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
-              else none
-          | _ => none
-      | none => none
-  | .publishVisibleReuse key runtimeId slot generation =>
-      match Runtime.apply? s.runtime (.insertPendingReuse runtimeId slot generation) with
-      | some runtime' =>
-          match runtime'.findInitializer? runtimeId with
-          | some { id := foundId, stage := .pending token } =>
-              if foundId = runtimeId ∧
-                  s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-                  s.findTopic? key = none ∧
-                  (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
-                  tokenLive? runtime'.registry token = true then
-                some { s with
-                  runtime := runtime'
-                  byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
-              else none
-          | _ => none
-      | none => none
+  | .insertPendingFresh key runtimeId =>
+      if s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+          s.findTopic? key = none then
+        match Runtime.apply? s.runtime (.insertPendingFresh runtimeId) with
+        | some runtime' => some { s with runtime := runtime' }
+        | none => none
+      else none
+  | .insertPendingReuse key runtimeId slot generation =>
+      if s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+          s.findTopic? key = none then
+        match Runtime.apply? s.runtime
+            (.insertPendingReuse runtimeId slot generation) with
+        | some runtime' => some { s with runtime := runtime' }
+        | none => none
+      else none
+  | .publishVisible key runtimeId =>
+      match s.runtime.findInitializer? runtimeId with
+      | some { id := foundId, stage := .pending token } =>
+          if foundId = runtimeId ∧
+              s.runtime.phase = .open ∧
+              s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+              s.findTopic? key = none ∧
+              (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
+              tokenLive? s.runtime.registry token = true then
+            some { s with
+              byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
+          else none
+      | _ => none
   | .commitPublication key runtimeId =>
       match s.findTopic? key with
       | some topic =>
@@ -145,37 +136,41 @@ def apply? (s : State) (event : Event) : Option State :=
             | none => none
           else none
       | none => none
-  | .rollbackVisibleReuse key runtimeId nextGeneration =>
+  | .withdrawVisible key runtimeId =>
       match s.findTopic? key with
       | some topic =>
           if topic.stage = .provisional ∧ topic.key = key ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
               s.runtime.findInitializer? runtimeId =
                 some { id := runtimeId, stage := .pending topic.token } then
+            some { s with byKey := s.removeTopic key }
+          else none
+      | none => none
+  | .rollbackPendingReuse key runtimeId nextGeneration =>
+      match s.runtime.findInitializer? runtimeId with
+      | some { id := foundId, stage := .pending token } =>
+          if foundId = runtimeId ∧
+              s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+              s.findTopic? key = none ∧
+              (∀ topic ∈ s.byKey, topic.token ≠ token) then
             match Runtime.apply? s.runtime
                 (.rollbackPendingReuse runtimeId nextGeneration) with
-            | some runtime' =>
-                some { s with
-                  runtime := runtime'
-                  byKey := s.removeTopic key }
+            | some runtime' => some { s with runtime := runtime' }
             | none => none
           else none
-      | none => none
-  | .rollbackVisibleRetire key runtimeId =>
-      match s.findTopic? key with
-      | some topic =>
-          if topic.stage = .provisional ∧ topic.key = key ∧
+      | _ => none
+  | .rollbackPendingRetire key runtimeId =>
+      match s.runtime.findInitializer? runtimeId with
+      | some { id := foundId, stage := .pending token } =>
+          if foundId = runtimeId ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-              s.runtime.findInitializer? runtimeId =
-                some { id := runtimeId, stage := .pending topic.token } then
+              s.findTopic? key = none ∧
+              (∀ topic ∈ s.byKey, topic.token ≠ token) then
             match Runtime.apply? s.runtime (.rollbackPendingRetire runtimeId) with
-            | some runtime' =>
-                some { s with
-                  runtime := runtime'
-                  byKey := s.removeTopic key }
+            | some runtime' => some { s with runtime := runtime' }
             | none => none
           else none
-      | none => none
+      | _ => none
   | .finishInitializer key runtimeId =>
       if s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
           (∀ topic ∈ s.byKey, topic.key = key → topic.stage = .committed) then
@@ -186,6 +181,16 @@ def apply? (s : State) (event : Event) : Option State :=
               initializing := s.removeInitializing runtimeId }
         | none => none
       else none
+  | .closeRegistry =>
+      if s.byKey = [] ∧ s.initializing = [] then
+        match Runtime.apply? s.runtime .closeRegistry with
+        | some runtime' => some { s with runtime := runtime' }
+        | none => none
+      else none
+  | .finishClose =>
+      match Runtime.apply? s.runtime .finishClose with
+      | some runtime' => some { s with runtime := runtime' }
+      | none => none
 
 private theorem findTopic_stage_of_find
     {s : State} {key : TopicKey} {topic : Topic}
@@ -252,116 +257,139 @@ theorem apply?_sound
               (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
-  | publishVisibleFresh key runtimeId =>
-      cases hRuntime : Runtime.apply? s.runtime (.insertPendingFresh runtimeId) with
-      | none => simp [apply?, hRuntime] at h
-      | some runtime' =>
-          simp only [apply?, hRuntime] at h
-          split at h
-          · rename_i _ foundId token hPending
-            by_cases hPre : foundId = runtimeId ∧
-                s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-                s.findTopic? key = none ∧
-                (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
-                tokenLive? runtime'.registry token = true
-            · rw [if_pos hPre] at h
-              cases h
-              cases hPre.1
-              exact Step.publishVisibleFresh hPre.2.1 hPre.2.2.1 hPre.2.2.2.1
-                (Runtime.apply?_sound hRuntime) hPending
-                (tokenLive?_iff.mp hPre.2.2.2.2)
-            · rw [if_neg hPre] at h
-              contradiction
-          · contradiction
-  | publishVisibleReuse key runtimeId slot generation =>
-      cases hRuntime : Runtime.apply? s.runtime
-          (.insertPendingReuse runtimeId slot generation) with
-      | none => simp [apply?, hRuntime] at h
-      | some runtime' =>
-          simp only [apply?, hRuntime] at h
-          split at h
-          · rename_i _ foundId token hPending
-            by_cases hPre : foundId = runtimeId ∧
-                s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-                s.findTopic? key = none ∧
-                (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
-                tokenLive? runtime'.registry token = true
-            · rw [if_pos hPre] at h
-              cases h
-              cases hPre.1
-              exact Step.publishVisibleReuse hPre.2.1 hPre.2.2.1 hPre.2.2.2.1
-                (Runtime.apply?_sound hRuntime) hPending
-                (tokenLive?_iff.mp hPre.2.2.2.2)
-            · rw [if_neg hPre] at h
-              contradiction
-          · contradiction
+  | insertPendingFresh key runtimeId =>
+      dsimp [apply?] at h
+      by_cases hPre : s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+          s.findTopic? key = none
+      · rw [if_pos hPre] at h
+        cases hRuntime : Runtime.apply? s.runtime (.insertPendingFresh runtimeId) with
+        | none => simp [hRuntime] at h
+        | some runtime' =>
+            rw [hRuntime] at h
+            cases h
+            exact Step.insertPendingFresh hPre.1 hPre.2
+              (Runtime.apply?_sound hRuntime)
+      · rw [if_neg hPre] at h
+        contradiction
+  | insertPendingReuse key runtimeId slot generation =>
+      dsimp [apply?] at h
+      by_cases hPre : s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+          s.findTopic? key = none
+      · rw [if_pos hPre] at h
+        cases hRuntime : Runtime.apply? s.runtime
+            (.insertPendingReuse runtimeId slot generation) with
+        | none => simp [hRuntime] at h
+        | some runtime' =>
+            rw [hRuntime] at h
+            cases h
+            exact Step.insertPendingReuse hPre.1 hPre.2
+              (Runtime.apply?_sound hRuntime)
+      · rw [if_neg hPre] at h
+        contradiction
+  | publishVisible key runtimeId =>
+      dsimp [apply?] at h
+      cases hFind : s.runtime.findInitializer? runtimeId with
+      | none => simp [hFind] at h
+      | some found =>
+          cases found with
+          | mk foundId stage =>
+              cases stage with
+              | beforeInsert => simp [hFind] at h
+              | resolved => simp [hFind] at h
+              | pending token =>
+                  simp only [hFind] at h
+                  split at h
+                  · rename_i hPre
+                    cases h
+                    rcases hPre with ⟨hId, hPhase, hInit, hNoTopic, hNoToken, hLive⟩
+                    cases hId
+                    exact Step.publishVisible hPhase hInit hNoTopic hNoToken hFind
+                      (tokenLive?_iff.mp hLive)
+                  · contradiction
   | commitPublication key runtimeId =>
       dsimp [apply?] at h
-      split at h
-      · rename_i topic hTopicFind
-        by_cases hPre : topic.stage = .provisional ∧ topic.key = key ∧
-            s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-            s.runtime.findInitializer? runtimeId =
-              some { id := runtimeId, stage := .pending topic.token }
-        · rw [if_pos hPre] at h
-          cases hRuntime : Runtime.apply? s.runtime (.publishTopic runtimeId) with
-          | none => simp [hRuntime] at h
-          | some runtime' =>
-              rw [hRuntime] at h
-              cases h
-              have hTopic : s.findTopic? key =
-                  some { topic with stage := .provisional } := by
-                exact findTopic_stage_of_find hTopicFind hPre.1
-              exact Step.commitPublication hPre.2.2.1 hTopic hPre.2.1 hPre.2.2.2
-                (Runtime.apply?_sound hRuntime)
-        · rw [if_neg hPre] at h
-          contradiction
-      · contradiction
-  | rollbackVisibleReuse key runtimeId nextGeneration =>
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases hRuntime : Runtime.apply? s.runtime (.publishTopic runtimeId) with
+            | none => simp [hRuntime] at h
+            | some runtime' =>
+                rw [hRuntime] at h
+                cases h
+                rcases hPre with ⟨hStage, hKey, hInit, hPending⟩
+                have hTopic : s.findTopic? key =
+                    some { topic with stage := .provisional } :=
+                  findTopic_stage_of_find hTopicFind hStage
+                exact Step.commitPublication hInit hTopic hKey hPending
+                  (Runtime.apply?_sound hRuntime)
+          · contradiction
+  | withdrawVisible key runtimeId =>
       dsimp [apply?] at h
-      split at h
-      · rename_i topic hTopicFind
-        by_cases hPre : topic.stage = .provisional ∧ topic.key = key ∧
-            s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-            s.runtime.findInitializer? runtimeId =
-              some { id := runtimeId, stage := .pending topic.token }
-        · rw [if_pos hPre] at h
-          cases hRuntime : Runtime.apply? s.runtime
-              (.rollbackPendingReuse runtimeId nextGeneration) with
-          | none => simp [hRuntime] at h
-          | some runtime' =>
-              rw [hRuntime] at h
-              cases h
-              have hTopic : s.findTopic? key =
-                  some { topic with stage := .provisional } := by
-                exact findTopic_stage_of_find hTopicFind hPre.1
-              exact Step.rollbackVisibleReuse hPre.2.2.1 hTopic hPre.2.1 hPre.2.2.2
-                (Runtime.apply?_sound hRuntime)
-        · rw [if_neg hPre] at h
-          contradiction
-      · contradiction
-  | rollbackVisibleRetire key runtimeId =>
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hStage, hKey, hInit, hPending⟩
+            have hTopic : s.findTopic? key =
+                some { topic with stage := .provisional } :=
+              findTopic_stage_of_find hTopicFind hStage
+            exact Step.withdrawVisible hInit hTopic hKey hPending
+          · contradiction
+  | rollbackPendingReuse key runtimeId nextGeneration =>
       dsimp [apply?] at h
-      split at h
-      · rename_i topic hTopicFind
-        by_cases hPre : topic.stage = .provisional ∧ topic.key = key ∧
-            s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
-            s.runtime.findInitializer? runtimeId =
-              some { id := runtimeId, stage := .pending topic.token }
-        · rw [if_pos hPre] at h
-          cases hRuntime : Runtime.apply? s.runtime (.rollbackPendingRetire runtimeId) with
-          | none => simp [hRuntime] at h
-          | some runtime' =>
-              rw [hRuntime] at h
-              cases h
-              have hTopic : s.findTopic? key =
-                  some { topic with stage := .provisional } := by
-                exact findTopic_stage_of_find hTopicFind hPre.1
-              exact Step.rollbackVisibleRetire hPre.2.2.1 hTopic hPre.2.1 hPre.2.2.2
-                (Runtime.apply?_sound hRuntime)
-        · rw [if_neg hPre] at h
-          contradiction
-      · contradiction
+      cases hFind : s.runtime.findInitializer? runtimeId with
+      | none => simp [hFind] at h
+      | some found =>
+          cases found with
+          | mk foundId stage =>
+              cases stage with
+              | beforeInsert => simp [hFind] at h
+              | resolved => simp [hFind] at h
+              | pending token =>
+                  simp only [hFind] at h
+                  split at h
+                  · rename_i hPre
+                    cases hRuntime : Runtime.apply? s.runtime
+                        (.rollbackPendingReuse runtimeId nextGeneration) with
+                    | none => simp [hRuntime] at h
+                    | some runtime' =>
+                        rw [hRuntime] at h
+                        cases h
+                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken⟩
+                        cases hId
+                        exact Step.rollbackPendingReuse hInit hNoTopic hNoToken hFind
+                          (Runtime.apply?_sound hRuntime)
+                  · contradiction
+  | rollbackPendingRetire key runtimeId =>
+      dsimp [apply?] at h
+      cases hFind : s.runtime.findInitializer? runtimeId with
+      | none => simp [hFind] at h
+      | some found =>
+          cases found with
+          | mk foundId stage =>
+              cases stage with
+              | beforeInsert => simp [hFind] at h
+              | resolved => simp [hFind] at h
+              | pending token =>
+                  simp only [hFind] at h
+                  split at h
+                  · rename_i hPre
+                    cases hRuntime : Runtime.apply? s.runtime (.rollbackPendingRetire runtimeId) with
+                    | none => simp [hRuntime] at h
+                    | some runtime' =>
+                        rw [hRuntime] at h
+                        cases h
+                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken⟩
+                        cases hId
+                        exact Step.rollbackPendingRetire hInit hNoTopic hNoToken hFind
+                          (Runtime.apply?_sound hRuntime)
+                  · contradiction
   | finishInitializer key runtimeId =>
       dsimp [apply?] at h
       by_cases hPre : s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
@@ -372,9 +400,30 @@ theorem apply?_sound
         | some runtime' =>
             rw [hRuntime] at h
             cases h
-            exact Step.finishInitializer hPre.1 hPre.2 (Runtime.apply?_sound hRuntime)
+            exact Step.finishInitializer hPre.1 hPre.2
+              (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
+  | closeRegistry =>
+      dsimp [apply?] at h
+      by_cases hPre : s.byKey = [] ∧ s.initializing = []
+      · rw [if_pos hPre] at h
+        cases hRuntime : Runtime.apply? s.runtime .closeRegistry with
+        | none => simp [hRuntime] at h
+        | some runtime' =>
+            rw [hRuntime] at h
+            cases h
+            exact Step.closeRegistry hPre.1 hPre.2
+              (Runtime.apply?_sound hRuntime)
+      · rw [if_neg hPre] at h
+        contradiction
+  | finishClose =>
+      cases hRuntime : Runtime.apply? s.runtime .finishClose with
+      | none => simp [apply?, hRuntime] at h
+      | some runtime' =>
+          simp only [apply?, hRuntime] at h
+          cases h
+          exact Step.finishClose (Runtime.apply?_sound hRuntime)
 
 theorem apply?_complete
     {s s' : State} {event : Event}
@@ -394,49 +443,60 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hNoTopic, hNoInitializer, hNoRuntimeId⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | publishVisibleFresh hInit hNoTopic hNoToken hRuntime hPending hRoot =>
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      dsimp [apply?]
+      rw [if_pos ⟨hInit, hNoTopic⟩]
+      rw [Runtime.apply?_complete hRuntime]
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      dsimp [apply?]
+      rw [if_pos ⟨hInit, hNoTopic⟩]
+      rw [Runtime.apply?_complete hRuntime]
+  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
       have hRootBool := tokenLive?_iff.mpr hRoot
       dsimp [apply?]
-      rw [Runtime.apply?_complete hRuntime]
-      simp only
       rw [hPending]
       simp only
-      have hPre : True ∧
+      have hPre : True ∧ s.runtime.phase = .open ∧
           s.findInitializing? _ = some { runtimeId := _, key := _ } ∧
           s.findTopic? _ = none ∧
           (∀ topic ∈ s.byKey, topic.token ≠ _) ∧
           tokenLive? _ _ = true :=
-        ⟨True.intro, hInit, hNoTopic, hNoToken, hRootBool⟩
-      rw [if_pos hPre]
-  | publishVisibleReuse hInit hNoTopic hNoToken hRuntime hPending hRoot =>
-      have hRootBool := tokenLive?_iff.mpr hRoot
-      dsimp [apply?]
-      rw [Runtime.apply?_complete hRuntime]
-      simp only
-      rw [hPending]
-      simp only
-      have hPre : True ∧
-          s.findInitializing? _ = some { runtimeId := _, key := _ } ∧
-          s.findTopic? _ = none ∧
-          (∀ topic ∈ s.byKey, topic.token ≠ _) ∧
-          tokenLive? _ _ = true :=
-        ⟨True.intro, hInit, hNoTopic, hNoToken, hRootBool⟩
+        ⟨True.intro, hPhase, hInit, hNoTopic, hNoToken, hRootBool⟩
       rw [if_pos hPre]
   | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
       dsimp [apply?]
-      rw [hTopic, Runtime.apply?_complete hRuntime]
-      simp [hInit, hTopicKey, hPending]
-  | rollbackVisibleReuse hInit hTopic hTopicKey hPending hRuntime =>
+      simp only [hTopic]
+      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ = _ :=
+        ⟨True.intro, hTopicKey, hInit, hPending⟩
+      rw [if_pos hPre]
+      rw [Runtime.apply?_complete hRuntime]
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
       dsimp [apply?]
-      rw [hTopic, Runtime.apply?_complete hRuntime]
-      simp [hInit, hTopicKey, hPending]
-  | rollbackVisibleRetire hInit hTopic hTopicKey hPending hRuntime =>
+      simp only [hTopic]
+      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ = _ :=
+        ⟨True.intro, hTopicKey, hInit, hPending⟩
+      rw [if_pos hPre]
+  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
       dsimp [apply?]
-      rw [hTopic, Runtime.apply?_complete hRuntime]
-      simp [hInit, hTopicKey, hPending]
+      rw [hPending]
+      simp only
+      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken⟩]
+      rw [Runtime.apply?_complete hRuntime]
+  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+      dsimp [apply?]
+      rw [hPending]
+      simp only
+      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken⟩]
+      rw [Runtime.apply?_complete hRuntime]
   | finishInitializer hInit hReady hRuntime =>
       dsimp [apply?]
       rw [if_pos ⟨hInit, hReady⟩]
       rw [Runtime.apply?_complete hRuntime]
+  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+      dsimp [apply?]
+      rw [if_pos ⟨hNoVisible, hNoInitializers⟩]
+      rw [Runtime.apply?_complete hRuntime]
+  | finishClose hRuntime =>
+      simp [apply?, Runtime.apply?_complete hRuntime]
 
 end XlFnFormal.Handle.Topics

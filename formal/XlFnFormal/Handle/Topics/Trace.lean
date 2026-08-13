@@ -40,23 +40,77 @@ theorem replay?_sound
 def fixtureKey : TopicKey :=
   { sheetId := 0, row := 0, column := 0, udfId := "fixture", argumentDigest := 0 }
 
-/-! The two named traces are the H3.1 fixture vocabulary.  Their JSON
-    counterparts live under `formal/fixtures/topics/`; the checker above is the
-    executable replay boundary used by future producer integration. -/
+def close_suffix : List Event :=
+  [.endPrepare, .sealTopics, .closeRegistry, .finishClose]
+
+def sealed_close_suffix : List Event :=
+  [.endPrepare, .closeRegistry, .finishClose]
+
 def success_trace : List Event :=
   [.beginPrepare,
    .beginInitializer fixtureKey 1,
-   .publishVisibleFresh fixtureKey 1,
+   .insertPendingFresh fixtureKey 1,
+   .publishVisible fixtureKey 1,
    .commitPublication fixtureKey 1,
-   .finishInitializer fixtureKey 1]
+   .finishInitializer fixtureKey 1] ++ close_suffix
 
-def rollback_trace : List Event :=
+def seal_before_visible_rollback_trace : List Event :=
   [.beginPrepare,
    .beginInitializer fixtureKey 1,
    .sealTopics,
-   .publishVisibleFresh fixtureKey 1,
-   .rollbackVisibleReuse fixtureKey 1 2,
-   .finishInitializer fixtureKey 1,
-   .endPrepare]
+   .insertPendingFresh fixtureKey 1,
+   .rollbackPendingReuse fixtureKey 1 2,
+   .finishInitializer fixtureKey 1] ++ sealed_close_suffix
+
+def seal_after_visible_rollback_trace : List Event :=
+  [.beginPrepare,
+   .beginInitializer fixtureKey 1,
+   .insertPendingFresh fixtureKey 1,
+   .publishVisible fixtureKey 1,
+   .sealTopics,
+   .rollbackPendingReuse fixtureKey 1 2,
+   .finishInitializer fixtureKey 1] ++ sealed_close_suffix
+
+def rollback_trace : List Event := seal_before_visible_rollback_trace
+
+theorem replay_close_certified
+    {session : Registry.SessionId} {events : List Event} {s : State}
+    (hReplay : replay? (initialState session) events = some s)
+    (hClosed : s.runtime.phase = .closed) :
+    CloseCertified s :=
+  successful_close_is_certified (replay?_sound hReplay) hClosed
+
+theorem replay_phase_is_closed
+    {session : Registry.SessionId} {events : List Event}
+    (hPhase : (replay? (initialState session) events).map
+      (fun s => s.runtime.phase) = some .closed) :
+    ∃ s, replay? (initialState session) events = some s ∧
+      s.runtime.phase = .closed ∧
+      CloseCertified s := by
+  generalize hOut : replay? (initialState session) events = output at hPhase
+  cases output with
+  | none => simp at hPhase
+  | some s =>
+      have hClosed : s.runtime.phase = .closed := by
+        simpa using hPhase
+      exact ⟨s, rfl, hClosed, replay_close_certified hOut hClosed⟩
+
+theorem success_trace_replays :
+    ∃ s, replay? (initialState 0) success_trace = some s ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  apply replay_phase_is_closed
+  native_decide
+
+theorem seal_before_visible_rollback_trace_replays :
+    ∃ s, replay? (initialState 0) seal_before_visible_rollback_trace = some s ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  apply replay_phase_is_closed
+  native_decide
+
+theorem seal_after_visible_rollback_trace_replays :
+    ∃ s, replay? (initialState 0) seal_after_visible_rollback_trace = some s ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  apply replay_phase_is_closed
+  native_decide
 
 end XlFnFormal.Handle.Topics

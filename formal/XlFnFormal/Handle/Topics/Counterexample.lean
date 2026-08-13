@@ -53,4 +53,10 @@ theorem commit_after_seal_is_rejected
           rw [hSealed] at hPhase
           contradiction
 
+theorem publish_after_seal_is_rejected
+    {s : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    (hSealed : s.runtime.phase = .drainingPrepares) :
+    ¬ ∃ s', Step s (.publishVisible key runtimeId) s' := by
+  exact no_topic_publication_after_seal hSealed
+
 end XlFnFormal.Handle.Topics

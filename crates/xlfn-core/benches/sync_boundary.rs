@@ -4,6 +4,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use xlfn_core::benchmark_support::{SyncBenchKind, SyncBoundaryWorkerPool};
 
 const ITERATIONS_PER_THREAD: usize = 1000;
+const THREAD_COUNTS: [usize; 4] = [1, 4, 16, 32];
 
 fn sync_boundary_benchmarks(c: &mut Criterion) {
     for (kind, name) in [
@@ -15,7 +16,7 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     ] {
         let mut group_admission = c.benchmark_group(name);
         group_admission.measurement_time(Duration::from_secs(10));
-        for threads in [1_usize, 2, 4, 8, 16, 32] {
+        for threads in THREAD_COUNTS {
             let attempts = threads * ITERATIONS_PER_THREAD;
             group_admission.throughput(Throughput::Elements(attempts as u64));
             group_admission.bench_with_input(
@@ -32,7 +33,7 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
 
     let mut group_no_sub = c.benchmark_group("sync_boundary/scalar_return/no_subscriber");
     group_no_sub.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
+    for threads in THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;
         group_no_sub.throughput(Throughput::Elements(attempts as u64));
         group_no_sub.bench_with_input(
@@ -50,49 +51,9 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     }
     group_no_sub.finish();
 
-    let mut group_return_stripe = c.benchmark_group("sync_boundary/return_stripe_only");
-    group_return_stripe.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_return_stripe.throughput(Throughput::Elements(attempts as u64));
-        group_return_stripe.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ReturnStripeOnly,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
-    group_return_stripe.finish();
-
-    let mut group_return_tracker_arc = c.benchmark_group("sync_boundary/return_tracker_arc_only");
-    group_return_tracker_arc.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_return_tracker_arc.throughput(Throughput::Elements(attempts as u64));
-        group_return_tracker_arc.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ReturnTrackerArcOnly,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
-    group_return_tracker_arc.finish();
-
     let mut group_return_tracker = c.benchmark_group("sync_boundary/return_tracker_only");
     group_return_tracker.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
+    for threads in THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;
         group_return_tracker.throughput(Throughput::Elements(attempts as u64));
         group_return_tracker.bench_with_input(
@@ -109,66 +70,6 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
         );
     }
     group_return_tracker.finish();
-
-    let mut group_return_block = c.benchmark_group("sync_boundary/return_block_local");
-    group_return_block.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_return_block.throughput(Throughput::Elements(attempts as u64));
-        group_return_block.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ReturnBlockLocal,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
-    group_return_block.finish();
-
-    let mut group_return_encode = c.benchmark_group("sync_boundary/return_encode_scalar_only");
-    group_return_encode.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_return_encode.throughput(Throughput::Elements(attempts as u64));
-        group_return_encode.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ReturnEncodeScalarOnly,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
-    group_return_encode.finish();
-
-    let mut group_return_box = c.benchmark_group("sync_boundary/return_box_only");
-    group_return_box.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_return_box.throughput(Throughput::Elements(attempts as u64));
-        group_return_box.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ReturnBoxOnly,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
-    group_return_box.finish();
 
     let mut group_trace = c.benchmark_group("sync_boundary/scalar_return/udf_trace_enabled");
     group_trace.measurement_time(Duration::from_secs(10));

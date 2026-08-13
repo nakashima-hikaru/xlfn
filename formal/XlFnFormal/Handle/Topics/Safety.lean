@@ -33,7 +33,7 @@ theorem same_key_has_at_most_one_visible_topic
   by_cases hEq : left = right
   · exact hEq
   · exfalso
-    have hRelation := pairwise_mem_ne_topics hInv.2.2.2.1 hLeft hRight hEq
+    have hRelation := pairwise_mem_ne_topics hInv.2.2.2.2.1 hLeft hRight hEq
     cases hRelation with
     | inl hNotEqual => exact hNotEqual (hLeftKey.trans hRightKey.symm)
     | inr hNotEqual => exact hNotEqual (hRightKey.trans hLeftKey.symm)
@@ -57,7 +57,7 @@ theorem distinct_visible_topics_have_distinct_tokens
     (hRight : right ∈ s.byKey)
     (hNe : left ≠ right) :
     left.token ≠ right.token := by
-  have hRelation := pairwise_mem_ne_topics hInv.2.2.2.2.1 hLeft hRight hNe
+  have hRelation := pairwise_mem_ne_topics hInv.2.2.2.2.2.1 hLeft hRight hNe
   cases hRelation with
   | inl hNotEqual => exact hNotEqual
   | inr hNotEqual => exact hNotEqual.symm
@@ -79,7 +79,7 @@ theorem committed_topic_root_is_live
     (hTopic : topic ∈ s.byKey)
     (hCommitted : topic.stage = .committed) :
     Runtime.TokenLive s.runtime.registry topic.token :=
-  hInv.2.2.2.2.2.1 topic hTopic
+  hInv.2.2.2.2.2.2.1 topic hTopic
 
 theorem provisional_topic_has_pending_provenance
     {s : State} {topic : Topic}
@@ -90,11 +90,11 @@ theorem provisional_topic_has_pending_provenance
       init.key = topic.key ∧
       s.runtime.findInitializer? init.runtimeId =
         some { id := init.runtimeId, stage := .pending topic.token } :=
-  hInv.2.2.2.2.2.2 topic hTopic hProvisional
+  hInv.2.2.2.2.2.2.2 topic hTopic hProvisional
 
-theorem publish_visible_fresh_exposes_pending_provenance
+theorem publish_visible_exposes_pending_provenance
     {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
-    (hStep : Step s (.publishVisibleFresh key runtimeId) s') :
+    (hStep : Step s (.publishVisible key runtimeId) s') :
     ∃ topic,
       topic ∈ s'.byKey ∧
       topic.key = key ∧
@@ -102,8 +102,8 @@ theorem publish_visible_fresh_exposes_pending_provenance
       s'.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending topic.token } := by
   cases hStep with
-  | publishVisibleFresh =>
-      rename_i runtime' token hNoToken hRoot hNoTopic hRuntime hPending hInit
+  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
+      rename_i token
       refine ⟨{ key := key, token := token, stage := .provisional }, ?_, rfl, rfl, ?_⟩
       · simp
       · exact hPending
@@ -118,8 +118,8 @@ theorem commit_publication_resolves_initializer
       s'.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .resolved } := by
   cases hStep with
-  | commitPublication =>
-      rename_i runtime' source hTopic hTopicKey hPending hRuntime hInit
+  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+      rename_i source
       have hTopicMem : { source with stage := .provisional } ∈ s.byKey :=
         mem_of_findTopic_some hTopic
       refine ⟨{ key := key, token := source.token, stage := .committed }, ?_, rfl, rfl, ?_⟩
@@ -132,13 +132,12 @@ theorem commit_publication_resolves_initializer
         have hResolved := Runtime.updateInitializer_find hPending (stage := .resolved)
         exact hResolved
 
-theorem rollback_visible_removes_topic_key
+theorem withdraw_visible_removes_topic_key
     {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
-    {nextGeneration : Registry.Generation}
-    (hStep : Step s (.rollbackVisibleReuse key runtimeId nextGeneration) s') :
+    (hStep : Step s (.withdrawVisible key runtimeId) s') :
     ∀ topic ∈ s'.byKey, topic.key ≠ key := by
   cases hStep with
-  | rollbackVisibleReuse =>
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
       intro topic hMem
       dsimp [State.removeTopic] at hMem
       rcases List.mem_filter.mp hMem with ⟨_, hNe⟩
@@ -146,5 +145,109 @@ theorem rollback_visible_removes_topic_key
       have hFalse : (topic.key != key) = false := by simp [hEq]
       rw [hFalse] at hNe
       contradiction
+
+theorem no_topic_publication_after_seal
+    {s : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    (hSealed : s.runtime.phase = .drainingPrepares) :
+    ¬ ∃ s', Step s (.publishVisible key runtimeId) s' := by
+  intro ⟨s', hStep⟩
+  cases hStep with
+  | publishVisible hPhase =>
+      rw [hSealed] at hPhase
+      contradiction
+
+theorem Reachable.runtime_reachable
+    {s t : State} (hReach : Reachable s t) :
+    Runtime.Reachable s.runtime t.runtime := by
+  induction hReach with
+  | refl => exact Runtime.Reachable.refl _
+  | tail _ hStep ih =>
+      cases hStep with
+      | beginPrepare hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | endPrepare hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | sealTopics hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | beginLookup hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | endLookup hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | beginInitializer _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | insertPendingFresh _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | insertPendingReuse _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | publishVisible => exact ih
+      | commitPublication _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | withdrawVisible => exact ih
+      | rollbackPendingReuse _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | rollbackPendingRetire _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | finishInitializer _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | closeRegistry _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | finishClose hRuntime => exact Runtime.Reachable.tail ih hRuntime
+
+def CloseCertified (s : State) : Prop :=
+  Runtime.CloseCertified s.runtime ∧
+  s.byKey = [] ∧
+  s.initializing = []
+
+theorem no_visible_topics_when_closed
+    {s : State} (hInv : s.Invariant)
+    (hClosed : s.runtime.phase = .closed) :
+    s.byKey = [] := by
+  have hPhase := Runtime.phaseInvariant_closed_fields hInv.1.1 hClosed
+  cases hByKey : s.byKey with
+  | nil => rfl
+  | cons head tail =>
+      exfalso
+      have hMem : head ∈ s.byKey := by
+        rw [hByKey]
+        exact List.mem_cons_self
+      rcases hInv.2.2.2.2.2.2.1 head hMem with
+        ⟨hSession, ⟨hBounds, hSlot⟩⟩
+      have hNoLive := hPhase.2.2.2.2 head.token.slot hBounds
+      apply hNoLive
+      rw [hSlot]
+      trivial
+
+theorem no_initializers_when_runtime_empty
+    {s : State} (hInv : s.Invariant)
+    (hRuntimeEmpty : s.runtime.initializers = []) :
+    s.initializing = [] := by
+  cases hInitializers : s.initializing with
+  | nil => rfl
+  | cons head tail =>
+      exfalso
+      have hMem : head ∈ s.initializing := by
+        rw [hInitializers]
+        exact List.mem_cons_self
+      rcases hInv.2.2.2.1 head hMem with ⟨runtimeInit, hRuntimeMem, hId⟩
+      rw [hRuntimeEmpty] at hRuntimeMem
+      contradiction
+
+theorem successful_close_is_certified
+    {session : Registry.SessionId} {s : State}
+    (hReach : Reachable (initialState session) s)
+    (hClosed : s.runtime.phase = .closed) :
+    CloseCertified s := by
+  have hInv := reachable_invariant session hReach
+  have hRuntimeReach := Reachable.runtime_reachable hReach
+  have hRuntimeCert := Runtime.successful_close_is_certified hRuntimeReach hClosed
+  exact ⟨hRuntimeCert,
+    no_visible_topics_when_closed hInv hClosed,
+    no_initializers_when_runtime_empty hInv hRuntimeCert.2.2.1⟩
+
+theorem Step.closeCertified_of_finishClose
+    {s s' : State}
+    (hReach : Reachable (initialState s.runtime.registry.session) s)
+    (hStep : Step s .finishClose s') :
+    CloseCertified s' := by
+  cases hStep with
+  | finishClose hRuntime =>
+      cases hRuntime with
+      | finishClose hPhase hRegStep =>
+          exact successful_close_is_certified
+            (Reachable.tail hReach (Step.finishClose
+              (Runtime.Step.finishClose hPhase hRegStep))) rfl
+
+theorem close_registry_waits_for_topic_quiescence
+    {s s' : State} (hStep : Step s .closeRegistry s') :
+    s.byKey = [] ∧ s.initializing = [] := by
+  cases hStep
+  exact ⟨by assumption, by assumption⟩
 
 end XlFnFormal.Handle.Topics

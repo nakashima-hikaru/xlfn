@@ -13,14 +13,18 @@ inductive Event where
   | beginLookup (token : Registry.Token)
   | endLookup
   | beginInitializer (key : TopicKey) (runtimeId : Runtime.InitializerId)
-  | publishVisibleFresh (key : TopicKey) (runtimeId : Runtime.InitializerId)
-  | publishVisibleReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | insertPendingFresh (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | insertPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (slot : Registry.SlotId) (generation : Registry.Generation)
+  | publishVisible (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | commitPublication (key : TopicKey) (runtimeId : Runtime.InitializerId)
-  | rollbackVisibleReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | withdrawVisible (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | rollbackPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (nextGeneration : Registry.Generation)
-  | rollbackVisibleRetire (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | rollbackPendingRetire (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | finishInitializer (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | closeRegistry
+  | finishClose
 deriving DecidableEq, Repr
 
 inductive Step : State → Event → State → Prop where
@@ -37,7 +41,7 @@ inductive Step : State → Event → State → Prop where
   | sealTopics
       {s : State} {runtime' : Runtime.State}
       (hRuntime : Runtime.Step s.runtime .sealTopics runtime') :
-      Step s .sealTopics { s with runtime := runtime' }
+      Step s .sealTopics { s with runtime := runtime', byKey := [] }
 
   | beginLookup
       {s : State} {runtime' : Runtime.State} {token : Registry.Token}
@@ -61,36 +65,37 @@ inductive Step : State → Event → State → Prop where
             runtime := runtime'
             initializing := s.initializing ++ [{ runtimeId := runtimeId, key := key }] }
 
-  | publishVisibleFresh
-      {s : State} {runtime' : Runtime.State} {token : Registry.Token}
+  | insertPendingFresh
+      {s : State} {runtime' : Runtime.State}
       {key : TopicKey} {runtimeId : Runtime.InitializerId}
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hNoTopic : s.findTopic? key = none)
-      (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
-      (hRuntime : Runtime.Step s.runtime (.insertPendingFresh runtimeId) runtime')
-      (hPending : runtime'.findInitializer? runtimeId =
-        some { id := runtimeId, stage := .pending token })
-      (hRoot : Runtime.TokenLive runtime'.registry token) :
-      Step s (.publishVisibleFresh key runtimeId)
-        { s with
-            runtime := runtime'
-            byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
+      (hRuntime : Runtime.Step s.runtime (.insertPendingFresh runtimeId) runtime') :
+      Step s (.insertPendingFresh key runtimeId) { s with runtime := runtime' }
 
-  | publishVisibleReuse
-      {s : State} {runtime' : Runtime.State} {token : Registry.Token}
+  | insertPendingReuse
+      {s : State} {runtime' : Runtime.State}
       {key : TopicKey} {runtimeId : Runtime.InitializerId}
       {slot : Registry.SlotId} {generation : Registry.Generation}
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hNoTopic : s.findTopic? key = none)
-      (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
       (hRuntime : Runtime.Step s.runtime
-        (.insertPendingReuse runtimeId slot generation) runtime')
-      (hPending : runtime'.findInitializer? runtimeId =
+        (.insertPendingReuse runtimeId slot generation) runtime') :
+      Step s (.insertPendingReuse key runtimeId slot generation)
+        { s with runtime := runtime' }
+
+  | publishVisible
+      {s : State} {token : Registry.Token}
+      {key : TopicKey} {runtimeId : Runtime.InitializerId}
+      (hPhase : s.runtime.phase = .open)
+      (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
+      (hNoTopic : s.findTopic? key = none)
+      (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
+      (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending token })
-      (hRoot : Runtime.TokenLive runtime'.registry token) :
-      Step s (.publishVisibleReuse key runtimeId slot generation)
+      (hRoot : Runtime.TokenLive s.runtime.registry token) :
+      Step s (.publishVisible key runtimeId)
         { s with
-            runtime := runtime'
             byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
 
   | commitPublication
@@ -107,36 +112,44 @@ inductive Step : State → Event → State → Prop where
             runtime := runtime'
             byKey := s.updateTopicStage key .committed }
 
-  | rollbackVisibleReuse
-      {s : State} {runtime' : Runtime.State} {topic : Topic}
+  | withdrawVisible
+      {s : State} {topic : Topic}
+      {key : TopicKey} {runtimeId : Runtime.InitializerId}
+      (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
+      (hTopic : s.findTopic? key = some { topic with stage := .provisional })
+      (hTopicKey : topic.key = key)
+      (hPending : s.runtime.findInitializer? runtimeId =
+        some { id := runtimeId, stage := .pending topic.token }) :
+      Step s (.withdrawVisible key runtimeId)
+        { s with byKey := s.removeTopic key }
+
+  | rollbackPendingReuse
+      {s : State} {runtime' : Runtime.State}
+      {token : Registry.Token}
       {key : TopicKey} {runtimeId : Runtime.InitializerId}
       {nextGeneration : Registry.Generation}
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
-      (hTopic : s.findTopic? key = some { topic with stage := .provisional })
-      (hTopicKey : topic.key = key)
+      (hNoTopic : s.findTopic? key = none)
+      (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
       (hPending : s.runtime.findInitializer? runtimeId =
-        some { id := runtimeId, stage := .pending topic.token })
+        some { id := runtimeId, stage := .pending token })
       (hRuntime : Runtime.Step s.runtime
         (.rollbackPendingReuse runtimeId nextGeneration) runtime') :
-      Step s (.rollbackVisibleReuse key runtimeId nextGeneration)
-        { s with
-            runtime := runtime'
-            byKey := s.removeTopic key }
+      Step s (.rollbackPendingReuse key runtimeId nextGeneration)
+        { s with runtime := runtime' }
 
-  | rollbackVisibleRetire
-      {s : State} {runtime' : Runtime.State} {topic : Topic}
+  | rollbackPendingRetire
+      {s : State} {runtime' : Runtime.State}
+      {token : Registry.Token}
       {key : TopicKey} {runtimeId : Runtime.InitializerId}
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
-      (hTopic : s.findTopic? key = some { topic with stage := .provisional })
-      (hTopicKey : topic.key = key)
+      (hNoTopic : s.findTopic? key = none)
+      (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
       (hPending : s.runtime.findInitializer? runtimeId =
-        some { id := runtimeId, stage := .pending topic.token })
-      (hRuntime : Runtime.Step s.runtime
-        (.rollbackPendingRetire runtimeId) runtime') :
-      Step s (.rollbackVisibleRetire key runtimeId)
-        { s with
-            runtime := runtime'
-            byKey := s.removeTopic key }
+        some { id := runtimeId, stage := .pending token })
+      (hRuntime : Runtime.Step s.runtime (.rollbackPendingRetire runtimeId) runtime') :
+      Step s (.rollbackPendingRetire key runtimeId)
+        { s with runtime := runtime' }
 
   | finishInitializer
       {s : State} {runtime' : Runtime.State}
@@ -148,6 +161,18 @@ inductive Step : State → Event → State → Prop where
         { s with
             runtime := runtime'
             initializing := s.removeInitializing runtimeId }
+
+  | closeRegistry
+      {s : State} {runtime' : Runtime.State}
+      (hNoVisible : s.byKey = [])
+      (hNoInitializers : s.initializing = [])
+      (hRuntime : Runtime.Step s.runtime .closeRegistry runtime') :
+      Step s .closeRegistry { s with runtime := runtime' }
+
+  | finishClose
+      {s : State} {runtime' : Runtime.State}
+      (hRuntime : Runtime.Step s.runtime .finishClose runtime') :
+      Step s .finishClose { s with runtime := runtime' }
 
 inductive Reachable : State → State → Prop where
   | refl (s : State) : Reachable s s

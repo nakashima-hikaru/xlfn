@@ -7,22 +7,24 @@ use xlfn_core::benchmark_support::{
 
 const DISTINCT_WORKERS: [usize; 4] = [1, 4, 16, 32];
 const DISTINCT_ITERATIONS_PER_WORKER: usize = 1_000;
+const BATCH_SIZE: usize = 100;
 
 fn handle_prepare_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_prepare");
     group.sample_size(50);
     group.measurement_time(Duration::from_secs(10));
 
-    group.bench_function("cold_miss", |b| {
+    group.throughput(Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function("cold_miss_batch_100", |b| {
         b.iter_batched_ref(
-            || HandleColdBatch::new(100),
+            || HandleColdBatch::new(BATCH_SIZE),
             |batch| batch.run(),
             BatchSize::SmallInput,
         );
     });
     let bench = HandleWarmBenchmark::new();
-    group.bench_function("warm_hit", |b| {
-        b.iter(|| bench.run(100));
+    group.bench_function("warm_hit_batch_100", |b| {
+        b.iter(|| bench.run(BATCH_SIZE));
     });
 
     drop(bench);

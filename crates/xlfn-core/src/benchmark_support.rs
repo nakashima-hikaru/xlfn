@@ -122,11 +122,14 @@ pub enum SyncBenchKind {
     FullAdmission,
     ScalarReturnNoSubscriber,
     ScalarReturnUdfTraceEnabled,
+    #[cfg(feature = "bench-diagnostics")]
     ReturnStripeOnly,
-    ReturnTrackerArcOnly,
     ReturnTrackerOnly,
+    #[cfg(feature = "bench-diagnostics")]
     ReturnBlockLocal,
+    #[cfg(feature = "bench-diagnostics")]
     ReturnEncodeScalarOnly,
+    #[cfg(feature = "bench-diagnostics")]
     ReturnBoxOnly,
 }
 
@@ -160,7 +163,7 @@ fn install_benchmark_subscriber() -> tracing::dispatcher::DefaultGuard {
 }
 
 pub struct SyncBoundaryWorkerPool {
-    _runtime: &'static crate::Runtime<()>,
+    _runtime: Arc<crate::Runtime<()>>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -174,7 +177,7 @@ impl SyncBoundaryWorkerPool {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
         }
-        let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::<()>::new()));
+        let runtime = Arc::new(crate::Runtime::<()>::new());
         let close_epoch = runtime.close_epoch();
         let mut open_attempt = runtime
             .begin_open_if_epoch(close_epoch)
@@ -183,6 +186,7 @@ impl SyncBoundaryWorkerPool {
         runtime
             .finish_open(&mut open_attempt, Vec::new())
             .expect("finish_open");
+        drop(open_attempt);
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);
@@ -193,7 +197,7 @@ impl SyncBoundaryWorkerPool {
             let d_tx = done_tx.clone();
             start_tx.push(s_tx);
 
-            let r = runtime;
+            let r = Arc::clone(&runtime);
             let handle = std::thread::spawn(move || {
                 let _subscriber_guard = matches!(kind, SyncBenchKind::ScalarReturnUdfTraceEnabled)
                     .then(install_benchmark_subscriber);
@@ -222,7 +226,7 @@ impl SyncBoundaryWorkerPool {
                         | SyncBenchKind::ScalarReturnUdfTraceEnabled => {
                             for _ in 0..iterations_per_thread {
                                 let ptr = crate::return_value::udf_boundary_named(
-                                    r,
+                                    &r,
                                     "bench_udf",
                                     "BENCH.UDF",
                                     |_| Ok(42.0),
@@ -246,28 +250,25 @@ impl SyncBoundaryWorkerPool {
                                 drop(producer);
                             }
                         }
+                        #[cfg(feature = "bench-diagnostics")]
                         SyncBenchKind::ReturnStripeOnly => {
                             for _ in 0..iterations_per_thread {
                                 r.return_tracker().benchmark_stripe_only();
                             }
                         }
-                        SyncBenchKind::ReturnTrackerArcOnly => {
-                            for _ in 0..iterations_per_thread {
-                                crate::return_value::benchmark_return_tracker_arc_only(
-                                    r.return_tracker(),
-                                );
-                            }
-                        }
+                        #[cfg(feature = "bench-diagnostics")]
                         SyncBenchKind::ReturnBlockLocal => {
                             for _ in 0..iterations_per_thread {
                                 crate::return_value::benchmark_local_scalar_return();
                             }
                         }
+                        #[cfg(feature = "bench-diagnostics")]
                         SyncBenchKind::ReturnEncodeScalarOnly => {
                             for _ in 0..iterations_per_thread {
                                 crate::return_value::benchmark_encode_scalar_only();
                             }
                         }
+                        #[cfg(feature = "bench-diagnostics")]
                         SyncBenchKind::ReturnBoxOnly => {
                             for _ in 0..iterations_per_thread {
                                 crate::return_value::benchmark_return_box_only();
