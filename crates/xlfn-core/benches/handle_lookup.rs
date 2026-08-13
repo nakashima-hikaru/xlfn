@@ -10,7 +10,10 @@ fn handle_lookup_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_lookup");
     group.measurement_time(Duration::from_secs(10));
 
-    for case in HandleLookupBenchCase::ALL {
+    for case in [
+        HandleLookupBenchCase::WarmSameToken,
+        HandleLookupBenchCase::DistinctTokens,
+    ] {
         for workers in THREAD_COUNTS {
             let benchmark = HandleLookupBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
             group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));

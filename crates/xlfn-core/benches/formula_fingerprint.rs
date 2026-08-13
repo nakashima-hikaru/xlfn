@@ -19,13 +19,6 @@ fn formula_fingerprint_benchmarks(c: &mut Criterion) {
                 b.iter(|| std::hint::black_box(benchmark.run_selected()));
             },
         );
-        group.bench_with_input(
-            BenchmarkId::new("direct", case.name()),
-            &benchmark,
-            |b, benchmark| {
-                b.iter(|| std::hint::black_box(benchmark.run_direct()));
-            },
-        );
     }
 
     group.finish();

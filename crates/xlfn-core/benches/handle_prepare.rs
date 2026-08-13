@@ -2,9 +2,8 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn_core::benchmark_support::{
-    CreateFormulaTopicKeyBenchmark, FormatFormulaTopicKeyBenchmark, HandleColdBatch,
-    HandleContendedBenchmark, HandleDistinctKeyBenchmark, HandleGuardContentionBenchmark,
-    HandleKeyAllocationBenchmark, HandleWarmBenchmark,
+    FormatFormulaTopicKeyBenchmark, HandleColdBatch, HandleContendedBenchmark,
+    HandleDistinctKeyBenchmark, HandleWarmBenchmark,
 };
 
 const DISTINCT_WORKERS: [usize; 6] = [1, 2, 4, 8, 16, 32];
@@ -49,32 +48,6 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
             },
         );
         bench.assert_warm_hit();
-
-        let bench = HandleKeyAllocationBenchmark::new(workers, DISTINCT_ITERATIONS_PER_WORKER);
-        group.throughput(Throughput::Elements(bench.total_iterations() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("allocation_only", workers),
-            &bench,
-            |b, bench| {
-                b.iter(|| {
-                    bench.run();
-                    std::hint::black_box(())
-                })
-            },
-        );
-
-        let bench = HandleGuardContentionBenchmark::new(workers, DISTINCT_ITERATIONS_PER_WORKER);
-        group.throughput(Throughput::Elements(bench.total_iterations() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("guards_only", workers),
-            &bench,
-            |b, bench| {
-                b.iter(|| {
-                    bench.run();
-                    std::hint::black_box(())
-                })
-            },
-        );
     }
 
     group.finish();
@@ -82,14 +55,6 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
 
 fn handle_key_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_key");
-    let create_benchmark = CreateFormulaTopicKeyBenchmark::new();
-
-    group.bench_function("create_formula_topic_key", |b| {
-        b.iter(|| {
-            create_benchmark.run();
-            std::hint::black_box(())
-        });
-    });
 
     let format_benchmark = FormatFormulaTopicKeyBenchmark::new();
 
