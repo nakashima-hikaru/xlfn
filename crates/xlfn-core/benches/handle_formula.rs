@@ -4,7 +4,7 @@ use xlfn_core::benchmark_support::{HandleFormulaBenchCase, HandleFormulaBenchmar
 fn handle_formula_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_formula");
 
-    for case in HandleFormulaBenchCase::ALL {
+    for case in HandleFormulaBenchCase::END_TO_END {
         let benchmark = HandleFormulaBenchmark::new(case);
         group.bench_function(BenchmarkId::from_parameter(case.name()), |b| {
             b.iter(|| std::hint::black_box(benchmark.run()));

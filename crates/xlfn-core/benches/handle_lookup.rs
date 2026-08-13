@@ -4,7 +4,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use xlfn_core::benchmark_support::{HandleLookupBenchCase, HandleLookupBenchmark};
 
 const ITERATIONS_PER_WORKER: usize = 1_000;
-const THREAD_COUNTS: [usize; 6] = [1, 2, 4, 8, 16, 32];
+const THREAD_COUNTS: [usize; 4] = [1, 4, 16, 32];
 
 fn handle_lookup_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_lookup");

@@ -1,28 +1,7 @@
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn_core::benchmark_support::{
-    FingerprintBenchCase, FingerprintBenchmark, HandleFormulaBenchCase, XloperFingerprintBenchmark,
-};
-
-fn formula_fingerprint_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("formula_fingerprint");
-
-    for case in FingerprintBenchCase::ALL {
-        let benchmark = FingerprintBenchmark::new(case);
-        group.throughput(Throughput::Bytes(benchmark.encoded_bytes() as u64));
-
-        group.bench_with_input(
-            BenchmarkId::new("selected", case.name()),
-            &benchmark,
-            |b, benchmark| {
-                b.iter(|| std::hint::black_box(benchmark.run_selected()));
-            },
-        );
-    }
-
-    group.finish();
-}
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use xlfn_core::benchmark_support::{HandleFormulaBenchCase, XloperFingerprintBenchmark};
 
 fn xloper_fingerprint_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("xloper_fingerprint");
@@ -38,9 +17,5 @@ fn xloper_fingerprint_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    formula_fingerprint_benchmarks,
-    xloper_fingerprint_benchmarks
-);
+criterion_group!(benches, xloper_fingerprint_benchmarks);
 criterion_main!(benches);

@@ -10,7 +10,7 @@ fn concurrent_spawns(c: &mut Criterion) {
     let mut group = c.benchmark_group("async_spawn/concurrent");
     group.measurement_time(Duration::from_secs(10));
 
-    for threads in [1_usize, 2, 4, 8, 16, 32] {
+    for threads in [1_usize, 4, 16, 32] {
         let attempts = threads * ITERATIONS_PER_THREAD;
         group.throughput(Throughput::Elements(attempts as u64));
         group.bench_with_input(

@@ -2,11 +2,10 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn_core::benchmark_support::{
-    FormatFormulaTopicKeyBenchmark, HandleColdBatch, HandleContendedBenchmark,
-    HandleDistinctKeyBenchmark, HandleWarmBenchmark,
+    HandleColdBatch, HandleDistinctKeyBenchmark, HandleWarmBenchmark,
 };
 
-const DISTINCT_WORKERS: [usize; 6] = [1, 2, 4, 8, 16, 32];
+const DISTINCT_WORKERS: [usize; 4] = [1, 4, 16, 32];
 const DISTINCT_ITERATIONS_PER_WORKER: usize = 1_000;
 
 fn handle_prepare_benchmarks(c: &mut Criterion) {
@@ -28,12 +27,6 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
 
     drop(bench);
 
-    let bench = HandleContendedBenchmark::new();
-    group.bench_function("same_key_contended", |b| {
-        b.iter(|| bench.run());
-    });
-    drop(bench);
-
     for workers in DISTINCT_WORKERS {
         let bench = HandleDistinctKeyBenchmark::new(workers, DISTINCT_ITERATIONS_PER_WORKER);
         group.throughput(Throughput::Elements(bench.total_iterations() as u64));
@@ -53,17 +46,5 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-fn handle_key_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("handle_key");
-
-    let format_benchmark = FormatFormulaTopicKeyBenchmark::new();
-
-    group.bench_function("format_formula_rtd_key", |b| {
-        b.iter(|| std::hint::black_box(format_benchmark.run()));
-    });
-
-    group.finish();
-}
-
-criterion_group!(benches, handle_prepare_benchmarks, handle_key_benchmarks);
+criterion_group!(benches, handle_prepare_benchmarks);
 criterion_main!(benches);

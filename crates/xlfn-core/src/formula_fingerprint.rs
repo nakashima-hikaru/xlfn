@@ -326,33 +326,6 @@ impl FingerprintSink for BufferedFingerprintEncoder {
     }
 }
 
-#[cfg(feature = "bench-internals")]
-#[inline]
-pub(crate) fn benchmark_stream(payload: &[u8], chunks: &[std::ops::Range<usize>]) -> [u8; 32] {
-    let mut encoder = BufferedFingerprintEncoder::new();
-    for chunk in chunks {
-        encoder
-            .write(&payload[chunk.clone()])
-            .expect("fingerprint benchmark input fits within the byte budget");
-    }
-    encoder.finish()
-}
-
-#[cfg(feature = "bench-internals")]
-#[inline]
-pub(crate) fn benchmark_direct_stream(
-    payload: &[u8],
-    chunks: &[std::ops::Range<usize>],
-) -> [u8; 32] {
-    let mut encoder = FingerprintEncoder::new();
-    for chunk in chunks {
-        encoder
-            .write(&payload[chunk.clone()])
-            .expect("fingerprint benchmark input fits within the byte budget");
-    }
-    encoder.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
