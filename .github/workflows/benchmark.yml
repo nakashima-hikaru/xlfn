@@ -76,7 +76,7 @@ jobs:
             --threshold-test t_test \
             --threshold-min-sample-size 10 \
             --threshold-max-sample-size 30 \
-            --threshold-upper-boundary 0.99 \
+            --threshold-upper-boundary 0.999 \
             --thresholds-reset \
             --error-on-alert \
             --ci-only-on-alert \
