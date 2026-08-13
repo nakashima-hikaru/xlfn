@@ -5,6 +5,7 @@ use crate::{
     UdfResultKind, XlArrayOutput, XllError, XllResult,
 };
 use parking_lot::{Condvar, Mutex};
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -89,15 +90,111 @@ impl CleanupDebtSet {
     }
 }
 
-const RETURN_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
-const RETURN_OBLIGATION_MASK: usize = RETURN_ADMISSION_CLOSED - 1;
+const RETURN_STRIPE_COUNT: usize = 32;
+const RETURN_STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
+const RETURN_STRIPE_COUNT_MASK: usize = RETURN_STRIPE_SEALED - 1;
+
+thread_local! {
+    static RETURN_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+static NEXT_RETURN_STRIPE: AtomicUsize = AtomicUsize::new(0);
+
+fn current_return_stripe() -> usize {
+    RETURN_STRIPE.with(|stripe| {
+        let current = stripe.get();
+        if current != usize::MAX {
+            return current;
+        }
+        let assigned =
+            NEXT_RETURN_STRIPE.fetch_add(1, Ordering::Relaxed) & (RETURN_STRIPE_COUNT - 1);
+        stripe.set(assigned);
+        assigned
+    })
+}
+
+#[derive(Debug)]
+#[repr(C, align(128))]
+struct ReturnStripe {
+    // The high bit seals this stripe against new producers during shutdown.
+    // The low bits count live Excel-owned return obligations.
+    state: AtomicUsize,
+}
+
+impl ReturnStripe {
+    const fn new_closed() -> Self {
+        Self {
+            state: AtomicUsize::new(RETURN_STRIPE_SEALED),
+        }
+    }
+
+    fn try_enter(&self) -> bool {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            if observed & RETURN_STRIPE_SEALED != 0 {
+                return false;
+            }
+            if observed & RETURN_STRIPE_COUNT_MASK == RETURN_STRIPE_COUNT_MASK {
+                std::process::abort();
+            }
+            match self.state.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    fn release(&self) {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        if previous & RETURN_STRIPE_COUNT_MASK == 0 {
+            std::process::abort();
+        }
+    }
+
+    fn seal(&self) {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            if observed & RETURN_STRIPE_SEALED != 0 {
+                return;
+            }
+            match self.state.compare_exchange_weak(
+                observed,
+                observed | RETURN_STRIPE_SEALED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    fn reopen(&self) {
+        debug_assert!(self.state.load(Ordering::Acquire) & RETURN_STRIPE_SEALED != 0);
+        debug_assert_eq!(self.active(), 0);
+        self.state.store(0, Ordering::Release);
+    }
+
+    fn is_sealed(&self) -> bool {
+        self.state.load(Ordering::Acquire) & RETURN_STRIPE_SEALED != 0
+    }
+
+    fn active(&self) -> usize {
+        self.state.load(Ordering::Acquire) & RETURN_STRIPE_COUNT_MASK
+    }
+}
 
 /// Runtime-local accounting for code paths that can retain or re-enter the
 /// XLL after a synchronous function has returned to Excel.
 pub(crate) struct ReturnTracker {
-    // Most significant bit: admission closed
-    // Remaining bits: outstanding return obligations
-    state: AtomicUsize,
+    // Ordinary producer entry and obligation release use one thread-assigned
+    // stripe. Shutdown seals all stripes and only then scans them for quiescence.
+    stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
     waiters: AtomicUsize,
     wait_lock: Mutex<()>,
     quiescent: Condvar,
@@ -107,6 +204,7 @@ pub(crate) struct ReturnTracker {
 
 pub(crate) struct ReturnObligation {
     tracker: Arc<ReturnTracker>,
+    stripe_index: usize,
 }
 
 impl ReturnObligation {
@@ -121,14 +219,14 @@ impl ReturnObligation {
 
 impl Drop for ReturnObligation {
     fn drop(&mut self) {
-        self.tracker.release_obligation();
+        self.tracker.release_obligation(self.stripe_index);
     }
 }
 
 impl ReturnTracker {
     pub(crate) fn new_closed() -> Self {
         Self {
-            state: AtomicUsize::new(RETURN_ADMISSION_CLOSED),
+            stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
             waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
@@ -150,74 +248,47 @@ impl ReturnTracker {
     }
 
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
-        self.state
-            .compare_exchange(
-                RETURN_ADMISSION_CLOSED,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map(|_| ())
-            .map_err(|_| XllError::Internal {
+        if !self.admission_closed() || !self.is_quiescent() {
+            return Err(XllError::Internal {
                 diagnostic_id: 0x5254_4e52_454f_504e,
-            })
+            });
+        }
+        for stripe in &self.stripes {
+            stripe.reopen();
+        }
+        Ok(())
     }
 
     pub(crate) fn close_admission(&self) {
-        self.state
-            .fetch_or(RETURN_ADMISSION_CLOSED, Ordering::AcqRel);
+        for stripe in &self.stripes {
+            stripe.seal();
+        }
     }
 
     pub(crate) fn try_enter_producer(self: &Arc<Self>) -> Option<ReturnProducerGuard> {
-        let mut observed = self.state.load(Ordering::Acquire);
-
-        loop {
-            if observed & RETURN_ADMISSION_CLOSED != 0 {
-                return None;
-            }
-
-            let obligations = observed & RETURN_OBLIGATION_MASK;
-            if obligations == RETURN_OBLIGATION_MASK {
-                std::process::abort();
-            }
-
-            match self.state.compare_exchange_weak(
-                observed,
-                observed + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(ReturnProducerGuard {
-                        obligation: Some(ReturnObligation {
-                            tracker: Arc::clone(self),
-                        }),
-                    });
-                }
-                Err(actual) => observed = actual,
-            }
+        let stripe_index = current_return_stripe();
+        if !self.stripes[stripe_index].try_enter() {
+            return None;
         }
+        Some(ReturnProducerGuard {
+            obligation: Some(ReturnObligation {
+                tracker: Arc::clone(self),
+                stripe_index,
+            }),
+        })
     }
 
-    fn release_obligation(&self) {
-        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
-        let obligations = previous & RETURN_OBLIGATION_MASK;
-
-        if obligations == 0 {
-            std::process::abort();
-        }
-
-        if obligations == 1 {
-            self.notify_if_quiescent();
-        }
+    fn release_obligation(&self, stripe_index: usize) {
+        self.stripes[stripe_index].release();
+        self.notify_if_quiescent();
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
-        self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK == 0
+        self.stripes.iter().all(|stripe| stripe.active() == 0)
     }
 
     pub(crate) fn admission_closed(&self) -> bool {
-        self.state.load(Ordering::Acquire) & RETURN_ADMISSION_CLOSED != 0
+        self.stripes.iter().all(ReturnStripe::is_sealed)
     }
 
     pub(crate) fn wait_for_quiescence(&self) {
@@ -252,7 +323,7 @@ impl ReturnTracker {
 
     #[cfg(test)]
     fn outstanding_obligations(&self) -> usize {
-        self.state.load(Ordering::Acquire) & RETURN_OBLIGATION_MASK
+        self.stripes.iter().map(ReturnStripe::active).sum()
     }
 }
 
@@ -420,7 +491,7 @@ const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
 enum ReturnOwnership {
     Excel(Option<ReturnObligation>),
-    #[cfg(any(feature = "async", test))]
+    #[cfg(any(feature = "async", feature = "bench-internals", test))]
     Local,
 }
 
@@ -562,7 +633,7 @@ impl PreparedReturn {
         ReturnBlock::into_non_null(block).as_ptr()
     }
 
-    #[cfg(any(feature = "async", test))]
+    #[cfg(any(feature = "async", feature = "bench-internals", test))]
     fn publish_local(self) -> NonNull<XLOPER12> {
         let block = Box::new(ReturnBlock {
             oper: self.oper,
@@ -694,6 +765,17 @@ fn allocate_excel_owned(
 #[cfg(any(feature = "async", test))]
 pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_local_scalar_return() {
+    let pointer = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+        .expect("scalar benchmark return encoding must succeed")
+        .publish_local();
+    std::hint::black_box(pointer);
+
+    // SAFETY: `pointer` is a live local ReturnBlock produced immediately above.
+    unsafe { free_return(pointer.as_ptr()) };
 }
 
 fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
@@ -1100,7 +1182,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
                     .expect("Excel return obligation is taken exactly once"),
             })
         }
-        #[cfg(any(feature = "async", test))]
+        #[cfg(any(feature = "async", feature = "bench-internals", test))]
         ReturnOwnership::Local => None,
     }
 }
@@ -1124,7 +1206,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
                 .tracker()
                 .record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
         }
-        #[cfg(any(feature = "async", test))]
+        #[cfg(any(feature = "async", feature = "bench-internals", test))]
         ReturnOwnership::Local => {
             debug_assert!(operation.is_none());
         }
@@ -1662,6 +1744,23 @@ mod tests {
 
         drop(free_guard);
         assert_eq!(tracker.outstanding_obligations(), 0);
+    }
+
+    #[test]
+    fn return_obligation_can_be_released_on_another_thread() {
+        let _test = test_lock();
+        let runtime = Arc::new(open_test_runtime());
+        let pointer = ffi_boundary(&runtime, || Ok(42.0));
+        assert!(!runtime.returns_are_quiescent());
+        let pointer = pointer as usize;
+
+        let worker = std::thread::spawn(move || {
+            // SAFETY: `pointer` is the live Excel-owned return produced above.
+            unsafe { free_return(pointer as *mut XLOPER12) };
+        });
+        worker.join().unwrap();
+
+        assert!(runtime.returns_are_quiescent());
     }
 
     #[test]

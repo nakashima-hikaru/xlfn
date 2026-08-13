@@ -122,6 +122,8 @@ pub enum SyncBenchKind {
     FullAdmission,
     ScalarReturnNoSubscriber,
     ScalarReturnUdfTraceEnabled,
+    ReturnTrackerOnly,
+    ReturnBlockLocal,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +231,20 @@ impl SyncBoundaryWorkerPool {
                                 unsafe {
                                     let _ = crate::return_value::free_return_boundary(ptr);
                                 }
+                            }
+                        }
+                        SyncBenchKind::ReturnTrackerOnly => {
+                            for _ in 0..iterations_per_thread {
+                                let producer = r
+                                    .enter_return_producer()
+                                    .expect("return admission must be open for benchmark");
+                                std::hint::black_box(&producer);
+                                drop(producer);
+                            }
+                        }
+                        SyncBenchKind::ReturnBlockLocal => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_local_scalar_return();
                             }
                         }
                     }

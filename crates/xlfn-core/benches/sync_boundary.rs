@@ -50,6 +50,46 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     }
     group_no_sub.finish();
 
+    let mut group_return_tracker = c.benchmark_group("sync_boundary/return_tracker_only");
+    group_return_tracker.measurement_time(Duration::from_secs(10));
+    for threads in [1_usize, 2, 4, 8, 16, 32] {
+        let attempts = threads * ITERATIONS_PER_THREAD;
+        group_return_tracker.throughput(Throughput::Elements(attempts as u64));
+        group_return_tracker.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |b, &threads| {
+                let pool = SyncBoundaryWorkerPool::new(
+                    threads,
+                    ITERATIONS_PER_THREAD,
+                    SyncBenchKind::ReturnTrackerOnly,
+                );
+                b.iter(|| pool.run_batch());
+            },
+        );
+    }
+    group_return_tracker.finish();
+
+    let mut group_return_block = c.benchmark_group("sync_boundary/return_block_local");
+    group_return_block.measurement_time(Duration::from_secs(10));
+    for threads in [1_usize, 2, 4, 8, 16, 32] {
+        let attempts = threads * ITERATIONS_PER_THREAD;
+        group_return_block.throughput(Throughput::Elements(attempts as u64));
+        group_return_block.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |b, &threads| {
+                let pool = SyncBoundaryWorkerPool::new(
+                    threads,
+                    ITERATIONS_PER_THREAD,
+                    SyncBenchKind::ReturnBlockLocal,
+                );
+                b.iter(|| pool.run_batch());
+            },
+        );
+    }
+    group_return_block.finish();
+
     let mut group_trace = c.benchmark_group("sync_boundary/scalar_return/udf_trace_enabled");
     group_trace.measurement_time(Duration::from_secs(10));
     let threads = 1_usize;
