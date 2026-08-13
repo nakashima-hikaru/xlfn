@@ -40,6 +40,8 @@ theorem replay?_sound
 def fixtureKey : TopicKey :=
   { sheetId := 0, row := 0, column := 0, udfId := "fixture", argumentDigest := 0 }
 
+def fixtureRtdKey : RtdKey := "fixture-rtd"
+
 def close_suffix : List Event :=
   [.endPrepare, .sealTopics, .closeRegistry, .finishClose]
 
@@ -50,7 +52,7 @@ def success_trace : List Event :=
   [.beginPrepare,
    .beginInitializer fixtureKey 1,
    .insertPendingFresh fixtureKey 1,
-   .publishVisible fixtureKey 1,
+   .publishVisible fixtureKey 1 fixtureRtdKey,
    .commitPublication fixtureKey 1,
    .finishInitializer fixtureKey 1] ++ close_suffix
 
@@ -66,7 +68,7 @@ def seal_after_visible_rollback_trace : List Event :=
   [.beginPrepare,
    .beginInitializer fixtureKey 1,
    .insertPendingFresh fixtureKey 1,
-   .publishVisible fixtureKey 1,
+   .publishVisible fixtureKey 1 fixtureRtdKey,
    .sealTopics,
    .rollbackPendingReuse fixtureKey 1 2,
    .finishInitializer fixtureKey 1] ++ sealed_close_suffix

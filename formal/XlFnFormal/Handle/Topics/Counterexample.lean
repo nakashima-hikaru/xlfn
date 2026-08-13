@@ -8,10 +8,13 @@ namespace XlFnFormal.Handle.Topics
 def orphanKey : TopicKey :=
   { sheetId := 0, row := 0, column := 0, udfId := "orphan", argumentDigest := 0 }
 
+def orphanRtdKey : RtdKey := "orphan-rtd"
+
 def orphanProvisional (session : Registry.SessionId) : State :=
   let token : Registry.Token := { session := session, slot := 0, generation := 1 }
   { runtime := Runtime.initialState session
-    byKey := [{ key := orphanKey, token := token, stage := .provisional }]
+    byKey := [{ key := orphanKey, rtdKey := orphanRtdKey, token := token, stage := .provisional }]
+    byRtdKey := []
     initializing := [] }
 
 /-! A visible topic without an initializer owner is not enough to authorize a
@@ -54,9 +57,9 @@ theorem commit_after_seal_is_rejected
           contradiction
 
 theorem publish_after_seal_is_rejected
-    {s : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    {s : State} {key : TopicKey} {runtimeId : Runtime.InitializerId} {rtdKey : RtdKey}
     (hSealed : s.runtime.phase = .drainingPrepares) :
-    ¬ ∃ s', Step s (.publishVisible key runtimeId) s' := by
+    ¬ ∃ s', Step s (.publishVisible key runtimeId rtdKey) s' := by
   exact no_topic_publication_after_seal hSealed
 
 end XlFnFormal.Handle.Topics

@@ -5,7 +5,7 @@
     "beginPrepare",
     {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
-    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
     "sealTopics",
     {"rollbackPendingReuse": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "nextGeneration": 2}},
     {"finishInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},

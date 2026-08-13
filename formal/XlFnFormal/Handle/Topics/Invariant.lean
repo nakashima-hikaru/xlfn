@@ -80,8 +80,12 @@ theorem initial_invariant (session : Registry.SessionId) :
     (initialState session).Invariant := by
   refine ⟨Runtime.initial_runtimeInvariant session,
     List.Pairwise.nil, List.Pairwise.nil, ?_, List.Pairwise.nil,
-    List.Pairwise.nil, ?_, ?_⟩
+    List.Pairwise.nil, List.Pairwise.nil, ?_, ?_, ?_, ?_⟩
   · intro init hMem
+    contradiction
+  · intro entry hMem
+    contradiction
+  · intro topic hMem
     contradiction
   · intro topic hMem
     contradiction
@@ -119,6 +123,13 @@ theorem mem_of_findTopic_some
     (hFind : s.findTopic? key = some topic) :
     topic ∈ s.byKey := by
   dsimp [State.findTopic?] at hFind
+  exact Runtime.List.mem_of_find?_eq_some' hFind
+
+theorem mem_of_findReverse_some
+    {s : State} {rtdKey : RtdKey} {entry : ReverseTopic}
+    (hFind : s.findReverse? rtdKey = some entry) :
+    entry ∈ s.byRtdKey := by
+  dsimp [State.findReverse?] at hFind
   exact Runtime.List.mem_of_find?_eq_some' hFind
 
 theorem mem_of_findInitializing_some
@@ -273,7 +284,7 @@ theorem Step.visibleKeysUnique_preserved
     s'.VisibleKeysUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       dsimp [State.VisibleKeysUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
@@ -295,7 +306,7 @@ theorem Step.visibleTokensUnique_preserved
     s'.VisibleTokensUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       dsimp [State.VisibleTokensUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
@@ -405,7 +416,7 @@ theorem Step.runtimeInvariant_preserved
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | finishInitializer hInit hReady hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
-  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | finishClose hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
@@ -486,7 +497,7 @@ theorem Step.initializersBackedByRuntime_preserved
             apply hInitNe
             exact hId.symm.trans hEq
           exact ⟨runtimeInit, runtime_mem_filter_ne hRuntimeMem hRuntimeNe, hId⟩
-  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
       intro init hMem
       rw [hNoInitializers] at hMem
       contradiction
@@ -612,7 +623,7 @@ theorem Step.visibleTopicRootsValid_preserved
       exact visibleRootsValid_after_insertFresh (s := s) hInv hRuntime
   | insertPendingReuse hInit hNoTopic hRuntime =>
       exact visibleRootsValid_after_insertReuse (s := s) hInv hRuntime
-  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       intro topic hMem
       simp only [List.mem_append, List.mem_singleton] at hMem
       cases hMem with
@@ -638,7 +649,7 @@ theorem Step.visibleTopicRootsValid_preserved
   | finishInitializer hInit hReady hRuntime =>
       cases hRuntime
       exact hInv
-  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
       intro topic hMem
       rw [hNoVisible] at hMem
       contradiction
@@ -780,8 +791,8 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
           · intro topic hMem hStage
             exact no_topic_member hNoTopic hMem
           · rfl
-  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
-      rename_i token key runtimeId
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i key runtimeId rtdKey
       intro topic hTopicMem hStage
       simp only [List.mem_append, List.mem_singleton] at hTopicMem
       cases hTopicMem with
@@ -847,7 +858,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
             have hCommitted := hReady topic hMem hKeyEq
             exact (by cases hStageTopic.symm.trans hCommitted)
           · rfl
-  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
       intro topic hMem hStage
       rw [hNoVisible] at hMem
       contradiction
@@ -855,13 +866,270 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
       cases hRuntime
       exact hProv
 
+theorem no_reverse_member
+    {s : State} {rtdKey : RtdKey} {entry : ReverseTopic}
+    (hNoReverse : s.findReverse? rtdKey = none)
+    (hMem : entry ∈ s.byRtdKey) :
+    entry.rtdKey ≠ rtdKey := by
+  intro hEq
+  dsimp [State.findReverse?] at hNoReverse
+  have hSome : (s.byRtdKey.find? (fun candidate => candidate.rtdKey == rtdKey)).isSome = true := by
+    rw [List.find?_isSome]
+    exact ⟨entry, hMem, beq_iff_eq.mpr hEq⟩
+  rw [hNoReverse] at hSome
+  contradiction
+
+theorem mem_of_mem_filter_reverse
+    {rtdKey : RtdKey} {entry : ReverseTopic} {entries : List ReverseTopic}
+    (h : entry ∈ entries.filter (fun candidate => candidate.rtdKey != rtdKey)) :
+    entry ∈ entries := by
+  induction entries with
+  | nil => contradiction
+  | cons head tail ih =>
+      dsimp [List.filter] at h
+      split at h
+      · cases List.mem_cons.mp h with
+        | inl hHead => subst hHead; exact List.mem_cons_self
+        | inr hTail => exact List.mem_cons_of_mem head (ih hTail)
+      · exact List.mem_cons_of_mem head (ih h)
+
+theorem updateTopicStage_pairwise_rtdKeys
+    {s : State} {key : TopicKey} {stage : TopicStage}
+    (hInv : s.RtdKeysUnique) :
+    ({ s with byKey := s.updateTopicStage key stage }).RtdKeysUnique := by
+  dsimp [State.RtdKeysUnique, State.updateTopicStage] at hInv ⊢
+  apply pairwise_map_topics hInv
+  intro a hA b hB hRel
+  by_cases hAKey : (a.key == key) = true <;>
+    by_cases hBKey : (b.key == key) = true <;>
+    simp [hAKey, hBKey]
+  all_goals exact hRel
+
+theorem Step.rtdKeysUnique_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.RtdKeysUnique)
+    (hComplete : s.ReverseMapComplete)
+    (hStep : Step s e s') :
+    s'.RtdKeysUnique := by
+  cases hStep with
+  | beginInitializer => exact hInv
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i key runtimeId rtdKey
+      dsimp [State.RtdKeysUnique] at hInv ⊢
+      apply pairwise_append_singleton_topics hInv
+      intro topic hMem
+      intro hEq
+      rcases hComplete topic hMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+      exact no_reverse_member hNoRtdKey hEntryMem (hEntryRtd.trans hEq)
+  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+      exact updateTopicStage_pairwise_rtdKeys hInv
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
+      dsimp [State.RtdKeysUnique, State.removeTopic] at hInv ⊢
+      exact pairwise_filter_topics (fun topic => topic.key != _) hInv
+  | sealTopics => exact List.Pairwise.nil
+  | insertPendingFresh | insertPendingReuse | rollbackPendingReuse |
+      rollbackPendingRetire | finishInitializer | beginPrepare | endPrepare |
+      beginLookup | endLookup | closeRegistry | finishClose => exact hInv
+
+theorem distinct_topics_have_rtd_keys
+    {s : State} {left right : Topic}
+    (hInv : s.RtdKeysUnique)
+    (hLeft : left ∈ s.byKey)
+    (hRight : right ∈ s.byKey)
+    (hNe : left ≠ right) :
+    left.rtdKey ≠ right.rtdKey := by
+  have hRelation := pairwise_mem_ne_topics hInv hLeft hRight hNe
+  cases hRelation with
+  | inl hNotEqual => exact hNotEqual
+  | inr hNotEqual => exact hNotEqual.symm
+
+theorem Step.reverseMapSound_preserved
+    {s s' : State} {e : Event}
+    (hSound : s.ReverseMapSound)
+    (hVisibleKeys : s.VisibleKeysUnique)
+    (hStep : Step s e s') :
+    s'.ReverseMapSound := by
+  cases hStep with
+  | beginPrepare hRuntime => cases hRuntime; exact hSound
+  | endPrepare hRuntime => cases hRuntime; exact hSound
+  | sealTopics hRuntime =>
+      intro entry hMem
+      contradiction
+  | beginLookup hRuntime => cases hRuntime; exact hSound
+  | endLookup hRuntime => cases hRuntime; exact hSound
+  | beginInitializer hNoTopic hNoInitializer hNoRuntimeId hRuntime =>
+      cases hRuntime
+      exact hSound
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      cases hRuntime
+      exact hSound
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      cases hRuntime
+      exact hSound
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i token key runtimeId rtdKey
+      intro entry hMem
+      simp only [List.mem_append, List.mem_singleton] at hMem
+      cases hMem with
+      | inl hOld =>
+          rcases hSound entry hOld with ⟨topic, hTopicMem, hTopicKey, hTopicRtd⟩
+          exact ⟨topic, List.mem_append_left _ hTopicMem, hTopicKey, hTopicRtd⟩
+      | inr hNew =>
+          subst hNew
+          refine ⟨{ key := key, rtdKey := rtdKey, token := token, stage := .provisional },
+            ?_, rfl, rfl⟩
+          simp
+  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+      rename_i source key runtimeId
+      intro entry hMem
+      rcases hSound entry hMem with ⟨old, hOldMem, hOldKey, hOldRtd⟩
+      by_cases h : old.key == key
+      · refine ⟨{ old with stage := .committed }, ?_, ?_, ?_⟩
+        · apply List.mem_map.mpr
+          exact ⟨old, hOldMem, by simp [h]⟩
+        · exact hOldKey
+        · exact hOldRtd
+      · refine ⟨old, ?_, hOldKey, hOldRtd⟩
+        apply List.mem_map.mpr
+        exact ⟨old, hOldMem, by simp [h]⟩
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
+      rename_i target key runtimeId
+      let target' : Topic := { target with stage := .provisional }
+      have hTargetMem : target' ∈ s.byKey := mem_of_findTopic_some hTopic
+      intro entry hMem
+      rcases List.mem_filter.mp hMem with ⟨hEntryMem, hEntryNe⟩
+      rcases hSound entry hEntryMem with ⟨old, hOldMem, hOldKey, hOldRtd⟩
+      have hEntryRtdNe : entry.rtdKey ≠ target'.rtdKey := by
+        intro hEq
+        have hFalse : (entry.rtdKey != target.rtdKey) = false := by
+          simp [target', hEq]
+        rw [hFalse] at hEntryNe
+        contradiction
+      have hOldKeyNe : old.key ≠ key := by
+        intro hEq
+        have hOldTarget : old = target' := by
+          by_cases hSame : old = target'
+          · exact hSame
+          · exfalso
+            have hRelation := pairwise_mem_ne_topics hVisibleKeys hOldMem
+              hTargetMem hSame
+            have hKeyRelation : old.key = target'.key := by
+              simpa [target'] using hEq.trans hTopicKey.symm
+            cases hRelation with
+            | inl hNotEqual => exact hNotEqual hKeyRelation
+            | inr hNotEqual => exact hNotEqual hKeyRelation.symm
+        subst hOldTarget
+        exact hEntryRtdNe (hOldRtd.symm.trans rfl)
+      refine ⟨old, ?_, hOldKey, hOldRtd⟩
+      apply List.mem_filter.mpr
+      exact ⟨hOldMem, by simp [hOldKeyNe]⟩
+  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+      cases hRuntime
+      exact hSound
+  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+      cases hRuntime
+      exact hSound
+  | finishInitializer hInit hReady hRuntime =>
+      cases hRuntime
+      exact hSound
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
+      intro entry hMem
+      rw [hNoReverse] at hMem
+      contradiction
+  | finishClose hRuntime => cases hRuntime; exact hSound
+
+theorem Step.reverseMapComplete_preserved
+    {s s' : State} {e : Event}
+    (hComplete : s.ReverseMapComplete)
+    (hRtdKeys : s.RtdKeysUnique)
+    (hVisibleKeys : s.VisibleKeysUnique)
+    (hStep : Step s e s') :
+    s'.ReverseMapComplete := by
+  cases hStep with
+  | beginPrepare hRuntime => cases hRuntime; exact hComplete
+  | endPrepare hRuntime => cases hRuntime; exact hComplete
+  | sealTopics hRuntime =>
+      intro topic hMem
+      contradiction
+  | beginLookup hRuntime => cases hRuntime; exact hComplete
+  | endLookup hRuntime => cases hRuntime; exact hComplete
+  | beginInitializer hNoTopic hNoInitializer hNoRuntimeId hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i key runtimeId rtdKey
+      intro topic hMem
+      simp only [List.mem_append, List.mem_singleton] at hMem
+      cases hMem with
+      | inl hOld =>
+          rcases hComplete topic hOld with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+          exact ⟨entry, List.mem_append_left _ hEntryMem, hEntryKey, hEntryRtd⟩
+      | inr hNew =>
+          subst hNew
+          exact ⟨{ rtdKey := rtdKey, key := key },
+            List.mem_append_right _ (List.mem_singleton_self _), rfl, rfl⟩
+  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+      rename_i source key runtimeId
+      intro topic hMem
+      rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+      rcases hComplete old hOldMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+      refine ⟨entry, hEntryMem, ?_, ?_⟩
+      · by_cases h : old.key == key <;> simp [h, hEntryKey]
+      · by_cases h : old.key == key <;> simp [h, hEntryRtd]
+  | withdrawVisible hInit hTopic hTopicKey hPending =>
+      rename_i target key runtimeId
+      let target' : Topic := { target with stage := .provisional }
+      have hTargetMem : target' ∈ s.byKey := mem_of_findTopic_some hTopic
+      intro topic hMem
+      rcases List.mem_filter.mp hMem with ⟨hOldMem, hOldKeyNeBool⟩
+      have hOldKeyNe : topic.key ≠ key := by
+        intro hEq
+        have hFalse : (topic.key != key) = false := by simp [hEq]
+        rw [hFalse] at hOldKeyNeBool
+        contradiction
+      have hOldNeTarget' : topic ≠ target' := by
+        intro hEq
+        apply hOldKeyNe
+        have hKeyEq : topic.key = target'.key := congrArg Topic.key hEq
+        simpa [target'] using hKeyEq.trans hTopicKey
+      have hRtdNe' : topic.rtdKey ≠ target'.rtdKey :=
+        distinct_topics_have_rtd_keys hRtdKeys hOldMem
+          hTargetMem hOldNeTarget'
+      have hRtdNe : topic.rtdKey ≠ target.rtdKey := by
+        simpa [target'] using hRtdNe'
+      rcases hComplete topic hOldMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+      refine ⟨entry, ?_, hEntryKey, hEntryRtd⟩
+      apply List.mem_filter.mpr
+      exact ⟨hEntryMem, by simp [hRtdNe, hEntryRtd]⟩
+  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | finishInitializer hInit hReady hRuntime =>
+      cases hRuntime
+      exact hComplete
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
+      intro topic hMem
+      rw [hNoVisible] at hMem
+      contradiction
+  | finishClose hRuntime => cases hRuntime; exact hComplete
+
 theorem Step.invariant_preserved
     {s s' : State} {e : Event}
     (hInv : s.Invariant)
     (hStep : Step s e s') :
     s'.Invariant := by
   rcases hInv with
-    ⟨hRuntime, hKeys, hIds, hBacked, hVisibleKeys, hVisibleTokens, hRoots, hProv⟩
+    ⟨hRuntime, hKeys, hIds, hBacked, hVisibleKeys, hVisibleTokens, hRtdKeys,
+      hReverseSound, hReverseComplete, hRoots, hProv⟩
   exact ⟨
     Step.runtimeInvariant_preserved hRuntime hStep,
     Step.initializingKeysUnique_preserved hKeys hStep,
@@ -869,6 +1137,9 @@ theorem Step.invariant_preserved
     Step.initializersBackedByRuntime_preserved hBacked hStep,
     Step.visibleKeysUnique_preserved hVisibleKeys hStep,
     Step.visibleTokensUnique_preserved hVisibleTokens hStep,
+    Step.rtdKeysUnique_preserved hRtdKeys hReverseComplete hStep,
+    Step.reverseMapSound_preserved hReverseSound hVisibleKeys hStep,
+    Step.reverseMapComplete_preserved hReverseComplete hRtdKeys hVisibleKeys hStep,
     Step.visibleTopicRootsValid_preserved hRoots hStep,
     Step.provisionalTopicsHavePendingRoots_preserved hKeys hIds hProv hStep⟩
 

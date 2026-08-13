@@ -72,7 +72,8 @@ def apply? (s : State) (event : Event) : Option State :=
       | none => none
   | .sealTopics =>
       match Runtime.apply? s.runtime .sealTopics with
-      | some runtime' => some { s with runtime := runtime', byKey := [] }
+      | some runtime' =>
+          some { s with runtime := runtime', byKey := [], byRtdKey := [] }
       | none => none
   | .beginLookup token =>
       match Runtime.apply? s.runtime (.beginLookup token) with
@@ -108,17 +109,20 @@ def apply? (s : State) (event : Event) : Option State :=
         | some runtime' => some { s with runtime := runtime' }
         | none => none
       else none
-  | .publishVisible key runtimeId =>
+  | .publishVisible key runtimeId rtdKey =>
       match s.runtime.findInitializer? runtimeId with
       | some { id := foundId, stage := .pending token } =>
           if foundId = runtimeId ∧
               s.runtime.phase = .open ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
               s.findTopic? key = none ∧
+              s.findReverse? rtdKey = none ∧
               (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
               tokenLive? s.runtime.registry token = true then
             some { s with
-              byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
+              byKey := s.byKey ++
+                [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional }]
+              byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
           else none
       | _ => none
   | .commitPublication key runtimeId =>
@@ -143,7 +147,9 @@ def apply? (s : State) (event : Event) : Option State :=
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
               s.runtime.findInitializer? runtimeId =
                 some { id := runtimeId, stage := .pending topic.token } then
-            some { s with byKey := s.removeTopic key }
+            some { s with
+              byKey := s.removeTopic key
+              byRtdKey := s.removeReverse topic.rtdKey }
           else none
       | none => none
   | .rollbackPendingReuse key runtimeId nextGeneration =>
@@ -182,7 +188,7 @@ def apply? (s : State) (event : Event) : Option State :=
         | none => none
       else none
   | .closeRegistry =>
-      if s.byKey = [] ∧ s.initializing = [] then
+      if s.byKey = [] ∧ s.byRtdKey = [] ∧ s.initializing = [] then
         match Runtime.apply? s.runtime .closeRegistry with
         | some runtime' => some { s with runtime := runtime' }
         | none => none
@@ -198,7 +204,7 @@ private theorem findTopic_stage_of_find
     (hStage : topic.stage = .provisional) :
     s.findTopic? key = some { topic with stage := .provisional } := by
   cases topic with
-  | mk topicKey token stage =>
+  | mk topicKey rtdKey token stage =>
       dsimp at hStage ⊢
       cases hStage
       exact hFind
@@ -286,7 +292,7 @@ theorem apply?_sound
               (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
-  | publishVisible key runtimeId =>
+  | publishVisible key runtimeId rtdKey =>
       dsimp [apply?] at h
       cases hFind : s.runtime.findInitializer? runtimeId with
       | none => simp [hFind] at h
@@ -301,9 +307,10 @@ theorem apply?_sound
                   split at h
                   · rename_i hPre
                     cases h
-                    rcases hPre with ⟨hId, hPhase, hInit, hNoTopic, hNoToken, hLive⟩
+                    rcases hPre with
+                      ⟨hId, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hLive⟩
                     cases hId
-                    exact Step.publishVisible hPhase hInit hNoTopic hNoToken hFind
+                    exact Step.publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hFind
                       (tokenLive?_iff.mp hLive)
                   · contradiction
   | commitPublication key runtimeId =>
@@ -406,14 +413,14 @@ theorem apply?_sound
         contradiction
   | closeRegistry =>
       dsimp [apply?] at h
-      by_cases hPre : s.byKey = [] ∧ s.initializing = []
+      by_cases hPre : s.byKey = [] ∧ s.byRtdKey = [] ∧ s.initializing = []
       · rw [if_pos hPre] at h
         cases hRuntime : Runtime.apply? s.runtime .closeRegistry with
         | none => simp [hRuntime] at h
         | some runtime' =>
             rw [hRuntime] at h
             cases h
-            exact Step.closeRegistry hPre.1 hPre.2
+            exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2
               (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
@@ -451,7 +458,7 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hInit, hNoTopic⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | publishVisible hPhase hInit hNoTopic hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       have hRootBool := tokenLive?_iff.mpr hRoot
       dsimp [apply?]
       rw [hPending]
@@ -459,9 +466,10 @@ theorem apply?_complete
       have hPre : True ∧ s.runtime.phase = .open ∧
           s.findInitializing? _ = some { runtimeId := _, key := _ } ∧
           s.findTopic? _ = none ∧
+          s.findReverse? _ = none ∧
           (∀ topic ∈ s.byKey, topic.token ≠ _) ∧
           tokenLive? _ _ = true :=
-        ⟨True.intro, hPhase, hInit, hNoTopic, hNoToken, hRootBool⟩
+        ⟨True.intro, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hRootBool⟩
       rw [if_pos hPre]
   | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
       dsimp [apply?]
@@ -492,9 +500,9 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hInit, hReady⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | closeRegistry hNoVisible hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
       dsimp [apply?]
-      rw [if_pos ⟨hNoVisible, hNoInitializers⟩]
+      rw [if_pos ⟨hNoVisible, hNoReverse, hNoInitializers⟩]
       rw [Runtime.apply?_complete hRuntime]
   | finishClose hRuntime =>
       simp [apply?, Runtime.apply?_complete hRuntime]

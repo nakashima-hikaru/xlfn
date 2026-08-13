@@ -16,7 +16,7 @@ inductive Event where
   | insertPendingFresh (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | insertPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (slot : Registry.SlotId) (generation : Registry.Generation)
-  | publishVisible (key : TopicKey) (runtimeId : Runtime.InitializerId)
+  | publishVisible (key : TopicKey) (runtimeId : Runtime.InitializerId) (rtdKey : RtdKey)
   | commitPublication (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | withdrawVisible (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | rollbackPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
@@ -41,7 +41,7 @@ inductive Step : State → Event → State → Prop where
   | sealTopics
       {s : State} {runtime' : Runtime.State}
       (hRuntime : Runtime.Step s.runtime .sealTopics runtime') :
-      Step s .sealTopics { s with runtime := runtime', byKey := [] }
+      Step s .sealTopics { s with runtime := runtime', byKey := [], byRtdKey := [] }
 
   | beginLookup
       {s : State} {runtime' : Runtime.State} {token : Registry.Token}
@@ -86,17 +86,19 @@ inductive Step : State → Event → State → Prop where
 
   | publishVisible
       {s : State} {token : Registry.Token}
-      {key : TopicKey} {runtimeId : Runtime.InitializerId}
+      {key : TopicKey} {runtimeId : Runtime.InitializerId} {rtdKey : RtdKey}
       (hPhase : s.runtime.phase = .open)
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hNoTopic : s.findTopic? key = none)
+      (hNoRtdKey : s.findReverse? rtdKey = none)
       (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending token })
       (hRoot : Runtime.TokenLive s.runtime.registry token) :
-      Step s (.publishVisible key runtimeId)
+      Step s (.publishVisible key runtimeId rtdKey)
         { s with
-            byKey := s.byKey ++ [{ key := key, token := token, stage := .provisional }] }
+            byKey := s.byKey ++ [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional }]
+            byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
 
   | commitPublication
       {s : State} {runtime' : Runtime.State} {topic : Topic}
@@ -121,7 +123,9 @@ inductive Step : State → Event → State → Prop where
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending topic.token }) :
       Step s (.withdrawVisible key runtimeId)
-        { s with byKey := s.removeTopic key }
+        { s with
+            byKey := s.removeTopic key
+            byRtdKey := s.removeReverse topic.rtdKey }
 
   | rollbackPendingReuse
       {s : State} {runtime' : Runtime.State}
@@ -165,6 +169,7 @@ inductive Step : State → Event → State → Prop where
   | closeRegistry
       {s : State} {runtime' : Runtime.State}
       (hNoVisible : s.byKey = [])
+      (hNoReverse : s.byRtdKey = [])
       (hNoInitializers : s.initializing = [])
       (hRuntime : Runtime.Step s.runtime .closeRegistry runtime') :
       Step s .closeRegistry { s with runtime := runtime' }

@@ -251,10 +251,10 @@ so the concrete side does not rely on wrapping `u64` counters.
 ## Handle topic ownership: H3.1
 
 `XlFnFormal/Handle/Topics` is the first topic-ownership layer. `TopicKey` is
-an abstract structured identity; RTD serialization and the reverse map are
-deliberately out of scope until H3.2. `State` extends `Runtime.State` with the
-visible topic table and initializer owners, so lifecycle phase and seal gates
-are shared with the H2 model.
+an abstract structured identity and `RtdKey` is the corresponding abstract RTD
+lookup key. `State` extends `Runtime.State` with the visible topic table, the
+RTD reverse table, and initializer owners, so lifecycle phase and seal gates are
+shared with the H2 model.
 
 Pending allocation is separate from visible publication:
 
@@ -282,15 +282,34 @@ prove these single-flight/root obligations:
 The last property is expressed through `Registry.TokenLive`, so a committed
 topic cannot retain an unpublished or stale registry root. `closeRegistry` and
 `finishClose` are included in the model; reachable closed states carry a
-`CloseCertified` certificate containing Runtime quiescence, an empty visible
-topic table, and no H3 initializer owners. H3.2 will add `byKey`/`byRtdKey`
-consistency and RTD-key uniqueness before Excel ownership and server-generation
-transactions are introduced.
+`CloseCertified` certificate containing Runtime quiescence, empty visible and
+reverse topic tables, and no H3 initializer owners.
 
-The H3.1 replay fixtures are `fixtures/topics/success.json`,
+## Handle topic reverse-map consistency: H3.2
+
+H3.2 adds `RtdKey`, `Topic.rtdKey`, and `State.byRtdKey`. `publishVisible`
+creates the `byKey` and `byRtdKey` entries in one transition; `withdrawVisible`
+and `sealTopics` remove both sides together, and `closeRegistry` requires both
+tables to be empty. The invariant separates the two directions of the
+relationship:
+
+- `ReverseMapSound`: every reverse entry names a visible topic with the same
+  `TopicKey` and `RtdKey`;
+- `ReverseMapComplete`: every visible topic has a matching reverse entry;
+- `RtdKeysUnique`: distinct visible topics cannot share an RTD key.
+
+The executable checker enforces the same reverse-key precondition and update
+shape. `reverse_lookup_resolves_visible_topic` proves that a successful
+`topic_key_for_rtd`-style lookup resolves to a visible topic, while
+`visible_topic_has_reverse_lookup` exposes the converse direction. RTD string
+formatting and byte-level serialization injectivity remain a separate boundary
+proof for a later step.
+
+The H3.1/H3.2 replay fixtures are `fixtures/topics/success.json`,
 `fixtures/topics/seal-before-visible-rollback.json`, and
 `fixtures/topics/seal-after-visible-rollback.json` (with `rollback.json` kept
-as the short compatibility name). They use the same event vocabulary as
-`XlFnFormal.Handle.Topics.Checker`; Lean proves replay and close certification
-for all three paths. The producer-facing JSON parser will be added when the
-Rust topic recorder is introduced.
+as the short compatibility name). Publication fixtures now carry an explicit
+`rtdKey`; they use the same event vocabulary as
+`XlFnFormal.Handle.Topics.Checker`, and Lean proves replay and close
+certification for all three paths. The producer-facing JSON parser will be
+added when the Rust topic recorder is introduced.
