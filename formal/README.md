@@ -247,3 +247,21 @@ The CI Lean job feeds those generated traces to `composition_trace_checker`,
 including the committed-owner takeover, already-closed, and reopen paths. The
 producer uses checked attempt allocation and fail-stop close-epoch advancing,
 so the concrete side does not rely on wrapping `u64` counters.
+
+## Handle topic ownership: H3.1
+
+`XlFnFormal/Handle/Topics` is the first topic-ownership layer. `TopicKey` is
+structured separately from its RTD boundary string, while `State` mirrors the
+production maps `byKey`, `byRtdKey`, and `initializing`. H3.1 deliberately
+leaves reverse-map consistency for the next layer.
+
+The current transition model proves three single-flight/root obligations:
+
+- a key has at most one active initializer owner;
+- a key has at most one committed topic;
+- every committed topic has exactly one live registry token.
+
+The last property is expressed through `Registry.TokenLive`, so a committed
+topic cannot retain an unpublished or stale registry root. H3.2 will add the
+`byKey`/`byRtdKey` bijection and RTD-key uniqueness before Excel ownership and
+server-generation transactions are introduced.

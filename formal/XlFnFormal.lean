@@ -34,3 +34,7 @@ import XlFnFormal.Handle.Runtime.Invariant
 import XlFnFormal.Handle.Runtime.Safety
 import XlFnFormal.Handle.Runtime.Checker
 import XlFnFormal.Handle.Runtime.Counterexample
+import XlFnFormal.Handle.Topics.Model
+import XlFnFormal.Handle.Topics.Transition
+import XlFnFormal.Handle.Topics.Invariant
+import XlFnFormal.Handle.Topics.Safety
