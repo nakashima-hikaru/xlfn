@@ -1,4 +1,5 @@
 import XlFnFormal.Handle.Runtime.Transition
+import XlFnFormal.Handle.Registry.Invariant
 
 set_option autoImplicit false
 set_option linter.unusedVariables false
@@ -31,8 +32,17 @@ def PhaseInvariant (s : State) : Prop :=
   match s.phase with
   | .«open» => s.registry.closed = false
   | .drainingPrepares => s.registry.closed = false
-  | .registryClosed => s.registry.closed = true
-  | .closed => s.registry.closed = true
+  | .registryClosed =>
+      s.registry.closed = true ∧
+      s.activePrepares = 0 ∧
+      s.initializers = [] ∧
+      Registry.NoLiveSlots s.registry
+  | .closed =>
+      s.registry.closed = true ∧
+      s.activePrepares = 0 ∧
+      s.initializers = [] ∧
+      s.registry.activeLeases = 0 ∧
+      Registry.NoLiveSlots s.registry
 
 def RuntimeInvariant (s : State) : Prop :=
   PhaseInvariant s ∧
@@ -47,31 +57,185 @@ theorem initial_runtimeInvariant (session : SessionId) :
   intro init hIn
   contradiction
 
+theorem phaseInvariant_registryClosed_fields
+    {s : State}
+    (hInv : PhaseInvariant s)
+    (hPhase : s.phase = .registryClosed) :
+    s.registry.closed = true ∧
+    s.activePrepares = 0 ∧
+    s.initializers = [] ∧
+    Registry.NoLiveSlots s.registry := by
+  dsimp [PhaseInvariant] at hInv
+  rw [hPhase] at hInv
+  exact hInv
+
+theorem phaseInvariant_closed_fields
+    {s : State}
+    (hInv : PhaseInvariant s)
+    (hPhase : s.phase = .closed) :
+    s.registry.closed = true ∧
+    s.activePrepares = 0 ∧
+    s.initializers = [] ∧
+    s.registry.activeLeases = 0 ∧
+    Registry.NoLiveSlots s.registry := by
+  dsimp [PhaseInvariant] at hInv
+  rw [hPhase] at hInv
+  exact hInv
+
 theorem Step.phaseInvariant_preserved
     {s s' : State} {e : Event}
     (hInv : PhaseInvariant s)
     (hStep : Step s e s') :
     PhaseInvariant s' := by
   cases hStep with
-  | beginPrepare => exact hInv
-  | endPrepare => exact hInv
-  | beginInitialize => exact hInv
-  | finishInitialize => exact hInv
-  | insertPendingFresh => rename_i hP hF hReg; cases hReg; exact hInv
-  | insertPendingReuse => rename_i hP hF hReg; cases hReg; exact hInv
-  | publishTopic => exact hInv
-  | rollbackPendingReuse => rename_i hF hReg; cases hReg; exact hInv
-  | rollbackPendingRetire => rename_i hF hReg; cases hReg; exact hInv
-  | beginLookup => rename_i hReg; cases hReg; exact hInv
-  | endLookup => rename_i hReg; cases hReg; exact hInv
-  | sealTopics => rename_i hP; dsimp [PhaseInvariant] at hInv ⊢; rw [hP] at hInv; exact hInv
-  | closeRegistry => rename_i hP hI hPr hReg; cases hReg; dsimp [PhaseInvariant]
-  | finishClose =>
-      rename_i hP hReg
-      cases hReg
+  | beginPrepare hPhase =>
       dsimp [PhaseInvariant] at hInv ⊢
-      rw [hP] at hInv
+      cases hPhase with
+      | inl hOpen => rw [hOpen] at hInv ⊢; exact hInv
+      | inr hDraining => rw [hDraining] at hInv ⊢; exact hInv
+  | endPrepare hPrep =>
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hP : s.phase with
+      | «open» => simpa [hP, PhaseInvariant] using hInv
+      | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+      | registryClosed =>
+          have hInv' := phaseInvariant_registryClosed_fields hInv hP
+          rw [hInv'.2.1] at hPrep
+          contradiction
+      | closed =>
+          have hInv' := phaseInvariant_closed_fields hInv hP
+          rw [hInv'.2.1] at hPrep
+          contradiction
+  | beginInitialize hPhase hPrep hFresh =>
+      dsimp [PhaseInvariant] at hInv ⊢
+      rw [hPhase] at hInv ⊢
       exact hInv
+  | finishInitialize hFind hStage =>
+      rename_i id init
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hP : s.phase with
+      | «open» => simpa [hP, PhaseInvariant] using hInv
+      | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+      | registryClosed =>
+          have hInv' := phaseInvariant_registryClosed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+      | closed =>
+          have hInv' := phaseInvariant_closed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+  | insertPendingFresh hPhase hFind hRegStep =>
+      cases hRegStep
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hPhase with
+      | inl hOpen => rw [hOpen] at hInv ⊢; exact hInv
+      | inr hDraining => rw [hDraining] at hInv ⊢; exact hInv
+  | insertPendingReuse hPhase hFind hRegStep =>
+      cases hRegStep
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hPhase with
+      | inl hOpen => rw [hOpen] at hInv ⊢; exact hInv
+      | inr hDraining => rw [hDraining] at hInv ⊢; exact hInv
+  | publishTopic hPhase hFind =>
+      dsimp [PhaseInvariant] at hInv ⊢
+      rw [hPhase] at hInv ⊢
+      exact hInv
+  | rollbackPendingReuse hFind hRegStep =>
+      rename_i id token nextGen reg'
+      cases hRegStep
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hP : s.phase with
+      | «open» => simpa [hP, PhaseInvariant] using hInv
+      | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+      | registryClosed =>
+          have hInv' := phaseInvariant_registryClosed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+      | closed =>
+          have hInv' := phaseInvariant_closed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+  | rollbackPendingRetire hFind hRegStep =>
+      rename_i id token reg'
+      cases hRegStep
+      dsimp [PhaseInvariant] at hInv ⊢
+      cases hP : s.phase with
+      | «open» => simpa [hP, PhaseInvariant] using hInv
+      | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+      | registryClosed =>
+          have hInv' := phaseInvariant_registryClosed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+      | closed =>
+          have hInv' := phaseInvariant_closed_fields hInv hP
+          have hNil : s.findInitializer? id = none := by
+            dsimp [State.findInitializer?]
+            rw [hInv'.2.2.1]
+            rfl
+          rw [hNil] at hFind
+          cases hFind
+  | beginLookup hRegStep =>
+      cases hRegStep with
+      | beginLookup hNotClosed hAuth hInBounds hLive =>
+          dsimp [PhaseInvariant] at hInv ⊢
+          cases hP : s.phase with
+          | «open» => simpa [hP, PhaseInvariant] using hInv
+          | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+          | registryClosed =>
+              have hInv' := phaseInvariant_registryClosed_fields hInv hP
+              rw [hInv'.1] at hNotClosed
+              contradiction
+          | closed =>
+              have hInv' := phaseInvariant_closed_fields hInv hP
+              rw [hInv'.1] at hNotClosed
+              contradiction
+  | endLookup hRegStep =>
+      cases hRegStep with
+      | endLookup hLeases =>
+          dsimp [PhaseInvariant] at hInv ⊢
+          cases hP : s.phase with
+          | «open» => simpa [hP, PhaseInvariant] using hInv
+          | drainingPrepares => simpa [hP, PhaseInvariant] using hInv
+          | registryClosed => simpa [hP, PhaseInvariant, Registry.NoLiveSlots] using hInv
+          | closed =>
+              have hInv' := phaseInvariant_closed_fields hInv hP
+              rw [hInv'.2.2.2.1] at hLeases
+              contradiction
+  | sealTopics hPhase =>
+      dsimp [PhaseInvariant] at hInv ⊢
+      rw [hPhase] at hInv
+      exact hInv
+  | closeRegistry hPhase hNoInits hNoPrepares hRegStep =>
+      cases hRegStep
+      dsimp [PhaseInvariant]
+      exact ⟨by rfl, hNoPrepares, hNoInits,
+        Registry.map_closeSlot_noLiveSlots s.registry⟩
+  | finishClose hPhase hRegStep =>
+      cases hRegStep with
+      | finishClose hClosed hNoLeases =>
+          dsimp [PhaseInvariant] at hInv ⊢
+          have hInv' := phaseInvariant_registryClosed_fields hInv hPhase
+          exact ⟨hClosed, hInv'.2.1, hInv'.2.2.1, hNoLeases, hInv'.2.2.2⟩
 
 theorem Step.operationInvariant_preserved
     {s s' : State} {e : Event}

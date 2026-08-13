@@ -86,17 +86,30 @@ theorem rollback_removes_pending_root_retire
 
 def CloseCertified (s : State) : Prop :=
   s.phase = .closed ∧
+  s.activePrepares = 0 ∧
+  s.initializers = [] ∧
   Registry.CloseCertified s.registry
+
+theorem successful_close_is_certified
+    {session : SessionId} {s : State}
+    (hReach : Reachable (initialState session) s)
+    (hClosed : s.phase = .closed) :
+    CloseCertified s := by
+  have hInv := Reachable.runtimeInvariant_preserved
+    (initial_runtimeInvariant session) hReach
+  have hPhase := phaseInvariant_closed_fields hInv.1 hClosed
+  exact ⟨hClosed, hPhase.2.1, hPhase.2.2.1,
+    ⟨hPhase.1, hPhase.2.2.2.1, hPhase.2.2.2.2⟩⟩
 
 theorem Step.closeCertified_of_finishClose
     {s s' : State}
+    (hReach : Reachable (initialState s.registry.session) s)
     (hStep : Step s .finishClose s') :
     CloseCertified s' := by
   cases hStep with
   | finishClose hPhase hRegStep =>
-      cases hRegStep with
-      | finishClose hClosed hLeases =>
-          exact ⟨rfl, ⟨hClosed, hLeases⟩⟩
+      exact successful_close_is_certified
+        (Reachable.tail hReach (Step.finishClose hPhase hRegStep)) rfl
 
 theorem draining_pending_insert_cannot_escape
     {s : State} {id : InitializerId} {token : Token}
@@ -106,8 +119,14 @@ theorem draining_pending_insert_cannot_escape
     (hLive : s.registry.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation)
     (hAuth : s.registry.AuthenticatedFor token) :
     (¬ ∃ s', Step s (.publishTopic id) s') ∧
-    ((∃ nextGen s', Step s (.rollbackPendingReuse id nextGen) s' ∧ s'.findInitializer? id = some { id := id, stage := .resolved }) ∨
-     (∃ s', Step s (.rollbackPendingRetire id) s' ∧ s'.findInitializer? id = some { id := id, stage := .resolved })) := by
+    ((∃ nextGen s',
+        Step s (.rollbackPendingReuse id nextGen) s' ∧
+        s'.findInitializer? id = some { id := id, stage := .resolved } ∧
+        ¬ TokenLive s'.registry token) ∨
+     (∃ s',
+        Step s (.rollbackPendingRetire id) s' ∧
+        s'.findInitializer? id = some { id := id, stage := .resolved } ∧
+        ¬ TokenLive s'.registry token)) := by
   refine ⟨no_topic_publication_after_seal hSealed, ?_⟩
   cases hNext : nextGeneration? token.generation with
   | some nextGen =>
@@ -116,13 +135,15 @@ theorem draining_pending_insert_cannot_escape
         Registry.Step.removeReuse hAuth hInBounds hLive hNext
       have hStep : Step s (.rollbackPendingReuse id nextGen) { s with registry := { s.registry with slots := s.registry.slots.set token.slot (.vacant nextGen) }, initializers := s.updateInitializer id .resolved } :=
         Step.rollbackPendingReuse hFind hRegStep
-      refine ⟨nextGen, _, hStep, (rollback_removes_pending_root_reuse hFind hStep).1⟩
+      refine ⟨nextGen, _, hStep, (rollback_removes_pending_root_reuse hFind hStep).1,
+        (rollback_removes_pending_root_reuse hFind hStep).2⟩
   | none =>
       right
       have hRegStep : Registry.Step s.registry (.removeRetire token) { s.registry with slots := s.registry.slots.set token.slot .retired } :=
         Registry.Step.removeRetire hAuth hInBounds hLive hNext
       have hStep : Step s (.rollbackPendingRetire id) { s with registry := { s.registry with slots := s.registry.slots.set token.slot .retired }, initializers := s.updateInitializer id .resolved } :=
         Step.rollbackPendingRetire hFind hRegStep
-      refine ⟨_, hStep, (rollback_removes_pending_root_retire hFind hStep).1⟩
+      refine ⟨_, hStep, (rollback_removes_pending_root_retire hFind hStep).1,
+        (rollback_removes_pending_root_retire hFind hStep).2⟩
 
 end XlFnFormal.Handle.Runtime

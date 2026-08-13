@@ -41,14 +41,86 @@ theorem closeSlot_vacant_retires
   rw [hExhausted]
 
 def CloseCertified (s : State) : Prop :=
-  s.closed = true ∧ s.activeLeases = 0
+  s.closed = true ∧
+  s.activeLeases = 0 ∧
+  NoLiveSlots s
 
 theorem Step.closeCertified_of_finishClose
     {s s' : State}
+    (hReach : Reachable (initialState s.session) s)
     (hStep : Step s .finishClose s') :
     CloseCertified s' := by
+  cases hStep with
+  | finishClose hClosed hNoLeases =>
+      exact ⟨hClosed, hNoLeases,
+        Reachable.noLiveSlots_when_closed hReach hClosed⟩
+
+theorem successful_close_is_certified
+    {session : SessionId} {s : State}
+    (hReach : Reachable (initialState session) s)
+    (hClosed : s.closed = true)
+    (hNoLeases : s.activeLeases = 0) :
+    CloseCertified s := by
+  exact ⟨hClosed, hNoLeases,
+    Reachable.noLiveSlots_when_closed hReach hClosed⟩
+
+theorem mismatched_generation_cannot_lookup
+    {s : State} {token : Token} {current : Generation}
+    {hInBounds : token.slot < s.slots.length}
+    (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live current)
+    (hGeneration : token.generation ≠ current) :
+    ¬ ∃ s', Step s (.beginLookup token) s' := by
+  intro ⟨s', hStep⟩
   cases hStep
-  exact ⟨by assumption, by assumption⟩
+  rename_i _ _ _ hLookupLive
+  rw [hLive] at hLookupLive
+  cases hLookupLive
+  exact hGeneration rfl
+
+theorem stale_generation_cannot_lookup
+    {s : State} {token : Token} {current : Generation}
+    {hInBounds : token.slot < s.slots.length}
+    (hStale : token.generation < current)
+    (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live current) :
+    ¬ ∃ s', Step s (.beginLookup token) s' := by
+  have hNe : token.generation ≠ current := by
+    intro hEq
+    rw [hEq] at hStale
+    exact Nat.lt_irrefl current hStale
+  exact mismatched_generation_cannot_lookup hLive hNe
+
+theorem removed_token_cannot_become_valid_again
+    {s : State} {token : Token} {hInBounds : token.slot < s.slots.length}
+    (hRetired : s.slots.get ⟨token.slot, hInBounds⟩ = .retired) :
+    ¬ ∃ s', Step s (.beginLookup token) s' := by
+  intro ⟨s', hStep⟩
+  cases hStep
+  rename_i _ _ _ hLive
+  rw [hRetired] at hLive
+  cases hLive
+
+theorem exhausted_slot_is_permanently_retired
+    {s s' : State} {token : Token}
+    (hStep : Step s (.removeRetire token) s') :
+    RetiredAt s' token.slot ∧
+    (∀ t, Reachable s' t → RetiredAt t token.slot) := by
+  cases hStep with
+  | removeRetire hAuth hInBounds hLive hExhausted =>
+      have hRetired : RetiredAt ({ s with slots := s.slots.set token.slot .retired }) token.slot := by
+        refine ⟨?_, ?_⟩
+        · simpa using hInBounds
+        · simp
+      exact ⟨hRetired, fun t hReach => retired_is_permanent hRetired hReach⟩
+
+theorem registry_close_invalidates_all_tokens
+    {s s' : State}
+    (hStep : Step s .closeRegistry s') :
+    ∀ token, ¬ TokenLive s' token := by
+  cases hStep with
+  | closeRegistry hNotClosed =>
+      intro token hLive
+      rcases hLive with ⟨_, ⟨hInBounds, hSlotLive⟩⟩
+      exact noLiveSlots_contradiction (map_closeSlot_noLiveSlots s) hSlotLive
 
 theorem remove_reuse_reinsert_prevents_aba
     (session : SessionId)

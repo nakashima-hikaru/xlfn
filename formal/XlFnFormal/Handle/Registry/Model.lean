@@ -59,6 +59,15 @@ def SlotState.IsLive : SlotState → Prop
   | .live _ => True
   | _ => False
 
+def NoLiveSlots (s : State) : Prop :=
+  ∀ slot (h : slot < s.slots.length),
+    ¬ (s.slots.get ⟨slot, h⟩).IsLive
+
+def TokenLive (s : State) (token : Token) : Prop :=
+  token.session = s.session ∧
+  ∃ h : token.slot < s.slots.length,
+    s.slots.get ⟨token.slot, h⟩ = .live token.generation
+
 def State.MayInsert (s : State) : Prop :=
   s.closed = false
 
