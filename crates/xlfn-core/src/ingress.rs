@@ -1,9 +1,9 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
 #[cfg(test)]
 use std::thread::ThreadId;
+use std::time::Duration;
 
 pub const PHASE_OPENING: u8 = 0;
 pub const PHASE_OPEN: u8 = 1;
