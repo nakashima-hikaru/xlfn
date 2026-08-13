@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 #[cfg(test)]
 use std::thread::ThreadId;
 
@@ -12,6 +13,7 @@ pub const PHASE_CLOSED: u8 = 3;
 const INGRESS_STRIPE_COUNT: usize = 32;
 const STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
 const STRIPE_COUNT_MASK: usize = STRIPE_SEALED - 1;
+const QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 thread_local! {
     static INGRESS_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -82,6 +84,17 @@ impl IngressStripe {
         self.udf_active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_sub(1)
+            })
+            .unwrap_or_else(|_| std::process::abort());
+    }
+
+    fn leave(&self) {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                let active = state & STRIPE_COUNT_MASK;
+                active
+                    .checked_sub(1)
+                    .map(|next| (state & STRIPE_SEALED) | next)
             })
             .unwrap_or_else(|_| std::process::abort());
     }
@@ -214,8 +227,8 @@ pub struct ExportIngress {
     phase: AtomicU8,
     epoch: AtomicU64,
     stripes: [IngressStripe; INGRESS_STRIPE_COUNT],
-    // The mutex is used only by the rare shutdown wait and by the final guard
-    // drop that wakes that wait. It is not taken by ordinary entry calls.
+    // Used only by rare lifecycle quiescence waits.
+    // Ordinary export/UDF entry and exit never acquire this mutex.
     wait_lock: Mutex<()>,
     idle: Condvar,
     // Opening entries are rejected by the caller but counted until their
@@ -338,17 +351,7 @@ impl ExportIngress {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        let mut wait_guard = self
-            .wait_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        while self.active_calls() != 0 {
-            wait_guard = self
-                .idle
-                .wait(wait_guard)
-                .unwrap_or_else(|error| error.into_inner());
-        }
-        drop(wait_guard);
+        self.wait_for_quiescence();
 
         if self.phase.load(Ordering::Acquire) != PHASE_OPENING {
             return Err(OpeningPublicationLost);
@@ -545,6 +548,22 @@ impl ExportIngress {
         operation()
     }
 
+    fn wait_for_quiescence(&self) {
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        while self.active_calls() != 0 {
+            let (next_guard, _) = self
+                .idle
+                .wait_timeout(guard, QUIESCENCE_RECHECK_INTERVAL)
+                .unwrap_or_else(|error| error.into_inner());
+
+            guard = next_guard;
+        }
+    }
+
     /// Waits for the current epoch to drain and seals it CLOSED in the same
     /// synchronization region that observes `active == 0`.
     pub fn seal_and_drain(&self) -> ExportsDrained {
@@ -562,14 +581,8 @@ impl ExportIngress {
             ),
             "ingress sealed before begin_close"
         );
-        let mut wait_guard = self.wait_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut before_close = Some(before_close);
-        while self.active_calls() != 0 {
-            wait_guard = self
-                .idle
-                .wait(wait_guard)
-                .unwrap_or_else(|e| e.into_inner());
-        }
+        self.wait_for_quiescence();
 
         if let Some(before_close) = before_close.take() {
             before_close();
@@ -581,12 +594,7 @@ impl ExportIngress {
         for stripe in &self.stripes {
             stripe.seal();
         }
-        while self.active_calls() != 0 {
-            wait_guard = self
-                .idle
-                .wait(wait_guard)
-                .unwrap_or_else(|e| e.into_inner());
-        }
+        self.wait_for_quiescence();
 
         match self.phase.compare_exchange(
             PHASE_CLOSING,
@@ -598,7 +606,6 @@ impl ExportIngress {
             Err(PHASE_OPEN | PHASE_OPENING) => panic!("ingress sealed before begin_close"),
             Err(_) => std::process::abort(),
         }
-        drop(wait_guard);
         #[cfg(test)]
         if std::ptr::eq(self, global_ingress())
             && self.test_epoch_active.swap(0, Ordering::AcqRel) != 0
@@ -640,24 +647,12 @@ impl ExportIngress {
 
     fn release_reservation(&self, stripe_index: usize, udf: bool) {
         let stripe = &self.stripes[stripe_index];
+
         if udf {
             stripe.leave_udf();
         }
-        let previous = stripe
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                let active = state & STRIPE_COUNT_MASK;
-                active
-                    .checked_sub(1)
-                    .map(|next| (state & STRIPE_SEALED) | next)
-            })
-            .unwrap_or_else(|_| std::process::abort());
-        if previous & STRIPE_COUNT_MASK == 1 {
-            let _wait_guard = self.wait_lock.lock().unwrap_or_else(|e| e.into_inner());
-            if self.active_calls() == 0 {
-                self.idle.notify_all();
-            }
-        }
+
+        stripe.leave();
     }
 }
 
@@ -709,6 +704,30 @@ mod tests {
         assert!(!accepted);
         assert_eq!(ingress.active_calls(), 0);
         drop(closed_guard);
+    }
+
+    #[test]
+    fn drain_rechecks_quiescence_without_exit_notification() {
+        let ingress = ExportIngress::new();
+
+        ingress.begin_opening();
+        ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+
+        let (guard, accepted) = ingress.enter_with(|| {});
+        assert!(accepted);
+
+        ingress.begin_close_with(|| {});
+
+        std::thread::scope(|scope| {
+            let drain = scope.spawn(|| ingress.seal_and_drain());
+
+            std::thread::sleep(Duration::from_millis(10));
+            drop(guard);
+
+            let _drained = drain.join().unwrap();
+        });
+
+        assert_eq!(ingress.phase(), PHASE_CLOSED);
     }
 
     #[test]
