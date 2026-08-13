@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "initial": {"session": 0},
+  "events": [
+    "beginPrepare",
+    {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    "sealTopics",
+    {"publishVisibleFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"rollbackVisibleReuse": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "nextGeneration": 2}},
+    {"finishInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    "endPrepare"
+  ],
+  "outcome": "rolled_back"
+}

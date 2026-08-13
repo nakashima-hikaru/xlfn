@@ -38,3 +38,6 @@ import XlFnFormal.Handle.Topics.Model
 import XlFnFormal.Handle.Topics.Transition
 import XlFnFormal.Handle.Topics.Invariant
 import XlFnFormal.Handle.Topics.Safety
+import XlFnFormal.Handle.Topics.Checker
+import XlFnFormal.Handle.Topics.Counterexample
+import XlFnFormal.Handle.Topics.Trace

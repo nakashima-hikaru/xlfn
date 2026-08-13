@@ -251,17 +251,33 @@ so the concrete side does not rely on wrapping `u64` counters.
 ## Handle topic ownership: H3.1
 
 `XlFnFormal/Handle/Topics` is the first topic-ownership layer. `TopicKey` is
-structured separately from its RTD boundary string, while `State` mirrors the
-production maps `byKey`, `byRtdKey`, and `initializing`. H3.1 deliberately
-leaves reverse-map consistency for the next layer.
+an abstract structured identity; RTD serialization and the reverse map are
+deliberately out of scope until H3.2. `State` extends `Runtime.State` with the
+visible topic table and initializer owners, so lifecycle phase and seal gates
+are shared with the H2 model.
 
-The current transition model proves three single-flight/root obligations:
+Publication is split into a provisional visible phase and a final commit:
+
+`beginInitializer → insertPending → publishVisible(provisional) →
+commitPublication → finishInitializer`.
+
+Rollback removes the provisional topic before the Runtime pending root is
+resolved. The current checker and safety layer prove these single-flight/root
+obligations:
 
 - a key has at most one active initializer owner;
-- a key has at most one committed topic;
-- every committed topic has exactly one live registry token.
+- a key has at most one visible topic and therefore at most one committed topic;
+- distinct visible topics have distinct registry tokens;
+- a provisional topic is linked to the matching `Runtime.InitializerId` and
+  `pending(token)` root;
+- every committed topic has a live registry token.
 
 The last property is expressed through `Registry.TokenLive`, so a committed
-topic cannot retain an unpublished or stale registry root. H3.2 will add the
-`byKey`/`byRtdKey` bijection and RTD-key uniqueness before Excel ownership and
-server-generation transactions are introduced.
+topic cannot retain an unpublished or stale registry root. H3.2 will add
+`byKey`/`byRtdKey` consistency and RTD-key uniqueness before Excel ownership
+and server-generation transactions are introduced.
+
+The first H3.1 replay fixtures are `fixtures/topics/success.json` and
+`fixtures/topics/rollback.json`. They use the same event vocabulary as
+`XlFnFormal.Handle.Topics.Checker`; the producer-facing JSON parser will be
+added when the Rust topic recorder is introduced.

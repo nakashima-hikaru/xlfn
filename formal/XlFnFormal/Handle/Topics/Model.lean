@@ -1,14 +1,9 @@
-import XlFnFormal.Handle.Registry.Model
+import XlFnFormal.Handle.Runtime.Invariant
 
 set_option autoImplicit false
 set_option linter.unusedVariables false
 
 namespace XlFnFormal.Handle.Topics
-
-open Registry (SessionId Token)
-
-abbrev OwnerId := Nat
-abbrev RtdKey := String
 
 structure TopicKey where
   sheetId : Nat
@@ -18,32 +13,31 @@ structure TopicKey where
   argumentDigest : Nat
 deriving DecidableEq, Repr
 
-def TopicKey.formatRtdKey (key : TopicKey) : RtdKey :=
-  let separator := String.singleton (Char.ofNat 31)
-  s!"{key.sheetId}{separator}{key.row}{separator}{key.column}{separator}{key.udfId}{separator}{key.argumentDigest}"
+inductive TopicStage where
+  | provisional
+  | committed
+deriving DecidableEq, Repr
 
 structure Initializer where
+  runtimeId : Runtime.InitializerId
   key : TopicKey
-  owner : OwnerId
 deriving DecidableEq, Repr
 
 structure Topic where
   key : TopicKey
-  rtdKey : RtdKey
-  token : Token
+  token : Registry.Token
+  stage : TopicStage
 deriving DecidableEq, Repr
 
 structure State where
-  registry : Registry.State
+  runtime : Runtime.State
   byKey : List Topic
-  byRtdKey : List (RtdKey × TopicKey)
   initializing : List Initializer
 deriving DecidableEq, Repr
 
-def initialState (registry : Registry.State) : State :=
-  { registry := registry
+def initialState (session : Registry.SessionId) : State :=
+  { runtime := Runtime.initialState session
     byKey := []
-    byRtdKey := []
     initializing := [] }
 
 def State.findTopic? (s : State) (key : TopicKey) : Option Topic :=
@@ -52,24 +46,53 @@ def State.findTopic? (s : State) (key : TopicKey) : Option Topic :=
 def State.findInitializing? (s : State) (key : TopicKey) : Option Initializer :=
   s.initializing.find? (fun init => init.key == key)
 
-def State.removeInitializing (s : State) (key : TopicKey) : List Initializer :=
-  s.initializing.filter (fun init => init.key != key)
+def State.findInitializerById? (s : State) (runtimeId : Runtime.InitializerId) : Option Initializer :=
+  s.initializing.find? (fun init => init.runtimeId == runtimeId)
 
-def State.CommittedTopicRootValid (s : State) (topic : Topic) : Prop :=
-  Registry.TokenLive s.registry topic.token
+def State.removeInitializing (s : State) (runtimeId : Runtime.InitializerId) : List Initializer :=
+  s.initializing.filter (fun init => init.runtimeId != runtimeId)
+
+def State.removeTopic (s : State) (key : TopicKey) : List Topic :=
+  s.byKey.filter (fun topic => topic.key != key)
+
+def State.updateTopicStage (s : State) (key : TopicKey) (stage : TopicStage) : List Topic :=
+  s.byKey.map (fun topic => if topic.key == key then { topic with stage := stage } else topic)
+
+def State.VisibleTopicRootsValid (s : State) : Prop :=
+  ∀ topic ∈ s.byKey, Runtime.TokenLive s.runtime.registry topic.token
 
 def State.InitializingKeysUnique (s : State) : Prop :=
   s.initializing.Pairwise (fun lhs rhs => lhs.key ≠ rhs.key)
 
-def State.CommittedKeysUnique (s : State) : Prop :=
+def State.InitializerIdsUnique (s : State) : Prop :=
+  s.initializing.Pairwise (fun lhs rhs => lhs.runtimeId ≠ rhs.runtimeId)
+
+def State.VisibleKeysUnique (s : State) : Prop :=
   s.byKey.Pairwise (fun lhs rhs => lhs.key ≠ rhs.key)
 
+def State.VisibleTokensUnique (s : State) : Prop :=
+  s.byKey.Pairwise (fun lhs rhs => lhs.token ≠ rhs.token)
+
+def State.ProvisionalTopicsHavePendingRoots (s : State) : Prop :=
+  ∀ topic ∈ s.byKey,
+    topic.stage = .provisional →
+      ∃ init ∈ s.initializing,
+        init.key = topic.key ∧
+        s.runtime.findInitializer? init.runtimeId =
+          some { id := init.runtimeId, stage := .pending topic.token }
+
 def State.CommittedTopicRootsValid (s : State) : Prop :=
-  ∀ topic ∈ s.byKey, s.CommittedTopicRootValid topic
+  ∀ topic ∈ s.byKey,
+    topic.stage = .committed →
+      Runtime.TokenLive s.runtime.registry topic.token
 
 def State.Invariant (s : State) : Prop :=
+  Runtime.RuntimeInvariant s.runtime ∧
   s.InitializingKeysUnique ∧
-  s.CommittedKeysUnique ∧
-  s.CommittedTopicRootsValid
+  s.InitializerIdsUnique ∧
+  s.VisibleKeysUnique ∧
+  s.VisibleTokensUnique ∧
+  s.VisibleTopicRootsValid ∧
+  s.ProvisionalTopicsHavePendingRoots
 
 end XlFnFormal.Handle.Topics
