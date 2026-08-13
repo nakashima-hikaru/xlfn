@@ -39,7 +39,7 @@ def apply? (s : State) (e : Event) : Option State :=
       | none => none
 
   | .insertPendingFresh id =>
-      if s.phase = .«open» then
+      if s.phase = .«open» ∨ s.phase = .drainingPrepares then
         match s.findInitializer? id with
         | some { id := _, stage := .beforeInsert } =>
             match Registry.apply? s.registry .insertFresh with
@@ -53,7 +53,7 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .insertPendingReuse id slotId gen =>
-      if s.phase = .«open» then
+      if s.phase = .«open» ∨ s.phase = .drainingPrepares then
         match s.findInitializer? id with
         | some { id := _, stage := .beforeInsert } =>
             match Registry.apply? s.registry (.insertReuse slotId gen) with
@@ -162,8 +162,8 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · contradiction
   | insertPendingFresh id =>
       dsimp [apply?] at h
-      split at h
-      · rename_i hPhase
+      by_cases hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares
+      · rw [if_pos hPhase] at h
         split at h
         · rename_i init_id hFind
           split at h
@@ -174,11 +174,11 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
             exact Step.insertPendingFresh hPhase hFind (Registry.apply?_sound hRegApply)
           · contradiction
         · contradiction
-      · contradiction
+      · rw [if_neg hPhase] at h; contradiction
   | insertPendingReuse id slotId gen =>
       dsimp [apply?] at h
-      split at h
-      · rename_i hPhase
+      by_cases hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares
+      · rw [if_pos hPhase] at h
         split at h
         · rename_i init_id hFind
           split at h
@@ -189,7 +189,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
             exact Step.insertPendingReuse hPhase hFind (Registry.apply?_sound hRegApply)
           · contradiction
         · contradiction
-      · contradiction
+      · rw [if_neg hPhase] at h; contradiction
   | publishTopic id =>
       dsimp [apply?] at h
       split at h

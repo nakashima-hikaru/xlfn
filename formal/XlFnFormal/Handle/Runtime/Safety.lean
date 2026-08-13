@@ -1,3 +1,4 @@
+import XlFnFormal.Handle.Registry.Safety
 import XlFnFormal.Handle.Runtime.Invariant
 
 set_option autoImplicit false
@@ -50,22 +51,52 @@ theorem updateInitializer_find
         exact ih hFind
 
 theorem rollback_removes_pending_root_reuse
-    {s s' : State} {id : InitializerId} {nextGen : Generation}
+    {s s' : State} {id : InitializerId} {token : Token} {nextGen : Generation}
+    (hFind : s.findInitializer? id = some { id := id, stage := .pending token })
     (hStep : Step s (.rollbackPendingReuse id nextGen) s') :
-    s'.findInitializer? id = some { id := id, stage := .resolved } := by
+    s'.findInitializer? id = some { id := id, stage := .resolved } ∧ ¬ TokenLive s'.registry token := by
   cases hStep with
-  | rollbackPendingReuse hFind hRegStep =>
-      dsimp [State.findInitializer?, State.updateInitializer]
-      exact updateInitializer_find hFind
+  | rollbackPendingReuse hFind' hRegStep =>
+      refine ⟨by dsimp [State.findInitializer?, State.updateInitializer]; exact updateInitializer_find hFind', ?_⟩
+      intro hLiveTok
+      rcases hLiveTok with ⟨hSess, ⟨hBounds, hLive⟩⟩
+      rw [hFind] at hFind'
+      cases hFind'
+      cases hRegStep
+      dsimp at hLive
+      rw [List.getElem_set_self] at hLive
+      contradiction
 
 theorem rollback_removes_pending_root_retire
-    {s s' : State} {id : InitializerId}
+    {s s' : State} {id : InitializerId} {token : Token}
+    (hFind : s.findInitializer? id = some { id := id, stage := .pending token })
     (hStep : Step s (.rollbackPendingRetire id) s') :
-    s'.findInitializer? id = some { id := id, stage := .resolved } := by
+    s'.findInitializer? id = some { id := id, stage := .resolved } ∧ ¬ TokenLive s'.registry token := by
   cases hStep with
-  | rollbackPendingRetire hFind hRegStep =>
-      dsimp [State.findInitializer?, State.updateInitializer]
-      exact updateInitializer_find hFind
+  | rollbackPendingRetire hFind' hRegStep =>
+      refine ⟨by dsimp [State.findInitializer?, State.updateInitializer]; exact updateInitializer_find hFind', ?_⟩
+      intro hLiveTok
+      rcases hLiveTok with ⟨hSess, ⟨hBounds, hLive⟩⟩
+      rw [hFind] at hFind'
+      cases hFind'
+      cases hRegStep
+      dsimp at hLive
+      rw [List.getElem_set_self] at hLive
+      contradiction
+
+def CloseCertified (s : State) : Prop :=
+  s.phase = .closed ∧
+  Registry.CloseCertified s.registry
+
+theorem Step.closeCertified_of_finishClose
+    {s s' : State}
+    (hStep : Step s .finishClose s') :
+    CloseCertified s' := by
+  cases hStep with
+  | finishClose hPhase hRegStep =>
+      cases hRegStep with
+      | finishClose hClosed hLeases =>
+          exact ⟨rfl, ⟨hClosed, hLeases⟩⟩
 
 theorem draining_pending_insert_cannot_escape
     {s : State} {id : InitializerId} {token : Token}
@@ -85,13 +116,13 @@ theorem draining_pending_insert_cannot_escape
         Registry.Step.removeReuse hAuth hInBounds hLive hNext
       have hStep : Step s (.rollbackPendingReuse id nextGen) { s with registry := { s.registry with slots := s.registry.slots.set token.slot (.vacant nextGen) }, initializers := s.updateInitializer id .resolved } :=
         Step.rollbackPendingReuse hFind hRegStep
-      refine ⟨nextGen, _, hStep, rollback_removes_pending_root_reuse hStep⟩
+      refine ⟨nextGen, _, hStep, (rollback_removes_pending_root_reuse hFind hStep).1⟩
   | none =>
       right
       have hRegStep : Registry.Step s.registry (.removeRetire token) { s.registry with slots := s.registry.slots.set token.slot .retired } :=
         Registry.Step.removeRetire hAuth hInBounds hLive hNext
       have hStep : Step s (.rollbackPendingRetire id) { s with registry := { s.registry with slots := s.registry.slots.set token.slot .retired }, initializers := s.updateInitializer id .resolved } :=
         Step.rollbackPendingRetire hFind hRegStep
-      refine ⟨_, hStep, rollback_removes_pending_root_retire hStep⟩
+      refine ⟨_, hStep, (rollback_removes_pending_root_retire hFind hStep).1⟩
 
 end XlFnFormal.Handle.Runtime

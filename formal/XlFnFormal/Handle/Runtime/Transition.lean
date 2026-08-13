@@ -58,7 +58,7 @@ inductive Step : State → Event → State → Prop where
       {s : State}
       {id : InitializerId}
       {reg' : Registry.State}
-      (hPhase : s.phase = .«open»)
+      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
       (hFind : s.findInitializer? id = some { id := id, stage := .beforeInsert })
       (hRegStep : Registry.Step s.registry .insertFresh reg') :
       Step s (.insertPendingFresh id)
@@ -72,7 +72,7 @@ inductive Step : State → Event → State → Prop where
       {slotId : SlotId}
       {gen : Generation}
       {reg' : Registry.State}
-      (hPhase : s.phase = .«open»)
+      (hPhase : s.phase = .«open» ∨ s.phase = .drainingPrepares)
       (hFind : s.findInitializer? id = some { id := id, stage := .beforeInsert })
       (hRegStep : Registry.Step s.registry (.insertReuse slotId gen) reg') :
       Step s (.insertPendingReuse id slotId gen)

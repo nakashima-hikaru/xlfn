@@ -19,15 +19,21 @@ inductive SlotState where
   | retired
 deriving DecidableEq, Repr
 
-def closeSlot : SlotState → SlotState
-  | .vacant g => .vacant g
-  | .live g => .vacant g
-  | .retired => .retired
-
 def maxGeneration : Generation := 2 ^ 64 - 1
 
 def nextGeneration? (g : Generation) : Option Generation :=
   if g < maxGeneration then some (g + 1) else none
+
+def closeSlot : SlotState → SlotState
+  | .vacant g =>
+      match nextGeneration? g with
+      | some next => .vacant next
+      | none => .retired
+  | .live g =>
+      match nextGeneration? g with
+      | some next => .vacant next
+      | none => .retired
+  | .retired => .retired
 
 structure State where
   session : SessionId

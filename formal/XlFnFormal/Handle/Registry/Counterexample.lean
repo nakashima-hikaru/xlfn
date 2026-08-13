@@ -6,13 +6,14 @@ set_option linter.unusedVariables false
 namespace XlFnFormal.Handle.Registry
 
 theorem trace_insert_lookup_close_completes
-    (session : SessionId) :
+    (session : SessionId)
+    (hMax : 1 < maxGeneration) :
     let s0 := initialState session
     let token : Token := { session := session, slot := 0, generation := 1 }
     let s1 := { s0 with slots := [.live 1] }
     let s2 := { s1 with activeLeases := 1 }
     let s3 := { s2 with activeLeases := 0 }
-    let s4 := { s3 with closed := true, slots := [.vacant 1] }
+    let s4 := { s3 with closed := true, slots := [.vacant 2] }
     Step s0 .insertFresh s1 ∧
     Step s1 (.beginLookup token) s2 ∧
     Step s2 .endLookup s3 ∧
@@ -25,7 +26,11 @@ theorem trace_insert_lookup_close_completes
   have hAuth1 : s1.AuthenticatedFor token := by rfl
   have h1 : Step s1 (.beginLookup token) s2 := Step.beginLookup (by dsimp [s1, s0, initialState]) hAuth1 hInBounds1 hLive1
   have h2 : Step s2 .endLookup s3 := Step.endLookup (by dsimp [s2, s1, s0, initialState]; decide)
-  have h3 : Step s3 .closeRegistry s4 := Step.closeRegistry (by dsimp [s3, s2, s1, s0, initialState])
+  have h3 : Step s3 .closeRegistry s4 := by
+    have hClose : s3.slots.map closeSlot = [.vacant 2] := by
+      dsimp [s3, s2, s1, s0, initialState, closeSlot, nextGeneration?]
+      rw [if_pos hMax]
+    exact Step.closeRegistry (by dsimp [s3, s2, s1, s0, initialState])
   have h4 : Step s4 .finishClose s4 := Step.finishClose (by dsimp [s4, s3, s2, s1, s0, initialState]) (by dsimp [s4, s3, s2, s1, s0, initialState])
   exact ⟨h0, h1, h2, h3, h4⟩
 

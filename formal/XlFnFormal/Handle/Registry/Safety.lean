@@ -16,6 +16,40 @@ theorem retired_is_permanent
     RetiredAt t slot :=
   Reachable.retiredAt_preserved hRetired hReach
 
+theorem closeSlot_live_advances
+    {g nextGen : Generation} (hNext : nextGeneration? g = some nextGen) :
+    closeSlot (.live g) = .vacant nextGen := by
+  dsimp [closeSlot]
+  rw [hNext]
+
+theorem closeSlot_live_retires
+    {g : Generation} (hExhausted : nextGeneration? g = none) :
+    closeSlot (.live g) = .retired := by
+  dsimp [closeSlot]
+  rw [hExhausted]
+
+theorem closeSlot_vacant_advances
+    {g nextGen : Generation} (hNext : nextGeneration? g = some nextGen) :
+    closeSlot (.vacant g) = .vacant nextGen := by
+  dsimp [closeSlot]
+  rw [hNext]
+
+theorem closeSlot_vacant_retires
+    {g : Generation} (hExhausted : nextGeneration? g = none) :
+    closeSlot (.vacant g) = .retired := by
+  dsimp [closeSlot]
+  rw [hExhausted]
+
+def CloseCertified (s : State) : Prop :=
+  s.closed = true ∧ s.activeLeases = 0
+
+theorem Step.closeCertified_of_finishClose
+    {s s' : State}
+    (hStep : Step s .finishClose s') :
+    CloseCertified s' := by
+  cases hStep
+  exact ⟨by assumption, by assumption⟩
+
 theorem remove_reuse_reinsert_prevents_aba
     (session : SessionId)
     (hMax : 1 < maxGeneration) :
