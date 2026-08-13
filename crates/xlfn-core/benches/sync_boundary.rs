@@ -52,22 +52,21 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
 
     let mut group_trace = c.benchmark_group("sync_boundary/scalar_return/udf_trace_enabled");
     group_trace.measurement_time(Duration::from_secs(10));
-    for threads in [1_usize] {
-        let attempts = threads * ITERATIONS_PER_THREAD;
-        group_trace.throughput(Throughput::Elements(attempts as u64));
-        group_trace.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                let pool = SyncBoundaryWorkerPool::new(
-                    threads,
-                    ITERATIONS_PER_THREAD,
-                    SyncBenchKind::ScalarReturnUdfTraceEnabled,
-                );
-                b.iter(|| pool.run_batch());
-            },
-        );
-    }
+    let threads = 1_usize;
+    let attempts = threads * ITERATIONS_PER_THREAD;
+    group_trace.throughput(Throughput::Elements(attempts as u64));
+    group_trace.bench_with_input(
+        BenchmarkId::from_parameter(threads),
+        &threads,
+        |b, &threads| {
+            let pool = SyncBoundaryWorkerPool::new(
+                threads,
+                ITERATIONS_PER_THREAD,
+                SyncBenchKind::ScalarReturnUdfTraceEnabled,
+            );
+            b.iter(|| pool.run_batch());
+        },
+    );
     group_trace.finish();
 }
 
