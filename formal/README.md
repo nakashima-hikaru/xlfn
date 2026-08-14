@@ -321,7 +321,8 @@ certification for all four paths.
 
 ## Excel topic ownership and connection transactions: H3.3
 
-H3.3 adds `ExcelOwnerId`, `Topic.excelOwner`,
+H3.3 adds the structured `ExcelOwnerId` (`serverGeneration` plus `topicId`),
+`Topic.excelOwner`,
 `Topic.excelCommitted`, and the reverse ownership table
 `State.byExcelOwner`. `beginConnection` claims a free visible topic and a
 free owner atomically; `commitConnection` changes only the topic's Excel
@@ -370,6 +371,41 @@ completeness, committed-owner consistency, distinct-owner uniqueness,
 rollback preservation of the formula topic and registry root, paired owner
 removal on withdrawal, state-preserving committed reuse, and rejection of
 formula resolution with an unsettled Excel connection.
+
+## RTD server-generation isolation: H3.4
+
+H3.4 makes the RTD server generation explicit in the topic model. A topic
+stores an optional `serverGeneration`, and an Excel owner is the structured
+pair `(serverGeneration, topicId)`. The independent `claimServer` event sets a
+previously unclaimed topic generation and is idempotent for the same
+generation; a different generation is rejected.
+
+`beginConnection` applies the same generation compatibility rule directly,
+matching the concrete `connect_inner` path rather than requiring a preceding
+claim event. `commitConnection` and `reuseCommittedConnection` require an
+owner whose generation matches the topic. `rollbackConnection` removes only
+the provisional Excel binding and deliberately preserves `serverGeneration`,
+so a stale server cannot reclaim the topic after rollback.
+
+The reachable invariant includes
+`ExcelOwnerGenerationConsistent`: every Excel owner has the same generation
+as its topic, and committed connections retain that correspondence. Named
+Safety theorems cover generation-mismatched claims and connections, owner and
+topic generation agreement, committed-connection agreement, and generation
+survival across rollback.
+
+Executable replay covers claim plus connection success, same-generation claim
+idempotence, mismatched claims, mismatched connection attempts, rollback
+followed by a stale-generation attempt, same-generation reuse with another
+topic id, committed reuse, and committed-topic rejection of a different
+generation. The JSON fixtures are
+`fixtures/topics/server-generation.json`,
+`fixtures/topics/server-generation-mismatch-rejected.json`, and
+`fixtures/topics/server-generation-rollback-rejected.json`.
+
+Termination of topics by server generation is intentionally deferred to H3.5;
+H3.4 proves isolation and ownership provenance without adding the termination
+transaction.
 
 ## RTD wire serialization boundary
 

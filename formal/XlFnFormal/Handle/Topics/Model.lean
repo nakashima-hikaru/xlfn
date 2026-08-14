@@ -20,7 +20,13 @@ structure ReverseTopic where
   key : TopicKey
 deriving DecidableEq, Repr
 
-abbrev ExcelOwnerId := Nat
+abbrev ServerGeneration := Nat
+abbrev ExcelTopicId := Int
+
+structure ExcelOwnerId where
+  serverGeneration : ServerGeneration
+  topicId : ExcelTopicId
+deriving DecidableEq, Repr
 
 structure ExcelBinding where
   owner : ExcelOwnerId
@@ -42,6 +48,7 @@ structure Topic where
   rtdKey : RtdKey
   token : Registry.Token
   stage : TopicStage
+  serverGeneration : Option ServerGeneration
   excelOwner : Option ExcelOwnerId
   excelCommitted : Bool
 deriving DecidableEq, Repr
@@ -98,7 +105,20 @@ def State.updateTopicExcel (s : State) (key : TopicKey)
     (owner : Option ExcelOwnerId) (committed : Bool) : List Topic :=
   s.byKey.map (fun topic =>
     if topic.key == key then
-      { topic with excelOwner := owner, excelCommitted := committed }
+      { topic with
+          serverGeneration :=
+            match owner with
+            | some owner => some owner.serverGeneration
+            | none => topic.serverGeneration
+          excelOwner := owner
+          excelCommitted := committed }
+    else topic)
+
+def State.updateTopicServerGeneration (s : State) (key : TopicKey)
+    (generation : Option ServerGeneration) : List Topic :=
+  s.byKey.map (fun topic =>
+    if topic.key == key then
+      { topic with serverGeneration := generation }
     else topic)
 
 def State.ReverseMapSound (s : State) : Prop :=
@@ -179,6 +199,12 @@ def State.ExcelCommitConsistent (s : State) : Prop :=
     topic.excelCommitted = true →
       ∃ owner, topic.excelOwner = some owner
 
+def State.ExcelOwnerGenerationConsistent (s : State) : Prop :=
+  ∀ topic ∈ s.byKey,
+    ∀ owner,
+      topic.excelOwner = some owner →
+        topic.serverGeneration = some owner.serverGeneration
+
 def State.ExcelOwnershipInvariant (s : State) : Prop :=
   s.ExcelOwnerMapSound ∧
   s.ExcelOwnerMapComplete ∧
@@ -199,6 +225,7 @@ def State.Invariant (s : State) : Prop :=
   s.ReverseMapComplete ∧
   s.VisibleTopicRootsValid ∧
   s.ProvisionalTopicsHavePendingRoots ∧
-  s.ExcelOwnershipInvariant
+  s.ExcelOwnershipInvariant ∧
+  s.ExcelOwnerGenerationConsistent
 
 end XlFnFormal.Handle.Topics

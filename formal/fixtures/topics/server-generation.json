@@ -6,9 +6,15 @@
     {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
+    {"claimServer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "generation": 1}},
     {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
-    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}}
+    {"commitConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
+    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"finishInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    "endPrepare",
+    "sealTopics",
+    "closeRegistry",
+    "finishClose"
   ],
-  "outcome": "rejected",
-  "reject_at": "commitPublication"
+  "outcome": "committed"
 }

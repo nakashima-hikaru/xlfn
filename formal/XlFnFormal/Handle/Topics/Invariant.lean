@@ -93,8 +93,9 @@ theorem initial_invariant (session : Registry.SessionId) :
     · intro topic hMem
       contradiction
     · simp [initialState, State.ExcelOwnershipInvariant, State.ExcelOwnerMapSound,
-        State.ExcelOwnerMapComplete, State.ExcelOwnersUnique,
-        State.ExcelBindingOwnersUnique, State.ExcelCommitConsistent]
+    State.ExcelOwnerMapComplete, State.ExcelOwnersUnique,
+        State.ExcelBindingOwnersUnique, State.ExcelCommitConsistent,
+        State.ExcelOwnerGenerationConsistent]
 
 theorem no_topic_member
     {s : State} {key : TopicKey} {topic : Topic}
@@ -338,7 +339,7 @@ theorem Step.initializingKeysUnique_preserved
       exact pairwise_filter_topics (fun init => init.runtimeId != _) hInv
   | insertPendingFresh | insertPendingReuse | publishVisible | commitPublication |
       withdrawVisible | rollbackPendingReuse | rollbackPendingRetire |
-      beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection |
+      claimServer | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection |
       beginPrepare | endPrepare | sealTopics | beginLookup | endLookup | closeRegistry |
       finishClose => exact hInv
 
@@ -358,9 +359,107 @@ theorem Step.initializerIdsUnique_preserved
       exact pairwise_filter_topics (fun init => init.runtimeId != _) hInv
   | insertPendingFresh | insertPendingReuse | publishVisible | commitPublication |
       withdrawVisible | rollbackPendingReuse | rollbackPendingRetire |
-      beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection |
+      claimServer | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection |
       beginPrepare | endPrepare | sealTopics | beginLookup | endLookup | closeRegistry |
       finishClose => exact hInv
+
+theorem updateTopicServerGeneration_pairwise_keys
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.VisibleKeysUnique) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).VisibleKeysUnique := by
+  dsimp [State.VisibleKeysUnique, State.updateTopicServerGeneration] at hInv ⊢
+  apply pairwise_map_topics hInv
+  intro a hA b hB hRel
+  by_cases hAKey : (a.key == key) = true <;>
+    by_cases hBKey : (b.key == key) = true <;>
+    simp [hAKey, hBKey]
+  all_goals exact hRel
+
+theorem updateTopicServerGeneration_pairwise_tokens
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.VisibleTokensUnique) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).VisibleTokensUnique := by
+  dsimp [State.VisibleTokensUnique, State.updateTopicServerGeneration] at hInv ⊢
+  apply pairwise_map_topics hInv
+  intro a hA b hB hRel
+  by_cases hAKey : (a.key == key) = true <;>
+    by_cases hBKey : (b.key == key) = true <;>
+    simp [hAKey, hBKey]
+  all_goals exact hRel
+
+theorem updateTopicServerGeneration_rtdKeys
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.RtdKeysUnique) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).RtdKeysUnique := by
+  dsimp [State.RtdKeysUnique, State.updateTopicServerGeneration] at hInv ⊢
+  apply pairwise_map_topics hInv
+  intro a hA b hB hRel
+  by_cases hAKey : (a.key == key) = true <;>
+    by_cases hBKey : (b.key == key) = true <;>
+    simp [hAKey, hBKey]
+  all_goals exact hRel
+
+theorem updateTopicServerGeneration_roots
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.VisibleTopicRootsValid) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).VisibleTopicRootsValid := by
+  intro topic hMem
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  by_cases hKey : old.key == key
+  · simp [State.updateTopicServerGeneration, hKey]
+    exact hInv old hOldMem
+  · simp [State.updateTopicServerGeneration, hKey]
+    exact hInv old hOldMem
+
+theorem updateTopicServerGeneration_provisional
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.ProvisionalTopicsHavePendingRoots) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).ProvisionalTopicsHavePendingRoots := by
+  intro topic hMem hStage
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  by_cases hKey : old.key == key
+  · simp [State.updateTopicServerGeneration, hKey] at hStage ⊢
+    exact hInv old hOldMem hStage
+  · simp [State.updateTopicServerGeneration, hKey] at hStage ⊢
+    exact hInv old hOldMem hStage
+
+theorem updateTopicServerGeneration_reverse_sound
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.ReverseMapSound) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).ReverseMapSound := by
+  intro entry hEntryMem
+  rcases hInv entry hEntryMem with ⟨old, hOldMem, hOldKey, hOldRtd⟩
+  refine ⟨if old.key == key then { old with serverGeneration := generation } else old, ?_, ?_, ?_⟩
+  · exact List.mem_map.mpr ⟨old, hOldMem, rfl⟩
+  · by_cases h : old.key == key
+    · simp [h]
+      exact hOldKey
+    · simp [h]
+      exact hOldKey
+  · by_cases h : old.key == key
+    · simp [h]
+      exact hOldRtd
+    · simp [h]
+      exact hOldRtd
+
+theorem updateTopicServerGeneration_reverse_complete
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.ReverseMapComplete) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).ReverseMapComplete := by
+  intro topic hMem
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  rcases hInv old hOldMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+  refine ⟨entry, hEntryMem, ?_, ?_⟩
+  · by_cases h : old.key == key
+    · simp [h]
+      exact hEntryKey
+    · simp [h]
+      exact hEntryKey
+  · by_cases h : old.key == key
+    · simp [h]
+      exact hEntryRtd
+    · simp [h]
+      exact hEntryRtd
 
 theorem Step.visibleKeysUnique_preserved
     {s s' : State} {e : Event}
@@ -379,7 +478,9 @@ theorem Step.visibleKeysUnique_preserved
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.VisibleKeysUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_pairwise_keys hInv
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact updateTopicExcel_pairwise_keys hInv
   | reuseCommittedConnection => exact hInv
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -408,7 +509,9 @@ theorem Step.visibleTokensUnique_preserved
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.VisibleTokensUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_pairwise_tokens hInv
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact updateTopicExcel_pairwise_tokens hInv
   | reuseCommittedConnection => exact hInv
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -506,7 +609,7 @@ theorem Step.runtimeInvariant_preserved
   | insertPendingReuse hInit hNoTopic hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | publishVisible => exact hInv
-  | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
+  | claimServer | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
       exact hInv
   | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
@@ -605,7 +708,7 @@ theorem Step.initializersBackedByRuntime_preserved
   | beginPrepare hRuntime => cases hRuntime; exact hInv
   | endPrepare hRuntime => cases hRuntime; exact hInv
   | publishVisible => exact hInv
-  | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
+  | claimServer | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
       exact hInv
   | withdrawVisible => exact hInv
   | beginLookup hRuntime => cases hRuntime; exact hInv
@@ -697,28 +800,52 @@ theorem visibleRootsValid_after_rollbackRetire
 theorem updateTopicExcel_key
     {topic : Topic} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool} :
     (if topic.key == key then
-        { topic with excelOwner := owner, excelCommitted := committed }
+        { topic with
+            serverGeneration :=
+              match owner with
+              | some owner => some owner.serverGeneration
+              | none => topic.serverGeneration
+            excelOwner := owner
+            excelCommitted := committed }
       else topic).key = topic.key := by
   by_cases h : topic.key == key <;> simp [h]
 
 theorem updateTopicExcel_rtdKey
     {topic : Topic} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool} :
     (if topic.key == key then
-        { topic with excelOwner := owner, excelCommitted := committed }
+        { topic with
+            serverGeneration :=
+              match owner with
+              | some owner => some owner.serverGeneration
+              | none => topic.serverGeneration
+            excelOwner := owner
+            excelCommitted := committed }
       else topic).rtdKey = topic.rtdKey := by
   by_cases h : topic.key == key <;> simp [h]
 
 theorem updateTopicExcel_token
     {topic : Topic} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool} :
     (if topic.key == key then
-        { topic with excelOwner := owner, excelCommitted := committed }
+        { topic with
+            serverGeneration :=
+              match owner with
+              | some owner => some owner.serverGeneration
+              | none => topic.serverGeneration
+            excelOwner := owner
+            excelCommitted := committed }
       else topic).token = topic.token := by
   by_cases h : topic.key == key <;> simp [h]
 
 theorem updateTopicExcel_stage
     {topic : Topic} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool} :
     (if topic.key == key then
-        { topic with excelOwner := owner, excelCommitted := committed }
+        { topic with
+            serverGeneration :=
+              match owner with
+              | some owner => some owner.serverGeneration
+              | none => topic.serverGeneration
+            excelOwner := owner
+            excelCommitted := committed }
       else topic).stage = topic.stage := by
   by_cases h : topic.key == key <;> simp [h]
 
@@ -728,8 +855,9 @@ theorem visibleRootsValid_after_topic_excel_update
     ({ s with byKey := s.updateTopicExcel key owner committed }).VisibleTopicRootsValid := by
   intro topic hMem
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
-  rw [updateTopicExcel_token]
-  exact hRoots old hOldMem
+  by_cases hKey : old.key == key
+  · simpa [State.updateTopicExcel, hKey] using hRoots old hOldMem
+  · simpa [State.updateTopicExcel, hKey] using hRoots old hOldMem
 
 theorem Step.visibleTopicRootsValid_preserved
     {s s' : State} {e : Event}
@@ -782,7 +910,9 @@ theorem Step.visibleTopicRootsValid_preserved
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       intro topic hMem
       exact hInv topic (mem_of_mem_filter_topics hMem)
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_roots hInv
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact visibleRootsValid_after_topic_excel_update hInv
   | reuseCommittedConnection => exact hInv
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -895,13 +1025,17 @@ theorem provisionalTopics_after_topic_excel_update
       { s with byKey := s.updateTopicExcel key owner committed } := by
   intro topic hMem hStage
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
-  rw [updateTopicExcel_stage] at hStage
-  rcases hProv old hOldMem hStage with ⟨init, hInitMem, hInitKey, hPending⟩
-  refine ⟨init, hInitMem, ?_, ?_⟩
-  · rw [updateTopicExcel_key]
-    exact hInitKey
-  · rw [updateTopicExcel_token]
-    exact hPending
+  by_cases hKey : old.key == key
+  · simp [State.updateTopicExcel, hKey] at hStage ⊢
+    rcases hProv old hOldMem hStage with ⟨init, hInitMem, hInitKey, hPending⟩
+    refine ⟨init, hInitMem, ?_, ?_⟩
+    · simpa [State.updateTopicExcel, hKey] using hInitKey
+    · simpa [State.updateTopicExcel, hKey] using hPending
+  · simp [State.updateTopicExcel, hKey] at hStage ⊢
+    rcases hProv old hOldMem hStage with ⟨init, hInitMem, hInitKey, hPending⟩
+    refine ⟨init, hInitMem, ?_, ?_⟩
+    · simpa [State.updateTopicExcel, hKey] using hInitKey
+    · simpa [State.updateTopicExcel, hKey] using hPending
 
 theorem Step.provisionalTopicsHavePendingRoots_preserved
     {s s' : State} {e : Event}
@@ -994,7 +1128,9 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       intro topic hTopicMem hStage
       exact hProv topic (mem_of_mem_filter_topics hTopicMem) hStage
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_provisional hProv
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact provisionalTopics_after_topic_excel_update hProv
   | reuseCommittedConnection => exact hProv
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -1107,7 +1243,9 @@ theorem Step.rtdKeysUnique_preserved
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.RtdKeysUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_rtdKeys hInv
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact updateTopicExcel_pairwise_rtdKeys hInv
   | reuseCommittedConnection => exact hInv
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -1133,7 +1271,7 @@ theorem Step.reverseRtdKeysUnique_preserved
       intro entry hMem
       exact no_reverse_member hNoRtdKey hMem
   | commitPublication => exact hInv
-  | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
+  | claimServer | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
       exact hInv
   | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.ReverseRtdKeysUnique, State.removeReverse] at hInv ⊢
@@ -1161,18 +1299,33 @@ theorem reverseMapSound_after_topic_excel_update
     ({ s with byKey := s.updateTopicExcel key owner committed }).ReverseMapSound := by
   intro entry hEntry
   rcases hSound entry hEntry with ⟨old, hOldMem, hOldKey, hOldRtd⟩
-  let updated : Topic :=
-    if old.key == key then
-      { old with excelOwner := owner, excelCommitted := committed }
-    else old
-  refine ⟨updated, ?_, ?_, ?_⟩
+  refine ⟨
+    (if old.key == key then
+      { old with
+          serverGeneration :=
+            match owner with
+            | some owner => some owner.serverGeneration
+            | none => old.serverGeneration
+          excelOwner := owner
+          excelCommitted := committed }
+    else old), ?_, ?_, ?_⟩
   · apply List.mem_map.mpr
-    refine ⟨old, hOldMem, ?_⟩
-    rfl
-  · exact (updateTopicExcel_key (topic := old) (key := key)
-      (owner := owner) (committed := committed)).trans hOldKey
-  · exact (updateTopicExcel_rtdKey (topic := old) (key := key)
-      (owner := owner) (committed := committed)).trans hOldRtd
+    exact ⟨old, hOldMem, by
+      by_cases hEq : old.key = key <;> cases owner <;> simp [hEq]⟩
+  · by_cases hKey : old.key == key
+    · have hEq : old.key = key := beq_iff_eq.mp hKey
+      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldKey, hEq]
+    · have hEq : old.key ≠ key := by
+        intro hEq
+        exact hKey (beq_iff_eq.mpr hEq)
+      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldKey, hEq]
+  · by_cases hKey : old.key == key
+    · have hEq : old.key = key := beq_iff_eq.mp hKey
+      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldRtd, hEq]
+    · have hEq : old.key ≠ key := by
+        intro hEq
+        exact hKey (beq_iff_eq.mpr hEq)
+      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldRtd, hEq]
 
 theorem reverseMapComplete_after_topic_excel_update
     {s : State} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool}
@@ -1182,10 +1335,12 @@ theorem reverseMapComplete_after_topic_excel_update
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
   rcases hComplete old hOldMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
   refine ⟨entry, hEntryMem, ?_, ?_⟩
-  · exact hEntryKey.trans (updateTopicExcel_key (topic := old) (key := key)
-      (owner := owner) (committed := committed)).symm
-  · exact hEntryRtd.trans (updateTopicExcel_rtdKey (topic := old) (key := key)
-      (owner := owner) (committed := committed)).symm
+  · by_cases hKey : old.key == key
+    · simpa [State.updateTopicExcel, hKey] using hEntryKey
+    · simpa [State.updateTopicExcel, hKey] using hEntryKey
+  · by_cases hKey : old.key == key
+    · simpa [State.updateTopicExcel, hKey] using hEntryRtd
+    · simpa [State.updateTopicExcel, hKey] using hEntryRtd
 
 theorem Step.reverseMapSound_preserved
     {s s' : State} {e : Event}
@@ -1220,7 +1375,7 @@ theorem Step.reverseMapSound_preserved
           exact ⟨topic, List.mem_append_left _ hTopicMem, hTopicKey, hTopicRtd⟩
       | inr hNew =>
           subst hNew
-          refine ⟨Topic.mk key rtdKey token .provisional none false,
+          refine ⟨Topic.mk key rtdKey token .provisional none none false,
             ?_, rfl, rfl⟩
           simp
   | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
@@ -1280,7 +1435,9 @@ theorem Step.reverseMapSound_preserved
       intro entry hMem
       rw [hNoReverse] at hMem
       contradiction
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_reverse_sound hSound
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact reverseMapSound_after_topic_excel_update hSound
   | reuseCommittedConnection => exact hSound
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -1358,7 +1515,9 @@ theorem Step.reverseMapComplete_preserved
       refine ⟨entry, ?_, hEntryKey, hEntryRtd⟩
       apply List.mem_filter.mpr
       exact ⟨hEntryMem, by simp [hRtdNe, hEntryRtd]⟩
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact updateTopicServerGeneration_reverse_complete hComplete
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       exact reverseMapComplete_after_topic_excel_update hComplete
   | reuseCommittedConnection => exact hComplete
   | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
@@ -1408,14 +1567,16 @@ theorem excelOwnerMapSound_after_beginConnection
         contradiction
       let updated : Topic :=
         if old.key == key then
-          { old with excelOwner := some owner, excelCommitted := false }
+          { old with
+              serverGeneration := some owner.serverGeneration
+              excelOwner := some owner
+              excelCommitted := false }
         else old
       refine ⟨updated, ?_, ?_, ?_⟩
       · apply List.mem_map.mpr
         exact ⟨old, hOldMem, rfl⟩
       · dsimp [updated]
-        rw [← hOldKey]
-        exact updateTopicExcel_key
+        simpa [hOldKeyNe] using hOldKey
       · dsimp [updated]
         simp [hOldKeyNe, hOldOwner]
   | inr hNewBinding =>
@@ -1425,7 +1586,10 @@ theorem excelOwnerMapSound_after_beginConnection
       cases hBinding
       refine ⟨
         (if topic.key == key then
-            { topic with excelOwner := some owner, excelCommitted := false }
+            { topic with
+                serverGeneration := some owner.serverGeneration
+                excelOwner := some owner
+                excelCommitted := false }
           else topic),
         ?_, ?_, ?_⟩
       · apply List.mem_map.mpr
@@ -1452,15 +1616,24 @@ theorem excelOwnerMapComplete_after_beginConnection
     subst owner0
     refine ⟨{ owner := owner, key := key },
       List.mem_append_right _ (List.mem_singleton_self _), rfl, ?_⟩
-    exact hOldKey.symm.trans (updateTopicExcel_key (topic := old)
-      (key := key) (owner := some owner) (committed := false)).symm
+    simpa [State.updateTopicExcel, hKey] using hOldKey.symm
   · have hOwnerOld : old.excelOwner = some owner0 := by
       simpa [hKey] using hOwner
     rcases hComplete old hOldMem owner0 hOwnerOld with
       ⟨binding, hBindingMem, hBindingOwner, hBindingKey⟩
     refine ⟨binding, List.mem_append_left _ hBindingMem, hBindingOwner, ?_⟩
-    exact hBindingKey.trans (updateTopicExcel_key (topic := old)
-      (key := key) (owner := some owner) (committed := false)).symm
+    calc
+      binding.key = old.key := hBindingKey
+      _ = (if old.key == key then
+          { old with
+              serverGeneration := some owner.serverGeneration
+              excelOwner := some owner
+              excelCommitted := false }
+        else old).key := by
+          have hOldKeyNe : old.key ≠ key := by
+            intro hEq
+            exact hKey (beq_iff_eq.mpr hEq)
+          simpa [hOldKeyNe]
 
 theorem excelOwnersUnique_after_beginConnection
     {s : State} {topic : Topic} {key : TopicKey} {owner : ExcelOwnerId}
@@ -1483,13 +1656,19 @@ theorem excelOwnersUnique_after_beginConnection
   · by_cases hRKey : oldR.key == key
     · calc
         (if oldL.key == key then
-            { oldL with excelOwner := some owner, excelCommitted := false }
-          else oldL).key = oldL.key := updateTopicExcel_key
+            { oldL with
+                serverGeneration := some owner.serverGeneration
+                excelOwner := some owner
+                excelCommitted := false }
+          else oldL).key = oldL.key := by simp [hLKey]
         _ = key := beq_iff_eq.mp hLKey
         _ = oldR.key := (beq_iff_eq.mp hRKey).symm
         _ = (if oldR.key == key then
-            { oldR with excelOwner := some owner, excelCommitted := false }
-          else oldR).key := (updateTopicExcel_key).symm
+            { oldR with
+                serverGeneration := some owner.serverGeneration
+                excelOwner := some owner
+                excelCommitted := false }
+          else oldR).key := by simp [hRKey]
     · have hOwnerEq : owner = owner0 :=
         Option.some.inj (by simpa [hLKey] using hLO)
       have hOwnerOld : oldR.excelOwner = some owner0 := by
@@ -1512,10 +1691,7 @@ theorem excelOwnersUnique_after_beginConnection
       have hROld : oldR.excelOwner = some owner0 := by
         simpa [hRKey] using hRO
       have hOldKeyEq := hUnique owner0 oldL oldR hOldLMem hOldRMem hLOld hROld
-      exact (updateTopicExcel_key (topic := oldL) (key := key)
-        (owner := some owner) (committed := false)).trans
-        (hOldKeyEq.trans (updateTopicExcel_key (topic := oldR) (key := key)
-          (owner := some owner) (committed := false)).symm)
+      simpa [State.updateTopicExcel, hLKey, hRKey] using hOldKeyEq
 
 theorem excelBindingOwnersUnique_after_beginConnection
     {s : State} {key : TopicKey} {owner : ExcelOwnerId}
@@ -1636,23 +1812,27 @@ theorem excelOwnerMapSound_after_commitConnection
       exact Option.some.inj (hAtTopic.symm.trans hTopicOwner)
     refine ⟨
       (if old.key == key then
-          { old with excelOwner := some owner, excelCommitted := true }
+          { old with
+              serverGeneration := some owner.serverGeneration
+              excelOwner := some owner
+              excelCommitted := true }
         else old),
       ?_, ?_, ?_⟩
     · apply List.mem_map.mpr
       exact ⟨old, hOldMem, rfl⟩
-    · rw [updateTopicExcel_key]
-      exact hOldKey
+    · simpa [State.updateTopicExcel, hKey] using hOldKey
     · simp [hKey, hBindingOwner, hOldOwner]
   · refine ⟨
       (if old.key == key then
-          { old with excelOwner := some owner, excelCommitted := true }
+          { old with
+              serverGeneration := some owner.serverGeneration
+              excelOwner := some owner
+              excelCommitted := true }
         else old),
       ?_, ?_, ?_⟩
     · apply List.mem_map.mpr
       exact ⟨old, hOldMem, rfl⟩
-    · rw [← hOldKey]
-      exact updateTopicExcel_key
+    · simpa [State.updateTopicExcel, hKey] using hOldKey
     · simp [hKey, hOldOwner]
 
 theorem excelOwnerMapComplete_after_commitConnection
@@ -1671,13 +1851,24 @@ theorem excelOwnerMapComplete_after_commitConnection
       Option.some.inj (by simpa [hKey] using hOwner)
     subst owner0
     refine ⟨{ owner := owner, key := key }, hBindingMem, rfl, ?_⟩
-    exact (beq_iff_eq.mp hKey).symm.trans (updateTopicExcel_key).symm
+    simpa [State.updateTopicExcel, hKey] using (beq_iff_eq.mp hKey).symm
   · have hOwnerOld : old.excelOwner = some owner0 := by
       simpa [hKey] using hOwner
     rcases hComplete old hOldMem owner0 hOwnerOld with
       ⟨binding, hBindingMem, hBindingOwner, hBindingKey⟩
     refine ⟨binding, hBindingMem, hBindingOwner, ?_⟩
-    exact hBindingKey.trans (updateTopicExcel_key).symm
+    calc
+      binding.key = old.key := hBindingKey
+      _ = (if old.key == key then
+          { old with
+              serverGeneration := some owner.serverGeneration
+              excelOwner := some owner
+              excelCommitted := true }
+        else old).key := by
+          have hOldKeyNe : old.key ≠ key := by
+            intro hEq
+            exact hKey (beq_iff_eq.mpr hEq)
+          simpa [hOldKeyNe]
 
 theorem excelOwnersUnique_after_commitConnection
     {s : State} {topic : Topic} {key : TopicKey} {owner : ExcelOwnerId}
@@ -1693,11 +1884,8 @@ theorem excelOwnersUnique_after_commitConnection
   rcases List.mem_map.mp hR with ⟨oldR, hOldRMem, rfl⟩
   by_cases hLKey : oldL.key == key
   · by_cases hRKey : oldR.key == key
-    · exact (updateTopicExcel_key (topic := oldL) (key := key)
-          (owner := some owner) (committed := true)).trans
-        ((beq_iff_eq.mp hLKey).trans (beq_iff_eq.mp hRKey).symm |>.trans
-          (updateTopicExcel_key (topic := oldR) (key := key)
-            (owner := some owner) (committed := true)).symm)
+    · simpa [State.updateTopicExcel, hLKey, hRKey] using
+        ((beq_iff_eq.mp hLKey).trans (beq_iff_eq.mp hRKey).symm)
     · have hOwnerEq : owner = owner0 :=
         Option.some.inj (by simpa [hLKey] using hLO)
       have hROld : oldR.excelOwner = some owner0 := by
@@ -1710,10 +1898,8 @@ theorem excelOwnersUnique_after_commitConnection
         (by simpa [hTopicEq] using hTopicMem) hOldRMem
         hLTopicOwner hROld
       have hOldLKeyEq : oldL.key = topic.key := congrArg Topic.key hTopicEq
-      exact (updateTopicExcel_key (topic := oldL) (key := key)
-          (owner := some owner) (committed := true)).trans
-        (hOldLKeyEq.trans (hOldKeyEq.trans (updateTopicExcel_key (topic := oldR)
-          (key := key) (owner := some owner) (committed := true)).symm))
+      simpa [State.updateTopicExcel, hLKey, hRKey] using
+        (hOldLKeyEq.trans hOldKeyEq)
   · by_cases hRKey : oldR.key == key
     · have hOwnerEq : owner = owner0 :=
         Option.some.inj (by simpa [hRKey] using hRO)
@@ -1727,20 +1913,14 @@ theorem excelOwnersUnique_after_commitConnection
         (by simpa [hTopicEq] using hTopicMem) hLOld
         hRTopicOwner
       have hOldRKeyEq : topic.key = oldR.key := congrArg Topic.key hTopicEq.symm
-      exact (updateTopicExcel_key (topic := oldL) (key := key)
-          (owner := some owner) (committed := true)).trans
-        ((hOldKeyEq.trans hOldRKeyEq).trans
-          (updateTopicExcel_key (topic := oldR) (key := key)
-            (owner := some owner) (committed := true)).symm)
+      simpa [State.updateTopicExcel, hLKey, hRKey] using
+        (hOldKeyEq.trans hOldRKeyEq)
     · have hLOld : oldL.excelOwner = some owner0 := by
         simpa [hLKey] using hLO
       have hROld : oldR.excelOwner = some owner0 := by
         simpa [hRKey] using hRO
       have hOldKeyEq := hUnique owner0 oldL oldR hOldLMem hOldRMem hLOld hROld
-      exact (updateTopicExcel_key (topic := oldL) (key := key)
-          (owner := some owner) (committed := true)).trans
-        (hOldKeyEq.trans (updateTopicExcel_key (topic := oldR) (key := key)
-          (owner := some owner) (committed := true)).symm)
+      simpa [State.updateTopicExcel, hLKey, hRKey] using hOldKeyEq
 
 theorem excelCommitConsistent_after_beginConnection
     {s : State} {key : TopicKey} {owner : ExcelOwnerId}
@@ -1795,8 +1975,7 @@ theorem excelOwnerMapSound_after_rollbackConnection
     ?_, ?_, ?_⟩
   · apply List.mem_map.mpr
     exact ⟨old, hOldMem, rfl⟩
-  · rw [← hOldKey]
-    exact updateTopicExcel_key
+  · simpa [hOldKeyNe] using hOldKey
   · simp [hOldKeyNe, hOldOwner]
 
 theorem excelOwnerMapComplete_after_rollbackConnection
@@ -1836,8 +2015,15 @@ theorem excelOwnerMapComplete_after_rollbackConnection
     refine ⟨binding, ?_, hBindingOwner, ?_⟩
     · apply List.mem_filter.mpr
       exact ⟨hBindingMem, by simp [hBindingOwnerNe]⟩
-    · exact hBindingKey.trans (updateTopicExcel_key (topic := old)
-        (key := key) (owner := none) (committed := false)).symm
+    · calc
+        binding.key = old.key := hBindingKey
+        _ = (if old.key == key then
+            { old with excelOwner := none, excelCommitted := false }
+          else old).key := by
+            have hOldKeyNe : old.key ≠ key := by
+              intro hEq
+              exact hKey (beq_iff_eq.mpr hEq)
+            simpa [hOldKeyNe]
 
 theorem excelOwnersUnique_after_rollbackConnection
     {s : State} {key : TopicKey} {owner : ExcelOwnerId}
@@ -1855,8 +2041,15 @@ theorem excelOwnersUnique_after_rollbackConnection
     · simp [hKey] at hRO
     · simpa [hKey] using hRO
   have hKeyEq := hUnique owner0 oldL oldR hOldLMem hOldRMem hLOld hROld
-  exact (updateTopicExcel_key (topic := oldL)).trans
-    (hKeyEq.trans (updateTopicExcel_key (topic := oldR)).symm)
+  have hLKeyNe : oldL.key ≠ key := by
+    intro hEq
+    have h : oldL.key == key := beq_iff_eq.mpr hEq
+    simp [h] at hLO
+  have hRKeyNe : oldR.key ≠ key := by
+    intro hEq
+    have h : oldR.key == key := beq_iff_eq.mpr hEq
+    simp [h] at hRO
+  simpa [hLKeyNe, hRKeyNe] using hKeyEq
 
 theorem excelBindingOwnersUnique_after_rollbackConnection
     {s : State} {owner : ExcelOwnerId}
@@ -1870,7 +2063,7 @@ theorem excelOwnerMapSound_after_publishVisible
     (hSound : s.ExcelOwnerMapSound) :
     ({ s with
         byKey := s.byKey ++
-          [Topic.mk key rtdKey token .provisional none false] }).ExcelOwnerMapSound := by
+          [Topic.mk key rtdKey token .provisional none none false] }).ExcelOwnerMapSound := by
   intro binding hMem
   change binding ∈ s.byExcelOwner at hMem
   rcases hSound binding hMem with ⟨topic, hTopicMem, hTopicKey, hTopicOwner⟩
@@ -1881,7 +2074,7 @@ theorem excelOwnerMapComplete_after_publishVisible
     (hComplete : s.ExcelOwnerMapComplete) :
     ({ s with
         byKey := s.byKey ++
-          [Topic.mk key rtdKey token .provisional none false] }).ExcelOwnerMapComplete := by
+          [Topic.mk key rtdKey token .provisional none none false] }).ExcelOwnerMapComplete := by
   intro topic hMem owner hOwner
   simp only [List.mem_append, List.mem_singleton] at hMem
   cases hMem with
@@ -1898,7 +2091,7 @@ theorem excelOwnersUnique_after_publishVisible
     (hUnique : s.ExcelOwnersUnique) :
     ({ s with
         byKey := s.byKey ++
-          [Topic.mk key rtdKey token .provisional none false] }).ExcelOwnersUnique := by
+          [Topic.mk key rtdKey token .provisional none none false] }).ExcelOwnersUnique := by
   intro owner lhs rhs hL hR hLO hRO
   simp only [List.mem_append, List.mem_singleton] at hL hR
   cases hL with
@@ -1917,7 +2110,7 @@ theorem excelCommitConsistent_after_publishVisible
     (hCommit : s.ExcelCommitConsistent) :
     ({ s with
         byKey := s.byKey ++
-          [Topic.mk key rtdKey token .provisional none false] }).ExcelCommitConsistent := by
+          [Topic.mk key rtdKey token .provisional none none false] }).ExcelCommitConsistent := by
   intro topic hMem hTopicCommitted
   simp only [List.mem_append, List.mem_singleton] at hMem
   cases hMem with
@@ -2054,6 +2247,194 @@ theorem excelCommitConsistent_after_withdrawVisible
   intro topic hMem hCommitted
   exact hCommit topic (mem_of_mem_filter_topics hMem) hCommitted
 
+theorem excelOwnerGenerationConsistent_after_topic_excel_update
+    {s : State} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool}
+    (hInv : s.ExcelOwnerGenerationConsistent) :
+    ({ s with byKey := s.updateTopicExcel key owner committed }).ExcelOwnerGenerationConsistent := by
+  intro updated hMem newOwner hOwner
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  by_cases hKey : old.key == key
+  · cases owner with
+    | none => simp [State.updateTopicExcel, hKey] at hOwner
+    | some owner' =>
+        have hOwnerEq : owner' = newOwner := by
+          simpa [State.updateTopicExcel, hKey] using hOwner
+        subst newOwner
+        simp [State.updateTopicExcel, hKey]
+  · simp [State.updateTopicExcel, hKey] at hOwner ⊢
+    exact hInv old hOldMem newOwner hOwner
+
+theorem excelOwnershipInvariant_after_topic_server_generation_update
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.ExcelOwnershipInvariant) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).ExcelOwnershipInvariant := by
+  let f : Topic → Topic := fun old =>
+    if old.key == key then { old with serverGeneration := generation } else old
+  have hUpdate : s.updateTopicServerGeneration key generation = s.byKey.map f := by
+    rfl
+  rw [hUpdate]
+  have hKeyF : ∀ old, (f old).key = old.key := by
+    intro old
+    by_cases h : old.key = key <;> simp [f, h]
+  have hOwnerF : ∀ old, (f old).excelOwner = old.excelOwner := by
+    intro old
+    by_cases h : old.key = key <;> simp [f, h]
+  have hCommittedF : ∀ old, (f old).excelCommitted = old.excelCommitted := by
+    intro old
+    by_cases h : old.key = key <;> simp [f, h]
+  rcases hInv with ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
+  refine ⟨?_, ?_, ?_, hBindings, ?_⟩
+  · intro binding hMem
+    rcases hSound binding hMem with ⟨old, hOldMem, hOldKey, hOldOwner⟩
+    refine ⟨f old, List.mem_map.mpr ⟨old, hOldMem, rfl⟩, ?_, ?_⟩
+    · exact (hKeyF old).trans hOldKey
+    · exact (hOwnerF old).trans hOldOwner
+  · intro topic hMem owner hOwner
+    rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+    have hOldOwner : old.excelOwner = some owner :=
+      (hOwnerF old).symm.trans hOwner
+    rcases hComplete old hOldMem owner hOldOwner with
+      ⟨binding, hBindingMem, hBindingOwner, hBindingKey⟩
+    refine ⟨binding, hBindingMem, hBindingOwner, ?_⟩
+    exact hBindingKey.trans (hKeyF old).symm
+  · intro owner lhs rhs hL hR hLO hRO
+    rcases List.mem_map.mp hL with ⟨oldL, hOldLMem, rfl⟩
+    rcases List.mem_map.mp hR with ⟨oldR, hOldRMem, rfl⟩
+    have hLOld : oldL.excelOwner = some owner :=
+      (hOwnerF oldL).symm.trans hLO
+    have hROld : oldR.excelOwner = some owner :=
+      (hOwnerF oldR).symm.trans hRO
+    have hKeyEq := hOwners owner oldL oldR hOldLMem hOldRMem hLOld hROld
+    exact (hKeyF oldL).trans (hKeyEq.trans (hKeyF oldR).symm)
+  · intro topic hMem hCommitted
+    rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+    have hOldCommitted : old.excelCommitted = true :=
+      (hCommittedF old).symm.trans hCommitted
+    rcases hCommit old hOldMem hOldCommitted with ⟨owner, hOwner⟩
+    exact ⟨owner, (hOwnerF old).trans hOwner⟩
+
+theorem excelOwnerGenerationConsistent_after_topic_server_generation_update
+    {s : State} {key : TopicKey} {generation : Option ServerGeneration}
+    (hInv : s.ExcelOwnerGenerationConsistent)
+    {topic : Topic}
+    (hTopic : s.findTopic? key = some topic)
+    (hTopicKey : topic.key = key)
+    (hVisibleKeys : s.VisibleKeysUnique)
+    (hAllowed : topic.serverGeneration = none ∨
+      topic.serverGeneration = generation) :
+    ({ s with byKey := s.updateTopicServerGeneration key generation }).ExcelOwnerGenerationConsistent := by
+  intro updated hMem newOwner hOwner
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  by_cases hKey : old.key == key
+  · have hOldKey : old.key = key := beq_iff_eq.mp hKey
+    have hOldEq : old = topic := topic_eq_of_same_key hVisibleKeys hOldMem
+      (mem_of_findTopic_some hTopic) hOldKey hTopicKey
+    cases hOldEq
+    have hKey' : (topic.key == key) = true := beq_iff_eq.mpr hTopicKey
+    cases hOwnerOld : topic.excelOwner with
+    | none => simp [State.updateTopicServerGeneration, hKey', hOwnerOld] at hOwner
+    | some oldOwner =>
+        have hOwnerEq : oldOwner = newOwner := by
+          simpa [State.updateTopicServerGeneration, hKey', hOwnerOld] using hOwner
+        have hOldGeneration := hInv topic (mem_of_findTopic_some hTopic) oldOwner hOwnerOld
+        cases hAllowed with
+        | inl hNone => simp [hOldGeneration] at hNone
+        | inr hSome =>
+            have hGenerationEq : topic.serverGeneration =
+                some oldOwner.serverGeneration := hOldGeneration
+            have hResult : generation = some newOwner.serverGeneration := by
+              calc
+                generation = topic.serverGeneration := hSome.symm
+                _ = some oldOwner.serverGeneration := hGenerationEq
+                _ = some newOwner.serverGeneration := by rw [hOwnerEq]
+            simpa [State.updateTopicServerGeneration, hKey', hOwnerOld] using hResult
+  · have hOldGeneration := hInv old hOldMem newOwner
+    have hOldOwner : old.excelOwner = some newOwner := by
+      simpa [State.updateTopicServerGeneration, hKey] using hOwner
+    simpa [State.updateTopicServerGeneration, hKey] using hOldGeneration hOldOwner
+
+theorem excelOwnerGenerationConsistent_after_topic_stage_update
+    {s : State} {key : TopicKey} {stage : TopicStage}
+    (hInv : s.ExcelOwnerGenerationConsistent) :
+    ({ s with byKey := s.updateTopicStage key stage }).ExcelOwnerGenerationConsistent := by
+  intro updated hMem owner hOwner
+  rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
+  by_cases hKey : old.key == key
+  · have hOwner' : old.excelOwner = some owner := by
+      simpa [State.updateTopicStage, hKey] using hOwner
+    simpa [State.updateTopicStage, hKey] using hInv old hOldMem owner hOwner'
+  · have hOwner' : old.excelOwner = some owner := by
+      simpa [State.updateTopicStage, hKey] using hOwner
+    simpa [State.updateTopicStage, hKey] using hInv old hOldMem owner hOwner'
+
+theorem excelOwnerGenerationConsistent_after_removeTopic
+    {s : State} {key : TopicKey}
+    (hInv : s.ExcelOwnerGenerationConsistent) :
+    ({ s with byKey := s.removeTopic key }).ExcelOwnerGenerationConsistent := by
+  intro topic hMem owner hOwner
+  exact hInv topic (mem_of_mem_filter_topics hMem) owner hOwner
+
+theorem excelOwnerGenerationConsistent_after_publishVisible
+    {s : State} {key : TopicKey} {rtdKey : RtdKey} {token : Registry.Token}
+    (hInv : s.ExcelOwnerGenerationConsistent) :
+    ({ s with
+        byKey := s.byKey ++
+          [Topic.mk key rtdKey token .provisional none none false] }).ExcelOwnerGenerationConsistent := by
+  intro topic hMem owner hOwner
+  simp only [List.mem_append, List.mem_singleton] at hMem
+  cases hMem with
+  | inl hOld => exact hInv topic hOld owner hOwner
+  | inr hNew =>
+      subst hNew
+      simp at hOwner
+
+theorem Step.excelOwnerGenerationConsistent_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.ExcelOwnerGenerationConsistent)
+    (hVisibleKeys : s.VisibleKeysUnique)
+    (hStep : Step s e s') :
+    s'.ExcelOwnerGenerationConsistent := by
+  cases hStep with
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact excelOwnerGenerationConsistent_after_topic_server_generation_update
+        hInv hTopic hTopicKey hVisibleKeys hAllowed
+  | beginConnection hTopic hTopicKey hGenerationAllowed hTopicFree hOwnerFree =>
+      exact excelOwnerGenerationConsistent_after_topic_excel_update hInv
+  | reuseCommittedConnection => exact hInv
+  | commitConnection hTopic hTopicKey hGenerationAllowed hTopicOwner hNotCommitted hBinding =>
+      exact excelOwnerGenerationConsistent_after_topic_excel_update hInv
+  | rollbackConnection hTopic hTopicKey hGenerationAllowed hTopicOwner hNotCommitted hBinding =>
+      exact excelOwnerGenerationConsistent_after_topic_excel_update hInv
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+      rename_i token key runtimeId rtdKey
+      exact excelOwnerGenerationConsistent_after_publishVisible
+        (s := s) (key := key) (rtdKey := rtdKey) (token := token) hInv
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
+      exact excelOwnerGenerationConsistent_after_topic_stage_update hInv
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
+      exact excelOwnerGenerationConsistent_after_removeTopic hInv
+  | sealTopics hRuntime =>
+      simp [State.ExcelOwnerGenerationConsistent]
+  | beginPrepare hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | endPrepare hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | beginLookup hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | endLookup hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | beginInitializer hNoTopic hNoInitializer hNoRuntimeId hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | finishInitializer hInit hReady hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+      simpa [State.ExcelOwnerGenerationConsistent] using hInv
+  | finishClose hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
+
 theorem Step.excelOwnershipInvariant_preserved
     {s s' : State} {e : Event}
     (hSound : s.ExcelOwnerMapSound)
@@ -2065,7 +2446,10 @@ theorem Step.excelOwnershipInvariant_preserved
     (hStep : Step s e s') :
     s'.ExcelOwnershipInvariant := by
   cases hStep with
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
+      exact excelOwnershipInvariant_after_topic_server_generation_update
+        ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
+  | beginConnection hTopic hTopicKey hGenerationAllowed hTopicFree hOwnerFree =>
       exact ⟨
         excelOwnerMapSound_after_beginConnection hSound hVisibleKeys hTopic
           hTopicKey hTopicFree hOwnerFree,
@@ -2076,7 +2460,7 @@ theorem Step.excelOwnershipInvariant_preserved
         excelCommitConsistent_after_beginConnection hCommit⟩
   | reuseCommittedConnection =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
-  | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+  | commitConnection hTopic hTopicKey hGenerationAllowed hTopicOwner hNotCommitted hBinding =>
       exact ⟨
         excelOwnerMapSound_after_commitConnection hSound hVisibleKeys hTopic hTopicKey
           hTopicOwner,
@@ -2086,7 +2470,7 @@ theorem Step.excelOwnershipInvariant_preserved
           hTopicOwner,
         hBindings,
         excelCommitConsistent_after_commitConnection hCommit⟩
-  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+  | rollbackConnection hTopic hTopicKey hGenerationAllowed hTopicOwner hNotCommitted hBinding =>
       rename_i topic key owner
       exact ⟨
         excelOwnerMapSound_after_rollbackConnection hSound hVisibleKeys hTopic hTopicKey
@@ -2154,8 +2538,10 @@ theorem Step.invariant_preserved
     s'.Invariant := by
   rcases hInv with
     ⟨hRuntime, hKeys, hIds, hBacked, hVisibleKeys, hVisibleTokens, hRtdKeys,
-      hReverseRtdKeys, hReverseSound, hReverseComplete, hRoots, hProv⟩
-  rcases hProv with ⟨hProv, hSound, hComplete, hOwners, hBindings, hCommit⟩
+      hReverseRtdKeys, hReverseSound, hReverseComplete, hRoots, hProv,
+      hExcel, hGeneration⟩
+  rcases hExcel with
+    ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
   exact ⟨
     Step.runtimeInvariant_preserved hRuntime hStep,
     Step.initializingKeysUnique_preserved hKeys hStep,
@@ -2168,9 +2554,10 @@ theorem Step.invariant_preserved
     Step.reverseMapSound_preserved hReverseSound hVisibleKeys hStep,
     Step.reverseMapComplete_preserved hReverseComplete hRtdKeys hVisibleKeys hStep,
     Step.visibleTopicRootsValid_preserved hRoots hStep,
-    ⟨Step.provisionalTopicsHavePendingRoots_preserved hKeys hIds hProv hStep,
-      Step.excelOwnershipInvariant_preserved hSound hComplete hOwners hBindings hCommit
-        hVisibleKeys hStep⟩⟩
+    Step.provisionalTopicsHavePendingRoots_preserved hKeys hIds hProv hStep,
+    Step.excelOwnershipInvariant_preserved hSound hComplete hOwners hBindings hCommit
+      hVisibleKeys hStep,
+    Step.excelOwnerGenerationConsistent_preserved hGeneration hVisibleKeys hStep⟩
 
 theorem Reachable.invariant_preserved
     {s t : State}

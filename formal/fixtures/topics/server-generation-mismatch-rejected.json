@@ -6,9 +6,9 @@
     {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
-    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
-    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}}
+    {"claimServer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "generation": 1}},
+    {"claimServer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "generation": 2}}
   ],
   "outcome": "rejected",
-  "reject_at": "commitPublication"
+  "reject_at": "claimServer"
 }

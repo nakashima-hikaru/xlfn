@@ -15,7 +15,7 @@ def orphanProvisional (session : Registry.SessionId) : State :=
   { runtime := Runtime.initialState session
     byKey :=
       [{ key := orphanKey, rtdKey := orphanRtdKey, token := token, stage := .provisional,
-         excelOwner := none, excelCommitted := false }]
+         serverGeneration := none, excelOwner := none, excelCommitted := false }]
     byRtdKey := []
     byExcelOwner := []
     initializing := [] }

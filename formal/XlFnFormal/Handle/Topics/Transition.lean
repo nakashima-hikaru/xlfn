@@ -17,6 +17,7 @@ inductive Event where
   | insertPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (slot : Registry.SlotId) (generation : Registry.Generation)
   | publishVisible (key : TopicKey) (runtimeId : Runtime.InitializerId) (rtdKey : RtdKey)
+  | claimServer (key : TopicKey) (generation : ServerGeneration)
   | beginConnection (key : TopicKey) (owner : ExcelOwnerId)
   | reuseCommittedConnection (key : TopicKey) (owner : ExcelOwnerId)
   | commitConnection (key : TopicKey) (owner : ExcelOwnerId)
@@ -104,14 +105,26 @@ inductive Step : State → Event → State → Prop where
         { s with
             byKey := s.byKey ++
               [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional,
-                 excelOwner := none, excelCommitted := false }]
+                 serverGeneration := none, excelOwner := none, excelCommitted := false }]
             byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
+
+  | claimServer
+      {s : State} {topic : Topic}
+      {key : TopicKey} {generation : ServerGeneration}
+      (hTopic : s.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hAllowed : topic.serverGeneration = none ∨
+        topic.serverGeneration = some generation) :
+      Step s (.claimServer key generation)
+        { s with byKey := s.updateTopicServerGeneration key (some generation) }
 
   | beginConnection
       {s : State} {topic : Topic}
       {key : TopicKey} {owner : ExcelOwnerId}
       (hTopic : s.findTopic? key = some topic)
       (hTopicKey : topic.key = key)
+      (hGeneration : topic.serverGeneration = none ∨
+        topic.serverGeneration = some owner.serverGeneration)
       (hTopicFree : topic.excelOwner = none)
       (hOwnerFree : s.findExcelOwner? owner = none) :
       Step s (.beginConnection key owner)
@@ -124,6 +137,7 @@ inductive Step : State → Event → State → Prop where
       {key : TopicKey} {owner : ExcelOwnerId}
       (hTopic : s.findTopic? key = some topic)
       (hTopicKey : topic.key = key)
+      (hGeneration : topic.serverGeneration = some owner.serverGeneration)
       (hTopicOwner : topic.excelOwner = some owner)
       (hCommitted : topic.excelCommitted = true)
       (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :
@@ -134,6 +148,7 @@ inductive Step : State → Event → State → Prop where
       {key : TopicKey} {owner : ExcelOwnerId}
       (hTopic : s.findTopic? key = some topic)
       (hTopicKey : topic.key = key)
+      (hGeneration : topic.serverGeneration = some owner.serverGeneration)
       (hTopicOwner : topic.excelOwner = some owner)
       (hNotCommitted : topic.excelCommitted = false)
       (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :
@@ -145,6 +160,7 @@ inductive Step : State → Event → State → Prop where
       {key : TopicKey} {owner : ExcelOwnerId}
       (hTopic : s.findTopic? key = some topic)
       (hTopicKey : topic.key = key)
+      (hGeneration : topic.serverGeneration = some owner.serverGeneration)
       (hTopicOwner : topic.excelOwner = some owner)
       (hNotCommitted : topic.excelCommitted = false)
       (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :

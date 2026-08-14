@@ -7,8 +7,9 @@
     {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
     {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
     {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
-    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}}
+    {"rollbackConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 2, "topicId": 7}}}
   ],
   "outcome": "rejected",
-  "reject_at": "commitPublication"
+  "reject_at": "beginConnection"
 }

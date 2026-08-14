@@ -142,8 +142,9 @@ theorem visible_topic_has_reverse_lookup
 theorem excel_ownership_invariant_of_invariant
     {s : State} (hInv : s.Invariant) :
     s.ExcelOwnershipInvariant := by
-  rcases hInv with ⟨_, _, _, _, _, _, _, _, _, _, _, hProvAndExcel⟩
-  exact hProvAndExcel.2
+  rcases hInv with
+    ⟨_, _, _, _, _, _, _, _, _, _, _, _, hExcel, _⟩
+  exact hExcel
 
 theorem excel_owner_lookup_resolves_visible_topic
     {s : State} {owner : ExcelOwnerId} {binding : ExcelBinding}
@@ -215,6 +216,79 @@ theorem distinct_owned_topics_have_distinct_owners
     rfl hKeyEq.symm
   exact hNe hSame
 
+theorem different_generation_cannot_claim_topic
+    {s s' : State} {key : TopicKey} {topic : Topic}
+    {existing requested : ServerGeneration}
+    (hStep : Step s (.claimServer key requested) s')
+    (hTopic : s.findTopic? key = some topic)
+    (hExisting : topic.serverGeneration = some existing)
+    (hDifferent : existing ≠ requested) :
+    False := by
+  cases hStep with
+  | claimServer hFind hTopicKey hAllowed =>
+      have hTopicEq : topic = _ := Option.some.inj (hTopic.symm.trans hFind)
+      cases hTopicEq
+      rw [hExisting] at hAllowed
+      cases hAllowed with
+      | inl hNone => cases hNone
+      | inr hSame => exact hDifferent (Option.some.inj hSame)
+
+theorem different_generation_cannot_begin_connection
+    {s s' : State} {key : TopicKey} {topic : Topic} {owner : ExcelOwnerId}
+    {existing : ServerGeneration}
+    (hStep : Step s (.beginConnection key owner) s')
+    (hTopic : s.findTopic? key = some topic)
+    (hExisting : topic.serverGeneration = some existing)
+    (hDifferent : existing ≠ owner.serverGeneration) :
+    False := by
+  cases hStep with
+  | beginConnection hFind hTopicKey hGeneration hTopicFree hOwnerFree =>
+      have hTopicEq : topic = _ := Option.some.inj (hTopic.symm.trans hFind)
+      cases hTopicEq
+      rw [hExisting] at hGeneration
+      cases hGeneration with
+      | inl hNone => cases hNone
+      | inr hSame => exact hDifferent (Option.some.inj hSame)
+
+theorem excel_owner_generation_matches_topic_generation
+    {s : State} {topic : Topic} {owner : ExcelOwnerId}
+    (hInv : s.Invariant)
+    (hTopic : topic ∈ s.byKey)
+    (hOwner : topic.excelOwner = some owner) :
+    topic.serverGeneration = some owner.serverGeneration := by
+  exact hInv.2.2.2.2.2.2.2.2.2.2.2.2.2 topic hTopic owner hOwner
+
+theorem committed_connection_generation_matches_topic
+    {s : State} {topic : Topic}
+    (hInv : s.Invariant)
+    (hTopic : topic ∈ s.byKey)
+    (hCommitted : topic.excelCommitted = true) :
+    ∃ owner,
+      topic.excelOwner = some owner ∧
+      topic.serverGeneration = some owner.serverGeneration := by
+  rcases committed_excel_connection_has_owner hInv hTopic hCommitted with
+    ⟨owner, hOwner⟩
+  exact ⟨owner, hOwner, excel_owner_generation_matches_topic_generation hInv hTopic hOwner⟩
+
+theorem server_generation_survives_rollback
+    {s s' : State} {key : TopicKey} {owner : ExcelOwnerId}
+    (hStep : Step s (.rollbackConnection key owner) s') :
+    ∃ before after,
+      before ∈ s.byKey ∧
+      after ∈ s'.byKey ∧
+      before.key = after.key ∧
+      before.serverGeneration = after.serverGeneration := by
+  cases hStep with
+  | rollbackConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
+      rename_i source
+      let after : Topic := { source with excelOwner := none, excelCommitted := false }
+      have hBefore : source ∈ s.byKey := mem_of_findTopic_some hTopic
+      have hAfter : after ∈ s.updateTopicExcel key none false := by
+        dsimp [after, State.updateTopicExcel]
+        apply List.mem_map.mpr
+        exact ⟨source, hBefore, by simp [hTopicKey]⟩
+      refine ⟨source, after, hBefore, hAfter, rfl, rfl⟩
+
 theorem reuse_committed_connection_is_state_preserving
     {s s' : State} {key : TopicKey} {owner : ExcelOwnerId}
     (hStep : Step s (.reuseCommittedConnection key owner) s') :
@@ -268,7 +342,7 @@ theorem publish_visible_exposes_pending_provenance
   cases hStep with
   | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       rename_i token
-      refine ⟨Topic.mk key rtdKey token .provisional none false,
+      refine ⟨Topic.mk key rtdKey token .provisional none none false,
         ?_, rfl, rfl, rfl, ?_⟩
       · simp
       · exact hPending
@@ -288,7 +362,7 @@ theorem commit_publication_resolves_initializer
       have hTopicMem : { source with stage := .provisional } ∈ s.byKey :=
         mem_of_findTopic_some hTopic
       refine ⟨Topic.mk key source.rtdKey source.token .committed
-        source.excelOwner source.excelCommitted,
+        source.serverGeneration source.excelOwner source.excelCommitted,
         ?_, rfl, rfl, ?_⟩
       · dsimp [State.updateTopicStage]
         simp only [List.mem_map]
@@ -313,7 +387,7 @@ theorem rollback_connection_preserves_formula_topic
       after.excelOwner = none ∧
       after.excelCommitted = false := by
   cases hStep with
-  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+  | rollbackConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
       rename_i source
       let after : Topic := { source with excelOwner := none, excelCommitted := false }
       have hBefore : source ∈ s.byKey := mem_of_findTopic_some hTopic
@@ -333,7 +407,7 @@ theorem rollback_connection_preserves_formula_root
       topic.key = key ∧
       Runtime.TokenLive s'.runtime.registry topic.token := by
   cases hStep with
-  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+  | rollbackConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
       rename_i source
       let after : Topic := { source with excelOwner := none, excelCommitted := false }
       have hBefore : source ∈ s.byKey := mem_of_findTopic_some hTopic
@@ -405,6 +479,7 @@ theorem Reachable.runtime_reachable
       | insertPendingFresh _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | insertPendingReuse _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | publishVisible => exact ih
+      | claimServer => exact ih
       | beginConnection => exact ih
       | reuseCommittedConnection => exact ih
       | commitConnection => exact ih
@@ -466,8 +541,8 @@ theorem no_excel_owners_when_closed
     s.byExcelOwner = [] := by
   have hNoVisible := no_visible_topics_when_closed hInv hClosed
   rcases hInv with
-    ⟨_, _, _, _, _, _, _, _, _, _, _, hProvAndExcel⟩
-  have hSound : s.ExcelOwnerMapSound := hProvAndExcel.2.1
+    ⟨_, _, _, _, _, _, _, _, _, _, _, _, hExcel, _⟩
+  have hSound : s.ExcelOwnerMapSound := hExcel.1
   cases hOwners : s.byExcelOwner with
   | nil => rfl
   | cons head tail =>

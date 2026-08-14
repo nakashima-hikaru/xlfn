@@ -731,6 +731,37 @@ fn failed_rtd_connection_rolls_back_pending_object() {
 }
 
 #[test]
+fn server_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
+    let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("server-generation");
+    let rtd_key = key.format_rtd_key();
+    runtime
+        .prepare(key, || Ok(Arc::new(DataRecord(1))))
+        .unwrap();
+
+    runtime.claim_server(&rtd_key, 1).unwrap();
+    assert!(matches!(
+        runtime.claim_server(&rtd_key, 2),
+        Err(XllError::InvalidHandle)
+    ));
+    assert!(matches!(
+        runtime.connect(2, 7, &rtd_key),
+        Err(XllError::InvalidHandle)
+    ));
+
+    let provisional = runtime.connect_transaction(1, 7, &rtd_key).unwrap();
+    drop(provisional);
+    assert!(matches!(
+        runtime.connect(2, 7, &rtd_key),
+        Err(XllError::InvalidHandle)
+    ));
+
+    runtime.connect(1, 8, &rtd_key).unwrap();
+    runtime.disconnect(1, 8);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("uncalculated");

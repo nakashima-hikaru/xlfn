@@ -122,14 +122,27 @@ def apply? (s : State) (event : Event) : Option State :=
             some { s with
               byKey := s.byKey ++
                 [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional,
-                   excelOwner := none, excelCommitted := false }]
+                   serverGeneration := none, excelOwner := none, excelCommitted := false }]
               byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
           else none
       | _ => none
+  | .claimServer key generation =>
+      match s.findTopic? key with
+      | some topic =>
+          if topic.key = key ∧
+              (topic.serverGeneration = none ∨
+                topic.serverGeneration = some generation) then
+            some { s with
+              byKey := s.updateTopicServerGeneration key (some generation) }
+          else none
+      | none => none
   | .beginConnection key owner =>
       match s.findTopic? key with
       | some topic =>
-          if topic.key = key ∧ topic.excelOwner = none ∧
+          if topic.key = key ∧
+              (topic.serverGeneration = none ∨
+                topic.serverGeneration = some owner.serverGeneration) ∧
+              topic.excelOwner = none ∧
               s.findExcelOwner? owner = none then
             some { s with
               byKey := s.updateTopicExcel key (some owner) false
@@ -140,6 +153,7 @@ def apply? (s : State) (event : Event) : Option State :=
       match s.findTopic? key with
       | some topic =>
           if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.serverGeneration = some owner.serverGeneration ∧
               topic.excelCommitted = true ∧
               s.findExcelOwner? owner = some { owner := owner, key := key } then
             some s
@@ -149,6 +163,7 @@ def apply? (s : State) (event : Event) : Option State :=
       match s.findTopic? key with
       | some topic =>
           if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.serverGeneration = some owner.serverGeneration ∧
               topic.excelCommitted = false ∧
               s.findExcelOwner? owner = some { owner := owner, key := key } then
             some { s with byKey := s.updateTopicExcel key (some owner) true }
@@ -158,6 +173,7 @@ def apply? (s : State) (event : Event) : Option State :=
       match s.findTopic? key with
       | some topic =>
           if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.serverGeneration = some owner.serverGeneration ∧
               topic.excelCommitted = false ∧
               s.findExcelOwner? owner = some { owner := owner, key := key } then
             some { s with
@@ -251,7 +267,7 @@ private theorem findTopic_stage_of_find
     (hStage : topic.stage = .provisional) :
     s.findTopic? key = some { topic with stage := .provisional } := by
   cases topic with
-  | mk topicKey rtdKey token stage =>
+  | mk topicKey rtdKey token stage serverGeneration excelOwner excelCommitted =>
       dsimp at hStage ⊢
       cases hStage
       exact hFind
@@ -360,6 +376,18 @@ theorem apply?_sound
                     exact Step.publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hFind
                       (tokenLive?_iff.mp hLive)
                   · contradiction
+  | claimServer key generation =>
+      dsimp [apply?] at h
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hTopicKey, hAllowed⟩
+            exact Step.claimServer hTopicFind hTopicKey hAllowed
+          · contradiction
   | beginConnection key owner =>
       dsimp [apply?] at h
       cases hTopicFind : s.findTopic? key with
@@ -369,8 +397,8 @@ theorem apply?_sound
           split at h
           · rename_i hPre
             cases h
-            rcases hPre with ⟨hTopicKey, hTopicFree, hOwnerFree⟩
-            exact Step.beginConnection hTopicFind hTopicKey hTopicFree hOwnerFree
+            rcases hPre with ⟨hTopicKey, hGeneration, hTopicFree, hOwnerFree⟩
+            exact Step.beginConnection hTopicFind hTopicKey hGeneration hTopicFree hOwnerFree
           · contradiction
   | reuseCommittedConnection key owner =>
       dsimp [apply?] at h
@@ -381,9 +409,9 @@ theorem apply?_sound
           split at h
           · rename_i hPre
             cases h
-            rcases hPre with ⟨hTopicKey, hTopicOwner, hCommitted, hBinding⟩
-            exact Step.reuseCommittedConnection hTopicFind hTopicKey hTopicOwner
-              hCommitted hBinding
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hGeneration, hCommitted, hBinding⟩
+            exact Step.reuseCommittedConnection hTopicFind hTopicKey hGeneration
+              hTopicOwner hCommitted hBinding
           · contradiction
   | commitConnection key owner =>
       dsimp [apply?] at h
@@ -394,8 +422,8 @@ theorem apply?_sound
           split at h
           · rename_i hPre
             cases h
-            rcases hPre with ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩
-            exact Step.commitConnection hTopicFind hTopicKey hTopicOwner
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hGeneration, hNotCommitted, hBinding⟩
+            exact Step.commitConnection hTopicFind hTopicKey hGeneration hTopicOwner
               hNotCommitted hBinding
           · contradiction
   | rollbackConnection key owner =>
@@ -407,8 +435,8 @@ theorem apply?_sound
           split at h
           · rename_i hPre
             cases h
-            rcases hPre with ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩
-            exact Step.rollbackConnection hTopicFind hTopicKey hTopicOwner
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hGeneration, hNotCommitted, hBinding⟩
+            exact Step.rollbackConnection hTopicFind hTopicKey hGeneration hTopicOwner
               hNotCommitted hBinding
           · contradiction
   | commitPublication key runtimeId =>
@@ -570,22 +598,26 @@ theorem apply?_complete
           tokenLive? _ _ = true :=
         ⟨True.intro, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hRootBool⟩
       rw [if_pos hPre]
-  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+  | claimServer hTopic hTopicKey hAllowed =>
       dsimp [apply?]
       simp only [hTopic]
-      rw [if_pos ⟨hTopicKey, hTopicFree, hOwnerFree⟩]
-  | reuseCommittedConnection hTopic hTopicKey hTopicOwner hCommitted hBinding =>
+      rw [if_pos ⟨hTopicKey, hAllowed⟩]
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
       dsimp [apply?]
       simp only [hTopic]
-      rw [if_pos ⟨hTopicKey, hTopicOwner, hCommitted, hBinding⟩]
-  | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      rw [if_pos ⟨hTopicKey, hGeneration, hTopicFree, hOwnerFree⟩]
+  | reuseCommittedConnection hTopic hTopicKey hGeneration hTopicOwner hCommitted hBinding =>
       dsimp [apply?]
       simp only [hTopic]
-      rw [if_pos ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩]
-  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hGeneration, hCommitted, hBinding⟩]
+  | commitConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
       dsimp [apply?]
       simp only [hTopic]
-      rw [if_pos ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩]
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hGeneration, hNotCommitted, hBinding⟩]
+  | rollbackConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
+      dsimp [apply?]
+      simp only [hTopic]
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hGeneration, hNotCommitted, hBinding⟩]
   | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       dsimp [apply?]
       simp only [hTopic]
