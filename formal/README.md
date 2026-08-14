@@ -338,6 +338,14 @@ when the topic is withdrawn, and `sealTopics` clears visible topics, reverse
 RTD entries, and owner bindings at the same seal boundary. `closeRegistry`
 requires all three tables and initializer owners to be empty.
 
+Formula resolution and withdrawal also require
+`Topic.ExcelConnectionSettled`: the topic must either have no Excel owner or
+have an already committed Excel connection. This models the concrete
+`observe`/`ConnectData` ordering, where an uncommitted connection is rolled
+back before formula publication or withdrawal can continue. A committed Excel
+connection may still coexist with a formula-provisional topic; the two
+transactions remain independent after the Excel transaction settles.
+
 Lean replay covers connection success, connection of an existing formula
 topic, committed reuse, provisional
 connection rollback while the formula topic remains visible, observe failure
@@ -349,10 +357,19 @@ are `fixtures/topics/excel-connection-success.json`,
 `fixtures/topics/excel-connection-rollback.json`,
 `fixtures/topics/excel-observe-failure-rollback.json`,
 `fixtures/topics/excel-seal-after-visible-rollback.json`, and
-`fixtures/topics/excel-owner-reuse.json`. The existing seal-before-visible
+`fixtures/topics/excel-owner-reuse.json`. The negative fixture
+`fixtures/topics/excel-unsettled-connection-rejected.json` records the
+rejected `commitPublication` attempt while a connection is provisional. The
+existing seal-before-visible
 fixture covers the pending allocation race where no visible Excel owner can
-be claimed. Invalid provisional reuse and a second `beginConnection` for a
-committed owner are rejected by the executable checker.
+be claimed. Invalid provisional reuse, unsettled formula resolution/withdrawal,
+and owner collisions are rejected by the executable checker.
+
+The H3.3 Safety surface exposes named theorems for owner lookup soundness and
+completeness, committed-owner consistency, distinct-owner uniqueness,
+rollback preservation of the formula topic and registry root, paired owner
+removal on withdrawal, state-preserving committed reuse, and rejection of
+formula resolution with an unsettled Excel connection.
 
 ## RTD wire serialization boundary
 

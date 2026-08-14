@@ -159,6 +159,7 @@ inductive Step : State → Event → State → Prop where
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hTopic : s.findTopic? key = some { topic with stage := .provisional })
       (hTopicKey : topic.key = key)
+      (hExcelSettled : topic.ExcelConnectionSettled)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending topic.token })
       (hRuntime : Runtime.Step s.runtime (.publishTopic runtimeId) runtime') :
@@ -173,6 +174,7 @@ inductive Step : State → Event → State → Prop where
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hTopic : s.findTopic? key = some { topic with stage := .provisional })
       (hTopicKey : topic.key = key)
+      (hExcelSettled : topic.ExcelConnectionSettled)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending topic.token }) :
       Step s (.withdrawVisible key runtimeId)

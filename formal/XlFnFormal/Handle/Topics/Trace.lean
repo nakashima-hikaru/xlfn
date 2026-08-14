@@ -299,4 +299,14 @@ theorem same_owner_on_different_topic_rejected :
       (fun s => apply? s (.beginConnection fixtureKey2 7)) = none := by
   native_decide
 
+theorem provisional_excel_connection_blocks_formula_commit :
+    (replay? (initialState 0) excel_provisional_connection_prefix).bind
+      (fun s => apply? s (.commitPublication fixtureKey 1)) = none := by
+  native_decide
+
+theorem provisional_excel_connection_blocks_formula_withdraw :
+    (replay? (initialState 0) excel_provisional_connection_prefix).bind
+      (fun s => apply? s (.withdrawVisible fixtureKey 1)) = none := by
+  native_decide
+
 end XlFnFormal.Handle.Topics

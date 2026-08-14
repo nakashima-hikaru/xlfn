@@ -28,7 +28,7 @@ theorem orphan_provisional_cannot_commit (session : Registry.SessionId) :
   intro hExists
   rcases hExists with ⟨s', hStep⟩
   cases hStep with
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       dsimp [orphanProvisional, State.findInitializing?] at hInit
       contradiction
 
@@ -53,7 +53,7 @@ theorem commit_after_seal_is_rejected
   intro hExists
   rcases hExists with ⟨s', hStep⟩
   cases hStep with
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       cases hRuntime with
       | publishTopic hPhase hFind =>
           rw [hSealed] at hPhase

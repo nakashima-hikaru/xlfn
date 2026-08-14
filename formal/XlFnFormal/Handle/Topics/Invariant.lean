@@ -143,6 +143,16 @@ theorem mem_of_findExcelOwner_some
   dsimp [State.findExcelOwner?] at hFind
   exact Runtime.List.mem_of_find?_eq_some' hFind
 
+theorem excelOwner_of_findExcelOwner_some
+    {s : State} {owner : ExcelOwnerId} {binding : ExcelBinding}
+    (hFind : s.findExcelOwner? owner = some binding) :
+    binding.owner = owner := by
+  dsimp [State.findExcelOwner?] at hFind
+  have hPred : (binding.owner == owner) = true := by
+    exact List.find?_some
+      (p := fun candidate : ExcelBinding => candidate.owner == owner) hFind
+  exact beq_iff_eq.mp hPred
+
 theorem no_excel_owner_member
     {s : State} {owner : ExcelOwnerId} {binding : ExcelBinding}
     (hNoOwner : s.findExcelOwner? owner = none)
@@ -364,9 +374,9 @@ theorem Step.visibleKeysUnique_preserved
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
       exact no_topic_member hNoTopic hMem
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact updateTopicStage_pairwise_keys hInv
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.VisibleKeysUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
   | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
@@ -393,9 +403,9 @@ theorem Step.visibleTokensUnique_preserved
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
       exact hNoToken topic hMem
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact updateTopicStage_pairwise_tokens hInv
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.VisibleTokensUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
   | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
@@ -498,7 +508,7 @@ theorem Step.runtimeInvariant_preserved
   | publishVisible => exact hInv
   | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
       exact hInv
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | withdrawVisible => exact hInv
   | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
@@ -547,7 +557,7 @@ theorem Step.initializersBackedByRuntime_preserved
           rcases runtime_mem_updateInitializer_same_id hRuntimeMem with
             ⟨updated, hUpdatedMem, hUpdatedId⟩
           exact ⟨updated, hUpdatedMem, hUpdatedId.trans hId⟩
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       cases hRuntime with
       | publishTopic hPhase hFind =>
           intro init hMem
@@ -761,7 +771,7 @@ theorem Step.visibleTopicRootsValid_preserved
       | inr hNew =>
           subst hNew
           exact hRoot
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       rename_i topic0 key runtimeId
       intro topic hMem
       rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
@@ -769,7 +779,7 @@ theorem Step.visibleTopicRootsValid_preserved
       by_cases hKey : old.key = key
       · simpa [hKey] using hInv old hOldMem
       · simpa [hKey] using hInv old hOldMem
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       intro topic hMem
       exact hInv topic (mem_of_mem_filter_topics hMem)
   | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
@@ -954,7 +964,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
           refine ⟨{ runtimeId := runtimeId, key := key },
             mem_of_findInitializing_some hInit, rfl, ?_⟩
           exact hPending
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       rename_i topic0 key runtimeId
       cases hRuntime with
       | publishTopic hPhase hFind =>
@@ -981,7 +991,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
             dsimp [Runtime.State.findInitializer?] at hOldPending
             simp [hKey]
             exact runtime_find_update_ne hOldPending hIdNe
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       intro topic hTopicMem hStage
       exact hProv topic (mem_of_mem_filter_topics hTopicMem) hStage
   | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
@@ -1092,9 +1102,9 @@ theorem Step.rtdKeysUnique_preserved
       intro hEq
       rcases hComplete topic hMem with ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
       exact no_reverse_member hNoRtdKey hEntryMem (hEntryRtd.trans hEq)
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact updateTopicStage_pairwise_rtdKeys hInv
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.RtdKeysUnique, State.removeTopic] at hInv ⊢
       exact pairwise_filter_topics (fun topic => topic.key != _) hInv
   | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
@@ -1125,7 +1135,7 @@ theorem Step.reverseRtdKeysUnique_preserved
   | commitPublication => exact hInv
   | beginConnection | reuseCommittedConnection | commitConnection | rollbackConnection =>
       exact hInv
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [State.ReverseRtdKeysUnique, State.removeReverse] at hInv ⊢
       exact pairwise_filter_topics (fun entry => entry.rtdKey != _) hInv
   | sealTopics => exact List.Pairwise.nil
@@ -1213,7 +1223,7 @@ theorem Step.reverseMapSound_preserved
           refine ⟨Topic.mk key rtdKey token .provisional none false,
             ?_, rfl, rfl⟩
           simp
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       rename_i source key runtimeId
       intro entry hMem
       rcases hSound entry hMem with ⟨old, hOldMem, hOldKey, hOldRtd⟩
@@ -1226,7 +1236,7 @@ theorem Step.reverseMapSound_preserved
       · refine ⟨old, ?_, hOldKey, hOldRtd⟩
         apply List.mem_map.mpr
         exact ⟨old, hOldMem, by simp [h]⟩
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       rename_i target key runtimeId
       let target' : Topic := { target with stage := .provisional }
       have hTargetMem : target' ∈ s.byKey := mem_of_findTopic_some hTopic
@@ -1315,7 +1325,7 @@ theorem Step.reverseMapComplete_preserved
           subst hNew
           exact ⟨{ rtdKey := rtdKey, key := key },
             List.mem_append_right _ (List.mem_singleton_self _), rfl, rfl⟩
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       rename_i source key runtimeId
       intro topic hMem
       rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
@@ -1323,7 +1333,7 @@ theorem Step.reverseMapComplete_preserved
       refine ⟨entry, hEntryMem, ?_, ?_⟩
       · by_cases h : old.key == key <;> simp [h, hEntryKey]
       · by_cases h : old.key == key <;> simp [h, hEntryRtd]
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       rename_i target key runtimeId
       let target' : Topic := { target with stage := .provisional }
       have hTargetMem : target' ∈ s.byKey := mem_of_findTopic_some hTopic
@@ -2093,14 +2103,14 @@ theorem Step.excelOwnershipInvariant_preserved
         excelOwnersUnique_after_publishVisible hOwners,
         hBindings,
         excelCommitConsistent_after_publishVisible hCommit⟩
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact ⟨
         excelOwnerMapSound_after_topic_stage_update hSound,
         excelOwnerMapComplete_after_topic_stage_update hComplete,
         excelOwnersUnique_after_topic_stage_update hOwners,
         hBindings,
         excelCommitConsistent_after_topic_stage_update hCommit⟩
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       rename_i target key runtimeId
       let target' : Topic := { target with stage := .provisional }
       have hTarget : s.findTopic? key = some target' := hTopic

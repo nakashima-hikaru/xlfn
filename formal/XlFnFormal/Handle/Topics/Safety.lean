@@ -139,6 +139,121 @@ theorem visible_topic_has_reverse_lookup
       refine ⟨found, rfl, ?_⟩
       exact hVisibleKey.symm.trans (congrArg Topic.key hVisibleEq)
 
+theorem excel_ownership_invariant_of_invariant
+    {s : State} (hInv : s.Invariant) :
+    s.ExcelOwnershipInvariant := by
+  rcases hInv with ⟨_, _, _, _, _, _, _, _, _, _, _, hProvAndExcel⟩
+  exact hProvAndExcel.2
+
+theorem excel_owner_lookup_resolves_visible_topic
+    {s : State} {owner : ExcelOwnerId} {binding : ExcelBinding}
+    (hInv : s.Invariant)
+    (hFind : s.findExcelOwner? owner = some binding) :
+    binding.owner = owner ∧
+      ∃ topic ∈ s.byKey,
+        topic.key = binding.key ∧ topic.excelOwner = some owner := by
+  have hExcel := excel_ownership_invariant_of_invariant hInv
+  have hSound := hExcel.1
+  rcases hSound binding (mem_of_findExcelOwner_some hFind) with
+    ⟨topic, hTopic, hTopicKey, hTopicOwner⟩
+  have hBindingOwner := excelOwner_of_findExcelOwner_some hFind
+  refine ⟨hBindingOwner, topic, hTopic, hTopicKey, ?_⟩
+  simpa [hBindingOwner] using hTopicOwner
+
+theorem owned_visible_topic_has_excel_binding
+    {s : State} {topic : Topic} {owner : ExcelOwnerId}
+    (hInv : s.Invariant)
+    (hTopic : topic ∈ s.byKey)
+    (hOwner : topic.excelOwner = some owner) :
+    ∃ binding,
+      s.findExcelOwner? owner = some binding ∧
+      binding.key = topic.key := by
+  have hExcel := excel_ownership_invariant_of_invariant hInv
+  have hComplete := hExcel.2.1
+  rcases hComplete topic hTopic owner hOwner with
+    ⟨binding, hBindingMem, hBindingOwner, hBindingKey⟩
+  have hSome : (s.findExcelOwner? owner).isSome = true := by
+    dsimp [State.findExcelOwner?]
+    rw [List.find?_isSome]
+    exact ⟨binding, hBindingMem, beq_iff_eq.mpr hBindingOwner⟩
+  cases hFind : s.findExcelOwner? owner with
+  | none => simp [hFind] at hSome
+  | some found =>
+      have hFoundOwner := excelOwner_of_findExcelOwner_some hFind
+      have hSound := hExcel.1
+      rcases hSound found (mem_of_findExcelOwner_some hFind) with
+        ⟨visible, hVisible, hVisibleKey, hVisibleOwner⟩
+      have hVisibleOwner' : visible.excelOwner = some owner := by
+        simpa [hFoundOwner] using hVisibleOwner
+      have hKeyEq := hExcel.2.2.1 owner visible topic hVisible hTopic
+        hVisibleOwner' hOwner
+      exact ⟨found, rfl, hVisibleKey.symm.trans hKeyEq⟩
+
+theorem committed_excel_connection_has_owner
+    {s : State} {topic : Topic}
+    (hInv : s.Invariant)
+    (hTopic : topic ∈ s.byKey)
+    (hCommitted : topic.excelCommitted = true) :
+    ∃ owner, topic.excelOwner = some owner := by
+  exact (excel_ownership_invariant_of_invariant hInv).2.2.2.2 topic hTopic hCommitted
+
+theorem distinct_owned_topics_have_distinct_owners
+    {s : State} {left right : Topic}
+    {leftOwner rightOwner : ExcelOwnerId}
+    (hInv : s.Invariant)
+    (hLeft : left ∈ s.byKey)
+    (hRight : right ∈ s.byKey)
+    (hLeftOwner : left.excelOwner = some leftOwner)
+    (hRightOwner : right.excelOwner = some rightOwner)
+    (hNe : left ≠ right) :
+    leftOwner ≠ rightOwner := by
+  intro hOwnerEq
+  subst rightOwner
+  have hKeyEq := (excel_ownership_invariant_of_invariant hInv).2.2.1
+    leftOwner left right hLeft hRight hLeftOwner hRightOwner
+  have hSame := same_key_has_at_most_one_visible_topic hInv hLeft hRight
+    rfl hKeyEq.symm
+  exact hNe hSame
+
+theorem reuse_committed_connection_is_state_preserving
+    {s s' : State} {key : TopicKey} {owner : ExcelOwnerId}
+    (hStep : Step s (.reuseCommittedConnection key owner) s') :
+    s' = s := by
+  cases hStep
+  rfl
+
+theorem provisional_excel_connection_blocks_formula_resolution
+    {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    (hInv : s.Invariant)
+    (hStep : Step s (.commitPublication key runtimeId) s') :
+    ¬ ∃ topic owner,
+      topic ∈ s.byKey ∧
+      topic.key = key ∧
+      topic.excelOwner = some owner ∧
+      topic.excelCommitted = false := by
+  intro hExists
+  rcases hExists with ⟨candidate, owner, hCandidate, hCandidateKey,
+    hCandidateOwner, hCandidateNotCommitted⟩
+  cases hStep with
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
+      rename_i source
+      let hTarget : Topic := { source with stage := .provisional }
+      have hTargetMem : hTarget ∈ s.byKey := by
+        simpa [hTarget] using (mem_of_findTopic_some hTopic)
+      have hTargetKey : hTarget.key = key := by simpa [hTarget] using hTopicKey
+      have hCandidateEq := same_key_has_at_most_one_visible_topic hInv
+        hCandidate hTargetMem hCandidateKey hTargetKey
+      rw [hCandidateEq] at hCandidateOwner hCandidateNotCommitted
+      rcases hExcelSettled with hNone | hCommitted
+      · have hNone' : hTarget.excelOwner = none := by
+          simpa [hTarget] using hNone
+        rw [hNone'] at hCandidateOwner
+        contradiction
+      · have hCommitted' : hTarget.excelCommitted = true := by
+          simpa [hTarget] using hCommitted
+        rw [hCommitted'] at hCandidateNotCommitted
+        contradiction
+
 theorem publish_visible_exposes_pending_provenance
     {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
     {rtdKey : RtdKey}
@@ -168,7 +283,7 @@ theorem commit_publication_resolves_initializer
       s'.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .resolved } := by
   cases hStep with
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       rename_i source
       have hTopicMem : { source with stage := .provisional } ∈ s.byKey :=
         mem_of_findTopic_some hTopic
@@ -184,12 +299,78 @@ theorem commit_publication_resolves_initializer
         have hResolved := Runtime.updateInitializer_find hPending (stage := .resolved)
         exact hResolved
 
+theorem rollback_connection_preserves_formula_topic
+    {s s' : State} {key : TopicKey} {owner : ExcelOwnerId}
+    (hStep : Step s (.rollbackConnection key owner) s') :
+    ∃ before after,
+      before ∈ s.byKey ∧
+      after ∈ s'.byKey ∧
+      before.key = after.key ∧
+      before.rtdKey = after.rtdKey ∧
+      before.token = after.token ∧
+      before.stage = after.stage ∧
+      before.excelOwner = some owner ∧
+      after.excelOwner = none ∧
+      after.excelCommitted = false := by
+  cases hStep with
+  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      rename_i source
+      let after : Topic := { source with excelOwner := none, excelCommitted := false }
+      have hBefore : source ∈ s.byKey := mem_of_findTopic_some hTopic
+      have hAfter : after ∈ s.updateTopicExcel key none false := by
+        dsimp [after, State.updateTopicExcel]
+        apply List.mem_map.mpr
+        exact ⟨source, hBefore, by simp [hTopicKey]⟩
+      refine ⟨source, after, hBefore, ?_, rfl, rfl, rfl, rfl, hTopicOwner, rfl, rfl⟩
+      exact hAfter
+
+theorem rollback_connection_preserves_formula_root
+    {s s' : State} {key : TopicKey} {owner : ExcelOwnerId}
+    (hInv : s.Invariant)
+    (hStep : Step s (.rollbackConnection key owner) s') :
+    ∃ topic,
+      topic ∈ s'.byKey ∧
+      topic.key = key ∧
+      Runtime.TokenLive s'.runtime.registry topic.token := by
+  cases hStep with
+  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      rename_i source
+      let after : Topic := { source with excelOwner := none, excelCommitted := false }
+      have hBefore : source ∈ s.byKey := mem_of_findTopic_some hTopic
+      have hAfter : after ∈ s.updateTopicExcel key none false := by
+        dsimp [after, State.updateTopicExcel]
+        apply List.mem_map.mpr
+        exact ⟨source, hBefore, by simp [hTopicKey]⟩
+      have hRoot : Runtime.TokenLive s.runtime.registry source.token :=
+        hInv.2.2.2.2.2.2.2.2.2.2.1 source hBefore
+      refine ⟨after, ?_, ?_, ?_⟩
+      · exact hAfter
+      · simp [after, hTopicKey]
+      · simpa [after] using hRoot
+
+theorem withdraw_visible_removes_excel_binding
+    {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    (hStep : Step s (.withdrawVisible key runtimeId) s') :
+    ∃ topic,
+      topic ∈ s.byKey ∧
+      s'.byExcelOwner =
+        match topic.excelOwner with
+        | some owner => s.removeExcelOwner owner
+        | none => s.byExcelOwner := by
+  cases hStep with
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
+      rename_i source
+      let topic : Topic := { source with stage := .provisional }
+      have hTopicMem : topic ∈ s.byKey := by
+        simpa [topic] using (mem_of_findTopic_some hTopic)
+      exact ⟨topic, hTopicMem, by rfl⟩
+
 theorem withdraw_visible_removes_topic_key
     {s s' : State} {key : TopicKey} {runtimeId : Runtime.InitializerId}
     (hStep : Step s (.withdrawVisible key runtimeId) s') :
     ∀ topic ∈ s'.byKey, topic.key ≠ key := by
   cases hStep with
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       intro topic hMem
       dsimp [State.removeTopic] at hMem
       rcases List.mem_filter.mp hMem with ⟨_, hNe⟩
@@ -228,7 +409,7 @@ theorem Reachable.runtime_reachable
       | reuseCommittedConnection => exact ih
       | commitConnection => exact ih
       | rollbackConnection => exact ih
-      | commitPublication _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | commitPublication _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | withdrawVisible => exact ih
       | rollbackPendingReuse _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | rollbackPendingRetire _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime

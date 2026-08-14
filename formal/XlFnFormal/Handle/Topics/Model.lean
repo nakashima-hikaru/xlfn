@@ -46,6 +46,9 @@ structure Topic where
   excelCommitted : Bool
 deriving DecidableEq, Repr
 
+def Topic.ExcelConnectionSettled (topic : Topic) : Prop :=
+  topic.excelOwner = none ∨ topic.excelCommitted = true
+
 structure State where
   runtime : Runtime.State
   byKey : List Topic

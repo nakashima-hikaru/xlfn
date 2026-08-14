@@ -170,6 +170,7 @@ def apply? (s : State) (event : Event) : Option State :=
       | some topic =>
           if topic.stage = .provisional ∧ topic.key = key ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+              (topic.excelOwner = none ∨ topic.excelCommitted = true) ∧
               s.runtime.findInitializer? runtimeId =
                 some { id := runtimeId, stage := .pending topic.token } then
             match Runtime.apply? s.runtime (.publishTopic runtimeId) with
@@ -185,6 +186,7 @@ def apply? (s : State) (event : Event) : Option State :=
       | some topic =>
           if topic.stage = .provisional ∧ topic.key = key ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
+              (topic.excelOwner = none ∨ topic.excelCommitted = true) ∧
               s.runtime.findInitializer? runtimeId =
                 some { id := runtimeId, stage := .pending topic.token } then
             some { s with
@@ -422,11 +424,11 @@ theorem apply?_sound
             | some runtime' =>
                 rw [hRuntime] at h
                 cases h
-                rcases hPre with ⟨hStage, hKey, hInit, hPending⟩
+                rcases hPre with ⟨hStage, hKey, hInit, hExcelSettled, hPending⟩
                 have hTopic : s.findTopic? key =
                     some { topic with stage := .provisional } :=
                   findTopic_stage_of_find hTopicFind hStage
-                exact Step.commitPublication hInit hTopic hKey hPending
+                exact Step.commitPublication hInit hTopic hKey hExcelSettled hPending
                   (Runtime.apply?_sound hRuntime)
           · contradiction
   | withdrawVisible key runtimeId =>
@@ -438,11 +440,11 @@ theorem apply?_sound
           split at h
           · rename_i hPre
             cases h
-            rcases hPre with ⟨hStage, hKey, hInit, hPending⟩
+            rcases hPre with ⟨hStage, hKey, hInit, hExcelSettled, hPending⟩
             have hTopic : s.findTopic? key =
                 some { topic with stage := .provisional } :=
               findTopic_stage_of_find hTopicFind hStage
-            exact Step.withdrawVisible hInit hTopic hKey hPending
+            exact Step.withdrawVisible hInit hTopic hKey hExcelSettled hPending
           · contradiction
   | rollbackPendingReuse key runtimeId nextGeneration =>
       dsimp [apply?] at h
@@ -584,18 +586,20 @@ theorem apply?_complete
       dsimp [apply?]
       simp only [hTopic]
       rw [if_pos ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩]
-  | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       dsimp [apply?]
       simp only [hTopic]
-      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ = _ :=
-        ⟨True.intro, hTopicKey, hInit, hPending⟩
+      simp only [Topic.ExcelConnectionSettled] at hExcelSettled
+      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ ∧ _ = _ :=
+        ⟨True.intro, hTopicKey, hInit, hExcelSettled, hPending⟩
       rw [if_pos hPre]
       rw [Runtime.apply?_complete hRuntime]
-  | withdrawVisible hInit hTopic hTopicKey hPending =>
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       dsimp [apply?]
       simp only [hTopic]
-      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ = _ :=
-        ⟨True.intro, hTopicKey, hInit, hPending⟩
+      simp only [Topic.ExcelConnectionSettled] at hExcelSettled
+      have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ ∧ _ = _ :=
+        ⟨True.intro, hTopicKey, hInit, hExcelSettled, hPending⟩
       rw [if_pos hPre]
       rfl
   | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
