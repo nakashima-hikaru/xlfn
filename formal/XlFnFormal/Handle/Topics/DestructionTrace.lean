@@ -222,6 +222,9 @@ theorem replay_close_certified_of_check
 def fixtureToken : Registry.Token :=
   { session := 0, slot := 0, generation := 1 }
 
+def fixtureToken2 : Registry.Token :=
+  { session := 0, slot := 1, generation := 1 }
+
 def disconnect_pending_prefix : List MixedEvent :=
   [.topic .beginPrepare,
    .topic (.beginInitializer fixtureKey 1),
@@ -255,6 +258,58 @@ def disconnect_published_trace : List MixedEvent :=
    .topic .closeRegistry,
    .topic .finishClose]
 
+def generation_termination_provisional_trace : List MixedEvent :=
+  [.topic .beginPrepare,
+   .topic (.beginInitializer fixtureKey 1),
+   .topic (.insertPendingFresh fixtureKey 1),
+   .topic (.publishVisible fixtureKey 1 fixtureRtdKey),
+   .topic (.claimServer fixtureKey 1),
+   .destruction (.detachGeneration 1),
+   .destruction (.drainPendingReuse fixtureToken 1 2),
+   .topic (.finishInitializer fixtureKey 1),
+   .topic .endPrepare,
+   .topic .sealTopics,
+   .topic .closeRegistry,
+   .topic .finishClose]
+
+def generation_termination_published_trace : List MixedEvent :=
+  [.topic .beginPrepare,
+   .topic (.beginInitializer fixtureKey 1),
+   .topic (.insertPendingFresh fixtureKey 1),
+   .topic (.publishVisible fixtureKey 1 fixtureRtdKey),
+   .topic (.claimServer fixtureKey 1),
+   .topic (.beginConnection fixtureKey fixtureOwner1),
+   .topic (.commitConnection fixtureKey fixtureOwner1),
+   .topic (.commitPublication fixtureKey 1),
+   .topic (.finishInitializer fixtureKey 1),
+   .destruction (.detachGeneration 1),
+   .destruction (.drainPublishedReuse fixtureToken 2),
+   .topic .endPrepare,
+   .topic .sealTopics,
+   .topic .closeRegistry,
+   .topic .finishClose]
+
+def generation_termination_preserves_other_generation_trace : List MixedEvent :=
+  [.topic .beginPrepare,
+   .topic (.beginInitializer fixtureKey 1),
+   .topic (.insertPendingFresh fixtureKey 1),
+   .topic (.publishVisible fixtureKey 1 fixtureRtdKey),
+   .topic (.claimServer fixtureKey 1),
+   .topic (.beginConnection fixtureKey fixtureOwner1),
+   .topic (.commitConnection fixtureKey fixtureOwner1),
+   .topic (.commitPublication fixtureKey 1),
+   .topic (.finishInitializer fixtureKey 1),
+   .topic (.beginInitializer fixtureKey2 2),
+   .topic (.insertPendingFresh fixtureKey2 2),
+   .topic (.publishVisible fixtureKey2 2 fixtureRtdKey2),
+   .topic (.claimServer fixtureKey2 2),
+   .topic (.beginConnection fixtureKey2 fixtureOwnerDifferentGeneration),
+   .topic (.commitConnection fixtureKey2 fixtureOwnerDifferentGeneration),
+   .topic (.commitPublication fixtureKey2 2),
+   .topic (.finishInitializer fixtureKey2 2),
+   .destruction (.detachGeneration 1),
+   .destruction (.drainPublishedReuse fixtureToken 2)]
+
 theorem disconnect_pending_trace_replays :
     ∃ s, replayMixed? (initialState 0) disconnect_pending_trace = some s ∧
       s.runtime.phase = .closed ∧ CloseCertified s := by
@@ -276,6 +331,61 @@ theorem disconnect_published_trace_replays :
     ∃ s, replayMixed? (initialState 0) disconnect_published_trace = some s ∧
       s.runtime.phase = .closed ∧ CloseCertified s := by
   apply replay_close_certified_of_check
+  native_decide
+
+theorem generation_termination_provisional_trace_replays :
+    ∃ s, replayMixed? (initialState 0)
+        generation_termination_provisional_trace = some s ∧
+      s.GenerationTerminationComplete 1 ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  have hCheck :
+      replayCertified? generation_termination_provisional_trace = true := by
+    native_decide
+  rcases replay_close_certified_of_check hCheck with
+    ⟨s, hReplay, hClosed, hCertified⟩
+  have hNoVisible := hCertified.2.1
+  have hNoDetached := hCertified.2.2.2.2.2
+  refine ⟨s, hReplay, ?_, hClosed, hCertified⟩
+  constructor
+  · intro topic hTopic
+    rw [hNoVisible] at hTopic
+    contradiction
+  · intro detached hDetached
+    rw [hNoDetached] at hDetached
+    contradiction
+
+theorem generation_termination_published_trace_replays :
+    ∃ s, replayMixed? (initialState 0)
+        generation_termination_published_trace = some s ∧
+      s.GenerationTerminationComplete 1 ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  have hCheck :
+      replayCertified? generation_termination_published_trace = true := by
+    native_decide
+  rcases replay_close_certified_of_check hCheck with
+    ⟨s, hReplay, hClosed, hCertified⟩
+  have hNoVisible := hCertified.2.1
+  have hNoDetached := hCertified.2.2.2.2.2
+  refine ⟨s, hReplay, ?_, hClosed, hCertified⟩
+  constructor
+  · intro topic hTopic
+    rw [hNoVisible] at hTopic
+    contradiction
+  · intro detached hDetached
+    rw [hNoDetached] at hDetached
+    contradiction
+
+theorem generation_termination_preserves_other_generation_trace_replays :
+    (replayMixed? (initialState 0)
+      generation_termination_preserves_other_generation_trace).bind
+      (fun s =>
+        if (s.findTopic? fixtureKey2).isSome ∧
+            (s.findReverse? fixtureRtdKey2).isSome ∧
+            (s.findExcelOwner? fixtureOwnerDifferentGeneration).isSome ∧
+            tokenLive? s.runtime.registry fixtureToken2 = true ∧
+            tokenLive? s.runtime.registry fixtureToken = false then
+          some ()
+        else none) = some () := by
   native_decide
 
 end XlFnFormal.Handle.Topics

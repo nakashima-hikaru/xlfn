@@ -7,6 +7,7 @@ namespace XlFnFormal.Handle.Topics
 
 inductive DestructionEvent where
   | disconnectTopic (key : TopicKey) (owner : ExcelOwnerId)
+  | detachGeneration (generation : ServerGeneration)
   | drainPendingReuse (token : Registry.Token) (runtimeId : Runtime.InitializerId)
       (nextGeneration : Registry.Generation)
   | drainPendingRetire (token : Registry.Token) (runtimeId : Runtime.InitializerId)
@@ -29,6 +30,15 @@ inductive DestructionStep : State → DestructionEvent → State → Prop where
             byRtdKey := s.removeReverse topic.rtdKey
             byExcelOwner := s.removeExcelOwner owner
             detached := s.detached ++ [{ topic := topic }] }
+
+  | detachGeneration
+      {s : State} {generation : ServerGeneration} :
+      DestructionStep s (.detachGeneration generation)
+        { s with
+            byKey := s.removeGenerationTopics generation
+            byRtdKey := s.removeGenerationReverse generation
+            byExcelOwner := s.removeGenerationExcelOwners generation
+            detached := s.detached ++ s.detachedGeneration generation }
 
   | drainPendingReuse
       {s : State} {sRuntime : Runtime.State} {detached : DetachedTopic}
@@ -105,6 +115,12 @@ def applyDestruction? (s : State) (e : DestructionEvent) : Option State :=
               detached := s.detached ++ [{ topic := topic }] }
           else none
       | none => none
+  | .detachGeneration generation =>
+      some { s with
+        byKey := s.removeGenerationTopics generation
+        byRtdKey := s.removeGenerationReverse generation
+        byExcelOwner := s.removeGenerationExcelOwners generation
+        detached := s.detached ++ s.detachedGeneration generation }
   | .drainPendingReuse token runtimeId nextGeneration =>
       match s.findDetached? token with
       | some detached =>
@@ -185,6 +201,10 @@ theorem applyDestruction?_sound
               hPre.2.2.1 hPre.2.2.2
           · rw [if_neg hPre] at h
             contradiction
+  | detachGeneration generation =>
+      dsimp [applyDestruction?] at h
+      cases h
+      exact DestructionStep.detachGeneration
   | drainPendingReuse token runtimeId nextGeneration =>
       dsimp [applyDestruction?] at h
       cases hDetached : s.findDetached? token with
@@ -277,6 +297,8 @@ theorem applyDestruction?_complete
       dsimp [applyDestruction?]
       simp only [hTopic]
       rw [if_pos ⟨hTopicKey, hTopicOwner, hBinding, hNoDetached⟩]
+  | detachGeneration =>
+      rfl
   | drainPendingReuse hDetached hInit hPending hRuntime =>
       dsimp [applyDestruction?]
       simp only [hDetached]

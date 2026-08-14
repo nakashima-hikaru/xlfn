@@ -76,6 +76,37 @@ theorem pairwise_mem_ne_topics
           | inl hY1 => subst hY1; right; exact hHead x hX2
           | inr hY2 => exact ih hX2 hY2
 
+theorem findTopic_of_mem
+    {s : State} {topic : Topic}
+    (hKeys : s.VisibleKeysUnique)
+    (hMem : topic ∈ s.byKey) :
+    s.findTopic? topic.key = some topic := by
+  have helper : ∀ (topics : List Topic),
+      topics.Pairwise (fun lhs rhs => lhs.key ≠ rhs.key) →
+      topic ∈ topics →
+      topics.find? (fun candidate => candidate.key == topic.key) = some topic := by
+    intro topics
+    induction topics with
+    | nil =>
+        intro _ hMem
+        contradiction
+    | cons head tail ih =>
+        intro hPair hMem
+        cases hPair with
+        | cons hHead hTailPair =>
+            cases List.mem_cons.mp hMem with
+            | inl hHeadMem =>
+                subst hHeadMem
+                simp
+            | inr hTailMem =>
+                have hHeadNe : head.key ≠ topic.key := hHead topic hTailMem
+                dsimp [List.find?]
+                have hFalse : (head.key == topic.key) = false := by
+                  simp [hHeadNe]
+                rw [hFalse]
+                exact ih hTailPair hTailMem
+  simpa [State.findTopic?] using helper s.byKey hKeys hMem
+
 theorem initial_invariant (session : Registry.SessionId) :
     (initialState session).Invariant := by
   refine ⟨Runtime.initial_runtimeInvariant session,

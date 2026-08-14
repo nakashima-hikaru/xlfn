@@ -60,6 +60,10 @@ structure DetachedTopic where
   topic : Topic
 deriving DecidableEq, Repr
 
+def Topic.BelongsToGeneration
+    (topic : Topic) (generation : ServerGeneration) : Prop :=
+  topic.serverGeneration = some generation
+
 structure State where
   runtime : Runtime.State
   byKey : List Topic
@@ -109,6 +113,34 @@ def State.removeExcelOwner (s : State) (owner : ExcelOwnerId) : List ExcelBindin
 
 def State.removeDetached (s : State) (token : Registry.Token) : List DetachedTopic :=
   s.detached.filter (fun detached => detached.topic.token != token)
+
+def State.removeGenerationTopics
+    (s : State) (generation : ServerGeneration) : List Topic :=
+  s.byKey.filter (fun topic => topic.serverGeneration != some generation)
+
+def State.removeGenerationReverse
+    (s : State) (generation : ServerGeneration) : List ReverseTopic :=
+  s.byRtdKey.filter (fun entry =>
+    match s.findTopic? entry.key with
+    | some topic => topic.serverGeneration != some generation
+    | none => true)
+
+def State.removeGenerationExcelOwners
+    (s : State) (generation : ServerGeneration) : List ExcelBinding :=
+  s.byExcelOwner.filter (fun binding =>
+    binding.owner.serverGeneration != generation)
+
+def State.detachedGeneration
+    (s : State) (generation : ServerGeneration) : List DetachedTopic :=
+  (s.byKey.filter (fun topic => topic.serverGeneration == some generation)).map
+    (fun topic => { topic := topic })
+
+def State.GenerationTerminationComplete
+    (s : State) (generation : ServerGeneration) : Prop :=
+  (∀ topic ∈ s.byKey,
+    topic.serverGeneration ≠ some generation) ∧
+  (∀ detached ∈ s.detached,
+    detached.topic.serverGeneration ≠ some generation)
 
 def State.updateTopicStage (s : State) (key : TopicKey) (stage : TopicStage) : List Topic :=
   s.byKey.map (fun topic => if topic.key == key then { topic with stage := stage } else topic)

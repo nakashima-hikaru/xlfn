@@ -740,6 +740,309 @@ private theorem initializers_backed_after_rollback_retire
         ⟨updated, hUpdatedMem, hUpdatedId⟩
       exact ⟨updated, hUpdatedMem, hUpdatedId.trans hId⟩
 
+private theorem generation_mem_of_detachedGeneration
+    {s : State} {generation : ServerGeneration} {detached : DetachedTopic}
+    (hMem : detached ∈ s.detachedGeneration generation) :
+    detached.topic ∈ s.byKey ∧ detached.topic.serverGeneration = some generation := by
+  cases detached with
+  | mk detachedTopic =>
+      dsimp [State.detachedGeneration] at hMem ⊢
+      rcases List.mem_map.mp hMem with ⟨source, hSource, hSourceEq⟩
+      have hSourceTopic : source = detachedTopic :=
+        congrArg DetachedTopic.topic hSourceEq
+      subst detachedTopic
+      have hSourceMem := mem_of_mem_filter_topics hSource
+      rcases List.mem_filter.mp hSource with ⟨_, hGeneration⟩
+      exact ⟨hSourceMem, beq_iff_eq.mp hGeneration⟩
+
+private theorem detachedGeneration_mem_of_generation
+    {s : State} {generation : ServerGeneration} {topic : Topic}
+    (hTopic : topic ∈ s.byKey)
+    (hGeneration : topic.serverGeneration = some generation) :
+    { topic := topic } ∈ s.detachedGeneration generation := by
+  dsimp [State.detachedGeneration]
+  apply List.mem_map.mpr
+  refine ⟨topic, List.mem_filter.mpr ⟨hTopic, ?_⟩, rfl⟩
+  exact beq_iff_eq.mpr hGeneration
+
+private theorem nonmatching_of_mem_removeGenerationTopics
+    {s : State} {generation : ServerGeneration} {topic : Topic}
+    (hMem : topic ∈ s.removeGenerationTopics generation) :
+    topic.serverGeneration ≠ some generation := by
+  dsimp [State.removeGenerationTopics] at hMem
+  rcases List.mem_filter.mp hMem with ⟨_, hKeep⟩
+  intro hEq
+  have hFalse : (topic.serverGeneration != some generation) = false := by
+    simp [hEq]
+  rw [hFalse] at hKeep
+  contradiction
+
+private theorem reverse_sound_after_detachGeneration
+    {s : State} {generation : ServerGeneration}
+    (hSound : s.ReverseMapSound)
+    (hKeys : s.VisibleKeysUnique) :
+    ({ s with
+        byKey := s.removeGenerationTopics generation
+        byRtdKey := s.removeGenerationReverse generation }).ReverseMapSound := by
+  intro entry hEntry
+  dsimp [State.removeGenerationReverse] at hEntry
+  have hEntryMem := mem_of_mem_filter_topics hEntry
+  rcases hSound entry hEntryMem with
+    ⟨topic, hTopic, hTopicKey, hTopicRtd⟩
+  have hFind : s.findTopic? entry.key = some topic := by
+    rw [← hTopicKey]
+    exact findTopic_of_mem hKeys hTopic
+  have hKeep := (List.mem_filter.mp hEntry).2
+  rw [hFind] at hKeep
+  have hKeep' : (topic.serverGeneration != some generation) = true := by
+    simpa using hKeep
+  have hTopicNe : topic.serverGeneration ≠ some generation := by
+    intro hEq
+    have hFalse : (topic.serverGeneration != some generation) = false := by
+      simp [hEq]
+    rw [hFalse] at hKeep'
+    contradiction
+  refine ⟨topic, ?_, hTopicKey, hTopicRtd⟩
+  exact List.mem_filter.mpr ⟨hTopic, by simp [hTopicNe]⟩
+
+private theorem reverse_complete_after_detachGeneration
+    {s : State} {generation : ServerGeneration}
+    (hComplete : s.ReverseMapComplete)
+    (hKeys : s.VisibleKeysUnique) :
+    ({ s with
+        byKey := s.removeGenerationTopics generation
+        byRtdKey := s.removeGenerationReverse generation }).ReverseMapComplete := by
+  intro topic hTopic
+  have hTopicMem := mem_of_mem_filter_topics hTopic
+  have hTopicNe := nonmatching_of_mem_removeGenerationTopics hTopic
+  rcases hComplete topic hTopicMem with
+    ⟨entry, hEntryMem, hEntryKey, hEntryRtd⟩
+  have hFind : s.findTopic? entry.key = some topic := by
+    rw [hEntryKey]
+    exact findTopic_of_mem hKeys hTopicMem
+  refine ⟨entry, ?_, hEntryKey, hEntryRtd⟩
+  change entry ∈ s.byRtdKey.filter (fun entry =>
+    match s.findTopic? entry.key with
+    | some topic => topic.serverGeneration != some generation
+    | none => true)
+  apply List.mem_filter.mpr
+  exact ⟨hEntryMem, by simp [hFind, hTopicNe]⟩
+
+private theorem excel_owner_map_sound_after_detachGeneration
+    {s : State} {generation : ServerGeneration}
+    (hSound : s.ExcelOwnerMapSound)
+    (hGeneration : s.ExcelOwnerGenerationConsistent) :
+    ({ s with
+        byKey := s.removeGenerationTopics generation
+        byExcelOwner := s.removeGenerationExcelOwners generation }).ExcelOwnerMapSound := by
+  intro binding hBinding
+  dsimp [State.removeGenerationExcelOwners] at hBinding
+  have hBindingMem := mem_of_mem_filter_topics hBinding
+  rcases hSound binding hBindingMem with
+    ⟨topic, hTopic, hTopicKey, hTopicOwner⟩
+  have hOwnerNe : binding.owner.serverGeneration ≠ generation := by
+    intro hEq
+    have hFalse : (binding.owner.serverGeneration != generation) = false := by
+      simp [hEq]
+    have hKeep : (binding.owner.serverGeneration != generation) = true := by
+      simpa using (List.mem_filter.mp hBinding).2
+    rw [hFalse] at hKeep
+    contradiction
+  have hTopicGeneration := hGeneration topic hTopic binding.owner hTopicOwner
+  have hTopicNe : topic.serverGeneration ≠ some generation := by
+    intro hEq
+    apply hOwnerNe
+    exact Option.some.inj (hTopicGeneration.symm.trans hEq)
+  refine ⟨topic, List.mem_filter.mpr ⟨hTopic, by simp [hTopicNe]⟩,
+    hTopicKey, hTopicOwner⟩
+
+private theorem excel_owner_map_complete_after_detachGeneration
+    {s : State} {generation : ServerGeneration}
+    (hComplete : s.ExcelOwnerMapComplete)
+    (hGeneration : s.ExcelOwnerGenerationConsistent) :
+    ({ s with
+        byKey := s.removeGenerationTopics generation
+        byExcelOwner := s.removeGenerationExcelOwners generation }).ExcelOwnerMapComplete := by
+  intro topic hTopic owner hOwner
+  have hTopicMem := mem_of_mem_filter_topics hTopic
+  have hTopicNe := nonmatching_of_mem_removeGenerationTopics hTopic
+  rcases hComplete topic hTopicMem owner hOwner with
+    ⟨binding, hBinding, hBindingOwner, hBindingKey⟩
+  have hTopicGeneration := hGeneration topic hTopicMem owner hOwner
+  have hOwnerNe : owner.serverGeneration ≠ generation := by
+    intro hEq
+    apply hTopicNe
+    calc
+      topic.serverGeneration = some owner.serverGeneration := hTopicGeneration
+      _ = some generation := by simp [hEq]
+  refine ⟨binding, ?_, hBindingOwner, hBindingKey⟩
+  change binding ∈ s.byExcelOwner.filter
+    (fun binding => binding.owner.serverGeneration != generation)
+  apply List.mem_filter.mpr
+  exact ⟨hBinding, by simpa [hBindingOwner, hOwnerNe]⟩
+
+private theorem detachedGeneration_tokens_unique
+    {s : State} {generation : ServerGeneration}
+    (hTokens : s.VisibleTokensUnique) :
+    (s.detachedGeneration generation).Pairwise
+      (fun lhs rhs => lhs.topic.token ≠ rhs.topic.token) := by
+  dsimp [State.detachedGeneration]
+  have hFiltered :
+      (s.byKey.filter (fun topic => topic.serverGeneration == some generation)).Pairwise
+        (fun lhs rhs : Topic => lhs.token ≠ rhs.token) :=
+    pairwise_filter_topics
+      (fun topic => topic.serverGeneration == some generation) hTokens
+  have hMap : ∀ {topics : List Topic},
+      topics.Pairwise (fun lhs rhs : Topic => lhs.token ≠ rhs.token) →
+      (topics.map (fun topic => { topic := topic })).Pairwise
+        (fun lhs rhs : DetachedTopic => lhs.topic.token ≠ rhs.topic.token) := by
+    intro topics hPair
+    induction hPair with
+    | nil => exact List.Pairwise.nil
+    | cons hHead hTail ih =>
+        simp only [List.map]
+        refine List.Pairwise.cons ?_ ih
+        intro detached hDetached
+        rcases List.mem_map.mp hDetached with ⟨topic, hTopic, rfl⟩
+        exact hHead topic hTopic
+  exact hMap hFiltered
+
+private theorem detachedGeneration_disjoint_visible
+    {s : State} {generation : ServerGeneration}
+    (hInv : s.Invariant) :
+    ∀ detached ∈ s.detachedGeneration generation,
+      ∀ topic ∈ s.removeGenerationTopics generation,
+        detached.topic.token ≠ topic.token := by
+  intro detached hDetached topic hTopic
+  rcases generation_mem_of_detachedGeneration hDetached with
+    ⟨detachedMem, hDetachedGeneration⟩
+  have hTopicMem := mem_of_mem_filter_topics hTopic
+  have hTopicGeneration := nonmatching_of_mem_removeGenerationTopics hTopic
+  have hTopicNe : detached.topic ≠ topic := by
+    intro hEq
+    apply hTopicGeneration
+    simpa [hEq] using hDetachedGeneration
+  exact distinct_visible_topics_have_distinct_tokens hInv detachedMem hTopicMem hTopicNe
+
+private theorem detachGeneration_invariant_preserved
+    {s : State} {generation : ServerGeneration}
+    (hInv : s.Invariant) :
+    ({ s with
+        byKey := s.removeGenerationTopics generation
+        byRtdKey := s.removeGenerationReverse generation
+        byExcelOwner := s.removeGenerationExcelOwners generation
+        detached := s.detached ++ s.detachedGeneration generation }).Invariant := by
+  have hFull := hInv
+  rcases hInv with
+    ⟨hRuntime, hKeys, hIds, hBacked, hVisibleKeys, hVisibleTokens,
+      hRtdKeys, hReverseRtdKeys, hReverseSound, hReverseComplete, hRoots,
+      hProv, hExcel, hGeneration⟩
+  rcases hExcel with
+    ⟨hExcelSound, hExcelComplete, hExcelOwners, hExcelBindings, hExcelCommit⟩
+  rcases hGeneration with ⟨hGeneration, hDestruction⟩
+  have hVisibleKeys' :
+      ({ s with byKey := s.removeGenerationTopics generation }).VisibleKeysUnique := by
+    dsimp [State.VisibleKeysUnique, State.removeGenerationTopics]
+    exact pairwise_filter_topics
+      (fun topic => topic.serverGeneration != some generation) hVisibleKeys
+  have hVisibleTokens' :
+      ({ s with byKey := s.removeGenerationTopics generation }).VisibleTokensUnique := by
+    dsimp [State.VisibleTokensUnique, State.removeGenerationTopics]
+    exact pairwise_filter_topics
+      (fun topic => topic.serverGeneration != some generation) hVisibleTokens
+  have hRtdKeys' :
+      ({ s with byKey := s.removeGenerationTopics generation }).RtdKeysUnique := by
+    dsimp [State.RtdKeysUnique, State.removeGenerationTopics]
+    exact pairwise_filter_topics
+      (fun topic => topic.serverGeneration != some generation) hRtdKeys
+  have hReverseRtdKeys' :
+      ({ s with byRtdKey := s.removeGenerationReverse generation }).ReverseRtdKeysUnique := by
+    dsimp [State.ReverseRtdKeysUnique, State.removeGenerationReverse]
+    exact pairwise_filter_topics _ hReverseRtdKeys
+  have hReverseSound' := reverse_sound_after_detachGeneration
+    (generation := generation)
+    hReverseSound hVisibleKeys
+  have hReverseComplete' := reverse_complete_after_detachGeneration
+    (generation := generation)
+    hReverseComplete hVisibleKeys
+  have hExcelSound' := excel_owner_map_sound_after_detachGeneration
+    (generation := generation)
+    hExcelSound hGeneration
+  have hExcelComplete' := excel_owner_map_complete_after_detachGeneration
+    (generation := generation)
+    hExcelComplete hGeneration
+  have hExcelOwners' :
+      ({ s with byKey := s.removeGenerationTopics generation }).ExcelOwnersUnique := by
+    intro owner left right hLeft hRight hLeftOwner hRightOwner
+    exact hExcelOwners owner left right
+      (mem_of_mem_filter_topics hLeft) (mem_of_mem_filter_topics hRight)
+      hLeftOwner hRightOwner
+  have hExcelBindings' :
+      ({ s with byExcelOwner := s.removeGenerationExcelOwners generation }).ExcelBindingOwnersUnique := by
+    dsimp [State.ExcelBindingOwnersUnique, State.removeGenerationExcelOwners]
+    exact pairwise_filter_topics
+      (fun binding => binding.owner.serverGeneration != generation) hExcelBindings
+  have hExcelCommit' :
+      ({ s with byKey := s.removeGenerationTopics generation }).ExcelCommitConsistent := by
+    intro topic hTopic hCommitted
+    exact hExcelCommit topic (mem_of_mem_filter_topics hTopic) hCommitted
+  have hGeneration' :
+      ({ s with byKey := s.removeGenerationTopics generation }).ExcelOwnerGenerationConsistent := by
+    intro topic hTopic owner hOwner
+    exact hGeneration topic (mem_of_mem_filter_topics hTopic) owner hOwner
+  refine ⟨
+    hRuntime,
+    hKeys,
+    hIds,
+    hBacked,
+    hVisibleKeys',
+    hVisibleTokens',
+    hRtdKeys',
+    hReverseRtdKeys',
+    hReverseSound',
+    hReverseComplete',
+    ?_,
+    ?_,
+    ?_,
+    hGeneration',
+    ?_⟩
+  · intro topic hTopic
+    exact hRoots topic (mem_of_mem_filter_topics hTopic)
+  · intro topic hTopic hStage
+    exact hProv topic (mem_of_mem_filter_topics hTopic) hStage
+  · refine ⟨?_, ?_, hExcelOwners', hExcelBindings', hExcelCommit'⟩
+    · simpa [State.ExcelOwnerMapSound] using hExcelSound'
+    · simpa [State.ExcelOwnerMapComplete] using hExcelComplete'
+  · refine ⟨?_, ?_, ?_, ?_⟩
+    · dsimp [State.DetachedTokensUnique]
+      rw [List.pairwise_append]
+      refine ⟨hDestruction.1, detachedGeneration_tokens_unique hVisibleTokens, ?_⟩
+      intro old hOld new hNew
+      have hNewInfo := generation_mem_of_detachedGeneration hNew
+      exact hDestruction.2.1 old hOld new.topic hNewInfo.1
+    · intro detached hDetached topic hTopic
+      simp only [List.mem_append] at hDetached
+      cases hDetached with
+      | inl hOld =>
+          exact hDestruction.2.1 detached hOld topic
+            (mem_of_mem_filter_topics hTopic)
+      | inr hNew =>
+          exact detachedGeneration_disjoint_visible hFull _ hNew _ hTopic
+    · intro detached hDetached
+      simp only [List.mem_append] at hDetached
+      cases hDetached with
+      | inl hOld => exact hDestruction.2.2.1 detached hOld
+      | inr hNew =>
+          have hNewInfo := generation_mem_of_detachedGeneration hNew
+          exact hRoots detached.topic hNewInfo.1
+    · intro detached hDetached hStage
+      simp only [List.mem_append] at hDetached
+      cases hDetached with
+      | inl hOld => exact hDestruction.2.2.2 detached hOld hStage
+      | inr hNew =>
+          have hNewInfo := generation_mem_of_detachedGeneration hNew
+          exact hProv detached.topic hNewInfo.1 hStage
+
 theorem DestructionStep.invariant_preserved
     {s s' : State} {event : DestructionEvent}
     (hInv : s.Invariant)
@@ -754,6 +1057,8 @@ theorem DestructionStep.invariant_preserved
     ⟨hExcelSound, hExcelComplete, hExcelOwners, hExcelBindings, hExcelCommit⟩
   rcases hGeneration with ⟨hGeneration, hDestruction⟩
   cases hStep with
+  | detachGeneration =>
+      exact detachGeneration_invariant_preserved hFull
   | disconnectTopic hTopic hTopicKey hTopicOwner hBinding hNoDetached =>
       rename_i source key owner
       have hSourceMem : source ∈ s.byKey := mem_of_findTopic_some hTopic
@@ -1008,4 +1313,152 @@ theorem DestructionStep.invariant_preserved
               ⟨init, hInitMem, hInitKey, hInitPending⟩
             exact ⟨init, hInitMem, hInitKey,
               by simpa [Runtime.State.findInitializer?] using hInitPending⟩⟩⟩
+theorem termination_detaches_all_matching_topics
+    {s s' : State} {generation : ServerGeneration}
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ topic ∈ s.byKey,
+      topic.serverGeneration = some generation →
+      { topic := topic } ∈ s'.detached := by
+  cases hStep with
+  | detachGeneration =>
+      intro topic hTopic hGeneration
+      exact List.mem_append.mpr (Or.inr
+        (detachedGeneration_mem_of_generation hTopic hGeneration))
+
+theorem termination_preserves_nonmatching_topics
+    {s s' : State} {generation : ServerGeneration}
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ topic ∈ s'.byKey,
+      topic.serverGeneration ≠ some generation := by
+  cases hStep with
+  | detachGeneration =>
+      intro topic hTopic
+      exact nonmatching_of_mem_removeGenerationTopics hTopic
+
+theorem termination_does_not_detach_unclaimed_topics
+    {s s' : State} {generation : ServerGeneration}
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ detached ∈ s'.detached,
+      detached ∉ s.detached →
+      detached.topic ∈ s.byKey ∧
+        detached.topic.serverGeneration = some generation := by
+  cases hStep with
+  | detachGeneration =>
+      intro detached hDetached hNotOld
+      simp only [List.mem_append] at hDetached
+      cases hDetached with
+      | inl hOld => exact False.elim (hNotOld hOld)
+      | inr hNew => exact generation_mem_of_detachedGeneration hNew
+
+theorem termination_retains_matching_roots_until_drain
+    {s s' : State} {generation : ServerGeneration}
+    (hRoots : s.VisibleTopicRootsValid)
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ topic ∈ s.byKey,
+      topic.serverGeneration = some generation →
+      Runtime.TokenLive s'.runtime.registry topic.token := by
+  cases hStep with
+  | detachGeneration =>
+      intro topic hTopic _
+      exact hRoots topic hTopic
+
+theorem termination_preserves_other_generation
+    {s s' : State} {generation : ServerGeneration}
+    (hRoots : s.VisibleTopicRootsValid)
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ topic ∈ s.byKey,
+      topic.serverGeneration ≠ some generation →
+      topic ∈ s'.byKey ∧
+        Runtime.TokenLive s'.runtime.registry topic.token := by
+  cases hStep with
+  | detachGeneration =>
+      intro topic hTopic hGeneration
+      constructor
+      · exact List.mem_filter.mpr ⟨hTopic, by simp [hGeneration]⟩
+      · exact hRoots topic hTopic
+
+theorem termination_removes_matching_reverse_entries
+    {s s' : State} {generation : ServerGeneration}
+    (hSound : s.ReverseMapSound)
+    (hKeys : s.VisibleKeysUnique)
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ entry ∈ s.byRtdKey,
+      (∃ topic ∈ s.byKey,
+        topic.key = entry.key ∧
+        topic.serverGeneration = some generation) →
+      entry ∉ s'.byRtdKey := by
+  cases hStep with
+  | detachGeneration =>
+      intro entry hEntry hMatching hAfter
+      rcases hMatching with ⟨topic, hTopic, hTopicKey, hGeneration⟩
+      have hFind : s.findTopic? entry.key = some topic := by
+        rw [← hTopicKey]
+        exact findTopic_of_mem hKeys hTopic
+      change entry ∈ s.byRtdKey.filter (fun entry =>
+        match s.findTopic? entry.key with
+        | some topic => topic.serverGeneration != some generation
+        | none => true) at hAfter
+      have hKeep := (List.mem_filter.mp hAfter).2
+      rw [hFind] at hKeep
+      have hKeep' : (topic.serverGeneration != some generation) = true := by
+        simpa using hKeep
+      have hFalse : (topic.serverGeneration != some generation) = false := by
+        simp [hGeneration]
+      rw [hFalse] at hKeep'
+      contradiction
+
+theorem termination_preserves_other_generation_reverse_entries
+    {s s' : State} {generation : ServerGeneration}
+    (hSound : s.ReverseMapSound)
+    (hKeys : s.VisibleKeysUnique)
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ entry ∈ s.byRtdKey,
+      (∃ topic ∈ s.byKey,
+        topic.key = entry.key ∧
+        topic.serverGeneration ≠ some generation) →
+      entry ∈ s'.byRtdKey := by
+  cases hStep with
+  | detachGeneration =>
+      intro entry hEntry hMatching
+      rcases hMatching with ⟨topic, hTopic, hTopicKey, hGeneration⟩
+      have hFind : s.findTopic? entry.key = some topic := by
+        rw [← hTopicKey]
+        exact findTopic_of_mem hKeys hTopic
+      change entry ∈ s.byRtdKey.filter (fun entry =>
+        match s.findTopic? entry.key with
+        | some topic => topic.serverGeneration != some generation
+        | none => true)
+      apply List.mem_filter.mpr
+      exact ⟨hEntry, by simp [hFind, hGeneration]⟩
+
+theorem termination_removes_matching_excel_bindings
+    {s s' : State} {generation : ServerGeneration}
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ binding ∈ s.byExcelOwner,
+      binding.owner.serverGeneration = generation →
+      binding ∉ s'.byExcelOwner := by
+  cases hStep with
+  | detachGeneration =>
+      intro binding hBinding hGeneration hAfter
+      change binding ∈ s.byExcelOwner.filter
+        (fun binding => binding.owner.serverGeneration != generation) at hAfter
+      have hKeep := (List.mem_filter.mp hAfter).2
+      have hFalse : (binding.owner.serverGeneration != generation) = false := by
+        simp [hGeneration]
+      rw [hFalse] at hKeep
+      contradiction
+
+theorem termination_preserves_other_generation_excel_bindings
+    {s s' : State} {generation : ServerGeneration}
+    (hStep : DestructionStep s (.detachGeneration generation) s') :
+    ∀ binding ∈ s.byExcelOwner,
+      binding.owner.serverGeneration ≠ generation →
+      binding ∈ s'.byExcelOwner := by
+  cases hStep with
+  | detachGeneration =>
+      intro binding hBinding hGeneration
+      change binding ∈ s.byExcelOwner.filter
+        (fun binding => binding.owner.serverGeneration != generation)
+      exact List.mem_filter.mpr ⟨hBinding, by simp [hGeneration]⟩
+
 end XlFnFormal.Handle.Topics
