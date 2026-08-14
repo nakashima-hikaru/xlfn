@@ -45,3 +45,4 @@ import XlFnFormal.Handle.Topics.Serialization.Model
 import XlFnFormal.Handle.Topics.Serialization.Format
 import XlFnFormal.Handle.Topics.Serialization.Parser
 import XlFnFormal.Handle.Topics.Serialization.Safety
+import XlFnFormal.Handle.Topics.Serialization.Golden

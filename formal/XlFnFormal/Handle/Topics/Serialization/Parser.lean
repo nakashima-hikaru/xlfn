@@ -35,7 +35,9 @@ def splitDigestSuffix (bytes : ByteString) : Option (ByteString × ByteString) :
     let suffix := bytes.drop udfLength
     match suffix with
     | separator' :: digest =>
-        if digest.length = 64 then some (udf, digest) else none
+        if separator' = separator ∧ digest.length = 64 then
+          some (udf, digest)
+        else none
     | _ => none
   else none
 
@@ -93,9 +95,15 @@ def parseRtdKey (bytes : ByteString) : Option FormulaTopicKeyWire :=
               some { sheetId, row, column, udfId, argumentDigest }
           | _, _, _, _ => none
 
+def parseCanonicalRtdKey (bytes : ByteString) : Option FormulaTopicKeyWire :=
+  match parseRtdKey bytes with
+  | some key =>
+      if formatRtdKey key = bytes then some key else none
+  | none => none
+
 def parseRtdKeyFor (width : PointerWidth) (bytes : ByteString) :
     Option FormulaTopicKeyWire := by
-  exact match parseRtdKey bytes with
+  exact match parseCanonicalRtdKey bytes with
     | some key => if h : WellFormed width key then some key else none
     | none => none
 

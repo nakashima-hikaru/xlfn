@@ -51,6 +51,16 @@ fn return_pool_prototype(c: &mut Criterion) {
         SyncBenchKind::ReturnPoolBlockLocal,
         "return_pool_prototype/striped_pool_block_local",
     );
+    bench_kind(
+        c,
+        SyncBenchKind::ReturnTlsOnly,
+        "return_pool_prototype/tls_slot_only",
+    );
+    bench_kind(
+        c,
+        SyncBenchKind::ReturnTlsBlockLocal,
+        "return_pool_prototype/tls_slot_block_local",
+    );
 }
 
 criterion_group!(benches, return_pool_prototype);

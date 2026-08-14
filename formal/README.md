@@ -332,12 +332,22 @@ by byte `0x1f`, followed by the UDF bytes and exactly 64 lower-case hex digest
 bytes. The parser does not split every separator. It consumes the first three
 separators for the numeric fields and locates the final separator plus the
 fixed-size digest suffix, so a separator byte inside the UDF id is preserved.
-`parseRtdKeyFor` is the executable, bounds-checked parser; the unbounded
-`parseRtdKey` is useful for the core byte-level parser theorem.
+The suffix separator is checked explicitly. `parseRtdKey` is the raw structural
+parser, while `parseCanonicalRtdKey` additionally requires a formatter
+round-trip, rejecting alternate decimal spellings such as leading zeroes.
+`parseRtdKeyFor` is the executable, bounds-checked canonical parser.
 
 The safety layer proves canonical decimal and digest parsing, UTF-8 validity
-for encoded strings, `parse_format_roundtrip`, bounded parser soundness, and
-`format_injective`. This serialization proof is intentionally downstream of
-H3.2: reverse-map consistency does not depend on formatter injectivity, while
-the future Rust producer refinement can use these theorems to show that
-concrete RTD keys cannot collide.
+for encoded strings, wrong-separator rejection, `parse_format_roundtrip`,
+`parseCanonical_format`, `parseCanonical_sound`, bounded parser soundness, a
+`WellFormed ∧ re-encode` certificate, and `format_injective`. The checked
+golden vectors are in `fixtures/topics/serialization-golden.json`; Lean proves
+the same zero, i32-boundary, 64-bit Unicode, and embedded-separator cases in
+`XlFnFormal.Handle.Topics.Serialization.Golden`, while Rust tests consume the
+shared JSON fixture. The `serialization_golden_checker` executable consumes
+that same fixture through the Lean parser and formatter in CI.
+
+This serialization proof is intentionally downstream of H3.2: reverse-map
+consistency does not depend on formatter injectivity, while the Rust producer
+refinement can use these theorems to show that concrete RTD keys cannot
+collide.

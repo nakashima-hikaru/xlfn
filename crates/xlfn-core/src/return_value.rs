@@ -495,6 +495,15 @@ struct ReturnBlock {
     magic: u64,
 }
 
+#[cfg(feature = "bench-diagnostics")]
+thread_local! {
+    // Diagnostic-only single-slot cache. The benchmark models the Excel
+    // callback contract where a returned block is released on the same
+    // thread that produced it; it must not be used by the production path
+    // without first validating the lifecycle assumptions.
+    static BENCH_RETURN_BLOCK: Cell<Option<Box<ReturnBlock>>> = const { Cell::new(None) };
+}
+
 #[derive(Debug)]
 struct PreparedReturn {
     oper: XLOPER12,
@@ -649,6 +658,18 @@ impl PreparedReturn {
         std::hint::black_box(&block.oper);
         pool.release(block);
     }
+
+    #[cfg(feature = "bench-diagnostics")]
+    fn publish_benchmark_tls(self) {
+        let mut block = benchmark_tls_acquire();
+        block.oper = self.oper;
+        block.storage = self.storage;
+        block.array = self.array;
+        block.ownership = ReturnOwnership::Local;
+        block.magic = RETURN_MAGIC;
+        std::hint::black_box(&block.oper);
+        benchmark_tls_release(block);
+    }
 }
 
 impl ReturnBlock {
@@ -718,6 +739,23 @@ impl Drop for BenchmarkReturnBlockPool {
             }
         }
     }
+}
+
+#[cfg(feature = "bench-diagnostics")]
+fn benchmark_tls_acquire() -> Box<ReturnBlock> {
+    BENCH_RETURN_BLOCK.with(|slot| {
+        slot.take()
+            .unwrap_or_else(BenchmarkReturnBlockPool::allocate_block)
+    })
+}
+
+#[cfg(feature = "bench-diagnostics")]
+fn benchmark_tls_release(block: Box<ReturnBlock>) {
+    BENCH_RETURN_BLOCK.with(|slot| {
+        let previous = slot.replace(Some(block));
+        debug_assert!(previous.is_none());
+        drop(previous);
+    });
 }
 
 #[cfg(feature = "bench-diagnostics")]
@@ -880,6 +918,20 @@ pub(crate) fn benchmark_pooled_scalar_return(pool: &BenchmarkReturnBlockPool) {
     PreparedReturn::encode(OwnedExcelValue::Number(42.0))
         .expect("scalar benchmark return encoding must succeed")
         .publish_benchmark_pool(pool);
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) fn benchmark_tls_box_only() {
+    let block = benchmark_tls_acquire();
+    std::hint::black_box(&block.oper);
+    benchmark_tls_release(block);
+}
+
+#[cfg(feature = "bench-diagnostics")]
+pub(crate) fn benchmark_tls_scalar_return() {
+    PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+        .expect("scalar benchmark return encoding must succeed")
+        .publish_benchmark_tls();
 }
 
 fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {

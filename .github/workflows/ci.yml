@@ -272,6 +272,14 @@ jobs:
               working-directory: formal
               run: lake build composition_trace_checker
 
+            - name: Build the RTD serialization golden checker
+              working-directory: formal
+              run: lake build serialization_golden_checker
+
+            - name: Validate RTD serialization golden vectors
+              working-directory: formal
+              run: lake exe serialization_golden_checker < fixtures/topics/serialization-golden.json
+
             - name: Validate composition replay fixtures
               shell: bash
               run: |

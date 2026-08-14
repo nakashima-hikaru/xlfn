@@ -135,6 +135,10 @@ pub enum SyncBenchKind {
     ReturnPoolOnly,
     #[cfg(feature = "bench-diagnostics")]
     ReturnPoolBlockLocal,
+    #[cfg(feature = "bench-diagnostics")]
+    ReturnTlsOnly,
+    #[cfg(feature = "bench-diagnostics")]
+    ReturnTlsBlockLocal,
 }
 
 #[derive(Clone, Copy)]
@@ -303,6 +307,18 @@ impl SyncBoundaryWorkerPool {
                                 .expect("pool benchmark must own a pool");
                             for _ in 0..iterations_per_thread {
                                 crate::return_value::benchmark_pooled_scalar_return(pool);
+                            }
+                        }
+                        #[cfg(feature = "bench-diagnostics")]
+                        SyncBenchKind::ReturnTlsOnly => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_tls_box_only();
+                            }
+                        }
+                        #[cfg(feature = "bench-diagnostics")]
+                        SyncBenchKind::ReturnTlsBlockLocal => {
+                            for _ in 0..iterations_per_thread {
+                                crate::return_value::benchmark_tls_scalar_return();
                             }
                         }
                     }

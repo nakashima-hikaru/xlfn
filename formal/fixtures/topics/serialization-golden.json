@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "name": "zero-empty",
+      "sheet_id": 0,
+      "row": 0,
+      "column": 0,
+      "udf_id": "",
+      "digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rtd_key": "0\u001f0\u001f0\u001f\u001f0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "i32-bounds",
+      "sheet_id": 4294967295,
+      "row": -2147483648,
+      "column": 2147483647,
+      "udf_id": "TEST.HANDLE",
+      "digest_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "rtd_key": "4294967295\u001f-2147483648\u001f2147483647\u001fTEST.HANDLE\u001fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "u64-unicode",
+      "sheet_id": 18446744073709551615,
+      "row": -1,
+      "column": 0,
+      "udf_id": "Unicode-日本語-😀",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "rtd_key": "18446744073709551615\u001f-1\u001f0\u001fUnicode-日本語-😀\u001f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "embedded-separator",
+      "sheet_id": 7,
+      "row": 8,
+      "column": 9,
+      "udf_id": "A\u001fB\u001fC",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "rtd_key": "7\u001f8\u001f9\u001fA\u001fB\u001fC\u001f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    }
+  ]
+}

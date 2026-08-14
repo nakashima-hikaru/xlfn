@@ -12,3 +12,7 @@ root = "XlFnFormal.Shutdown.TraceChecker"
 [[lean_exe]]
 name = "composition_trace_checker"
 root = "XlFnFormal.Composition.TraceChecker"
+
+[[lean_exe]]
+name = "serialization_golden_checker"
+root = "XlFnFormal.Handle.Topics.Serialization.GoldenChecker"

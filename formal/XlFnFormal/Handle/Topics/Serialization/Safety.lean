@@ -87,6 +87,18 @@ theorem splitDigestSuffix_structured
   simp only [List.length_append, List.length_cons]
   simp [hDigest]
 
+theorem splitDigestSuffix_wrong_separator_rejected
+    {udf digest : ByteString}
+    {wrong : UInt8}
+    (hWrong : wrong ≠ separator)
+    (hDigest : digest.length = 64) :
+    splitDigestSuffix (udf ++ [wrong] ++ digest) = none := by
+  unfold splitDigestSuffix
+  have hLength : 65 ≤ (udf ++ [wrong] ++ digest).length := by
+    simp [hDigest]
+  simp only [List.length_append, List.length_cons]
+  simp [hDigest, hWrong]
+
 theorem hexValue_hexNibble {value : Nat} (hValue : value < 16) :
     hexValue (hexNibble value) = some value := by
   unfold hexValue hexNibble
@@ -209,13 +221,34 @@ theorem parse_format_roundtrip
   rw [parseNatBytes_decimalNatBytes, parseIntBytes_decimalIntBytes,
     parseIntBytes_decimalIntBytes, parseDigest_format]
 
+theorem parseCanonical_format (key : FormulaTopicKeyWire) :
+    parseCanonicalRtdKey (formatRtdKey key) = some key := by
+  unfold parseCanonicalRtdKey
+  rw [parse_format_roundtrip key]
+  simp
+
+theorem parseCanonical_sound
+    {bytes : ByteString}
+    {key : FormulaTopicKeyWire}
+    (hParsed : parseCanonicalRtdKey bytes = some key) :
+    formatRtdKey key = bytes := by
+  cases hRaw : parseRtdKey bytes with
+  | none =>
+      simp [parseCanonicalRtdKey, hRaw] at hParsed
+  | some parsed =>
+      by_cases hCanonical : formatRtdKey parsed = bytes
+      · have hEqual : parsed = key := by
+          simpa [parseCanonicalRtdKey, hRaw, hCanonical] using hParsed
+        simpa [hEqual] using hCanonical
+      · simp [parseCanonicalRtdKey, hRaw, hCanonical] at hParsed
+
 theorem parseRtdKeyFor_sound
     {width : PointerWidth}
     {bytes : ByteString}
     {key : FormulaTopicKeyWire}
     (hParsed : parseRtdKeyFor width bytes = some key) :
     WellFormed width key := by
-  cases hRaw : parseRtdKey bytes with
+  cases hRaw : parseCanonicalRtdKey bytes with
   | none =>
       simp [parseRtdKeyFor, hRaw] at hParsed
   | some parsed =>
@@ -231,8 +264,33 @@ theorem parse_for_format_roundtrip
     (hWellFormed : WellFormed width key) :
     parseRtdKeyFor width (formatRtdKey key) = some key := by
   unfold parseRtdKeyFor
-  rw [parse_format_roundtrip key]
+  rw [parseCanonical_format key]
   simp [hWellFormed]
+
+theorem parseRtdKeyFor_reencode
+    {width : PointerWidth}
+    {bytes : ByteString}
+    {key : FormulaTopicKeyWire}
+    (hParsed : parseRtdKeyFor width bytes = some key) :
+    formatRtdKey key = bytes := by
+  cases hRaw : parseCanonicalRtdKey bytes with
+  | none =>
+      simp [parseRtdKeyFor, hRaw] at hParsed
+  | some parsed =>
+      by_cases hWell : WellFormed width parsed
+      · have hEqual : parsed = key := by
+          simpa [parseRtdKeyFor, hRaw, hWell] using hParsed
+        have hCanonical := parseCanonical_sound hRaw
+        simpa [hEqual] using hCanonical
+      · simp [parseRtdKeyFor, hRaw, hWell] at hParsed
+
+theorem parseRtdKeyFor_certificate
+    {width : PointerWidth}
+    {bytes : ByteString}
+    {key : FormulaTopicKeyWire}
+    (hParsed : parseRtdKeyFor width bytes = some key) :
+    WellFormed width key ∧ formatRtdKey key = bytes := by
+  exact ⟨parseRtdKeyFor_sound hParsed, parseRtdKeyFor_reencode hParsed⟩
 
 theorem format_injective
     {left right : FormulaTopicKeyWire}

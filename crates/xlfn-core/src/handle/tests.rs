@@ -16,6 +16,76 @@ where
     registry.insert_pending(&mut value)
 }
 
+#[derive(serde::Deserialize)]
+struct SerializationGoldenFile {
+    schema_version: u32,
+    vectors: Vec<SerializationGoldenVector>,
+}
+
+#[derive(serde::Deserialize)]
+struct SerializationGoldenVector {
+    name: String,
+    sheet_id: u64,
+    row: i32,
+    column: i32,
+    udf_id: String,
+    digest_hex: String,
+    rtd_key: String,
+}
+
+fn decode_digest_hex(hex: &str) -> [u8; 32] {
+    fn nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("golden digest contains a non-lowercase-hex byte"),
+        }
+    }
+
+    assert_eq!(hex.len(), 64, "golden digest must contain 32 bytes");
+    let mut digest = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = nibble(pair[0]) << 4 | nibble(pair[1]);
+    }
+    digest
+}
+
+#[test]
+fn rtd_key_golden_vectors_match_wire_contract() {
+    let golden: SerializationGoldenFile = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../formal/fixtures/topics/serialization-golden.json"
+    )))
+    .expect("serialization golden vectors must be valid JSON");
+    assert_eq!(golden.schema_version, 1);
+
+    for vector in golden.vectors {
+        let Some(sheet_id) = usize::try_from(vector.sheet_id).ok() else {
+            // The 64-bit boundary vector is intentionally not representable
+            // when this test is compiled for a 32-bit target.
+            continue;
+        };
+        let udf_id: &'static str = Box::leak(vector.udf_id.into_boxed_str());
+        let digest = decode_digest_hex(&vector.digest_hex);
+        let actual = format_formula_topic_key(
+            FormulaCaller {
+                sheet_id,
+                row: vector.row,
+                column: vector.column,
+            },
+            udf_id,
+            &digest,
+        );
+
+        assert_eq!(
+            actual.as_bytes(),
+            vector.rtd_key.as_bytes(),
+            "Rust RTD formatter disagrees with golden vector {}",
+            vector.name
+        );
+    }
+}
+
 #[test]
 fn formula_topic_key_uses_the_stable_sheet_identifier() {
     let digest = [0xab_u8; 32];
