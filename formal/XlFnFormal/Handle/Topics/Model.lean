@@ -20,6 +20,13 @@ structure ReverseTopic where
   key : TopicKey
 deriving DecidableEq, Repr
 
+abbrev ExcelOwnerId := Nat
+
+structure ExcelBinding where
+  owner : ExcelOwnerId
+  key : TopicKey
+deriving DecidableEq, Repr
+
 inductive TopicStage where
   | provisional
   | committed
@@ -35,12 +42,15 @@ structure Topic where
   rtdKey : RtdKey
   token : Registry.Token
   stage : TopicStage
+  excelOwner : Option ExcelOwnerId
+  excelCommitted : Bool
 deriving DecidableEq, Repr
 
 structure State where
   runtime : Runtime.State
   byKey : List Topic
   byRtdKey : List ReverseTopic
+  byExcelOwner : List ExcelBinding
   initializing : List Initializer
 deriving DecidableEq, Repr
 
@@ -48,6 +58,7 @@ def initialState (session : Registry.SessionId) : State :=
   { runtime := Runtime.initialState session
     byKey := []
     byRtdKey := []
+    byExcelOwner := []
     initializing := [] }
 
 def State.findTopic? (s : State) (key : TopicKey) : Option Topic :=
@@ -55,6 +66,9 @@ def State.findTopic? (s : State) (key : TopicKey) : Option Topic :=
 
 def State.findReverse? (s : State) (rtdKey : RtdKey) : Option ReverseTopic :=
   s.byRtdKey.find? (fun entry => entry.rtdKey == rtdKey)
+
+def State.findExcelOwner? (s : State) (owner : ExcelOwnerId) : Option ExcelBinding :=
+  s.byExcelOwner.find? (fun binding => binding.owner == owner)
 
 def State.findInitializing? (s : State) (key : TopicKey) : Option Initializer :=
   s.initializing.find? (fun init => init.key == key)
@@ -71,8 +85,18 @@ def State.removeTopic (s : State) (key : TopicKey) : List Topic :=
 def State.removeReverse (s : State) (rtdKey : RtdKey) : List ReverseTopic :=
   s.byRtdKey.filter (fun entry => entry.rtdKey != rtdKey)
 
+def State.removeExcelOwner (s : State) (owner : ExcelOwnerId) : List ExcelBinding :=
+  s.byExcelOwner.filter (fun binding => binding.owner != owner)
+
 def State.updateTopicStage (s : State) (key : TopicKey) (stage : TopicStage) : List Topic :=
   s.byKey.map (fun topic => if topic.key == key then { topic with stage := stage } else topic)
+
+def State.updateTopicExcel (s : State) (key : TopicKey)
+    (owner : Option ExcelOwnerId) (committed : Bool) : List Topic :=
+  s.byKey.map (fun topic =>
+    if topic.key == key then
+      { topic with excelOwner := owner, excelCommitted := committed }
+    else topic)
 
 def State.ReverseMapSound (s : State) : Prop :=
   ∀ entry ∈ s.byRtdKey,
@@ -123,6 +147,42 @@ def State.CommittedTopicRootsValid (s : State) : Prop :=
     topic.stage = .committed →
       Runtime.TokenLive s.runtime.registry topic.token
 
+def State.ExcelOwnerMapSound (s : State) : Prop :=
+  ∀ binding ∈ s.byExcelOwner,
+    ∃ topic ∈ s.byKey,
+      topic.key = binding.key ∧
+      topic.excelOwner = some binding.owner
+
+def State.ExcelOwnerMapComplete (s : State) : Prop :=
+  ∀ topic ∈ s.byKey,
+    ∀ owner,
+      topic.excelOwner = some owner →
+        ∃ binding ∈ s.byExcelOwner,
+          binding.owner = owner ∧ binding.key = topic.key
+
+def State.ExcelOwnersUnique (s : State) : Prop :=
+  ∀ owner lhs rhs,
+    lhs ∈ s.byKey →
+    rhs ∈ s.byKey →
+    lhs.excelOwner = some owner →
+    rhs.excelOwner = some owner →
+    lhs.key = rhs.key
+
+def State.ExcelBindingOwnersUnique (s : State) : Prop :=
+  s.byExcelOwner.Pairwise (fun lhs rhs => lhs.owner ≠ rhs.owner)
+
+def State.ExcelCommitConsistent (s : State) : Prop :=
+  ∀ topic ∈ s.byKey,
+    topic.excelCommitted = true →
+      ∃ owner, topic.excelOwner = some owner
+
+def State.ExcelOwnershipInvariant (s : State) : Prop :=
+  s.ExcelOwnerMapSound ∧
+  s.ExcelOwnerMapComplete ∧
+  s.ExcelOwnersUnique ∧
+  s.ExcelBindingOwnersUnique ∧
+  s.ExcelCommitConsistent
+
 def State.Invariant (s : State) : Prop :=
   Runtime.RuntimeInvariant s.runtime ∧
   s.InitializingKeysUnique ∧
@@ -135,6 +195,7 @@ def State.Invariant (s : State) : Prop :=
   s.ReverseMapSound ∧
   s.ReverseMapComplete ∧
   s.VisibleTopicRootsValid ∧
-  s.ProvisionalTopicsHavePendingRoots
+  s.ProvisionalTopicsHavePendingRoots ∧
+  s.ExcelOwnershipInvariant
 
 end XlFnFormal.Handle.Topics

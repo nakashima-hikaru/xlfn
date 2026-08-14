@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "initial": {"session": 0},
+  "events": [
+    "beginPrepare",
+    {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": 7}},
+    {"commitConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": 7}},
+    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"finishInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    "endPrepare",
+    "sealTopics",
+    "closeRegistry",
+    "finishClose"
+  ],
+  "outcome": "committed"
+}

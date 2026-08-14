@@ -73,7 +73,7 @@ def apply? (s : State) (event : Event) : Option State :=
   | .sealTopics =>
       match Runtime.apply? s.runtime .sealTopics with
       | some runtime' =>
-          some { s with runtime := runtime', byKey := [], byRtdKey := [] }
+          some { s with runtime := runtime', byKey := [], byRtdKey := [], byExcelOwner := [] }
       | none => none
   | .beginLookup token =>
       match Runtime.apply? s.runtime (.beginLookup token) with
@@ -121,10 +121,50 @@ def apply? (s : State) (event : Event) : Option State :=
               tokenLive? s.runtime.registry token = true then
             some { s with
               byKey := s.byKey ++
-                [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional }]
+                [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional,
+                   excelOwner := none, excelCommitted := false }]
               byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
           else none
       | _ => none
+  | .beginConnection key owner =>
+      match s.findTopic? key with
+      | some topic =>
+          if topic.key = key ∧ topic.excelOwner = none ∧
+              s.findExcelOwner? owner = none then
+            some { s with
+              byKey := s.updateTopicExcel key (some owner) false
+              byExcelOwner := s.byExcelOwner ++ [{ owner := owner, key := key }] }
+          else none
+      | none => none
+  | .reuseCommittedConnection key owner =>
+      match s.findTopic? key with
+      | some topic =>
+          if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.excelCommitted = true ∧
+              s.findExcelOwner? owner = some { owner := owner, key := key } then
+            some s
+          else none
+      | none => none
+  | .commitConnection key owner =>
+      match s.findTopic? key with
+      | some topic =>
+          if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.excelCommitted = false ∧
+              s.findExcelOwner? owner = some { owner := owner, key := key } then
+            some { s with byKey := s.updateTopicExcel key (some owner) true }
+          else none
+      | none => none
+  | .rollbackConnection key owner =>
+      match s.findTopic? key with
+      | some topic =>
+          if topic.key = key ∧ topic.excelOwner = some owner ∧
+              topic.excelCommitted = false ∧
+              s.findExcelOwner? owner = some { owner := owner, key := key } then
+            some { s with
+              byKey := s.updateTopicExcel key none false
+              byExcelOwner := s.removeExcelOwner owner }
+          else none
+      | none => none
   | .commitPublication key runtimeId =>
       match s.findTopic? key with
       | some topic =>
@@ -149,7 +189,11 @@ def apply? (s : State) (event : Event) : Option State :=
                 some { id := runtimeId, stage := .pending topic.token } then
             some { s with
               byKey := s.removeTopic key
-              byRtdKey := s.removeReverse topic.rtdKey }
+              byRtdKey := s.removeReverse topic.rtdKey
+              byExcelOwner :=
+                match topic.excelOwner with
+                | some owner => s.removeExcelOwner owner
+                | none => s.byExcelOwner }
           else none
       | none => none
   | .rollbackPendingReuse key runtimeId nextGeneration =>
@@ -188,7 +232,8 @@ def apply? (s : State) (event : Event) : Option State :=
         | none => none
       else none
   | .closeRegistry =>
-      if s.byKey = [] ∧ s.byRtdKey = [] ∧ s.initializing = [] then
+      if s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧
+          s.initializing = [] then
         match Runtime.apply? s.runtime .closeRegistry with
         | some runtime' => some { s with runtime := runtime' }
         | none => none
@@ -313,6 +358,57 @@ theorem apply?_sound
                     exact Step.publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hFind
                       (tokenLive?_iff.mp hLive)
                   · contradiction
+  | beginConnection key owner =>
+      dsimp [apply?] at h
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hTopicKey, hTopicFree, hOwnerFree⟩
+            exact Step.beginConnection hTopicFind hTopicKey hTopicFree hOwnerFree
+          · contradiction
+  | reuseCommittedConnection key owner =>
+      dsimp [apply?] at h
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hCommitted, hBinding⟩
+            exact Step.reuseCommittedConnection hTopicFind hTopicKey hTopicOwner
+              hCommitted hBinding
+          · contradiction
+  | commitConnection key owner =>
+      dsimp [apply?] at h
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩
+            exact Step.commitConnection hTopicFind hTopicKey hTopicOwner
+              hNotCommitted hBinding
+          · contradiction
+  | rollbackConnection key owner =>
+      dsimp [apply?] at h
+      cases hTopicFind : s.findTopic? key with
+      | none => simp [hTopicFind] at h
+      | some topic =>
+          simp only [hTopicFind] at h
+          split at h
+          · rename_i hPre
+            cases h
+            rcases hPre with ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩
+            exact Step.rollbackConnection hTopicFind hTopicKey hTopicOwner
+              hNotCommitted hBinding
+          · contradiction
   | commitPublication key runtimeId =>
       dsimp [apply?] at h
       cases hTopicFind : s.findTopic? key with
@@ -413,14 +509,15 @@ theorem apply?_sound
         contradiction
   | closeRegistry =>
       dsimp [apply?] at h
-      by_cases hPre : s.byKey = [] ∧ s.byRtdKey = [] ∧ s.initializing = []
+      by_cases hPre : s.byKey = [] ∧ s.byRtdKey = [] ∧
+          s.byExcelOwner = [] ∧ s.initializing = []
       · rw [if_pos hPre] at h
         cases hRuntime : Runtime.apply? s.runtime .closeRegistry with
         | none => simp [hRuntime] at h
         | some runtime' =>
             rw [hRuntime] at h
             cases h
-            exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2
+            exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2.1 hPre.2.2.2
               (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
@@ -471,6 +568,22 @@ theorem apply?_complete
           tokenLive? _ _ = true :=
         ⟨True.intro, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hRootBool⟩
       rw [if_pos hPre]
+  | beginConnection hTopic hTopicKey hTopicFree hOwnerFree =>
+      dsimp [apply?]
+      simp only [hTopic]
+      rw [if_pos ⟨hTopicKey, hTopicFree, hOwnerFree⟩]
+  | reuseCommittedConnection hTopic hTopicKey hTopicOwner hCommitted hBinding =>
+      dsimp [apply?]
+      simp only [hTopic]
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hCommitted, hBinding⟩]
+  | commitConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      dsimp [apply?]
+      simp only [hTopic]
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩]
+  | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
+      dsimp [apply?]
+      simp only [hTopic]
+      rw [if_pos ⟨hTopicKey, hTopicOwner, hNotCommitted, hBinding⟩]
   | commitPublication hInit hTopic hTopicKey hPending hRuntime =>
       dsimp [apply?]
       simp only [hTopic]
@@ -484,6 +597,7 @@ theorem apply?_complete
       have hPre : True ∧ _ = _ ∧ _ = _ ∧ _ = _ :=
         ⟨True.intro, hTopicKey, hInit, hPending⟩
       rw [if_pos hPre]
+      rfl
   | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
       dsimp [apply?]
       rw [hPending]
@@ -500,9 +614,9 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hInit, hReady⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | closeRegistry hNoVisible hNoReverse hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
       dsimp [apply?]
-      rw [if_pos ⟨hNoVisible, hNoReverse, hNoInitializers⟩]
+      rw [if_pos ⟨hNoVisible, hNoReverse, hNoExcelOwners, hNoInitializers⟩]
       rw [Runtime.apply?_complete hRuntime]
   | finishClose hRuntime =>
       simp [apply?, Runtime.apply?_complete hRuntime]

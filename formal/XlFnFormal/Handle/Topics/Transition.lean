@@ -17,6 +17,10 @@ inductive Event where
   | insertPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (slot : Registry.SlotId) (generation : Registry.Generation)
   | publishVisible (key : TopicKey) (runtimeId : Runtime.InitializerId) (rtdKey : RtdKey)
+  | beginConnection (key : TopicKey) (owner : ExcelOwnerId)
+  | reuseCommittedConnection (key : TopicKey) (owner : ExcelOwnerId)
+  | commitConnection (key : TopicKey) (owner : ExcelOwnerId)
+  | rollbackConnection (key : TopicKey) (owner : ExcelOwnerId)
   | commitPublication (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | withdrawVisible (key : TopicKey) (runtimeId : Runtime.InitializerId)
   | rollbackPendingReuse (key : TopicKey) (runtimeId : Runtime.InitializerId)
@@ -41,7 +45,8 @@ inductive Step : State → Event → State → Prop where
   | sealTopics
       {s : State} {runtime' : Runtime.State}
       (hRuntime : Runtime.Step s.runtime .sealTopics runtime') :
-      Step s .sealTopics { s with runtime := runtime', byKey := [], byRtdKey := [] }
+      Step s .sealTopics
+        { s with runtime := runtime', byKey := [], byRtdKey := [], byExcelOwner := [] }
 
   | beginLookup
       {s : State} {runtime' : Runtime.State} {token : Registry.Token}
@@ -97,8 +102,56 @@ inductive Step : State → Event → State → Prop where
       (hRoot : Runtime.TokenLive s.runtime.registry token) :
       Step s (.publishVisible key runtimeId rtdKey)
         { s with
-            byKey := s.byKey ++ [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional }]
+            byKey := s.byKey ++
+              [{ key := key, rtdKey := rtdKey, token := token, stage := .provisional,
+                 excelOwner := none, excelCommitted := false }]
             byRtdKey := s.byRtdKey ++ [{ rtdKey := rtdKey, key := key }] }
+
+  | beginConnection
+      {s : State} {topic : Topic}
+      {key : TopicKey} {owner : ExcelOwnerId}
+      (hTopic : s.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hTopicFree : topic.excelOwner = none)
+      (hOwnerFree : s.findExcelOwner? owner = none) :
+      Step s (.beginConnection key owner)
+        { s with
+            byKey := s.updateTopicExcel key (some owner) false
+            byExcelOwner := s.byExcelOwner ++ [{ owner := owner, key := key }] }
+
+  | reuseCommittedConnection
+      {s : State} {topic : Topic}
+      {key : TopicKey} {owner : ExcelOwnerId}
+      (hTopic : s.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hTopicOwner : topic.excelOwner = some owner)
+      (hCommitted : topic.excelCommitted = true)
+      (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :
+      Step s (.reuseCommittedConnection key owner) s
+
+  | commitConnection
+      {s : State} {topic : Topic}
+      {key : TopicKey} {owner : ExcelOwnerId}
+      (hTopic : s.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hTopicOwner : topic.excelOwner = some owner)
+      (hNotCommitted : topic.excelCommitted = false)
+      (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :
+      Step s (.commitConnection key owner)
+        { s with byKey := s.updateTopicExcel key (some owner) true }
+
+  | rollbackConnection
+      {s : State} {topic : Topic}
+      {key : TopicKey} {owner : ExcelOwnerId}
+      (hTopic : s.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hTopicOwner : topic.excelOwner = some owner)
+      (hNotCommitted : topic.excelCommitted = false)
+      (hBinding : s.findExcelOwner? owner = some { owner := owner, key := key }) :
+      Step s (.rollbackConnection key owner)
+        { s with
+            byKey := s.updateTopicExcel key none false
+            byExcelOwner := s.removeExcelOwner owner }
 
   | commitPublication
       {s : State} {runtime' : Runtime.State} {topic : Topic}
@@ -125,7 +178,11 @@ inductive Step : State → Event → State → Prop where
       Step s (.withdrawVisible key runtimeId)
         { s with
             byKey := s.removeTopic key
-            byRtdKey := s.removeReverse topic.rtdKey }
+            byRtdKey := s.removeReverse topic.rtdKey
+            byExcelOwner :=
+              match topic.excelOwner with
+              | some owner => s.removeExcelOwner owner
+              | none => s.byExcelOwner }
 
   | rollbackPendingReuse
       {s : State} {runtime' : Runtime.State}
@@ -170,6 +227,7 @@ inductive Step : State → Event → State → Prop where
       {s : State} {runtime' : Runtime.State}
       (hNoVisible : s.byKey = [])
       (hNoReverse : s.byRtdKey = [])
+      (hNoExcelOwners : s.byExcelOwner = [])
       (hNoInitializers : s.initializing = [])
       (hRuntime : Runtime.Step s.runtime .closeRegistry runtime') :
       Step s .closeRegistry { s with runtime := runtime' }

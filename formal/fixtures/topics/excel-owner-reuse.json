@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "initial": {"session": 0},
+  "events": [
+    "beginPrepare",
+    {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": 7}},
+    {"rollbackConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": 7}},
+    {"commitPublication": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"finishInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
+    {"beginInitializer": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "runtimeId": 2}},
+    {"insertPendingFresh": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "runtimeId": 2}},
+    {"publishVisible": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "runtimeId": 2, "rtdKey": "fixture-rtd-2"}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "owner": 7}},
+    {"commitConnection": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "owner": 7}},
+    {"commitPublication": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "runtimeId": 2}},
+    {"finishInitializer": {"key": {"sheetId": 0, "row": 1, "column": 0, "udfId": "fixture-2", "argumentDigest": 1}, "runtimeId": 2}},
+    "endPrepare",
+    "sealTopics",
+    "closeRegistry",
+    "finishClose"
+  ],
+  "outcome": "committed"
+}

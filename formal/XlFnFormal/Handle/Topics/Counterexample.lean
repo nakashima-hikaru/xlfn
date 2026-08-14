@@ -13,8 +13,11 @@ def orphanRtdKey : RtdKey := "orphan-rtd"
 def orphanProvisional (session : Registry.SessionId) : State :=
   let token : Registry.Token := { session := session, slot := 0, generation := 1 }
   { runtime := Runtime.initialState session
-    byKey := [{ key := orphanKey, rtdKey := orphanRtdKey, token := token, stage := .provisional }]
+    byKey :=
+      [{ key := orphanKey, rtdKey := orphanRtdKey, token := token, stage := .provisional,
+         excelOwner := none, excelCommitted := false }]
     byRtdKey := []
+    byExcelOwner := []
     initializing := [] }
 
 /-! A visible topic without an initializer owner is not enough to authorize a

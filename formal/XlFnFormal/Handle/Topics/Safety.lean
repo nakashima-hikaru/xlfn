@@ -92,7 +92,7 @@ theorem provisional_topic_has_pending_provenance
         some { id := init.runtimeId, stage := .pending topic.token } :=
   by
     rcases hInv with ⟨_, _, _, _, _, _, _, _, _, _, _, hProv⟩
-    exact hProv topic hTopic hProvisional
+    exact hProv.1 topic hTopic hProvisional
 
 theorem reverse_lookup_resolves_visible_topic
     {s : State} {rtdKey : RtdKey} {entry : ReverseTopic}
@@ -153,7 +153,7 @@ theorem publish_visible_exposes_pending_provenance
   cases hStep with
   | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
       rename_i token
-      refine ⟨{ key := key, rtdKey := rtdKey, token := token, stage := .provisional },
+      refine ⟨Topic.mk key rtdKey token .provisional none false,
         ?_, rfl, rfl, rfl, ?_⟩
       · simp
       · exact hPending
@@ -172,7 +172,8 @@ theorem commit_publication_resolves_initializer
       rename_i source
       have hTopicMem : { source with stage := .provisional } ∈ s.byKey :=
         mem_of_findTopic_some hTopic
-      refine ⟨{ key := key, rtdKey := source.rtdKey, token := source.token, stage := .committed },
+      refine ⟨Topic.mk key source.rtdKey source.token .committed
+        source.excelOwner source.excelCommitted,
         ?_, rfl, rfl, ?_⟩
       · dsimp [State.updateTopicStage]
         simp only [List.mem_map]
@@ -223,18 +224,23 @@ theorem Reachable.runtime_reachable
       | insertPendingFresh _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | insertPendingReuse _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | publishVisible => exact ih
+      | beginConnection => exact ih
+      | reuseCommittedConnection => exact ih
+      | commitConnection => exact ih
+      | rollbackConnection => exact ih
       | commitPublication _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | withdrawVisible => exact ih
       | rollbackPendingReuse _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | rollbackPendingRetire _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishInitializer _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
-      | closeRegistry _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | closeRegistry _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishClose hRuntime => exact Runtime.Reachable.tail ih hRuntime
 
 def CloseCertified (s : State) : Prop :=
   Runtime.CloseCertified s.runtime ∧
   s.byKey = [] ∧
   s.byRtdKey = [] ∧
+  s.byExcelOwner = [] ∧
   s.initializing = []
 
 theorem no_visible_topics_when_closed
@@ -273,6 +279,25 @@ theorem no_reverse_entries_when_closed
       rw [hNoVisible] at hTopic
       contradiction
 
+theorem no_excel_owners_when_closed
+    {s : State} (hInv : s.Invariant)
+    (hClosed : s.runtime.phase = .closed) :
+    s.byExcelOwner = [] := by
+  have hNoVisible := no_visible_topics_when_closed hInv hClosed
+  rcases hInv with
+    ⟨_, _, _, _, _, _, _, _, _, _, _, hProvAndExcel⟩
+  have hSound : s.ExcelOwnerMapSound := hProvAndExcel.2.1
+  cases hOwners : s.byExcelOwner with
+  | nil => rfl
+  | cons head tail =>
+      exfalso
+      have hMem : head ∈ s.byExcelOwner := by
+        rw [hOwners]
+        exact List.mem_cons_self
+      rcases hSound head hMem with ⟨topic, hTopic, _, _⟩
+      rw [hNoVisible] at hTopic
+      contradiction
+
 theorem no_initializers_when_runtime_empty
     {s : State} (hInv : s.Invariant)
     (hRuntimeEmpty : s.runtime.initializers = []) :
@@ -299,6 +324,7 @@ theorem successful_close_is_certified
   exact ⟨hRuntimeCert,
     no_visible_topics_when_closed hInv hClosed,
     no_reverse_entries_when_closed hInv hClosed,
+    no_excel_owners_when_closed hInv hClosed,
     no_initializers_when_runtime_empty hInv hRuntimeCert.2.2.1⟩
 
 theorem Step.closeCertified_of_finishClose
@@ -316,8 +342,8 @@ theorem Step.closeCertified_of_finishClose
 
 theorem close_registry_waits_for_topic_quiescence
     {s s' : State} (hStep : Step s .closeRegistry s') :
-    s.byKey = [] ∧ s.byRtdKey = [] ∧ s.initializing = [] := by
+    s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧ s.initializing = [] := by
   cases hStep
-  exact ⟨by assumption, by assumption, by assumption⟩
+  exact ⟨by assumption, by assumption, by assumption, by assumption⟩
 
 end XlFnFormal.Handle.Topics

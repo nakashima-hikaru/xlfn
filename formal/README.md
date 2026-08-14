@@ -319,6 +319,41 @@ before registry rollback. They use the same event vocabulary as
 `XlFnFormal.Handle.Topics.Checker`, and Lean proves replay and close
 certification for all four paths.
 
+## Excel topic ownership and connection transactions: H3.3
+
+H3.3 adds `ExcelOwnerId`, `Topic.excelOwner`,
+`Topic.excelCommitted`, and the reverse ownership table
+`State.byExcelOwner`. `beginConnection` claims a free visible topic and a
+free owner atomically; `commitConnection` changes only the topic's Excel
+commit flag; `reuseCommittedConnection` is an idempotent no-op for an already
+committed owner/topic pair; and `rollbackConnection` removes only the
+provisional Excel binding. A connection transaction is independent of the
+formula publication transaction, so a formula-provisional topic may have a
+committed Excel connection while it is still awaiting `commitPublication`.
+
+The H3.3 invariant proves owner-map soundness and completeness, unique owner
+bindings, binding uniqueness, and the implication that an Excel-committed
+topic has an owner. `withdrawVisible` removes a paired Excel owner binding
+when the topic is withdrawn, and `sealTopics` clears visible topics, reverse
+RTD entries, and owner bindings at the same seal boundary. `closeRegistry`
+requires all three tables and initializer owners to be empty.
+
+Lean replay covers connection success, connection of an existing formula
+topic, committed reuse, provisional
+connection rollback while the formula topic remains visible, observe failure
+after a committed Excel connection, seal-after-visible rollback, and reuse of
+an owner on a second topic after rollback. The corresponding JSON fixtures
+are `fixtures/topics/excel-connection-success.json`,
+`fixtures/topics/excel-existing-topic-connection.json`,
+`fixtures/topics/excel-connection-reuse.json`,
+`fixtures/topics/excel-connection-rollback.json`,
+`fixtures/topics/excel-observe-failure-rollback.json`,
+`fixtures/topics/excel-seal-after-visible-rollback.json`, and
+`fixtures/topics/excel-owner-reuse.json`. The existing seal-before-visible
+fixture covers the pending allocation race where no visible Excel owner can
+be claimed. Invalid provisional reuse and a second `beginConnection` for a
+committed owner are rejected by the executable checker.
+
 ## RTD wire serialization boundary
 
 `XlFnFormal/Handle/Topics/Serialization` models the concrete RTD wire identity
