@@ -198,6 +198,15 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     assert!(topics.by_excel_id.is_empty());
     drop(topics);
 
+    let published = runtime.published.load(&key);
+    let publication = published
+        .get(&key)
+        .expect("successful observation must commit its published snapshot");
+    assert_eq!(
+        publication.state.load(Ordering::Acquire),
+        PublishedTopicState::Live as u8
+    );
+
     runtime.connect(1, 41, &rtd_key).unwrap();
     {
         let topics = runtime.topics.read();
@@ -210,6 +219,26 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     assert!(topics.by_key.is_empty());
     assert!(topics.by_rtd_key.is_empty());
     assert!(topics.by_excel_id.is_empty());
+}
+
+#[test]
+fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("publication-commit-after-observation");
+
+    runtime
+        .prepare_observed(
+            key,
+            || Ok(Arc::new(DataRecord(1))),
+            |_, _| {
+                let published = runtime.published.load(&key);
+                assert!(published.get(&key).is_none());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(runtime.published.load(&key).get(&key).is_some());
 }
 
 #[test]
@@ -1110,6 +1139,29 @@ fn observation_cannot_commit_a_topic_removed_reentrantly() {
             Ok(())
         },
     );
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn published_warm_observation_rejects_topic_removed_reentrantly() {
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("published-removed-during-observation");
+    let (token, created) = runtime
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .unwrap();
+    assert!(created);
+
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        |rtd_key, observed_token| {
+            assert_eq!(observed_token, token);
+            runtime.rollback(rtd_key);
+            Ok(())
+        },
+    );
+
     assert!(matches!(result, Err(XllError::StaleHandle)));
     assert_eq!(runtime.len(), 0);
 }

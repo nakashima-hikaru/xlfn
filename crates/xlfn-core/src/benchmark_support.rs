@@ -414,6 +414,171 @@ impl Drop for HandleWarmBenchmark {
 }
 
 // ---------------------------------------------------------------------------
+// Temporary handle-prepare decomposition diagnostics
+// ---------------------------------------------------------------------------
+
+/// Internal decomposition target for the temporary published-topic study.
+#[derive(Clone, Copy, Debug)]
+pub enum HandlePrepareDiagnosticCase {
+    /// Measure a published snapshot lookup using one independent key per worker.
+    PublishedLookupDistinct,
+    /// Measure a published snapshot lookup where every worker uses one key.
+    PublishedLookupSameKey,
+    /// Measure the production warm prepare path through the published snapshot.
+    PublishedWarmPath,
+}
+
+impl HandlePrepareDiagnosticCase {
+    /// All decomposition targets used by the temporary benchmark.
+    pub const ALL: [Self; 3] = [
+        Self::PublishedLookupDistinct,
+        Self::PublishedLookupSameKey,
+        Self::PublishedWarmPath,
+    ];
+
+    /// Stable benchmark path component for this target.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PublishedLookupDistinct => "published_lookup_distinct",
+            Self::PublishedLookupSameKey => "published_lookup_same_key",
+            Self::PublishedWarmPath => "published_warm_path",
+        }
+    }
+}
+
+fn benchmark_published_lookup(runtime: &HandleRuntime, key: HandleTopicKey) {
+    let published = runtime.published.load(&key);
+    let topic = published
+        .get(&key)
+        .expect("diagnostic published topic is missing");
+    std::hint::black_box((topic.token.as_str(), topic.rtd_key.as_ref()));
+}
+
+/// Persistent worker pool for the temporary handle-prepare decomposition.
+pub struct HandlePrepareDiagnostics {
+    runtime: Arc<HandleRuntime>,
+    keys: Vec<HandleTopicKey>,
+    case: HandlePrepareDiagnosticCase,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandlePrepareDiagnostics {
+    /// Create a prepared diagnostic pool with no thread creation in `run`.
+    pub fn new(
+        case: HandlePrepareDiagnosticCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let keys = (0..worker_count)
+            .map(|worker| benchmark_topic_key("BENCH.PUBLISHED.DIAGNOSTIC", worker as u64))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            runtime
+                .prepare_observed(
+                    *key,
+                    || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                    |_, _| Ok(()),
+                )
+                .expect("diagnostic published topic seed failed");
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker_index in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_key = keys[worker_index];
+            let same_key = keys[0];
+            start_tx.push(worker_tx);
+
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_worker {
+                        match case {
+                            HandlePrepareDiagnosticCase::PublishedLookupDistinct => {
+                                benchmark_published_lookup(&worker_runtime, worker_key);
+                            }
+                            HandlePrepareDiagnosticCase::PublishedLookupSameKey => {
+                                benchmark_published_lookup(&worker_runtime, same_key);
+                            }
+                            HandlePrepareDiagnosticCase::PublishedWarmPath => {
+                                let result = worker_runtime
+                                    .prepare_observed(
+                                        worker_key,
+                                        || -> crate::XllResult<Arc<BenchHandleObject>> {
+                                            unreachable!("published warm factory must not run")
+                                        },
+                                        |_, _| Ok(()),
+                                    )
+                                    .expect("published warm observation failed");
+                                std::hint::black_box(result);
+                            }
+                        }
+                    }
+                    done_tx
+                        .send(())
+                        .expect("diagnostic benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            keys,
+            case,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    /// Run one synchronized batch across all persistent workers.
+    pub fn run(&self) {
+        std::hint::black_box(self.keys.len());
+        std::hint::black_box(self.case);
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("diagnostic benchmark worker received start signal");
+        }
+        for _ in 0..self.start_tx.len() {
+            self.done_rx
+                .recv()
+                .expect("diagnostic benchmark worker finished batch");
+        }
+    }
+
+    /// Number of measured operations in one batch.
+    pub fn total_iterations(&self) -> usize {
+        self.start_tx.len() * self.iterations_per_worker
+    }
+}
+
+impl Drop for HandlePrepareDiagnostics {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Formula-to-handle end-to-end benchmarks
 // ---------------------------------------------------------------------------
 

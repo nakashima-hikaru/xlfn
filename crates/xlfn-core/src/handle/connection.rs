@@ -1,3 +1,4 @@
+use super::PublishedTopic;
 #[cfg(any(target_os = "windows", test))]
 use super::*;
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use std::sync::Weak;
 pub(crate) struct Topic {
     pub(crate) token: String,
     pub(crate) rtd_key: Arc<str>,
+    pub(crate) publication: Arc<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) server_generation: Option<u64>,
     pub(crate) excel_topic: Option<HandleTopicOwner>,

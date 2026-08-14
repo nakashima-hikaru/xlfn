@@ -1,4 +1,103 @@
 use super::*;
+use arc_swap::ArcSwap;
+use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicU8;
+
+const PUBLISHED_TOPIC_SHARD_COUNT: usize = 64;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublishedTopicState {
+    Provisional = 0,
+    Live = 1,
+    Stale = 2,
+    Closing = 3,
+}
+
+impl PublishedTopicState {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            value if value == Self::Provisional as u8 => Self::Provisional,
+            value if value == Self::Live as u8 => Self::Live,
+            value if value == Self::Stale as u8 => Self::Stale,
+            value if value == Self::Closing as u8 => Self::Closing,
+            _ => Self::Stale,
+        }
+    }
+}
+
+pub(crate) struct PublishedTopic {
+    pub(crate) token: String,
+    pub(crate) rtd_key: Arc<str>,
+    pub(crate) state: AtomicU8,
+}
+
+impl PublishedTopic {
+    fn new(token: String, rtd_key: Arc<str>) -> Self {
+        Self {
+            token,
+            rtd_key,
+            state: AtomicU8::new(PublishedTopicState::Provisional as u8),
+        }
+    }
+
+    fn state(&self) -> PublishedTopicState {
+        PublishedTopicState::from_raw(self.state.load(Ordering::Acquire))
+    }
+}
+
+pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, Arc<PublishedTopic>>;
+
+pub(crate) struct PublishedTopics {
+    shards: [ArcSwap<PublishedTopicMap>; PUBLISHED_TOPIC_SHARD_COUNT],
+}
+
+impl PublishedTopics {
+    fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| ArcSwap::from_pointee(PublishedTopicMap::default())),
+        }
+    }
+
+    fn shard_index(key: &HandleTopicKey) -> usize {
+        let mut hasher = FxHasher::default();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) & (PUBLISHED_TOPIC_SHARD_COUNT - 1)
+    }
+
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<Arc<PublishedTopicMap>> {
+        self.shards[Self::shard_index(key)].load()
+    }
+
+    /// Update the publication snapshot while holding the canonical topic lock.
+    fn insert(&self, key: HandleTopicKey, topic: Arc<PublishedTopic>) {
+        let shard = &self.shards[Self::shard_index(&key)];
+        let current = shard.load_full();
+        let mut next = current.as_ref().clone();
+        next.insert(key, topic);
+        shard.store(Arc::new(next));
+    }
+
+    /// Update the publication snapshot while holding the canonical topic lock.
+    fn remove(&self, key: HandleTopicKey) {
+        let shard = &self.shards[Self::shard_index(&key)];
+        let current = shard.load_full();
+        if !current.contains_key(&key) {
+            return;
+        }
+        let mut next = current.as_ref().clone();
+        next.remove(&key);
+        shard.store(Arc::new(next));
+    }
+
+    /// Clear all publication snapshots while holding the canonical topic lock.
+    fn clear(&self) {
+        for shard in &self.shards {
+            shard.store(Arc::new(PublishedTopicMap::default()));
+        }
+    }
+}
 
 pub(crate) struct TopicState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
@@ -104,6 +203,7 @@ impl Drop for HandleInitializationGuard {
 pub(crate) struct HandleRuntime {
     pub(crate) registry: HandleRegistry,
     pub(crate) topics: RwLock<TopicState>,
+    pub(crate) published: PublishedTopics,
     pub(crate) prepares: HandlePrepareState,
     pub(crate) leases: Arc<HandleLeaseState>,
     pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
@@ -122,6 +222,7 @@ impl HandleRuntime {
         Ok(Self {
             registry: HandleRegistry::try_new(maximum_handles)?,
             topics: RwLock::new(TopicState::default()),
+            published: PublishedTopics::new(),
             prepares: HandlePrepareState::new(),
             leases: Arc::new(HandleLeaseState::new()),
             _module_ingress: module_ingress,
@@ -207,6 +308,48 @@ impl HandleRuntime {
         Ok((token, false))
     }
 
+    fn commit_publication(
+        &self,
+        key: HandleTopicKey,
+        generation: u64,
+        initialization: &Arc<Initialization>,
+        publication: &Arc<PublishedTopic>,
+    ) -> XllResult<()> {
+        let mut topics = self.topics.write();
+
+        if topics.closed || topics.generation != generation {
+            return Err(XllError::Closing);
+        }
+
+        let valid_topic = topics.by_key.get(&key).is_some_and(|topic| {
+            topic.token == publication.token && Arc::ptr_eq(&topic.publication, publication)
+        });
+        if !valid_topic {
+            return Err(XllError::StaleHandle);
+        }
+
+        if !topics
+            .initializing
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, initialization))
+        {
+            return Err(XllError::StaleHandle);
+        }
+
+        // A provisional snapshot lets readers that raced with the publication
+        // fall back to the canonical single-flight path. Make it Live only
+        // after the initialization marker is removed.
+        self.published.insert(key, Arc::clone(publication));
+        topics.initializing.remove(&key);
+        publication
+            .state
+            .store(PublishedTopicState::Live as u8, Ordering::Release);
+
+        drop(topics);
+        initialization.complete();
+        Ok(())
+    }
+
     pub(crate) fn prepare_observed<T, K>(
         &self,
         key: K,
@@ -221,6 +364,23 @@ impl HandleRuntime {
         let _active_initialization = HandleInitializationGuard::enter()?;
         let _prepare = self.prepares.enter();
         let _handle_operation = self.leases.acquire();
+
+        {
+            let published = self.published.load(&key);
+            if let Some(publication) = published.get(&key)
+                && publication.state() == PublishedTopicState::Live
+            {
+                observe(&publication.rtd_key, &publication.token)?;
+
+                return match publication.state() {
+                    PublishedTopicState::Live => Ok((publication.token.clone(), false)),
+                    PublishedTopicState::Closing => Err(XllError::Closing),
+                    PublishedTopicState::Provisional | PublishedTopicState::Stale => {
+                        Err(XllError::StaleHandle)
+                    }
+                };
+            }
+        }
 
         let decision = loop {
             let topics = self.topics.read();
@@ -351,6 +511,14 @@ impl HandleRuntime {
             |(registry, topics, key, token)| {
                 let mut topics = topics.write();
                 if let Some(topic) = topics.by_key.get(&key).filter(|topic| topic.token == token) {
+                    topic
+                        .publication
+                        .state
+                        .store(PublishedTopicState::Stale as u8, Ordering::Release);
+                    // The publication is normally not visible until the
+                    // final commit. Removing it here also covers future
+                    // changes that add a post-publication failure point.
+                    self.published.remove(key);
                     let rtd_key = Arc::clone(&topic.rtd_key);
                     let owner = topic.excel_topic;
                     topics.by_key.remove(&key);
@@ -374,11 +542,13 @@ impl HandleRuntime {
                 diagnostic_id: HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID,
             });
         }
+        let publication = Arc::new(PublishedTopic::new(token.clone(), Arc::clone(&rtd_key)));
         topics.by_key.insert(
             key,
             Topic {
                 token: token.clone(),
                 rtd_key: Arc::clone(&rtd_key),
+                publication: Arc::clone(&publication),
                 #[cfg(any(target_os = "windows", test))]
                 server_generation: None,
                 excel_topic: None,
@@ -408,9 +578,10 @@ impl HandleRuntime {
         {
             return Err(XllError::StaleHandle);
         }
-        let _ = scopeguard::ScopeGuard::into_inner(unpublished);
         drop(topics);
-        drop(initializing);
+        self.commit_publication(key, generation, &initialization, &publication)?;
+        let _ = scopeguard::ScopeGuard::into_inner(unpublished);
+        let _ = scopeguard::ScopeGuard::into_inner(initializing);
         Ok((token, true))
     }
 
@@ -582,6 +753,17 @@ impl HandleRuntime {
             let Ok(key) = Self::topic_key_for_rtd(&topics, rtd_key) else {
                 return;
             };
+            let Some(publication) = topics
+                .by_key
+                .get(&key)
+                .map(|topic| Arc::clone(&topic.publication))
+            else {
+                return;
+            };
+            publication
+                .state
+                .store(PublishedTopicState::Stale as u8, Ordering::Release);
+            self.published.remove(key);
             let Some(topic) = topics.by_key.remove(&key) else {
                 return;
             };
@@ -608,6 +790,17 @@ impl HandleRuntime {
             let Some(key) = topics.by_excel_id.remove(&owner) else {
                 return;
             };
+            let Some(publication) = topics
+                .by_key
+                .get(&key)
+                .map(|topic| Arc::clone(&topic.publication))
+            else {
+                return;
+            };
+            publication
+                .state
+                .store(PublishedTopicState::Stale as u8, Ordering::Release);
+            self.published.remove(key);
             let topic = topics.by_key.remove(&key);
             topic.map(|topic| {
                 topics.by_rtd_key.remove(topic.rtd_key.as_ref());
@@ -633,6 +826,13 @@ impl HandleRuntime {
 
             topics.closed = true;
             topics.generation = topics.generation.wrapping_add(1);
+            for topic in topics.by_key.values() {
+                topic
+                    .publication
+                    .state
+                    .store(PublishedTopicState::Closing as u8, Ordering::Release);
+            }
+            self.published.clear();
             topics.by_key.clear();
             topics.by_rtd_key.clear();
             topics.by_excel_id.clear();
@@ -680,6 +880,14 @@ impl HandleRuntime {
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| {
+                    let publication = topics
+                        .by_key
+                        .get(&key)
+                        .map(|topic| Arc::clone(&topic.publication))?;
+                    publication
+                        .state
+                        .store(PublishedTopicState::Stale as u8, Ordering::Release);
+                    self.published.remove(key);
                     let topic = topics.by_key.remove(&key)?;
                     topics.by_rtd_key.remove(topic.rtd_key.as_ref());
                     if let Some(owner) = topic.excel_topic {
@@ -698,6 +906,13 @@ impl HandleRuntime {
     pub fn terminate_all_topics(&self) {
         let tokens = {
             let mut topics = self.topics.write();
+            for topic in topics.by_key.values() {
+                topic
+                    .publication
+                    .state
+                    .store(PublishedTopicState::Stale as u8, Ordering::Release);
+            }
+            self.published.clear();
             let tokens = topics
                 .by_key
                 .drain()
