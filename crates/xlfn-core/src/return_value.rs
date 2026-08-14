@@ -5,8 +5,9 @@ use crate::{
     UdfResultKind, XlArrayOutput, XllError, XllResult,
 };
 use parking_lot::{Condvar, Mutex};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -484,6 +485,12 @@ enum ReturnOwnership {
     Local,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReturnBlockBacking {
+    ThreadLocal,
+    Heap,
+}
+
 #[repr(C)]
 struct ReturnBlock {
     // This must remain first: Excel receives a pointer to this field and
@@ -493,6 +500,68 @@ struct ReturnBlock {
     array: Option<Box<[XLOPER12]>>,
     ownership: ReturnOwnership,
     magic: u64,
+    backing: ReturnBlockBacking,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReturnBlockSlotState {
+    Vacant,
+    Occupied,
+    Poisoned,
+}
+
+struct ReturnBlockSlot {
+    state: Cell<ReturnBlockSlotState>,
+    block: UnsafeCell<MaybeUninit<ReturnBlock>>,
+}
+
+impl ReturnBlockSlot {
+    const fn new() -> Self {
+        Self {
+            state: Cell::new(ReturnBlockSlotState::Vacant),
+            block: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<NonNull<ReturnBlock>> {
+        if self.state.get() != ReturnBlockSlotState::Vacant {
+            return None;
+        }
+
+        self.state.set(ReturnBlockSlotState::Occupied);
+        // SAFETY: Vacant is the only state in which the slot may be acquired,
+        // so no initialized ReturnBlock is being aliased or overwritten.
+        Some(unsafe { NonNull::new_unchecked((*self.block.get()).as_mut_ptr()) })
+    }
+
+    fn owns(&self, pointer: *mut ReturnBlock) -> bool {
+        self.state.get() == ReturnBlockSlotState::Occupied
+            && self.block.get().cast::<ReturnBlock>() == pointer
+    }
+
+    /// Marks the slot available after its initialized value has been dropped.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` must be the pointer returned by `try_acquire`, and the value
+    /// at that pointer must already have been destroyed.
+    unsafe fn release(&self, pointer: *mut ReturnBlock) {
+        debug_assert!(self.owns(pointer));
+        self.state.set(ReturnBlockSlotState::Vacant);
+    }
+
+    fn poison(&self) {
+        debug_assert_eq!(self.state.get(), ReturnBlockSlotState::Occupied);
+        self.state.set(ReturnBlockSlotState::Poisoned);
+    }
+}
+
+// The slot contains only non-owning storage. Its TLS value must never run a
+// destructor while a cdylib is being unloaded.
+const _: () = assert!(!std::mem::needs_drop::<ReturnBlockSlot>());
+
+thread_local! {
+    static RETURN_BLOCK_SLOT: ReturnBlockSlot = const { ReturnBlockSlot::new() };
 }
 
 #[cfg(feature = "bench-diagnostics")]
@@ -617,18 +686,30 @@ impl PreparedReturn {
         let obligation = producer.transfer_to_block();
         self.oper.xltype |= XLBIT_DLL_FREE;
 
-        let block = Box::new(ReturnBlock {
+        let block = ReturnBlock {
             oper: self.oper,
             storage: self.storage,
             array: self.array,
             ownership: ReturnOwnership::Excel(Some(obligation)),
             magic: RETURN_MAGIC,
-        });
+            backing: ReturnBlockBacking::Heap,
+        };
 
         #[cfg(test)]
         LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
 
-        ReturnBlock::into_non_null(block).as_ptr()
+        RETURN_BLOCK_SLOT.with(|slot| {
+            if let Some(block_pointer) = slot.try_acquire() {
+                let mut block = block;
+                block.backing = ReturnBlockBacking::ThreadLocal;
+                // SAFETY: `try_acquire` reserved this slot and returned its
+                // uninitialized storage for exactly one ReturnBlock value.
+                unsafe { block_pointer.as_ptr().write(block) };
+                block_pointer.cast::<XLOPER12>().as_ptr()
+            } else {
+                ReturnBlock::into_non_null(Box::new(block)).as_ptr()
+            }
+        })
     }
 
     #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
@@ -639,6 +720,7 @@ impl PreparedReturn {
             array: self.array,
             ownership: ReturnOwnership::Local,
             magic: RETURN_MAGIC,
+            backing: ReturnBlockBacking::Heap,
         });
 
         #[cfg(test)]
@@ -655,6 +737,7 @@ impl PreparedReturn {
         block.array = self.array;
         block.ownership = ReturnOwnership::Local;
         block.magic = RETURN_MAGIC;
+        block.backing = ReturnBlockBacking::Heap;
         std::hint::black_box(&block.oper);
         pool.release(block);
     }
@@ -667,6 +750,7 @@ impl PreparedReturn {
         block.array = self.array;
         block.ownership = ReturnOwnership::Local;
         block.magic = RETURN_MAGIC;
+        block.backing = ReturnBlockBacking::Heap;
         std::hint::black_box(&block.oper);
         benchmark_tls_release(block);
     }
@@ -706,6 +790,7 @@ impl BenchmarkReturnBlockPool {
             array: None,
             ownership: ReturnOwnership::Local,
             magic: RETURN_MAGIC,
+            backing: ReturnBlockBacking::Heap,
         })
     }
 
@@ -780,7 +865,18 @@ impl Drop for ReturnBlock {
     fn drop(&mut self) {
         debug_assert_eq!(self.magic, RETURN_MAGIC);
         #[cfg(test)]
-        LIVE_BLOCKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            if self.storage.is_some() {
+                RETURN_BLOCKS_WITH_STORAGE.fetch_add(1, Ordering::Relaxed);
+            }
+            if self.array.is_some() {
+                RETURN_BLOCKS_WITH_ARRAY.fetch_add(1, Ordering::Relaxed);
+            }
+            LIVE_BLOCKS.fetch_sub(1, Ordering::Relaxed);
+            if PANIC_ON_RETURN_BLOCK_DROP.swap(false, Ordering::SeqCst) {
+                panic!("injected ReturnBlock drop panic");
+            }
+        }
     }
 }
 
@@ -898,6 +994,7 @@ pub(crate) fn benchmark_return_box_only() {
         array: None,
         ownership: ReturnOwnership::Local,
         magic: RETURN_MAGIC,
+        backing: ReturnBlockBacking::Heap,
     });
     let pointer = Box::into_raw(block);
     std::hint::black_box(pointer);
@@ -1348,8 +1445,9 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
         return;
     }
     let block_pointer = pointer.cast::<ReturnBlock>();
-    // SAFETY: caller contract guarantees pointer was allocated via Box::into_raw in publish_excel.
-    let block = unsafe { Box::from_raw(block_pointer) };
+    // SAFETY: caller contract guarantees pointer refers to a live
+    // ReturnBlock produced by publish_excel or its heap fallback.
+    let block = unsafe { &mut *block_pointer };
     debug_assert_eq!(block.magic, RETURN_MAGIC);
 
     match &block.ownership {
@@ -1368,15 +1466,60 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
         }
     }
 
-    destroy_return_block(block);
+    destroy_return_block(block_pointer, block.backing);
 }
 
-fn destroy_return_block(block: Box<ReturnBlock>) {
-    drop(block);
+fn destroy_return_block(pointer: *mut ReturnBlock, backing: ReturnBlockBacking) {
+    match backing {
+        ReturnBlockBacking::Heap => {
+            // SAFETY: Heap backing was created with Box::into_raw and is
+            // destroyed exactly once on this path.
+            unsafe { drop(Box::from_raw(pointer)) };
+        }
+        ReturnBlockBacking::ThreadLocal => destroy_thread_local_return_block(pointer),
+    }
+}
+
+fn destroy_thread_local_return_block(pointer: *mut ReturnBlock) {
+    RETURN_BLOCK_SLOT.with(|slot| {
+        // A cross-thread free remains supported defensively. In that case the
+        // producer's slot cannot be touched safely from this thread, so it is
+        // deliberately left occupied and future returns use heap fallback.
+        let owned_by_current_thread = slot.owns(pointer);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: pointer is a live ReturnBlock and its backing storage is
+            // still initialized until drop_in_place completes.
+            unsafe { std::ptr::drop_in_place(pointer) };
+        }));
+
+        match result {
+            Ok(()) => {
+                if owned_by_current_thread {
+                    // SAFETY: the initialized ReturnBlock was just destroyed.
+                    unsafe { slot.release(pointer) };
+                }
+            }
+            Err(payload) => {
+                if owned_by_current_thread {
+                    slot.poison();
+                }
+                std::panic::resume_unwind(payload);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 static LIVE_BLOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RETURN_BLOCKS_WITH_STORAGE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RETURN_BLOCKS_WITH_ARRAY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PANIC_ON_RETURN_BLOCK_DROP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(all(feature = "async", test))]
 pub(crate) fn live_return_blocks() -> usize {
@@ -1427,6 +1570,11 @@ mod tests {
         PreparedReturn::encode(value).map(|prep| prep.publish_local().as_ptr())
     }
 
+    fn backing_of(pointer: *mut XLOPER12) -> ReturnBlockBacking {
+        // SAFETY: callers pass a live pointer returned by this module.
+        unsafe { (*pointer.cast::<ReturnBlock>()).backing }
+    }
+
     #[test]
     fn oper_is_the_first_field_and_is_freed_once() {
         let _test = test_lock();
@@ -1450,6 +1598,129 @@ mod tests {
             runtime.returns_are_quiescent(),
             "free_return must release the runtime-local return obligation"
         );
+    }
+
+    #[test]
+    fn excel_returns_reuse_tls_and_fallback_to_heap_when_occupied() {
+        let _test = test_lock();
+        let runtime = Arc::new(open_test_runtime());
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let first = ffi_boundary(&worker_runtime, || Ok(1.0));
+            assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
+
+            let second = ffi_boundary(&worker_runtime, || Ok(2.0));
+            assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
+
+            // SAFETY: both pointers are live Excel-owned returns from this
+            // thread and are released exactly once.
+            unsafe {
+                free_return(second);
+                free_return(first);
+            }
+
+            let reused = ffi_boundary(&worker_runtime, || Ok(3.0));
+            assert_eq!(backing_of(reused), ReturnBlockBacking::ThreadLocal);
+            assert_eq!(reused, first);
+
+            // SAFETY: `reused` is the live return produced immediately above.
+            unsafe { free_return(reused) };
+        });
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn excel_return_tls_slots_are_isolated_between_threads() {
+        let _test = test_lock();
+        let runtime = Arc::new(open_test_runtime());
+        let barrier = Arc::new(Barrier::new(3));
+        let (pointer_tx, pointer_rx) = mpsc::channel();
+        let mut workers = Vec::new();
+
+        for value in [11.0, 22.0] {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            let pointer_tx = pointer_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                let pointer = ffi_boundary(&runtime, || Ok(value));
+                assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
+                pointer_tx.send(pointer as usize).unwrap();
+                barrier.wait();
+
+                // SAFETY: this worker owns the live pointer it produced.
+                unsafe { free_return(pointer) };
+            }));
+        }
+        drop(pointer_tx);
+
+        let first = pointer_rx.recv().unwrap();
+        let second = pointer_rx.recv().unwrap();
+        assert_ne!(first, second);
+        barrier.wait();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn tls_return_drops_storage_and_array_payloads_before_reuse() {
+        let _test = test_lock();
+        let storage_before = RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed);
+        let array_before = RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed);
+
+        let runtime = Arc::new(open_test_runtime());
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let string_pointer = ffi_boundary(&worker_runtime, || Ok("hello".to_owned()));
+            assert_eq!(backing_of(string_pointer), ReturnBlockBacking::ThreadLocal);
+            // SAFETY: string_pointer is the live return produced above.
+            unsafe { free_return(string_pointer) };
+
+            let matrix = Matrix::new(1, 2, vec!["left".to_owned(), "right".to_owned()]).unwrap();
+            let array_pointer = ffi_boundary(&worker_runtime, || Ok(matrix));
+            assert_eq!(backing_of(array_pointer), ReturnBlockBacking::ThreadLocal);
+            // SAFETY: array_pointer is the live return produced above.
+            unsafe { free_return(array_pointer) };
+        });
+        worker.join().unwrap();
+
+        assert!(
+            RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed) > storage_before,
+            "TLS return cleanup must drop ReturnStorage"
+        );
+        assert!(
+            RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed) > array_before,
+            "TLS return cleanup must drop array cells"
+        );
+    }
+
+    #[test]
+    fn panicking_tls_drop_poison_falls_back_to_heap() {
+        let _test = test_lock();
+        let runtime = Arc::new(open_test_runtime());
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let pointer = ffi_boundary(&worker_runtime, || Ok(42.0));
+            assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
+            PANIC_ON_RETURN_BLOCK_DROP.store(true, Ordering::SeqCst);
+
+            // The FFI boundary catches the injected destructor panic and the
+            // slot remains poisoned instead of exposing partially-dropped
+            // storage to a future return.
+            // SAFETY: pointer is the live return produced above.
+            let free_guard = unsafe { free_return_boundary(pointer) };
+            RETURN_BLOCK_SLOT.with(|slot| {
+                assert_eq!(slot.state.get(), ReturnBlockSlotState::Poisoned);
+            });
+
+            let fallback = ffi_boundary(&worker_runtime, || Ok(43.0));
+            assert_eq!(backing_of(fallback), ReturnBlockBacking::Heap);
+            // SAFETY: fallback is the live heap-backed return produced above.
+            unsafe { free_return(fallback) };
+            drop(free_guard);
+        });
+        worker.join().unwrap();
     }
 
     #[test]
