@@ -110,6 +110,23 @@ jobs:
         shell: bash
         run: just bench
 
+  return-pool-prototype:
+    name: ReturnBlock pool prototype
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install just
+        uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+        with:
+          tool: just
+
+      - name: Run ReturnBlock pool prototype
+        shell: bash
+        run: just bench-pool-prototype
+
   archive-closed-pr:
     name: Archive closed PR benchmark branch
     if: >-
