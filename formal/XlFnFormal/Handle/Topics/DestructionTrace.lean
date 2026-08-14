@@ -78,6 +78,74 @@ theorem replayMixed?_sound
           (MixedReachable.tail (MixedReachable.refl s) hStep) hTail
       · contradiction
 
+theorem MixedStep.invariant_preserved
+    {s s' : State} {event : MixedEvent}
+    (hInv : s.Invariant)
+    (hStep : MixedStep s event s') :
+    s'.Invariant := by
+  cases hStep with
+  | topic hStep => exact Step.invariant_preserved hInv hStep
+  | destruction hStep => exact DestructionStep.invariant_preserved hInv hStep
+
+theorem MixedReachable.invariant_preserved
+    {s t : State}
+    (hInv : s.Invariant)
+    (hReach : MixedReachable s t) :
+    t.Invariant := by
+  induction hReach with
+  | refl => exact hInv
+  | tail hPrev hStep ih => exact MixedStep.invariant_preserved ih hStep
+
+theorem mixed_reachable_invariant
+    {session : Registry.SessionId} {s : State}
+    (hReach : MixedReachable (initialState session) s) :
+    s.Invariant := by
+  exact MixedReachable.invariant_preserved (initial_invariant session) hReach
+
+theorem no_detached_when_quiescent
+    {s : State}
+    (hInv : s.Invariant)
+    (hPhase : s.runtime.phase = .registryClosed ∨
+      s.runtime.phase = .closed) :
+    s.detached = [] := by
+  have hNoLive : Registry.NoLiveSlots s.runtime.registry := by
+    cases hPhase with
+    | inl hRegistryClosed =>
+        exact (Runtime.phaseInvariant_registryClosed_fields hInv.1.1 hRegistryClosed).2.2.2
+    | inr hClosed =>
+        exact (Runtime.phaseInvariant_closed_fields hInv.1.1 hClosed).2.2.2.2
+  rcases hInv with
+    ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, hDestruction⟩
+  have hDetachedRoots : s.DetachedRootsValid := hDestruction.2.2.1
+  cases hDetached : s.detached with
+  | nil => rfl
+  | cons head tail =>
+      exfalso
+      have hMem : head ∈ s.detached := by
+        rw [hDetached]
+        exact List.mem_cons_self
+      rcases hDetachedRoots head hMem with ⟨_, ⟨hBounds, hSlot⟩⟩
+      apply hNoLive head.topic.token.slot hBounds
+      rw [hSlot]
+      trivial
+
+theorem successful_mixed_close_is_certified
+    {session : Registry.SessionId} {s : State}
+    (hReach : MixedReachable (initialState session) s)
+    (hClosed : s.runtime.phase = .closed) :
+    CloseCertified s := by
+  have hInv := mixed_reachable_invariant hReach
+  have hPhase := Runtime.phaseInvariant_closed_fields hInv.1.1 hClosed
+  have hRuntimeCert : Runtime.CloseCertified s.runtime :=
+    ⟨hClosed, hPhase.2.1, hPhase.2.2.1,
+      ⟨hPhase.1, hPhase.2.2.2.1, hPhase.2.2.2.2⟩⟩
+  exact ⟨hRuntimeCert,
+    no_visible_topics_when_closed hInv hClosed,
+    no_reverse_entries_when_closed hInv hClosed,
+    no_excel_owners_when_closed hInv hClosed,
+    no_initializers_when_runtime_empty hInv hRuntimeCert.2.2.1,
+    no_detached_when_quiescent hInv (Or.inr hClosed)⟩
+
 def noLiveSlots? : List Registry.SlotState → Bool
   | [] => true
   | .live _ :: _ => false
@@ -197,6 +265,11 @@ theorem published_drain_cannot_remove_pending_root :
     (replayMixed? (initialState 0) disconnect_pending_prefix).bind
       (fun s => applyDestruction? s
         (.drainPublishedReuse fixtureToken 2)) = none := by
+  native_decide
+
+theorem disconnect_then_commit_connection_rejected :
+    (replayMixed? (initialState 0) disconnect_pending_prefix).bind
+      (fun s => apply? s (.commitConnection fixtureKey fixtureOwner1)) = none := by
   native_decide
 
 theorem disconnect_published_trace_replays :

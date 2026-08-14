@@ -95,7 +95,9 @@ theorem initial_invariant (session : Registry.SessionId) :
     · simp [initialState, State.ExcelOwnershipInvariant, State.ExcelOwnerMapSound,
     State.ExcelOwnerMapComplete, State.ExcelOwnersUnique,
         State.ExcelBindingOwnersUnique, State.ExcelCommitConsistent,
-        State.ExcelOwnerGenerationConsistent]
+        State.ExcelOwnerGenerationConsistent, State.DestructionInvariant,
+        State.DetachedTokensUnique, State.DetachedTokensDisjointVisible,
+        State.DetachedRootsValid, State.DetachedProvisionalRootsHavePendingOwners]
 
 theorem no_topic_member
     {s : State} {key : TopicKey} {topic : Topic}
@@ -121,6 +123,20 @@ theorem no_initializer_member
     rw [List.find?_isSome]
     exact ⟨init, hMem, beq_iff_eq.mpr hEq⟩
   rw [hNoInitializer] at hSome
+  contradiction
+
+theorem no_detached_member
+    {s : State} {token : Registry.Token} {detached : DetachedTopic}
+    (hNoDetached : s.findDetached? token = none)
+    (hMem : detached ∈ s.detached) :
+    detached.topic.token ≠ token := by
+  intro hEq
+  dsimp [State.findDetached?] at hNoDetached
+  have hSome :
+      (s.detached.find? (fun candidate => candidate.topic.token == token)).isSome = true := by
+    rw [List.find?_isSome]
+    exact ⟨detached, hMem, beq_iff_eq.mpr hEq⟩
+  rw [hNoDetached] at hSome
   contradiction
 
 theorem mem_of_findTopic_some
@@ -197,6 +213,13 @@ theorem mem_of_findInitializing_some
     (hFind : s.findInitializing? key = some init) :
     init ∈ s.initializing := by
   dsimp [State.findInitializing?] at hFind
+  exact Runtime.List.mem_of_find?_eq_some' hFind
+
+theorem mem_of_findDetached_some
+    {s : State} {token : Registry.Token} {detached : DetachedTopic}
+    (hFind : s.findDetached? token = some detached) :
+    detached ∈ s.detached := by
+  dsimp [State.findDetached?] at hFind
   exact Runtime.List.mem_of_find?_eq_some' hFind
 
 theorem runtime_mem_updateInitializer_same_id
@@ -468,7 +491,7 @@ theorem Step.visibleKeysUnique_preserved
     s'.VisibleKeysUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       dsimp [State.VisibleKeysUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
@@ -499,7 +522,7 @@ theorem Step.visibleTokensUnique_preserved
     s'.VisibleTokensUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       dsimp [State.VisibleTokensUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
       intro topic hMem
@@ -586,6 +609,286 @@ theorem runtimeTokenLive_preserved_endLookup
       cases hRegStep
       exact hLive
 
+theorem detachedDisjoint_after_topic_map
+    {s : State} {f : Topic → Topic}
+    (hToken : ∀ topic, (f topic).token = topic.token)
+    (hInv : s.DetachedTokensDisjointVisible) :
+    ({ s with byKey := s.byKey.map f }).DetachedTokensDisjointVisible := by
+  intro detached hDetached topic hTopic
+  rcases List.mem_map.mp hTopic with ⟨old, hOld, rfl⟩
+  simpa [hToken old] using hInv detached hDetached old hOld
+
+theorem detachedDisjoint_after_topic_append
+    {s : State} {topic : Topic}
+    (hInv : s.DetachedTokensDisjointVisible)
+    (hNoDetachedToken : ∀ detached ∈ s.detached,
+      detached.topic.token ≠ topic.token) :
+    ({ s with byKey := s.byKey ++ [topic] }).DetachedTokensDisjointVisible := by
+  intro detached hDetached visible hVisible
+  simp only [List.mem_append, List.mem_singleton] at hVisible
+  cases hVisible with
+  | inl hOld => exact hInv detached hDetached _ hOld
+  | inr hNew => subst hNew; exact hNoDetachedToken detached hDetached
+
+theorem detachedDisjoint_after_topic_remove
+    {s : State} {key : TopicKey}
+    (hInv : s.DetachedTokensDisjointVisible) :
+    ({ s with byKey := s.removeTopic key }).DetachedTokensDisjointVisible := by
+  intro detached hDetached topic hTopic
+  exact hInv detached hDetached topic (mem_of_mem_filter_topics hTopic)
+
+theorem detachedRootsValid_after_insertFresh
+    {s : State} {runtime' : Runtime.State} {id : Runtime.InitializerId}
+    (hRoots : s.DetachedRootsValid)
+    (hStep : Runtime.Step s.runtime (.insertPendingFresh id) runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro detached hDetached
+  exact runtimeTokenLive_preserved_insertFresh (hRoots detached hDetached) hStep
+
+theorem detachedRootsValid_after_insertReuse
+    {s : State} {runtime' : Runtime.State} {id : Runtime.InitializerId}
+    {slot : Registry.SlotId} {generation : Registry.Generation}
+    (hRoots : s.DetachedRootsValid)
+    (hStep : Runtime.Step s.runtime
+      (.insertPendingReuse id slot generation) runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro detached hDetached
+  exact runtimeTokenLive_preserved_insertReuse (hRoots detached hDetached) hStep
+
+theorem detachedRootsValid_after_lookup
+    {s : State} {runtime' : Runtime.State} {token : Registry.Token}
+    (hRoots : s.DetachedRootsValid)
+    (hStep : Runtime.Step s.runtime (.beginLookup token) runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro detached hDetached
+  cases hStep with
+  | beginLookup hRegStep =>
+      cases hRegStep
+      exact hRoots detached hDetached
+
+theorem detachedRootsValid_after_endLookup
+    {s : State} {runtime' : Runtime.State}
+    (hRoots : s.DetachedRootsValid)
+    (hStep : Runtime.Step s.runtime .endLookup runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro detached hDetached
+  cases hStep with
+  | endLookup hRegStep =>
+      cases hRegStep
+      exact hRoots detached hDetached
+
+theorem detachedRootsValid_after_rollbackReuse
+    {s : State} {runtime' : Runtime.State} {id : Runtime.InitializerId}
+    {nextGeneration : Registry.Generation} {token : Registry.Token}
+    (hRoots : s.DetachedRootsValid)
+    (hNoToken : ∀ detached ∈ s.detached, detached.topic.token ≠ token)
+    (hPending : s.runtime.findInitializer? id =
+      some { id := id, stage := .pending token })
+    (hStep : Runtime.Step s.runtime
+      (.rollbackPendingReuse id nextGeneration) runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro old hOldMem
+  have hOldLive := hRoots old hOldMem
+  cases hStep with
+  | rollbackPendingReuse hFind hRegStep =>
+      rw [hPending] at hFind
+      cases hFind
+      cases hRegStep with
+      | removeReuse hAuth hInBounds hRemovedLive hNext =>
+          change token.session = s.runtime.registry.session at hAuth
+          have hTokenLive : Runtime.TokenLive s.runtime.registry token :=
+            ⟨hAuth, ⟨hInBounds, hRemovedLive⟩⟩
+          have hSlotNe : old.topic.token.slot ≠ token.slot :=
+            Runtime.token_ne_slot_of_distinct_live_tokens
+              (hNoToken old hOldMem) hOldLive hTokenLive
+          rcases hOldLive with ⟨hSession, ⟨hBounds, hSlot⟩⟩
+          refine ⟨hSession, ⟨?_, ?_⟩⟩
+          · rw [List.length_set]
+            exact hBounds
+          · dsimp
+            rw [List.getElem_set_ne hSlotNe.symm]
+            exact hSlot
+
+theorem detachedRootsValid_after_rollbackRetire
+    {s : State} {runtime' : Runtime.State} {id : Runtime.InitializerId}
+    {token : Registry.Token}
+    (hRoots : s.DetachedRootsValid)
+    (hNoToken : ∀ detached ∈ s.detached, detached.topic.token ≠ token)
+    (hPending : s.runtime.findInitializer? id =
+      some { id := id, stage := .pending token })
+    (hStep : Runtime.Step s.runtime
+      (.rollbackPendingRetire id) runtime') :
+    ∀ detached ∈ s.detached,
+      Runtime.TokenLive runtime'.registry detached.topic.token := by
+  intro old hOldMem
+  have hOldLive := hRoots old hOldMem
+  cases hStep with
+  | rollbackPendingRetire hFind hRegStep =>
+      rw [hPending] at hFind
+      cases hFind
+      cases hRegStep with
+      | removeRetire hAuth hInBounds hRemovedLive hExhausted =>
+          change token.session = s.runtime.registry.session at hAuth
+          have hTokenLive : Runtime.TokenLive s.runtime.registry token :=
+            ⟨hAuth, ⟨hInBounds, hRemovedLive⟩⟩
+          have hSlotNe : old.topic.token.slot ≠ token.slot :=
+            Runtime.token_ne_slot_of_distinct_live_tokens
+              (hNoToken old hOldMem) hOldLive hTokenLive
+          rcases hOldLive with ⟨hSession, ⟨hBounds, hSlot⟩⟩
+          refine ⟨hSession, ⟨?_, ?_⟩⟩
+          · rw [List.length_set]
+            exact hBounds
+          · dsimp
+            rw [List.getElem_set_ne hSlotNe.symm]
+            exact hSlot
+
+theorem Step.detachedTokensUnique_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.DetachedTokensUnique)
+    (hStep : Step s e s') :
+    s'.DetachedTokensUnique := by
+  cases hStep <;> exact hInv
+
+theorem Step.detachedTokensDisjointVisible_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.DetachedTokensDisjointVisible)
+    (hStep : Step s e s') :
+    s'.DetachedTokensDisjointVisible := by
+  cases hStep with
+  | beginPrepare => exact hInv
+  | endPrepare => exact hInv
+  | sealTopics hRuntime =>
+      intro detached hDetached topic hTopic
+      contradiction
+  | beginLookup => exact hInv
+  | endLookup => exact hInv
+  | beginInitializer => exact hInv
+  | insertPendingFresh => exact hInv
+  | insertPendingReuse => exact hInv
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
+      exact detachedDisjoint_after_topic_append hInv hNoDetachedToken
+  | claimServer hTopic hTopicKey hAllowed =>
+      rename_i topic key generation
+      simpa [State.updateTopicServerGeneration] using
+        (detachedDisjoint_after_topic_map
+          (f := fun current =>
+            if current.key == key then
+              { current with serverGeneration := some generation }
+            else current)
+          (by intro current; by_cases h : current.key == key <;> simp [h]) hInv)
+  | beginConnection hTopic hTopicKey hGeneration hTopicFree hOwnerFree =>
+      rename_i topic key owner
+      simpa [State.DetachedTokensDisjointVisible, State.updateTopicExcel] using
+        (detachedDisjoint_after_topic_map
+          (f := fun current =>
+            if current.key == key then
+              { current with
+                  serverGeneration := some owner.serverGeneration
+                  excelOwner := some owner
+                  excelCommitted := false }
+            else current)
+          (by intro current; by_cases h : current.key == key <;> simp [h]) hInv)
+  | reuseCommittedConnection => exact hInv
+  | commitConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
+      rename_i topic key owner
+      simpa [State.DetachedTokensDisjointVisible, State.updateTopicExcel] using
+        (detachedDisjoint_after_topic_map
+          (f := fun current =>
+            if current.key == key then
+              { current with
+                  serverGeneration := some owner.serverGeneration
+                  excelOwner := some owner
+                  excelCommitted := true }
+            else current)
+          (by intro current; by_cases h : current.key == key <;> simp [h]) hInv)
+  | rollbackConnection hTopic hTopicKey hGeneration hTopicOwner hNotCommitted hBinding =>
+      rename_i topic key owner
+      simpa [State.DetachedTokensDisjointVisible, State.updateTopicExcel] using
+        (detachedDisjoint_after_topic_map
+          (f := fun current =>
+            if current.key == key then
+              { current with
+                  excelOwner := none
+                  excelCommitted := false }
+            else current)
+          (by intro current; by_cases h : current.key == key <;> simp [h]) hInv)
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
+      rename_i source key runtimeId
+      simpa [State.DetachedTokensDisjointVisible, State.updateTopicStage] using
+        (detachedDisjoint_after_topic_map
+          (f := fun current =>
+            if current.key == key then { current with stage := .committed } else current)
+          (by intro current; by_cases h : current.key == key <;> simp [h]) hInv)
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
+      exact detachedDisjoint_after_topic_remove hInv
+  | rollbackPendingReuse => exact hInv
+  | rollbackPendingRetire => exact hInv
+  | finishInitializer => exact hInv
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
+      intro detached hDetached topic hTopic
+      rw [hNoVisible] at hTopic
+      contradiction
+  | finishClose => exact hInv
+
+theorem Step.detachedRootsValid_preserved
+    {s s' : State} {e : Event}
+    (hInv : s.DetachedRootsValid)
+    (hStep : Step s e s') :
+    s'.DetachedRootsValid := by
+  cases hStep with
+  | beginPrepare hRuntime =>
+      cases hRuntime
+      exact hInv
+  | endPrepare hRuntime =>
+      cases hRuntime
+      exact hInv
+  | sealTopics hRuntime =>
+      cases hRuntime
+      simpa [State.DetachedRootsValid] using hInv
+  | beginLookup hRuntime =>
+      simpa [State.DetachedRootsValid] using
+        (detachedRootsValid_after_lookup hInv hRuntime)
+  | endLookup hRuntime =>
+      simpa [State.DetachedRootsValid] using
+        (detachedRootsValid_after_endLookup hInv hRuntime)
+  | beginInitializer hNoTopic hNoInitializer hNoRuntimeId hRuntime =>
+      cases hRuntime
+      exact hInv
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      simpa [State.DetachedRootsValid] using
+        (detachedRootsValid_after_insertFresh (s := s) hInv hRuntime)
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      simpa [State.DetachedRootsValid] using
+        (detachedRootsValid_after_insertReuse (s := s) hInv hRuntime)
+  | publishVisible => exact hInv
+  | claimServer | beginConnection | reuseCommittedConnection | commitConnection |
+      rollbackConnection => exact hInv
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
+      cases hRuntime
+      exact hInv
+  | withdrawVisible => exact hInv
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
+      exact detachedRootsValid_after_rollbackReuse (s := s) hInv
+        (fun detached hMem => no_detached_member hNoDetached hMem) hPending hRuntime
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
+      exact detachedRootsValid_after_rollbackRetire (s := s) hInv
+        (fun detached hMem => no_detached_member hNoDetached hMem) hPending hRuntime
+  | finishInitializer hInit hReady hRuntime =>
+      cases hRuntime
+      exact hInv
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
+      intro detached hMem
+      rw [hNoDetached] at hMem
+      contradiction
+  | finishClose hRuntime =>
+      cases hRuntime
+      exact hInv
+
 theorem Step.runtimeInvariant_preserved
     {s s' : State} {e : Event}
     (hInv : Runtime.RuntimeInvariant s.runtime)
@@ -614,9 +917,9 @@ theorem Step.runtimeInvariant_preserved
   | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | withdrawVisible => exact hInv
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | finishInitializer hInit hReady hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
@@ -668,7 +971,7 @@ theorem Step.initializersBackedByRuntime_preserved
           rcases runtime_mem_updateInitializer_same_id hRuntimeMem with
             ⟨updated, hUpdatedMem, hUpdatedId⟩
           exact ⟨updated, hUpdatedMem, hUpdatedId.trans hId⟩
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime with
       | rollbackPendingReuse hFind hRegStep =>
           intro init hMem
@@ -676,7 +979,7 @@ theorem Step.initializersBackedByRuntime_preserved
           rcases runtime_mem_updateInitializer_same_id hRuntimeMem with
             ⟨updated, hUpdatedMem, hUpdatedId⟩
           exact ⟨updated, hUpdatedMem, hUpdatedId.trans hId⟩
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime with
       | rollbackPendingRetire hFind hRegStep =>
           intro init hMem
@@ -891,7 +1194,7 @@ theorem Step.visibleTopicRootsValid_preserved
       exact visibleRootsValid_after_insertFresh (s := s) hInv hRuntime
   | insertPendingReuse hInit hNoTopic hRuntime =>
       exact visibleRootsValid_after_insertReuse (s := s) hInv hRuntime
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       intro topic hMem
       simp only [List.mem_append, List.mem_singleton] at hMem
       cases hMem with
@@ -919,9 +1222,9 @@ theorem Step.visibleTopicRootsValid_preserved
       exact visibleRootsValid_after_topic_excel_update hInv
   | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
       exact visibleRootsValid_after_topic_excel_update hInv
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact visibleRootsValid_after_rollbackReuse (s := s) hInv hNoToken hPending hRuntime
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact visibleRootsValid_after_rollbackRetire (s := s) hInv hNoToken hPending hRuntime
   | finishInitializer hInit hReady hRuntime =>
       cases hRuntime
@@ -984,6 +1287,175 @@ theorem provisionalTopics_after_runtime_update
   dsimp [Runtime.State.findInitializer?]
   rw [hUpdate]
   exact runtime_find_update_ne hPending hIdNe
+
+theorem detachedProvisional_after_runtime_update
+    {s : State} {runtime' : Runtime.State}
+    {runtimeId : Runtime.InitializerId} {stage : Runtime.InitializerStage}
+    (hProv : s.DetachedProvisionalRootsHavePendingOwners)
+    (hNoAffected : ∀ detached ∈ s.detached,
+      detached.topic.stage = .provisional →
+      ∀ init ∈ s.initializing,
+        init.key = detached.topic.key →
+        s.runtime.findInitializer? init.runtimeId =
+          some { id := init.runtimeId, stage := .pending detached.topic.token } →
+        init.runtimeId ≠ runtimeId)
+    (hUpdate : runtime'.initializers =
+      s.runtime.initializers.map
+        (fun i => if i.id == runtimeId then { i with stage := stage } else i)) :
+    ∀ detached ∈ s.detached, detached.topic.stage = .provisional →
+      ∃ init ∈ s.initializing,
+        init.key = detached.topic.key ∧
+        runtime'.findInitializer? init.runtimeId =
+          some { id := init.runtimeId, stage := .pending detached.topic.token } := by
+  intro detached hDetached hStage
+  rcases hProv detached hDetached hStage with
+    ⟨init, hInitMem, hInitKey, hPending⟩
+  have hInitNe := hNoAffected detached hDetached hStage init hInitMem hInitKey hPending
+  refine ⟨init, hInitMem, hInitKey, ?_⟩
+  dsimp [Runtime.State.findInitializer?]
+  rw [hUpdate]
+  exact runtime_find_update_ne hPending hInitNe
+
+theorem Step.detachedProvisionalRootsHavePendingOwners_preserved
+    {s s' : State} {e : Event}
+    (hKeys : s.InitializingKeysUnique)
+    (hIds : s.InitializerIdsUnique)
+    (hDisjoint : s.DetachedTokensDisjointVisible)
+    (hProv : s.DetachedProvisionalRootsHavePendingOwners)
+    (hStep : Step s e s') :
+    s'.DetachedProvisionalRootsHavePendingOwners := by
+  cases hStep with
+  | beginPrepare hRuntime =>
+      cases hRuntime
+      exact hProv
+  | endPrepare hRuntime =>
+      cases hRuntime
+      exact hProv
+  | sealTopics hRuntime =>
+      cases hRuntime
+      simpa [State.DetachedProvisionalRootsHavePendingOwners,
+        Runtime.State.findInitializer?] using hProv
+  | beginLookup hRuntime =>
+      cases hRuntime
+      exact hProv
+  | endLookup hRuntime =>
+      cases hRuntime
+      exact hProv
+  | beginInitializer hNoTopic hNoInitializer hNoRuntimeId hRuntime =>
+      rename_i key runtimeId
+      cases hRuntime
+      intro detached hDetached hStage
+      rcases hProv detached hDetached hStage with
+        ⟨init, hInitMem, hInitKey, hPending⟩
+      refine ⟨init, List.mem_append_left _ hInitMem, hInitKey, ?_⟩
+      dsimp [Runtime.State.findInitializer?]
+      dsimp [Runtime.State.findInitializer?] at hPending
+      rw [List.find?_append, hPending]
+      rfl
+  | insertPendingFresh hInit hNoTopic hRuntime =>
+      rename_i key runtimeId
+      cases hRuntime with
+      | insertPendingFresh hPhase hFind hRegStep =>
+          apply detachedProvisional_after_runtime_update (runtimeId := runtimeId) hProv
+          · intro detached hDetached hStage init hInitMem hInitKey hPending hEq
+            cases hEq
+            rw [hFind] at hPending
+            cases hPending
+          · rfl
+  | insertPendingReuse hInit hNoTopic hRuntime =>
+      rename_i key runtimeId slot generation
+      cases hRuntime with
+      | insertPendingReuse hPhase hFind hRegStep =>
+          apply detachedProvisional_after_runtime_update (runtimeId := runtimeId) hProv
+          · intro detached hDetached hStage init hInitMem hInitKey hPending hEq
+            cases hEq
+            rw [hFind] at hPending
+            cases hPending
+          · rfl
+  | publishVisible => exact hProv
+  | claimServer => exact hProv
+  | beginConnection => exact hProv
+  | reuseCommittedConnection => exact hProv
+  | commitConnection => exact hProv
+  | rollbackConnection => exact hProv
+  | commitPublication hInit hTopic hTopicKey hExcelSettled hPending hRuntime =>
+      rename_i source key runtimeId
+      cases hRuntime with
+      | publishTopic hPhase hFind =>
+          apply detachedProvisional_after_runtime_update (runtimeId := runtimeId) hProv
+          · intro detached hDetached hStage init hInitMem hInitKey hDetachedPending hEq
+            cases hEq
+            have hSourceMem : { source with stage := .provisional } ∈ s.byKey :=
+              mem_of_findTopic_some hTopic
+            have hTokenNe : detached.topic.token ≠ source.token := by
+              simpa using
+                (hDisjoint detached hDetached
+                  { source with stage := .provisional } hSourceMem)
+            have hStageEq := Option.some.inj (hPending.symm.trans hDetachedPending)
+            exfalso
+            apply hTokenNe
+            have hStages := congrArg Runtime.Initializer.stage hStageEq
+            injection hStages with hTokenEq
+            exact hTokenEq.symm
+          · rfl
+  | withdrawVisible => exact hProv
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
+      rename_i key runtimeId nextGeneration
+      cases hRuntime with
+      | rollbackPendingReuse hFind hRegStep =>
+          apply detachedProvisional_after_runtime_update (runtimeId := runtimeId) hProv
+          · intro detached hDetached hStage init hInitMem hInitKey hDetachedPending hEq
+            cases hEq
+            have hStageEq := Option.some.inj (hPending.symm.trans hDetachedPending)
+            exfalso
+            apply no_detached_member hNoDetached hDetached
+            have hStages := congrArg Runtime.Initializer.stage hStageEq
+            cases hStages
+            rfl
+          · rfl
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
+      rename_i key runtimeId
+      cases hRuntime with
+      | rollbackPendingRetire hFind hRegStep =>
+          apply detachedProvisional_after_runtime_update (runtimeId := runtimeId) hProv
+          · intro detached hDetached hStage init hInitMem hInitKey hDetachedPending hEq
+            cases hEq
+            have hStageEq := Option.some.inj (hPending.symm.trans hDetachedPending)
+            exfalso
+            apply no_detached_member hNoDetached hDetached
+            have hStages := congrArg Runtime.Initializer.stage hStageEq
+            cases hStages
+            rfl
+          · rfl
+  | finishInitializer hInit hReady hRuntime =>
+      rename_i key runtimeId
+      cases hRuntime with
+      | finishInitialize hFind hStage =>
+          rename_i runtimeInit
+          intro detached hDetached hDetachedStage
+          change detached ∈ s.detached at hDetached
+          rcases hProv detached hDetached hDetachedStage with
+            ⟨init, hInitMem, hInitKey, hPending⟩
+          have hInitNe : init.runtimeId ≠ runtimeId := by
+            intro hEq
+            cases hEq
+            have hStageEq := Option.some.inj (hFind.symm.trans hPending)
+            have hPendingStage : runtimeInit.stage = .pending detached.topic.token :=
+              congrArg Runtime.Initializer.stage hStageEq
+            cases hStage with
+            | inl hBefore => rw [hBefore] at hPendingStage; cases hPendingStage
+            | inr hResolved => rw [hResolved] at hPendingStage; cases hPendingStage
+          refine ⟨init, ?_, hInitKey, ?_⟩
+          · exact List.mem_filter.mpr ⟨hInitMem, by simp [hInitNe]⟩
+          · dsimp [Runtime.State.findInitializer?, Runtime.State.removeInitializer]
+            exact runtime_find_remove_ne hPending hInitNe
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
+      intro detached hDetached hStage
+      rw [hNoDetached] at hDetached
+      contradiction
+  | finishClose hRuntime =>
+      cases hRuntime
+      exact hProv
 
 theorem provisionalTopics_after_runtime_remove
     {s : State} {runtime' : Runtime.State}
@@ -1087,7 +1559,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
           · intro topic hMem hStage
             exact no_topic_member hNoTopic hMem
           · rfl
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i key runtimeId rtdKey
       intro topic hTopicMem hStage
       simp only [List.mem_append, List.mem_singleton] at hTopicMem
@@ -1137,7 +1609,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
       exact provisionalTopics_after_topic_excel_update hProv
   | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
       exact provisionalTopics_after_topic_excel_update hProv
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       rename_i key runtimeId nextGeneration
       cases hRuntime with
       | rollbackPendingReuse hFind hRegStep =>
@@ -1145,7 +1617,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
           · intro topic hMem hStage
             exact no_topic_member hNoTopic hMem
           · rfl
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       rename_i key runtimeId
       cases hRuntime with
       | rollbackPendingRetire hFind hRegStep =>
@@ -1230,7 +1702,7 @@ theorem Step.rtdKeysUnique_preserved
     s'.RtdKeysUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i key runtimeId rtdKey
       dsimp [State.RtdKeysUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
@@ -1264,7 +1736,7 @@ theorem Step.reverseRtdKeysUnique_preserved
     s'.ReverseRtdKeysUnique := by
   cases hStep with
   | beginInitializer => exact hInv
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i key runtimeId rtdKey
       dsimp [State.ReverseRtdKeysUnique] at hInv ⊢
       apply pairwise_append_singleton_topics hInv
@@ -1365,7 +1837,7 @@ theorem Step.reverseMapSound_preserved
   | insertPendingReuse hInit hNoTopic hRuntime =>
       cases hRuntime
       exact hSound
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i token key runtimeId rtdKey
       intro entry hMem
       simp only [List.mem_append, List.mem_singleton] at hMem
@@ -1422,10 +1894,10 @@ theorem Step.reverseMapSound_preserved
       refine ⟨old, ?_, hOldKey, hOldRtd⟩
       apply List.mem_filter.mpr
       exact ⟨hOldMem, by simp [hOldKeyNe]⟩
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime
       exact hSound
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime
       exact hSound
   | finishInitializer hInit hReady hRuntime =>
@@ -1470,7 +1942,7 @@ theorem Step.reverseMapComplete_preserved
   | insertPendingReuse hInit hNoTopic hRuntime =>
       cases hRuntime
       exact hComplete
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i key runtimeId rtdKey
       intro topic hMem
       simp only [List.mem_append, List.mem_singleton] at hMem
@@ -1524,10 +1996,10 @@ theorem Step.reverseMapComplete_preserved
       exact reverseMapComplete_after_topic_excel_update hComplete
   | rollbackConnection hTopic hTopicKey hTopicOwner hNotCommitted hBinding =>
       exact reverseMapComplete_after_topic_excel_update hComplete
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime
       exact hComplete
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       cases hRuntime
       exact hComplete
   | finishInitializer hInit hReady hRuntime =>
@@ -2405,7 +2877,7 @@ theorem Step.excelOwnerGenerationConsistent_preserved
       exact excelOwnerGenerationConsistent_after_topic_excel_update hInv
   | rollbackConnection hTopic hTopicKey hGenerationAllowed hTopicOwner hNotCommitted hBinding =>
       exact excelOwnerGenerationConsistent_after_topic_excel_update hInv
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       rename_i token key runtimeId rtdKey
       exact excelOwnerGenerationConsistent_after_publishVisible
         (s := s) (key := key) (rtdKey := rtdKey) (token := token) hInv
@@ -2425,9 +2897,9 @@ theorem Step.excelOwnerGenerationConsistent_preserved
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
   | insertPendingReuse hInit hNoTopic hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
   | finishInitializer hInit hReady hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
@@ -2480,7 +2952,7 @@ theorem Step.excelOwnershipInvariant_preserved
         excelOwnersUnique_after_rollbackConnection (key := key) (owner := owner) hOwners,
         excelBindingOwnersUnique_after_rollbackConnection hBindings,
         excelCommitConsistent_after_rollbackConnection (key := key) (owner := owner) hCommit⟩
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       exact ⟨
         excelOwnerMapSound_after_publishVisible hSound,
         excelOwnerMapComplete_after_publishVisible hComplete,
@@ -2521,9 +2993,9 @@ theorem Step.excelOwnershipInvariant_preserved
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
   | insertPendingReuse hInit hNoTopic hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
   | finishInitializer hInit hReady hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
@@ -2542,6 +3014,7 @@ theorem Step.invariant_preserved
       hExcel, hGeneration⟩
   rcases hExcel with
     ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
+  rcases hGeneration with ⟨hGeneration, hDestruction⟩
   exact ⟨
     Step.runtimeInvariant_preserved hRuntime hStep,
     Step.initializingKeysUnique_preserved hKeys hStep,
@@ -2557,7 +3030,13 @@ theorem Step.invariant_preserved
     Step.provisionalTopicsHavePendingRoots_preserved hKeys hIds hProv hStep,
     Step.excelOwnershipInvariant_preserved hSound hComplete hOwners hBindings hCommit
       hVisibleKeys hStep,
-    Step.excelOwnerGenerationConsistent_preserved hGeneration hVisibleKeys hStep⟩
+    Step.excelOwnerGenerationConsistent_preserved hGeneration hVisibleKeys hStep,
+    ⟨
+      Step.detachedTokensUnique_preserved hDestruction.1 hStep,
+      Step.detachedTokensDisjointVisible_preserved hDestruction.2.1 hStep,
+      Step.detachedRootsValid_preserved hDestruction.2.2.1 hStep,
+      Step.detachedProvisionalRootsHavePendingOwners_preserved hKeys hIds
+        hDestruction.2.1 hDestruction.2.2.2 hStep⟩⟩
 
 theorem Reachable.invariant_preserved
     {s t : State}

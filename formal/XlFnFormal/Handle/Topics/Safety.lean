@@ -256,7 +256,7 @@ theorem excel_owner_generation_matches_topic_generation
     (hTopic : topic ∈ s.byKey)
     (hOwner : topic.excelOwner = some owner) :
     topic.serverGeneration = some owner.serverGeneration := by
-  exact hInv.2.2.2.2.2.2.2.2.2.2.2.2.2 topic hTopic owner hOwner
+  exact (hInv.2.2.2.2.2.2.2.2.2.2.2.2.2).1 topic hTopic owner hOwner
 
 theorem committed_connection_generation_matches_topic
     {s : State} {topic : Topic}
@@ -340,7 +340,8 @@ theorem publish_visible_exposes_pending_provenance
       s'.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending topic.token } := by
   cases hStep with
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken
+      hPending hRoot =>
       rename_i token
       refine ⟨Topic.mk key rtdKey token .provisional none none false,
         ?_, rfl, rfl, rfl, ?_⟩
@@ -486,8 +487,8 @@ theorem Reachable.runtime_reachable
       | rollbackConnection => exact ih
       | commitPublication _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | withdrawVisible => exact ih
-      | rollbackPendingReuse _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
-      | rollbackPendingRetire _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | rollbackPendingReuse _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | rollbackPendingRetire _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishInitializer _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | closeRegistry _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishClose hRuntime => exact Runtime.Reachable.tail ih hRuntime

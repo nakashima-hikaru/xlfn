@@ -1160,6 +1160,40 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
 }
 
 #[test]
+fn disconnect_rejects_provisional_excel_commit_without_resurrection() {
+    let runtime = Arc::new(HandleRuntime::new(8));
+    let observed_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("disconnect-before-excel-commit");
+
+    let result = runtime.prepare_observed(
+        key,
+        || Ok(Arc::new(DataRecord(1))),
+        move |rtd_key, token| {
+            let connection = observed_runtime
+                .connect_transaction(1, 17, rtd_key)
+                .expect("ConnectData must be able to claim the visible topic");
+            assert_eq!(connection.token(), token);
+
+            // DisconnectData may detach the topic before ConnectData commits
+            // its provisional Excel connection.
+            observed_runtime.disconnect(1, 17);
+
+            // The commit must fail at the detached ownership boundary. Its
+            // drop path must not recreate the topic or registry root.
+            assert!(matches!(connection.commit(), Err(XllError::StaleHandle)));
+            assert!(matches!(
+                observed_runtime.lookup::<DataRecord>(token),
+                Err(XllError::StaleHandle)
+            ));
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn concurrent_waiter_retries_after_observation_failure() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};

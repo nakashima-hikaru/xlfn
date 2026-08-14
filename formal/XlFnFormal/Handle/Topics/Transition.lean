@@ -98,6 +98,7 @@ inductive Step : State → Event → State → Prop where
       (hNoTopic : s.findTopic? key = none)
       (hNoRtdKey : s.findReverse? rtdKey = none)
       (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
+      (hNoDetachedToken : ∀ detached ∈ s.detached, detached.topic.token ≠ token)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending token })
       (hRoot : Runtime.TokenLive s.runtime.registry token) :
@@ -210,6 +211,7 @@ inductive Step : State → Event → State → Prop where
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hNoTopic : s.findTopic? key = none)
       (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
+      (hNoDetached : s.findDetached? token = none)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending token })
       (hRuntime : Runtime.Step s.runtime
@@ -224,6 +226,7 @@ inductive Step : State → Event → State → Prop where
       (hInit : s.findInitializing? key = some { runtimeId := runtimeId, key := key })
       (hNoTopic : s.findTopic? key = none)
       (hNoToken : ∀ topic ∈ s.byKey, topic.token ≠ token)
+      (hNoDetached : s.findDetached? token = none)
       (hPending : s.runtime.findInitializer? runtimeId =
         some { id := runtimeId, stage := .pending token })
       (hRuntime : Runtime.Step s.runtime (.rollbackPendingRetire runtimeId) runtime') :

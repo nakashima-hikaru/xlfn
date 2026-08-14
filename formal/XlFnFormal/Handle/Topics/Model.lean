@@ -177,6 +177,32 @@ def State.ProvisionalTopicsHavePendingRoots (s : State) : Prop :=
         s.runtime.findInitializer? init.runtimeId =
           some { id := init.runtimeId, stage := .pending topic.token }
 
+def State.DetachedTokensUnique (s : State) : Prop :=
+  s.detached.Pairwise (fun lhs rhs => lhs.topic.token ≠ rhs.topic.token)
+
+def State.DetachedTokensDisjointVisible (s : State) : Prop :=
+  ∀ detached ∈ s.detached,
+    ∀ topic ∈ s.byKey,
+      detached.topic.token ≠ topic.token
+
+def State.DetachedRootsValid (s : State) : Prop :=
+  ∀ detached ∈ s.detached,
+    Runtime.TokenLive s.runtime.registry detached.topic.token
+
+def State.DetachedProvisionalRootsHavePendingOwners (s : State) : Prop :=
+  ∀ detached ∈ s.detached,
+    detached.topic.stage = .provisional →
+      ∃ init ∈ s.initializing,
+        init.key = detached.topic.key ∧
+        s.runtime.findInitializer? init.runtimeId =
+          some { id := init.runtimeId, stage := .pending detached.topic.token }
+
+def State.DestructionInvariant (s : State) : Prop :=
+  s.DetachedTokensUnique ∧
+  s.DetachedTokensDisjointVisible ∧
+  s.DetachedRootsValid ∧
+  s.DetachedProvisionalRootsHavePendingOwners
+
 def State.CommittedTopicRootsValid (s : State) : Prop :=
   ∀ topic ∈ s.byKey,
     topic.stage = .committed →
@@ -238,6 +264,7 @@ def State.Invariant (s : State) : Prop :=
   s.VisibleTopicRootsValid ∧
   s.ProvisionalTopicsHavePendingRoots ∧
   s.ExcelOwnershipInvariant ∧
-  s.ExcelOwnerGenerationConsistent
+  s.ExcelOwnerGenerationConsistent ∧
+  s.DestructionInvariant
 
 end XlFnFormal.Handle.Topics

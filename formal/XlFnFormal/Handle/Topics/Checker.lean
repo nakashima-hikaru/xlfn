@@ -118,6 +118,7 @@ def apply? (s : State) (event : Event) : Option State :=
               s.findTopic? key = none ∧
               s.findReverse? rtdKey = none ∧
               (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
+              (∀ detached ∈ s.detached, detached.topic.token ≠ token) ∧
               tokenLive? s.runtime.registry token = true then
             some { s with
               byKey := s.byKey ++
@@ -220,7 +221,8 @@ def apply? (s : State) (event : Event) : Option State :=
           if foundId = runtimeId ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
               s.findTopic? key = none ∧
-              (∀ topic ∈ s.byKey, topic.token ≠ token) then
+              (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
+              s.findDetached? token = none then
             match Runtime.apply? s.runtime
                 (.rollbackPendingReuse runtimeId nextGeneration) with
             | some runtime' => some { s with runtime := runtime' }
@@ -233,7 +235,8 @@ def apply? (s : State) (event : Event) : Option State :=
           if foundId = runtimeId ∧
               s.findInitializing? key = some { runtimeId := runtimeId, key := key } ∧
               s.findTopic? key = none ∧
-              (∀ topic ∈ s.byKey, topic.token ≠ token) then
+              (∀ topic ∈ s.byKey, topic.token ≠ token) ∧
+              s.findDetached? token = none then
             match Runtime.apply? s.runtime (.rollbackPendingRetire runtimeId) with
             | some runtime' => some { s with runtime := runtime' }
             | none => none
@@ -371,9 +374,11 @@ theorem apply?_sound
                   · rename_i hPre
                     cases h
                     rcases hPre with
-                      ⟨hId, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hLive⟩
+                      ⟨hId, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken,
+                        hNoDetachedToken, hLive⟩
                     cases hId
-                    exact Step.publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hFind
+                    exact Step.publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken
+                      hNoDetachedToken hFind
                       (tokenLive?_iff.mp hLive)
                   · contradiction
   | claimServer key generation =>
@@ -494,9 +499,9 @@ theorem apply?_sound
                     | some runtime' =>
                         rw [hRuntime] at h
                         cases h
-                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken⟩
+                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken, hNoDetached⟩
                         cases hId
-                        exact Step.rollbackPendingReuse hInit hNoTopic hNoToken hFind
+                        exact Step.rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hFind
                           (Runtime.apply?_sound hRuntime)
                   · contradiction
   | rollbackPendingRetire key runtimeId =>
@@ -518,9 +523,9 @@ theorem apply?_sound
                     | some runtime' =>
                         rw [hRuntime] at h
                         cases h
-                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken⟩
+                        rcases hPre with ⟨hId, hInit, hNoTopic, hNoToken, hNoDetached⟩
                         cases hId
-                        exact Step.rollbackPendingRetire hInit hNoTopic hNoToken hFind
+                        exact Step.rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hFind
                           (Runtime.apply?_sound hRuntime)
                   · contradiction
   | finishInitializer key runtimeId =>
@@ -586,7 +591,7 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hInit, hNoTopic⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hPending hRoot =>
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
       have hRootBool := tokenLive?_iff.mpr hRoot
       dsimp [apply?]
       rw [hPending]
@@ -596,8 +601,10 @@ theorem apply?_complete
           s.findTopic? _ = none ∧
           s.findReverse? _ = none ∧
           (∀ topic ∈ s.byKey, topic.token ≠ _) ∧
+          (∀ detached ∈ s.detached, detached.topic.token ≠ _) ∧
           tokenLive? _ _ = true :=
-        ⟨True.intro, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken, hRootBool⟩
+        ⟨True.intro, hPhase, hInit, hNoTopic, hNoRtdKey, hNoToken,
+          hNoDetachedToken, hRootBool⟩
       rw [if_pos hPre]
   | claimServer hTopic hTopicKey hAllowed =>
       dsimp [apply?]
@@ -635,17 +642,17 @@ theorem apply?_complete
         ⟨True.intro, hTopicKey, hInit, hExcelSettled, hPending⟩
       rw [if_pos hPre]
       rfl
-  | rollbackPendingReuse hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingReuse hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       dsimp [apply?]
       rw [hPending]
       simp only
-      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken⟩]
+      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken, hNoDetached⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | rollbackPendingRetire hInit hNoTopic hNoToken hPending hRuntime =>
+  | rollbackPendingRetire hInit hNoTopic hNoToken hNoDetached hPending hRuntime =>
       dsimp [apply?]
       rw [hPending]
       simp only
-      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken⟩]
+      rw [if_pos ⟨True.intro, hInit, hNoTopic, hNoToken, hNoDetached⟩]
       rw [Runtime.apply?_complete hRuntime]
   | finishInitializer hInit hReady hRuntime =>
       dsimp [apply?]
