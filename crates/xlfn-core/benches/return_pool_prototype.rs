@@ -43,6 +43,16 @@ fn return_pool_prototype(c: &mut Criterion) {
 
     bench_kind(
         c,
+        SyncBenchKind::ReturnBoxOnly,
+        "return_pool_prototype/baseline_box_only",
+    );
+    bench_kind(
+        c,
+        SyncBenchKind::ReturnBlockLocal,
+        "return_pool_prototype/baseline_block_local",
+    );
+    bench_kind(
+        c,
         SyncBenchKind::ReturnPoolOnly,
         "return_pool_prototype/striped_pool_only",
     );
