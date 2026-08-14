@@ -1115,6 +1115,51 @@ fn observation_cannot_commit_a_topic_removed_reentrantly() {
 }
 
 #[test]
+fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
+    let runtime = Arc::new(HandleRuntime::new(8));
+    let observed_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("disconnect-during-excel-connection");
+
+    let result = runtime.prepare_observed(
+        key,
+        || Ok(Arc::new(DataRecord(1))),
+        move |rtd_key, token| {
+            let connection = observed_runtime
+                .connect_transaction(1, 17, rtd_key)
+                .expect("ConnectData must be able to claim the visible topic");
+            assert_eq!(connection.token(), token);
+
+            // DisconnectData may enter while ConnectData still owns an
+            // uncommitted connection transaction. The server operation gate
+            // permits the two COM operations to overlap.
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            let disconnect_runtime = Arc::clone(&observed_runtime);
+            let disconnect = std::thread::spawn(move || {
+                release_rx.recv().unwrap();
+                disconnect_runtime.disconnect(1, 17);
+            });
+            release_tx.send(()).unwrap();
+            disconnect.join().unwrap();
+
+            // DisconnectData removes the visible topic and registry root
+            // without inspecting the connection commit bit.
+            assert!(matches!(
+                observed_runtime.lookup::<DataRecord>(token),
+                Err(XllError::StaleHandle)
+            ));
+
+            // The connection guard observes that the topic was already
+            // detached and therefore has no rollback work left to perform.
+            drop(connection);
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn concurrent_waiter_retries_after_observation_failure() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};

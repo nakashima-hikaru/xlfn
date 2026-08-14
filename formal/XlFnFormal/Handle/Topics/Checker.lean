@@ -251,7 +251,7 @@ def apply? (s : State) (event : Event) : Option State :=
       else none
   | .closeRegistry =>
       if s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧
-          s.initializing = [] then
+          s.initializing = [] ∧ s.detached = [] then
         match Runtime.apply? s.runtime .closeRegistry with
         | some runtime' => some { s with runtime := runtime' }
         | none => none
@@ -540,14 +540,15 @@ theorem apply?_sound
   | closeRegistry =>
       dsimp [apply?] at h
       by_cases hPre : s.byKey = [] ∧ s.byRtdKey = [] ∧
-          s.byExcelOwner = [] ∧ s.initializing = []
+          s.byExcelOwner = [] ∧ s.initializing = [] ∧ s.detached = []
       · rw [if_pos hPre] at h
         cases hRuntime : Runtime.apply? s.runtime .closeRegistry with
         | none => simp [hRuntime] at h
         | some runtime' =>
             rw [hRuntime] at h
             cases h
-            exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2.1 hPre.2.2.2
+            exact Step.closeRegistry hPre.1 hPre.2.1 hPre.2.2.1 hPre.2.2.2.1
+              hPre.2.2.2.2
               (Runtime.apply?_sound hRuntime)
       · rw [if_neg hPre] at h
         contradiction
@@ -650,9 +651,9 @@ theorem apply?_complete
       dsimp [apply?]
       rw [if_pos ⟨hInit, hReady⟩]
       rw [Runtime.apply?_complete hRuntime]
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       dsimp [apply?]
-      rw [if_pos ⟨hNoVisible, hNoReverse, hNoExcelOwners, hNoInitializers⟩]
+      rw [if_pos ⟨hNoVisible, hNoReverse, hNoExcelOwners, hNoInitializers, hNoDetached⟩]
       rw [Runtime.apply?_complete hRuntime]
   | finishClose hRuntime =>
       simp [apply?, Runtime.apply?_complete hRuntime]

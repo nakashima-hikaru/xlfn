@@ -247,6 +247,7 @@ inductive Step : State → Event → State → Prop where
       (hNoReverse : s.byRtdKey = [])
       (hNoExcelOwners : s.byExcelOwner = [])
       (hNoInitializers : s.initializing = [])
+      (hNoDetached : s.detached = [])
       (hRuntime : Runtime.Step s.runtime .closeRegistry runtime') :
       Step s .closeRegistry { s with runtime := runtime' }
 

@@ -18,7 +18,8 @@ def orphanProvisional (session : Registry.SessionId) : State :=
          serverGeneration := none, excelOwner := none, excelCommitted := false }]
     byRtdKey := []
     byExcelOwner := []
-    initializing := [] }
+    initializing := []
+    detached := [] }
 
 /-! A visible topic without an initializer owner is not enough to authorize a
     commit.  This is the malformed state the H3.1 provenance gate excludes. -/

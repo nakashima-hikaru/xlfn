@@ -489,7 +489,7 @@ theorem Reachable.runtime_reachable
       | rollbackPendingReuse _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | rollbackPendingRetire _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishInitializer _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
-      | closeRegistry _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
+      | closeRegistry _ _ _ _ _ hRuntime => exact Runtime.Reachable.tail ih hRuntime
       | finishClose hRuntime => exact Runtime.Reachable.tail ih hRuntime
 
 def CloseCertified (s : State) : Prop :=
@@ -497,7 +497,17 @@ def CloseCertified (s : State) : Prop :=
   s.byKey = [] ∧
   s.byRtdKey = [] ∧
   s.byExcelOwner = [] ∧
-  s.initializing = []
+  s.initializing = [] ∧
+  s.detached = []
+
+theorem no_detached_when_reachable
+    {session : Registry.SessionId} {s : State}
+    (hReach : Reachable (initialState session) s) :
+    s.detached = [] := by
+  induction hReach with
+  | refl => simp [initialState]
+  | tail _ hStep ih =>
+      cases hStep <;> simpa using ih
 
 theorem no_visible_topics_when_closed
     {s : State} (hInv : s.Invariant)
@@ -581,7 +591,8 @@ theorem successful_close_is_certified
     no_visible_topics_when_closed hInv hClosed,
     no_reverse_entries_when_closed hInv hClosed,
     no_excel_owners_when_closed hInv hClosed,
-    no_initializers_when_runtime_empty hInv hRuntimeCert.2.2.1⟩
+    no_initializers_when_runtime_empty hInv hRuntimeCert.2.2.1,
+    no_detached_when_reachable hReach⟩
 
 theorem Step.closeCertified_of_finishClose
     {s s' : State}
@@ -598,8 +609,9 @@ theorem Step.closeCertified_of_finishClose
 
 theorem close_registry_waits_for_topic_quiescence
     {s s' : State} (hStep : Step s .closeRegistry s') :
-    s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧ s.initializing = [] := by
+    s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧
+      s.initializing = [] ∧ s.detached = [] := by
   cases hStep
-  exact ⟨by assumption, by assumption, by assumption, by assumption⟩
+  exact ⟨by assumption, by assumption, by assumption, by assumption, by assumption⟩
 
 end XlFnFormal.Handle.Topics

@@ -56,12 +56,17 @@ deriving DecidableEq, Repr
 def Topic.ExcelConnectionSettled (topic : Topic) : Prop :=
   topic.excelOwner = none ∨ topic.excelCommitted = true
 
+structure DetachedTopic where
+  topic : Topic
+deriving DecidableEq, Repr
+
 structure State where
   runtime : Runtime.State
   byKey : List Topic
   byRtdKey : List ReverseTopic
   byExcelOwner : List ExcelBinding
   initializing : List Initializer
+  detached : List DetachedTopic
 deriving DecidableEq, Repr
 
 def initialState (session : Registry.SessionId) : State :=
@@ -69,7 +74,8 @@ def initialState (session : Registry.SessionId) : State :=
     byKey := []
     byRtdKey := []
     byExcelOwner := []
-    initializing := [] }
+    initializing := []
+    detached := [] }
 
 def State.findTopic? (s : State) (key : TopicKey) : Option Topic :=
   s.byKey.find? (fun topic => topic.key == key)
@@ -82,6 +88,9 @@ def State.findExcelOwner? (s : State) (owner : ExcelOwnerId) : Option ExcelBindi
 
 def State.findInitializing? (s : State) (key : TopicKey) : Option Initializer :=
   s.initializing.find? (fun init => init.key == key)
+
+def State.findDetached? (s : State) (token : Registry.Token) : Option DetachedTopic :=
+  s.detached.find? (fun detached => detached.topic.token == token)
 
 def State.findInitializerById? (s : State) (runtimeId : Runtime.InitializerId) : Option Initializer :=
   s.initializing.find? (fun init => init.runtimeId == runtimeId)
@@ -97,6 +106,9 @@ def State.removeReverse (s : State) (rtdKey : RtdKey) : List ReverseTopic :=
 
 def State.removeExcelOwner (s : State) (owner : ExcelOwnerId) : List ExcelBinding :=
   s.byExcelOwner.filter (fun binding => binding.owner != owner)
+
+def State.removeDetached (s : State) (token : Registry.Token) : List DetachedTopic :=
+  s.detached.filter (fun detached => detached.topic.token != token)
 
 def State.updateTopicStage (s : State) (key : TopicKey) (stage : TopicStage) : List Topic :=
   s.byKey.map (fun topic => if topic.key == key then { topic with stage := stage } else topic)

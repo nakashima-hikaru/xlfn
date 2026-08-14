@@ -449,3 +449,37 @@ This serialization proof is intentionally downstream of H3.2: reverse-map
 consistency does not depend on formatter injectivity, while the Rust producer
 refinement can use these theorems to show that concrete RTD keys cannot
 collide.
+
+## H3.5 destruction boundary: detach and drain
+
+The concrete ordering permits `DisconnectData` to overlap `ConnectData`. The
+server operation gate admits both ordinary COM operations, and `ConnectData`
+releases the topic lock after creating its provisional Excel connection but
+before writing the value and committing that connection. `DisconnectData` can
+therefore remove the visible topic and registry root while the connection is
+still provisional; it does not inspect `excel_topic_committed`. The Rust
+regression `disconnect_can_remove_pending_formula_root_during_excel_connection`
+fixes this reachability.
+
+The formal model now represents the lock boundary with `DetachedTopic` and a
+separate `DestructionEvent` layer. `disconnectTopic` removes the `byKey`,
+`byRtdKey`, and `byExcelOwner` entries but retains the registry token in the
+detached list. The drain is deliberately split:
+
+* `drainPendingReuse` / `drainPendingRetire` call the existing Runtime pending
+  rollback transitions, resolve the initializer, and invalidate the token.
+* `drainPublishedReuse` / `drainPublishedRetire` remove a committed root
+  directly through the Registry transition, but require that no runtime
+  initializer still owns the token as `.pending`.
+
+`closeRegistry` and `CloseCertified` now also require `detached = []`, so a
+detached root cannot be hidden by the close certificate. The named safety
+surface proves that disconnect retains the root until drain, pending and
+published drains invalidate it, and a published drain rejects a pending root.
+`DestructionTrace` replays both the provisional-connection race and the
+settled published-root path through `CloseCertified`; a negative replay proves
+that the published drain cannot bypass pending rollback.
+
+Generation-wide `terminate_topics` still remains to be modeled using the same
+detach/drain split. The current H3.5 scope is the single-topic
+`DisconnectData` path that establishes the concrete destruction boundary.

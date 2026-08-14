@@ -620,7 +620,7 @@ theorem Step.runtimeInvariant_preserved
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | finishInitializer hInit hReady hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
   | finishClose hRuntime =>
       exact Runtime.Step.runtimeInvariant_preserved hInv hRuntime
@@ -701,7 +701,7 @@ theorem Step.initializersBackedByRuntime_preserved
             apply hInitNe
             exact hId.symm.trans hEq
           exact ⟨runtimeInit, runtime_mem_filter_ne hRuntimeMem hRuntimeNe, hId⟩
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       intro init hMem
       rw [hNoInitializers] at hMem
       contradiction
@@ -926,7 +926,7 @@ theorem Step.visibleTopicRootsValid_preserved
   | finishInitializer hInit hReady hRuntime =>
       cases hRuntime
       exact hInv
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       intro topic hMem
       rw [hNoVisible] at hMem
       contradiction
@@ -1163,7 +1163,7 @@ theorem Step.provisionalTopicsHavePendingRoots_preserved
             have hCommitted := hReady topic hMem hKeyEq
             exact (by cases hStageTopic.symm.trans hCommitted)
           · rfl
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       intro topic hMem hStage
       rw [hNoVisible] at hMem
       contradiction
@@ -1431,7 +1431,7 @@ theorem Step.reverseMapSound_preserved
   | finishInitializer hInit hReady hRuntime =>
       cases hRuntime
       exact hSound
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       intro entry hMem
       rw [hNoReverse] at hMem
       contradiction
@@ -1533,7 +1533,7 @@ theorem Step.reverseMapComplete_preserved
   | finishInitializer hInit hReady hRuntime =>
       cases hRuntime
       exact hComplete
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       intro topic hMem
       rw [hNoVisible] at hMem
       contradiction
@@ -2431,7 +2431,7 @@ theorem Step.excelOwnerGenerationConsistent_preserved
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
   | finishInitializer hInit hReady hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       simpa [State.ExcelOwnerGenerationConsistent] using hInv
   | finishClose hRuntime => simpa [State.ExcelOwnerGenerationConsistent] using hInv
 
@@ -2527,7 +2527,7 @@ theorem Step.excelOwnershipInvariant_preserved
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
   | finishInitializer hInit hReady hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
-  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hRuntime =>
+  | closeRegistry hNoVisible hNoReverse hNoExcelOwners hNoInitializers hNoDetached hRuntime =>
       exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
   | finishClose hRuntime => exact ⟨hSound, hComplete, hOwners, hBindings, hCommit⟩
 
