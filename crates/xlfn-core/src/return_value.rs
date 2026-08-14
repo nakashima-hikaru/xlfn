@@ -305,16 +305,6 @@ impl ReturnTracker {
     fn outstanding_obligations(&self) -> usize {
         self.stripes.iter().map(|stripe| stripe.active()).sum()
     }
-
-    #[cfg(feature = "bench-diagnostics")]
-    pub(crate) fn benchmark_stripe_only(&self) {
-        let stripe = &self.stripes[current_return_stripe()];
-        assert!(
-            stripe.try_enter(),
-            "return admission must be open for benchmark"
-        );
-        stripe.release();
-    }
 }
 
 pub(crate) struct ReturnProducerGuard {
@@ -481,7 +471,7 @@ const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
 enum ReturnOwnership {
     Excel(Option<ReturnObligation>),
-    #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
+    #[cfg(any(feature = "async", test))]
     Local,
 }
 
@@ -562,15 +552,6 @@ const _: () = assert!(!std::mem::needs_drop::<ReturnBlockSlot>());
 
 thread_local! {
     static RETURN_BLOCK_SLOT: ReturnBlockSlot = const { ReturnBlockSlot::new() };
-}
-
-#[cfg(feature = "bench-diagnostics")]
-thread_local! {
-    // Diagnostic-only single-slot cache. The benchmark models the Excel
-    // callback contract where a returned block is released on the same
-    // thread that produced it; it must not be used by the production path
-    // without first validating the lifecycle assumptions.
-    static BENCH_RETURN_BLOCK: Cell<Option<Box<ReturnBlock>>> = const { Cell::new(None) };
 }
 
 #[derive(Debug)]
@@ -712,7 +693,7 @@ impl PreparedReturn {
         })
     }
 
-    #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
+    #[cfg(any(feature = "async", test))]
     fn publish_local(self) -> NonNull<XLOPER12> {
         let block = Box::new(ReturnBlock {
             oper: self.oper,
@@ -728,32 +709,6 @@ impl PreparedReturn {
 
         ReturnBlock::into_non_null(block)
     }
-
-    #[cfg(feature = "bench-diagnostics")]
-    fn publish_benchmark_pool(self, pool: &BenchmarkReturnBlockPool) {
-        let mut block = pool.acquire();
-        block.oper = self.oper;
-        block.storage = self.storage;
-        block.array = self.array;
-        block.ownership = ReturnOwnership::Local;
-        block.magic = RETURN_MAGIC;
-        block.backing = ReturnBlockBacking::Heap;
-        std::hint::black_box(&block.oper);
-        pool.release(block);
-    }
-
-    #[cfg(feature = "bench-diagnostics")]
-    fn publish_benchmark_tls(self) {
-        let mut block = benchmark_tls_acquire();
-        block.oper = self.oper;
-        block.storage = self.storage;
-        block.array = self.array;
-        block.ownership = ReturnOwnership::Local;
-        block.magic = RETURN_MAGIC;
-        block.backing = ReturnBlockBacking::Heap;
-        std::hint::black_box(&block.oper);
-        benchmark_tls_release(block);
-    }
 }
 
 impl ReturnBlock {
@@ -762,90 +717,6 @@ impl ReturnBlock {
         // SAFETY: Box::into_raw always returns a non-null, properly aligned pointer.
         unsafe { NonNull::new_unchecked(pointer.cast::<XLOPER12>()) }
     }
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) struct BenchmarkReturnBlockPool {
-    // This pool is owned by one diagnostic benchmark runtime. Each stripe is
-    // independently locked, and any worker may return a block to its current
-    // stripe without assuming that allocation and release use the same thread.
-    // The benchmark pool stores exclusive Box ownership as an address token.
-    // XLOPER12 contains raw pointers and is intentionally not Send, while the
-    // pool itself must be shareable by the benchmark worker threads.
-    stripes: [Mutex<Vec<usize>>; RETURN_STRIPE_COUNT],
-}
-
-#[cfg(feature = "bench-diagnostics")]
-impl BenchmarkReturnBlockPool {
-    pub(crate) fn new() -> Self {
-        Self {
-            stripes: std::array::from_fn(|_| Mutex::new(Vec::new())),
-        }
-    }
-
-    fn allocate_block() -> Box<ReturnBlock> {
-        Box::new(ReturnBlock {
-            oper: XLOPER12::number(42.0),
-            storage: None,
-            array: None,
-            ownership: ReturnOwnership::Local,
-            magic: RETURN_MAGIC,
-            backing: ReturnBlockBacking::Heap,
-        })
-    }
-
-    fn acquire(&self) -> Box<ReturnBlock> {
-        let address = self.stripes[current_return_stripe()].lock().pop();
-        match address {
-            Some(address) => {
-                // SAFETY: release stores only pointers produced by
-                // Box::into_raw, and the stripe mutex transfers unique
-                // ownership to this call before reconstruction.
-                unsafe { Box::from_raw(address as *mut ReturnBlock) }
-            }
-            None => Self::allocate_block(),
-        }
-    }
-
-    fn release(&self, block: Box<ReturnBlock>) {
-        let address = Box::into_raw(block) as usize;
-        self.stripes[current_return_stripe()].lock().push(address);
-    }
-}
-
-#[cfg(feature = "bench-diagnostics")]
-impl Drop for BenchmarkReturnBlockPool {
-    fn drop(&mut self) {
-        for stripe in &self.stripes {
-            for address in stripe.lock().drain(..) {
-                // SAFETY: every token was created by Box::into_raw and is
-                // drained exactly once when the pool releases its ownership.
-                unsafe { drop(Box::from_raw(address as *mut ReturnBlock)) };
-            }
-        }
-    }
-}
-
-#[cfg(feature = "bench-diagnostics")]
-fn benchmark_tls_acquire() -> Box<ReturnBlock> {
-    BENCH_RETURN_BLOCK.with(|slot| {
-        slot.take()
-            .unwrap_or_else(BenchmarkReturnBlockPool::allocate_block)
-    })
-}
-
-#[cfg(feature = "bench-diagnostics")]
-fn benchmark_tls_release(block: Box<ReturnBlock>) {
-    BENCH_RETURN_BLOCK.with(|slot| {
-        let previous = slot.replace(Some(block));
-        debug_assert!(previous.is_none());
-        drop(previous);
-    });
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_return_block_size() -> usize {
-    std::mem::size_of::<ReturnBlock>()
 }
 
 /// Total payload requested from the allocator before UTF-16 buffers are added.
@@ -966,69 +837,6 @@ fn allocate_excel_owned(
 #[cfg(any(feature = "async", test))]
 pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_local_scalar_return() {
-    let pointer = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
-        .expect("scalar benchmark return encoding must succeed")
-        .publish_local();
-    std::hint::black_box(pointer);
-
-    // SAFETY: `pointer` is a live local ReturnBlock produced immediately above.
-    unsafe { free_return(pointer.as_ptr()) };
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_encode_scalar_only() {
-    let prepared = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
-        .expect("scalar benchmark return encoding must succeed");
-    std::hint::black_box(prepared);
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_return_box_only() {
-    let block = Box::new(ReturnBlock {
-        oper: XLOPER12::number(42.0),
-        storage: None,
-        array: None,
-        ownership: ReturnOwnership::Local,
-        magic: RETURN_MAGIC,
-        backing: ReturnBlockBacking::Heap,
-    });
-    let pointer = Box::into_raw(block);
-    std::hint::black_box(pointer);
-
-    // SAFETY: `pointer` is the unique allocation created immediately above.
-    unsafe { drop(Box::from_raw(pointer)) };
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_pooled_box_only(pool: &BenchmarkReturnBlockPool) {
-    let block = pool.acquire();
-    std::hint::black_box(&block.oper);
-    pool.release(block);
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_pooled_scalar_return(pool: &BenchmarkReturnBlockPool) {
-    PreparedReturn::encode(OwnedExcelValue::Number(42.0))
-        .expect("scalar benchmark return encoding must succeed")
-        .publish_benchmark_pool(pool);
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_tls_box_only() {
-    let block = benchmark_tls_acquire();
-    std::hint::black_box(&block.oper);
-    benchmark_tls_release(block);
-}
-
-#[cfg(feature = "bench-diagnostics")]
-pub(crate) fn benchmark_tls_scalar_return() {
-    PreparedReturn::encode(OwnedExcelValue::Number(42.0))
-        .expect("scalar benchmark return encoding must succeed")
-        .publish_benchmark_tls();
 }
 
 fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
@@ -1435,7 +1243,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
                     .expect("Excel return obligation is taken exactly once"),
             })
         }
-        #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
+        #[cfg(any(feature = "async", test))]
         ReturnOwnership::Local => None,
     }
 }
@@ -1460,7 +1268,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
                 .tracker()
                 .record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
         }
-        #[cfg(any(feature = "async", feature = "bench-diagnostics", test))]
+        #[cfg(any(feature = "async", test))]
         ReturnOwnership::Local => {
             debug_assert!(operation.is_none());
         }

@@ -51,7 +51,6 @@ features:
         --feature-powerset \
         --depth 2 \
         --exclude-features bench-internals \
-        --exclude-features bench-diagnostics \
         --no-dev-deps
 
 deny:
@@ -94,11 +93,5 @@ bench-handle-lookup:
 bench-handle-formula:
     cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked
 
-bench-diagnostics:
-    cargo bench --package xlfn-core --bench return_diagnostics --features bench-diagnostics --locked
-
-bench-pool-prototype:
-    cargo bench --package xlfn-core --bench return_pool_prototype --features bench-diagnostics --locked
-
 bench-check:
-    cargo clippy --package xlfn-core --benches --features "bench-diagnostics async" --locked -- -D warnings
+    cargo clippy --package xlfn-core --benches --features "bench-internals async" --locked -- -D warnings
