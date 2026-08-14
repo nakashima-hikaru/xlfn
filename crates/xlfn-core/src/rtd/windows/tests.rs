@@ -751,6 +751,17 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
 }
 
 #[test]
+fn server_generation_allocator_refuses_wrap_without_mutating_after_exhaustion() {
+    let counter = AtomicU64::new(u64::MAX - 1);
+
+    assert_eq!(allocate_server_generation(&counter), Some(u64::MAX));
+    assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+
+    assert_eq!(allocate_server_generation(&counter), None);
+    assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+}
+
+#[test]
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));

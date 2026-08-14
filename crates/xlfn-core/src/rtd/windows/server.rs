@@ -43,6 +43,7 @@ pub(super) const SERVER_NOT_STARTED: u8 = 0;
 pub(super) const SERVER_STARTING: u8 = 1;
 pub(super) const SERVER_STARTED: u8 = 2;
 pub(super) const SERVER_START_FAILED: u8 = 3;
+const SERVER_GENERATION_EXHAUSTED_DIAGNOSTIC_ID: u64 = 0x5352_5647_454e_4558;
 
 #[derive(Clone)]
 pub(super) struct ActiveServer {
@@ -53,7 +54,18 @@ pub(super) struct ActiveServer {
 }
 
 pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
-pub(super) static NEXT_SERVER_GENERATION: AtomicU64 = AtomicU64::new(1);
+pub(super) static LAST_SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn allocate_server_generation(last_generation: &AtomicU64) -> Option<u64> {
+    // `fetch_update` returns the previous value; expose the checked successor
+    // as the allocated generation and leave the counter unchanged at MAX.
+    last_generation
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            last.checked_add(1)
+        })
+        .ok()
+        .and_then(|last| last.checked_add(1))
+}
 
 #[cfg(test)]
 pub(super) static PANIC_IN_REFRESH_DATA: AtomicBool = AtomicBool::new(false);
@@ -621,7 +633,10 @@ pub(super) fn ensure_server(
         });
     }
 
-    let generation = NEXT_SERVER_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let generation =
+        allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
+            diagnostic_id: SERVER_GENERATION_EXHAUSTED_DIAGNOSTIC_ID,
+        })?;
     let operations = ServerOperationBarrier::new().map_err(|error| XllError::ExcelApi {
         function: error.operation,
         code: error.code as i32,

@@ -407,6 +407,16 @@ Termination of topics by server generation is intentionally deferred to H3.5;
 H3.4 proves isolation and ownership provenance without adding the termination
 transaction.
 
+The allocator boundary is modeled independently under
+`XlFnFormal/Rtd/ServerGeneration`. Its `State.last` is a non-wrapping natural
+number, `maxGeneration` is `2^64 - 1`, and `allocate?` rejects an exhausted
+state rather than producing zero or reusing a prior generation. The safety
+layer proves strict increase, non-zero and bounded allocation, rejection at
+the maximum, and non-reuse across sequential allocations. The Rust
+`LAST_SERVER_GENERATION` counter uses a checked `fetch_update`; when the
+counter is exhausted, `ensure_server` returns an internal error before
+constructing or publishing a new RTD server.
+
 ## RTD wire serialization boundary
 
 `XlFnFormal/Handle/Topics/Serialization` models the concrete RTD wire identity
