@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "initial": { "session": 1 },
+  "events": [
+    { "event": "insertFresh" },
+    {
+      "event": "beginFastObservation",
+      "readerId": 1,
+      "token": { "session": 1, "slot": 0, "generation": 1 }
+    },
+    { "event": "acquireTentativeLease", "readerId": 1 },
+    { "event": "validateFastLookup", "readerId": 1 },
+    { "event": "fallbackFastLookup", "readerId": 1 }
+  ],
+  "trace_truncated": false,
+  "outcome": "in_progress"
+}

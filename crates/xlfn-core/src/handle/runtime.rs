@@ -245,14 +245,21 @@ impl HandleRuntime {
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> XllResult<Self> {
         let registry = HandleRegistry::try_new(maximum_handles)?;
+        let leases = Arc::new(HandleLeaseState::new());
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let registry_session = registry.session;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let snapshot_trace = Arc::new(SnapshotTraceRecorder::new(registry_session));
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        registry.set_snapshot_trace_recorder(Arc::clone(&snapshot_trace));
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        leases.set_snapshot_trace_recorder(snapshot_trace);
         Ok(Self {
             registry,
             topics: RwLock::new(TopicState::default()),
             published: PublishedTopics::new(),
             prepares: HandlePrepareState::new(),
-            leases: Arc::new(HandleLeaseState::new()),
+            leases,
             _module_ingress: module_ingress,
             #[cfg(any(test, feature = "handle-refinement-trace"))]
             refinement: HandleRefinementTrace::new(registry_session),
@@ -278,13 +285,30 @@ impl HandleRuntime {
         }
     }
 
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    #[allow(
-        dead_code,
-        reason = "H4 trace extraction is consumed by the feature-gated checker test"
-    )]
+    #[cfg(test)]
     pub(crate) fn refinement_trace_json(&self) -> String {
         self.refinement.trace_json()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_refinement_trace_json(&self, outcome: &str) -> String {
+        self.registry
+            .snapshot_trace_recorder()
+            .expect("snapshot trace recorder is present in tests")
+            .export_json(outcome)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lookup_handle<T>(&self, token: &str) -> XllResult<Handle<T>>
+    where
+        T: ExcelHandleObject,
+    {
+        self.registry.lookup_handle(token, &self.leases)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_leases(&self) -> usize {
+        self.leases.active()
     }
 
     #[cfg(target_os = "windows")]

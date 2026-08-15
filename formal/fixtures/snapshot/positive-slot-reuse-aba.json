@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "initial": { "session": 1 },
+  "events": [
+    { "event": "insertFresh" },
+    {
+      "event": "removeReuse",
+      "token": { "session": 1, "slot": 0, "generation": 1 },
+      "nextGeneration": 2
+    },
+    { "event": "insertReuse", "slot": 0, "generation": 2 },
+    {
+      "event": "beginFastObservation",
+      "readerId": 1,
+      "token": { "session": 1, "slot": 0, "generation": 2 }
+    },
+    { "event": "acquireTentativeLease", "readerId": 1 },
+    { "event": "validateFastLookup", "readerId": 1 },
+    { "event": "completeFastLookup", "readerId": 1 },
+    { "event": "beginSealLeaseAdmission" },
+    { "event": "finishSealLeaseAdmission" },
+    { "event": "closeRegistry" },
+    { "event": "finishClose" }
+  ],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}

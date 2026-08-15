@@ -121,6 +121,8 @@ pub(crate) struct HandleLeaseState {
     closing: AtomicBool,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) snapshot_recorder: Mutex<Option<Arc<SnapshotTraceRecorder>>>,
     #[cfg(test)]
     pub(crate) before_idle_wait_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -134,6 +136,8 @@ impl HandleLeaseState {
             closing: AtomicBool::new(false),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            snapshot_recorder: Mutex::new(None),
             #[cfg(test)]
             before_idle_wait_hook: Mutex::new(None),
             #[cfg(test)]
@@ -150,6 +154,18 @@ impl HandleLeaseState {
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
+        }
+    }
+
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) fn set_snapshot_trace_recorder(&self, recorder: Arc<SnapshotTraceRecorder>) {
+        *self.snapshot_recorder.lock() = Some(recorder);
+    }
+
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) fn record_snapshot_trace_event(&self, event: SnapshotEvent) {
+        if let Some(recorder) = self.snapshot_recorder.lock().as_ref().cloned() {
+            recorder.record(event);
         }
     }
 
@@ -188,6 +204,8 @@ impl HandleLeaseState {
             stripe,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost,
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            lineage: None,
         })
     }
 
@@ -195,16 +213,20 @@ impl HandleLeaseState {
         // Close admission without waiting. Canonical values may contain nested
         // handles, so active lease draining must happen only after those values
         // have been dropped by the registry close path.
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.record_snapshot_trace_event(SnapshotEvent::BeginSealLeaseAdmission);
         self.closing.store(true, Ordering::Release);
         for stripe in &self.stripes {
             stripe.seal();
         }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.record_snapshot_trace_event(SnapshotEvent::FinishSealLeaseAdmission);
     }
 
     pub(crate) fn wait_for_idle(&self) {
         while self.active() != 0 {
             #[cfg(test)]
-            if let Some(hook) = self.before_idle_wait_hook.lock().as_ref().cloned() {
+            if let Some(hook) = self.before_idle_wait_hook.lock().take() {
                 hook();
             }
             std::thread::sleep(HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL);
@@ -230,6 +252,8 @@ pub(crate) struct HandleLease {
     stripe: Arc<HandleLeaseStripe>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: Option<crate::shutdown_refinement::GhostHandle>,
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) lineage: Option<Arc<LeaseLineageTrace>>,
 }
 
 impl HandleLease {
@@ -260,6 +284,8 @@ impl Clone for HandleLease {
             stripe: Arc::clone(&self.stripe),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost,
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            lineage: self.lineage.clone(),
         }
     }
 }

@@ -18,6 +18,8 @@ mod lease;
 mod refinement;
 mod registry;
 mod runtime;
+#[cfg(any(test, feature = "handle-refinement-trace"))]
+pub(crate) mod snapshot_refinement;
 mod token;
 mod typed;
 
@@ -28,10 +30,16 @@ pub(crate) use lease::*;
 pub(crate) use refinement::{HandleRefinementTrace, TokenWire};
 pub(crate) use registry::*;
 pub(crate) use runtime::*;
+#[cfg(any(test, feature = "handle-refinement-trace"))]
+pub(crate) use snapshot_refinement::{
+    Event as SnapshotEvent, LeaseLineageTrace, SnapshotTokenWire, SnapshotTraceRecorder,
+};
 pub(crate) use token::*;
 pub use typed::{ExcelHandleObject, Handle};
 
 #[cfg(test)]
 mod refinement_tests;
+#[cfg(test)]
+mod snapshot_trace_tests;
 #[cfg(test)]
 mod tests;

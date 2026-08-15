@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "initial": { "session": 1 },
+  "events": [
+    { "event": "insertFresh" },
+    { "event": "closeRegistry" }
+  ],
+  "trace_truncated": false,
+  "outcome": "in_progress"
+}

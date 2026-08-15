@@ -619,3 +619,39 @@ semantics:
     2-thread race using `before_fast_upgrade_hook` verifying `remove()` after second Live
     check causes Weak upgrade failure, clean slow fallback, and 0 residual leases.
 
+## H4.4 PublishedHandle concrete-to-Lean trace refinement bridge
+
+`XlFnFormal/Handle/Registry/Snapshot/Refinement.lean` and `crates/xlfn-core/src/handle/snapshot_refinement.rs`
+establish a verified concrete-to-formal trace refinement bridge for `PublishedHandle` snapshot lookups,
+lease admission lifecycle, and terminal quiescence:
+
+* **Formal Lease-Lineage Abstraction & Zero-Equivalence** (`Refinement.lean`):
+  - Formalizes that 1 abstract lease in the formal model corresponds to 1 independent acquisition
+    lineage (`.fast` or `.slow`).
+  - Proves that `Handle::clone()` and non-final `Drop` operations increment/decrement physical clone
+    counters without altering abstract state (`clone_is_abstract_stutter`, `drop_clone_non_final_is_abstract_stutter`).
+  - Proves that only the final `Drop` of a lineage performs `completeFastLookup` or `endSlowLookup`.
+  - Proves zero-equivalence and quiescence preservation: `totalPhysicalLeases = 0 ↔ lineages = [] ↔ activeLeases = 0`
+    (`zero_lineages_iff_zero_physical_leases`, `terminal_quiescence_equivalence`).
+* **Rust Snapshot Trace Producer & Lineage Tracker** (`snapshot_refinement.rs`, `registry.rs`, `lease.rs`):
+  - Emits JSON wire traces matching the Lean `Snapshot.Event` schema under `handle-refinement-trace` and test builds.
+  - `LeaseLineageTrace` is refcounted alongside `HandleLease` clones so that `CompleteFastLookup` / `EndSlowLookup`
+    linearization events are emitted strictly on the final drop of the lineage.
+  - Exact linearization points instrumented for `BeginFastObservation`, `AcquireTentativeLease`,
+    `AbandonObservation`, `ValidateFastLookup`, `RejectTentativeFastLookup`, `FallbackFastLookup`,
+    `BeginSealLeaseAdmission`, `FinishSealLeaseAdmission`, `CloseRegistry`, and `FinishClose`.
+* **Executable Snapshot Trace Checker** (`TraceChecker.lean`, `lakefile.toml`):
+  - Executable target `published_handle_snapshot_trace_checker` parses wire traces and checks them
+    against `Snapshot.Checker.apply?`, requiring `CloseCertified` on `returned_success`.
+  - Invoked via:
+    ```text
+    lake exe published_handle_snapshot_trace_checker < snapshot-trace.json
+    ```
+* **Trace Fixtures & CI Integration**:
+  - Positive fixtures (`formal/fixtures/snapshot/positive-*.json`): fast lookup success, handle clone surviving close,
+    abandon observation after close, reject tentative on stale, fallback to slow, and slot reuse ABA protection.
+  - Negative fixtures (`formal/fixtures/snapshot/negative-*.json`): abandon while open, acquire when sealed,
+    close before sealed, fallback while live, and finish close with live lineage.
+  - CI uploads and verifies 12 Windows traces (6 for `i686-pc-windows-msvc`, 6 for `x86_64-pc-windows-msvc`)
+    and independently rejects all negative fixtures.
+
