@@ -382,9 +382,9 @@ fn published_handle_index_is_weak_and_generation_scoped() {
     let first_weak = Arc::downgrade(&first);
     let token = insert_production(&registry, Arc::clone(&first)).unwrap();
     let parsed = registry.parse_token(&token).unwrap();
-    let first_publication = registry
-        .published
-        .lookup(parsed.slot)
+    let first_snapshot = registry.published.load(parsed.slot);
+    let first_publication = first_snapshot
+        .get(&parsed.slot)
         .expect("inserted handle must be published");
 
     assert_eq!(first_publication.generation, parsed.generation);
@@ -400,9 +400,9 @@ fn published_handle_index_is_weak_and_generation_scoped() {
 
     let replacement = insert_production(&registry, Arc::new(String::from("replacement"))).unwrap();
     let replacement_parsed = registry.parse_token(&replacement).unwrap();
-    let replacement_publication = registry
-        .published
-        .lookup(replacement_parsed.slot)
+    let replacement_snapshot = registry.published.load(replacement_parsed.slot);
+    let replacement_publication = replacement_snapshot
+        .get(&replacement_parsed.slot)
         .expect("reused handle must be republished");
 
     assert_eq!(replacement_parsed.slot, parsed.slot);
@@ -418,16 +418,22 @@ fn published_handle_index_does_not_extend_values_through_close() {
     let value_weak = Arc::downgrade(&value);
     let token = insert_production(&registry, Arc::clone(&value)).unwrap();
     let parsed = registry.parse_token(&token).unwrap();
-    let publication = registry
-        .published
-        .lookup(parsed.slot)
+    let publication_snapshot = registry.published.load(parsed.slot);
+    let publication = publication_snapshot
+        .get(&parsed.slot)
         .expect("inserted handle must be published");
 
     drop(value);
     registry.close().unwrap();
 
     assert_eq!(publication.state(), PublishedHandleState::Closing);
-    assert!(registry.published.lookup(parsed.slot).is_none());
+    assert!(
+        registry
+            .published
+            .load(parsed.slot)
+            .get(&parsed.slot)
+            .is_none()
+    );
     assert!(value_weak.upgrade().is_none());
     assert!(publication.upgrade().is_none());
 }
@@ -442,9 +448,9 @@ fn published_handle_reused_slot_retains_stale_publication_arc() {
 
     let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
     let parsed1 = registry.parse_token(&token1).unwrap();
-    let retained_old_publication = registry
-        .published
-        .lookup(parsed1.slot)
+    let retained_old_snapshot = registry.published.load(parsed1.slot);
+    let retained_old_publication = retained_old_snapshot
+        .get(&parsed1.slot)
         .expect("first handle must be published");
 
     // Remove first handle: slot is now vacant with next generation, retained_old_publication is Stale.
@@ -462,9 +468,9 @@ fn published_handle_reused_slot_retains_stale_publication_arc() {
     assert_eq!(parsed1.slot, parsed2.slot);
     assert_ne!(parsed1.generation, parsed2.generation);
 
-    let replacement_publication = registry
-        .published
-        .lookup(parsed2.slot)
+    let replacement_snapshot = registry.published.load(parsed2.slot);
+    let replacement_publication = replacement_snapshot
+        .get(&parsed2.slot)
         .expect("reused handle must be published");
     assert_eq!(replacement_publication.state(), PublishedHandleState::Live);
     assert_eq!(replacement_publication.generation, parsed2.generation);
@@ -505,9 +511,9 @@ fn published_handle_remove_during_lease_acquire_linearizes_as_stale() {
 
     let token = insert_production(&registry, Arc::new(TestObj("target"))).unwrap();
     let parsed = registry.parse_token(&token).unwrap();
-    let publication = registry
-        .published
-        .lookup(parsed.slot)
+    let publication_snapshot = registry.published.load(parsed.slot);
+    let publication = publication_snapshot
+        .get(&parsed.slot)
         .expect("handle must be published");
     assert_eq!(publication.state(), PublishedHandleState::Live);
 
@@ -561,9 +567,9 @@ fn published_handle_remove_before_weak_upgrade_falls_back_to_stale() {
     let token = insert_production(&registry, Arc::new(TestObj)).unwrap();
     let parsed = registry.parse_token(&token).unwrap();
 
-    let publication = registry
-        .published
-        .lookup(parsed.slot)
+    let publication_snapshot = registry.published.load(parsed.slot);
+    let publication = publication_snapshot
+        .get(&parsed.slot)
         .expect("handle must be published");
     let (validated_tx, validated_rx) = mpsc::sync_channel(0);
     let release_reader = Arc::new(AtomicBool::new(false));

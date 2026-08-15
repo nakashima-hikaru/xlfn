@@ -78,11 +78,13 @@ impl PublishedHandles {
         (slot as usize) & (PUBLISHED_HANDLE_SHARD_COUNT - 1)
     }
 
-    /// Load one publication while retaining no snapshot lock beyond the Arc
-    /// clone needed to validate and use the publication.
-    pub(crate) fn lookup(&self, slot: u32) -> Option<Arc<PublishedHandle>> {
-        let snapshot = self.shards[Self::shard_index(slot)].load();
-        snapshot.get(&slot).cloned()
+    /// Load the shard containing one publication.
+    ///
+    /// The guard must remain alive while the caller validates and uses the
+    /// borrowed publication. This avoids cloning the publication's `Arc` on
+    /// every warm lookup while still keeping the immutable snapshot alive.
+    pub(crate) fn load(&self, slot: u32) -> arc_swap::Guard<Arc<PublishedHandleMap>> {
+        self.shards[Self::shard_index(slot)].load()
     }
 
     /// Update the snapshot while the canonical registry write lock is held.
@@ -443,7 +445,8 @@ impl HandleRegistry {
         T: ExcelHandleObject,
     {
         let parsed = self.parse_token(token)?;
-        if let Some(publication) = self.published.lookup(parsed.slot) {
+        let published_snapshot = self.published.load(parsed.slot);
+        if let Some(publication) = published_snapshot.get(&parsed.slot) {
             if publication.generation != parsed.generation {
                 return Err(XllError::StaleHandle);
             }
@@ -543,6 +546,7 @@ impl HandleRegistry {
                 lease: Some(lease),
             });
         }
+        drop(published_snapshot);
 
         self.lookup_handle_slow(parsed, leases)
     }
