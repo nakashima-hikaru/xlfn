@@ -21,6 +21,8 @@ inductive Event where
   | fallbackFastLookup (readerId : Nat)
   | beginSlowLookup (token : Token)
   | endSlowLookup
+  | beginSealLeaseAdmission
+  | finishSealLeaseAdmission
   | closeRegistry
   | finishClose
 deriving DecidableEq, Repr
@@ -92,6 +94,7 @@ inductive Step : State → Event → State → Prop where
       {readerId : Nat} {lookup : FastLookup}
       (hLookup : s.findFastLookup? readerId = some lookup)
       (hObserved : lookup.stage = .observed)
+      (hNotSealed : s.leaseAdmission ≠ .sealed)
       (hNotClosed : s.registry.closed = false) :
       Step s (.acquireTentativeLease readerId)
         { s with fastLookups := s.updateFastLookupStage readerId .tentative }
@@ -154,6 +157,7 @@ inductive Step : State → Event → State → Prop where
   | beginSlowLookup
       {s : State} {reg' : Registry.State}
       {token : Token}
+      (hNotSealed : s.leaseAdmission ≠ .sealed)
       (hReg : Registry.Step s.registry (.beginLookup token) reg') :
       Step s (.beginSlowLookup token)
         { s with registry := reg' }
@@ -165,8 +169,21 @@ inductive Step : State → Event → State → Prop where
       Step s .endSlowLookup
         { s with registry := reg' }
 
+  | beginSealLeaseAdmission
+      {s : State}
+      (hOpen : s.leaseAdmission = .open) :
+      Step s .beginSealLeaseAdmission
+        { s with leaseAdmission := .sealing }
+
+  | finishSealLeaseAdmission
+      {s : State}
+      (hSealing : s.leaseAdmission = .sealing) :
+      Step s .finishSealLeaseAdmission
+        { s with leaseAdmission := .sealed }
+
   | closeRegistry
       {s : State} {reg' : Registry.State}
+      (hSealed : s.leaseAdmission = .sealed)
       (hReg : Registry.Step s.registry .closeRegistry reg') :
       Step s .closeRegistry
         { s with

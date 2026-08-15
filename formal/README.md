@@ -554,24 +554,30 @@ fast-lookup architecture as a refinement layer over the canonical H1 `Registry`
 semantics:
 
 * **Model & Invariants** (`Model.lean`): Tracks `publications`, active
-  `snapshot` slot bindings, and active `fastLookups` (with three stages:
-  `.observed`, `.tentative`, and `.validated`) refining `registry`. Invariants preserve
+  `snapshot` slot bindings, active `fastLookups` (with three stages:
+  `.observed`, `.tentative`, and `.validated`), and `leaseAdmission` (with three
+  phases: `.open`, `.sealing`, and `.sealed`) refining `registry`. Invariants preserve
   publication uniqueness, snapshot uniqueness, fast lookup uniqueness,
   fast lookup provenance, canonical live root correspondence, lease accounting
-  (`validatedFastLookups.length ≤ activeLeases`), and closed registry emptiness.
+  (`validatedFastLookups.length ≤ activeLeases`), and closed registry emptiness
+  with sealed admission (`closed = true → leaseAdmission = .sealed`).
 * **Transitions & Soundness/Completeness** (`Transition.lean`, `Checker.lean`):
   Defines relational `Step` transitions:
   - `beginFastObservation`: Reader observes current snapshot and passes first `Live` check
     without acquiring a lease or modifying H1 registry (`.observed`).
-  - `acquireTentativeLease`: Reader acquires tentative implementation lease (`.tentative`).
-    If the registry was closed in between, admission is sealed and the reader instead exits
-    via `abandonObservation`.
+  - `acquireTentativeLease`: Reader acquires tentative implementation lease (`.tentative`),
+    permitted in `.open` or `.sealing` phases (`leaseAdmission ≠ .sealed`) provided the registry is not closed.
+  - `abandonObservation`: Reader exits observation without acquiring a lease.
   - `validateFastLookup`: Reader checks second `Live` state, linearizing to H1
     `beginLookup` and advancing to `.validated`.
   - `rejectTentativeFastLookup`: If removed or closing before second check, reader observes
     `Stale`/`Closing`, releases tentative lease, and exits without modifying H1.
   - `completeFastLookup` / `fallbackFastLookup`: Linearizes to H1 `endLookup`.
-  - `beginSlowLookup`, `endSlowLookup`, `insertFresh`, `insertReuse`, `removeReuse`, `removeRetire`, `closeRegistry`, `finishClose`.
+  - `beginSlowLookup`: Admitted when `leaseAdmission ≠ .sealed`, linearizing to H1 `beginLookup`.
+  - `endSlowLookup`, `insertFresh`, `insertReuse`, `removeReuse`, `removeRetire`.
+  - `beginSealLeaseAdmission` (`.open → .sealing`) and `finishSealLeaseAdmission` (`.sealing → .sealed`).
+  - `closeRegistry`: Requires `.sealed` admission phase before closing canonical roots.
+  - `finishClose`: Requires `tentativeFastLookups = [] ∧ validatedFastLookups = [] ∧ activeLeases = 0`.
   Executable `apply?` is proven sound and complete against `Step`.
 * **Invariant Preservation** (`Invariant.lean`): Proves `Step.invariant_preserved`
   and `Reachable.invariant_preserved` across all transitions.
@@ -579,20 +585,27 @@ semantics:
   - *Linearization Point*: Proves the second `Live` state check linearizes
     fast lookups to H1 `beginLookup`; if removed first, tentative lookup is rejected
     without modifying H1 state.
-  - *Lease Accounting & Close Gating*: Proves tentative and validated fast lookups
-    prevent `finishClose` until all leases are released (`tentative = [] ∧ validated = []`).
-    An `observed` reader is not waited on by close; once close returns and seals admission,
+  - *Admission Sealing & Lease Gating*: Proves independent lease acquisition
+    (both fast and slow) is strictly rejected in `.sealed` phase, and `closeRegistry`
+    requires `.sealed` admission. Tentative and validated fast lookups prevent
+    `finishClose` until all leases are released (`tentative = [] ∧ validated = []`).
+    An `observed` reader is not waited on by close; once close seals admission,
     its subsequent lease acquisition is rejected.
   - *Slot Reuse ABA Protection*: Proves `stale_lookup_cannot_follow_reused_generation`.
   - *Weak Upgrade Fallback*: Proves fallback drops lease and falls back cleanly
     without assuming unconditional fast success.
-* **Executable Replay Traces** (`Trace.lean`): Proves replay traces for fast
-  lookup success, observation abandonment on close, remove-before-second-check race
-  linearization, slot reuse ABA protection, and reachable Weak upgrade fallback through
-  `CloseCertified`.
+* **Executable Replay Traces** (`Trace.lean`): Proves replay traces for:
+  - Fast lookup success with orderly seal and close.
+  - Non-blocking admission race where an existing tentative reader completes after seal while a subsequent observed reader is rejected and abandons.
+  - Close racing observation before lease acquisition.
+  - Remove racing tentative lookup before second check.
+  - Slot reuse ABA protection.
+  - Reachable Weak upgrade fallback through `CloseCertified`.
 * **Rust Concrete Quiescence & Deterministic Race Regressions** (`crates/xlfn-core/src/handle/`):
-  - `HandleLeaseState::seal`: Atomic admission gate with in-flight reservation
-    counter ensuring no new independent lookup lease can be admitted after close.
+  - `HandleLeaseState::seal`: Uses a global closing flag plus a sealed bit
+    co-located with each stripe's active count. New independent acquisitions cannot
+    cross a sealed stripe, while clones of an already-admitted lease lineage remain
+    permitted until close observes stable quiescence.
   - `published_handle_close_after_first_live_rejects_admission_and_returns_closing`:
     Deterministic 2-thread race using `before_fast_lease_acquire_hook` verifying that
     a reader paused after first `Live` check encounters sealed admission on resume after

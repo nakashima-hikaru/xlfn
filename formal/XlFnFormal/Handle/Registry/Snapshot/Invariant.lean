@@ -699,7 +699,7 @@ theorem Step.invariant_preserved
           snapshot := s.removeSnapshot token.slot } := by
         intro hCl
         rw [hClosed] at hCl
-        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, _, _⟩
+        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, _, _, _⟩
         have hNotLive := hNoLiveSlots token.slot hInB
         simp only [hLiveSlot, SlotState.IsLive] at hNotLive
         cases hNotLive True.intro
@@ -800,7 +800,7 @@ theorem Step.invariant_preserved
           snapshot := s.removeSnapshot token.slot } := by
         intro hCl
         rw [hClosed] at hCl
-        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, _, _⟩
+        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, _, _, _⟩
         have hNotLive := hNoLiveSlots token.slot hInB
         simp only [hLiveSlot, SlotState.IsLive] at hNotLive
         cases hNotLive True.intro
@@ -836,9 +836,14 @@ theorem Step.invariant_preserved
         dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [validated_filter_append_observed (lookup := FastLookup.mk readerId token .observed) rfl]
         exact hLeaseAcc
-      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .observed] } := by
+        intro hCl
+        rcases hClosedNoLive hCl with ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
+        exact ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | acquireTentativeLease hLookup hObs hNotClosed =>
+  | acquireTentativeLease hLookup hObs hNotSealed hNotClosed =>
       rename_i readerId lookup
       have hFastUniq' := pairwise_updateFastLookupStage
         (id := readerId) (stage := FastLookupStage.tentative) hFastUniq
@@ -864,7 +869,12 @@ theorem Step.invariant_preserved
           hFastUniq hLookup hObs
         rw [hLen]
         exact hLeaseAcc
-      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with
+          fastLookups := s.updateFastLookupStage readerId .tentative } := by
+        intro hCl
+        rw [hCl] at hNotClosed
+        contradiction
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
   | abandonObservation hLookup hObs =>
       rename_i readerId lookup
@@ -887,7 +897,12 @@ theorem Step.invariant_preserved
         dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
         rw [validated_removeFastLookup_eq hFastUniq hLookup (by simp [hObs])]
         exact hLeaseAcc
-      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        intro hCl
+        rcases hClosedNoLive hCl with ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
+        exact ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
   | validateFastLookup hLookup hTentative hPub hLive hReg =>
       rename_i reg' readerId lookup origPub
@@ -962,6 +977,11 @@ theorem Step.invariant_preserved
         dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
         rw [validated_removeFastLookup_eq hFastUniq hLookup (by simp [hTentative])]
         exact hLeaseAcc
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        intro hCl
+        rcases hClosedNoLive hCl with ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
+        exact ⟨hNoLive, hSnapNil, hNoPubLive, hSealed⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
 
   | completeFastLookup hLookup hValidated hReg =>
@@ -1015,10 +1035,10 @@ theorem Step.invariant_preserved
           fastLookups := s.removeFastLookup readerId } := by
         intro hCl
         rw [hClosed] at hCl
-        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
+        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs, hSealed⟩
         have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
           noLiveSlots_of_eq_slots hSlots hNoLiveSlots
-        exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
+        exact ⟨hNoLive', hSnapNil, hNoLivePubs, hSealed⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
   | fallbackFastLookup hLookup hValidated hPub hNotLive hReg =>
@@ -1072,13 +1092,13 @@ theorem Step.invariant_preserved
           fastLookups := s.removeFastLookup readerId } := by
         intro hCl
         rw [hClosed] at hCl
-        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
+        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs, hSealed⟩
         have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
           noLiveSlots_of_eq_slots hSlots hNoLiveSlots
-        exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
+        exact ⟨hNoLive', hSnapNil, hNoLivePubs, hSealed⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | beginSlowLookup hReg =>
+  | beginSlowLookup hNotSealed hReg =>
       rename_i reg' token
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases + 1 ∧
@@ -1136,13 +1156,38 @@ theorem Step.invariant_preserved
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with registry := reg' } := by
         intro hCl
         rw [hClosed] at hCl
-        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
+        rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs, hSealed⟩
         have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
           noLiveSlots_of_eq_slots hSlots hNoLiveSlots
-        exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
+        exact ⟨hNoLive', hSnapNil, hNoLivePubs, hSealed⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | closeRegistry hReg =>
+  | beginSealLeaseAdmission hOpen =>
+      have hLivePub' : State.LivePublicationSound { s with leaseAdmission := .sealing } := hLivePub
+      have hLiveSnap' : State.LiveSnapshotSound { s with leaseAdmission := .sealing } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with leaseAdmission := .sealing } := hFastSound
+      have hLeaseAcc' : State.LeaseAccounting { s with leaseAdmission := .sealing } := hLeaseAcc
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with leaseAdmission := .sealing } := by
+        intro hCl
+        rcases hClosedNoLive hCl with ⟨_, _, _, hSealed⟩
+        rw [hOpen] at hSealed
+        contradiction
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
+
+  | finishSealLeaseAdmission hSealing =>
+      have hLivePub' : State.LivePublicationSound { s with leaseAdmission := .sealed } := hLivePub
+      have hLiveSnap' : State.LiveSnapshotSound { s with leaseAdmission := .sealed } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with leaseAdmission := .sealed } := hFastSound
+      have hLeaseAcc' : State.LeaseAccounting { s with leaseAdmission := .sealed } := hLeaseAcc
+      have hClosedNoLive' : State.ClosedNoLiveSlots { s with leaseAdmission := .sealed } := by
+        intro hCl
+        rcases hClosedNoLive hCl with ⟨hNoLive, hSnapNil, hNoPubLive, _⟩
+        exact ⟨hNoLive, hSnapNil, hNoPubLive, rfl⟩
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
+
+  | closeRegistry hSealed hReg =>
       rename_i reg'
       have hRegInv : reg'.slots = s.registry.slots.map closeSlot ∧
                      reg'.activeLeases = s.registry.activeLeases ∧
@@ -1209,7 +1254,7 @@ theorem Step.invariant_preserved
           snapshot := [] } := by
         intro _
         have hNoLive' := noLiveSlots_of_map_closeSlot hSlots
-        refine ⟨hNoLive', rfl, ?_⟩
+        refine ⟨hNoLive', rfl, ?_, hSealed⟩
         intro p hMem
         dsimp [State.updateClosingPublications] at hMem
         rcases List.mem_map.mp hMem with ⟨orig, hOrigMem, hOrigEq⟩

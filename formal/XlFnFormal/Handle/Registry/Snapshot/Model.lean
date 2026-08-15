@@ -36,18 +36,26 @@ structure FastLookup where
   stage : FastLookupStage
 deriving DecidableEq, Repr
 
+inductive LeaseAdmissionPhase where
+  | open
+  | sealing
+  | sealed
+deriving DecidableEq, Repr
+
 structure State where
   registry : Registry.State
   publications : List Publication
   snapshot : List SnapshotBinding
   fastLookups : List FastLookup
+  leaseAdmission : LeaseAdmissionPhase
 deriving DecidableEq, Repr
 
 def initialState (session : SessionId) : State :=
   { registry := Registry.initialState session
     publications := []
     snapshot := []
-    fastLookups := [] }
+    fastLookups := []
+    leaseAdmission := .open }
 
 def State.findPublication?
     (s : State) (slot : SlotId) (generation : Generation) : Option Publication :=
@@ -133,7 +141,8 @@ def State.ClosedNoLiveSlots (s : State) : Prop :=
   s.registry.closed = true →
     Registry.NoLiveSlots s.registry ∧
     s.snapshot = [] ∧
-    (∀ pub ∈ s.publications, pub.state ≠ .live)
+    (∀ pub ∈ s.publications, pub.state ≠ .live) ∧
+    s.leaseAdmission = .sealed
 
 def State.Invariant (s : State) : Prop :=
   s.PublicationIdentitiesUnique ∧

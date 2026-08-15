@@ -52,6 +52,13 @@ theorem closed_registry_has_no_live_snapshot
     s.snapshot = [] :=
   (hInv.2.2.2.2.2.2.2.2 hClosed).2.1
 
+theorem closed_registry_is_sealed
+    {s : State}
+    (hInv : s.Invariant)
+    (hClosed : s.registry.closed = true) :
+    s.leaseAdmission = .sealed :=
+  (hInv.2.2.2.2.2.2.2.2 hClosed).2.2.2
+
 theorem closed_registry_rejects_observation
     {s : State}
     (hInv : s.Invariant)
@@ -66,6 +73,34 @@ theorem closed_registry_rejects_observation
       rw [hSnapNil] at hSnapMem
       contradiction
 
+theorem sealed_admission_rejects_tentative_lease_acquisition
+    {s : State}
+    (hSealed : s.leaseAdmission = .sealed)
+    (readerId : Nat) :
+    ¬ ∃ s', Step s (.acquireTentativeLease readerId) s' := by
+  intro ⟨s', hStep⟩
+  cases hStep with
+  | acquireTentativeLease _ _ hNotSealed _ =>
+      exact hNotSealed hSealed
+
+theorem sealed_admission_rejects_slow_lookup
+    {s : State}
+    (hSealed : s.leaseAdmission = .sealed)
+    (token : Token) :
+    ¬ ∃ s', Step s (.beginSlowLookup token) s' := by
+  intro ⟨s', hStep⟩
+  cases hStep with
+  | beginSlowLookup hNotSealed _ =>
+      exact hNotSealed hSealed
+
+theorem close_registry_requires_sealed_admission
+    {s s' : State}
+    (hStep : Step s .closeRegistry s') :
+    s.leaseAdmission = .sealed := by
+  cases hStep with
+  | closeRegistry hSealed _ =>
+      exact hSealed
+
 theorem closed_registry_rejects_tentative_lease_acquisition
     {s : State}
     (hClosed : s.registry.closed = true)
@@ -73,7 +108,7 @@ theorem closed_registry_rejects_tentative_lease_acquisition
     ¬ ∃ s', Step s (.acquireTentativeLease readerId) s' := by
   intro ⟨s', hStep⟩
   cases hStep with
-  | acquireTentativeLease _ _ hNotClosed =>
+  | acquireTentativeLease _ _ _ hNotClosed =>
       rw [hClosed] at hNotClosed
       contradiction
 
@@ -169,13 +204,14 @@ theorem close_certified_when_finished
     {session : SessionId} {s s' : State}
     (hReach : Reachable (initialState session) s)
     (hStep : Step s .finishClose s') :
-    Registry.CloseCertified s'.registry ∧ s'.tentativeFastLookups = [] ∧ s'.validatedFastLookups = [] := by
+    Registry.CloseCertified s'.registry ∧ s'.tentativeFastLookups = [] ∧ s'.validatedFastLookups = [] ∧ s'.leaseAdmission = .sealed := by
   cases hStep with
   | finishClose hNoTentative hNoValidated hReg =>
       have hInv := Reachable.invariant_preserved (initialInvariant session) hReach
       cases hReg with
       | finishClose hClosed hNoLeases =>
           have hNoLive := (hInv.2.2.2.2.2.2.2.2 hClosed).1
-          exact ⟨⟨hClosed, hNoLeases, hNoLive⟩, hNoTentative, hNoValidated⟩
+          have hSealed := (hInv.2.2.2.2.2.2.2.2 hClosed).2.2.2
+          exact ⟨⟨hClosed, hNoLeases, hNoLive⟩, hNoTentative, hNoValidated, hSealed⟩
 
 end XlFnFormal.Handle.Registry.Snapshot
