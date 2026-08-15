@@ -90,9 +90,6 @@ bench-handle-prepare:
 bench-handle-lookup:
     cargo bench --package xlfn-core --bench handle_lookup --features bench-internals --locked
 
-bench-weak-upgrade:
-    cargo bench --package xlfn-core --bench weak_upgrade --features bench-internals --locked
-
 bench-handle-formula:
     cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked
 
