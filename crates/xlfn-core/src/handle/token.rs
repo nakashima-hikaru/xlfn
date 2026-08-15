@@ -63,7 +63,6 @@ struct VerifiedTokenCacheEntry {
     registry_address: usize,
     session: u64,
     secret: [u8; 32],
-    hash: u64,
     token: [u8; HANDLE_TOKEN_LENGTH],
     parsed: ParsedToken,
 }
@@ -75,16 +74,17 @@ thread_local! {
     ]> = const { RefCell::new([None; VERIFIED_TOKEN_CACHE_SIZE]) };
 }
 
-fn token_hash(bytes: &[u8]) -> u64 {
-    // This is only a direct-mapped cache index. The complete fixed-width token
-    // and registry secret are compared before a hit is accepted, so collisions
-    // cannot bypass token authentication.
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
+#[inline]
+fn verified_token_cache_index(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() != HANDLE_TOKEN_LENGTH {
+        return None;
     }
-    hash
+
+    // The final token byte is one hex nibble of the authenticated tag. It is
+    // used only to choose a direct-mapped cache bucket; the complete token,
+    // registry identity, and secret are still checked before accepting a hit.
+    let nibble = hex_nibble(bytes[HANDLE_TOKEN_LENGTH - 1])?;
+    Some(usize::from(nibble) & (VERIFIED_TOKEN_CACHE_SIZE - 1))
 }
 
 pub(crate) fn verified_token_cache_lookup(
@@ -94,18 +94,13 @@ pub(crate) fn verified_token_cache_lookup(
     token: &str,
 ) -> Option<ParsedToken> {
     let bytes = token.as_bytes();
-    if bytes.len() != HANDLE_TOKEN_LENGTH {
-        return None;
-    }
-    let hash = token_hash(bytes);
-    let index = (hash as usize) & (VERIFIED_TOKEN_CACHE_SIZE - 1);
+    let index = verified_token_cache_index(bytes)?;
     VERIFIED_TOKEN_CACHE.with(|cache| {
         let entry = cache.borrow()[index];
         entry.and_then(|entry| {
             (entry.registry_address == registry_address
                 && entry.session == session
                 && entry.secret == *secret
-                && entry.hash == hash
                 && entry.token.as_slice() == bytes)
                 .then_some(entry.parsed)
         })
@@ -120,11 +115,9 @@ pub(crate) fn verified_token_cache_store(
     parsed: ParsedToken,
 ) {
     let bytes = token.as_bytes();
-    if bytes.len() != HANDLE_TOKEN_LENGTH {
+    let Some(index) = verified_token_cache_index(bytes) else {
         return;
-    }
-    let hash = token_hash(bytes);
-    let index = (hash as usize) & (VERIFIED_TOKEN_CACHE_SIZE - 1);
+    };
     let mut token_bytes = [0_u8; HANDLE_TOKEN_LENGTH];
     token_bytes.copy_from_slice(bytes);
     VERIFIED_TOKEN_CACHE.with(|cache| {
@@ -132,7 +125,6 @@ pub(crate) fn verified_token_cache_store(
             registry_address,
             session,
             secret: *secret,
-            hash,
             token: token_bytes,
             parsed,
         });

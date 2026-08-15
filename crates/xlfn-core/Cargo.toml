@@ -19,8 +19,6 @@ async = [
     "dep:futures-util",
 ]
 bench-internals = []
-# Temporary opt-in for the short-lived handle-lookup decomposition.
-handle-lookup-diagnostics = ["bench-internals"]
 
 [lib]
 bench = false
@@ -49,11 +47,6 @@ required-features = ["bench-internals"]
 name = "handle_lookup"
 harness = false
 required-features = ["bench-internals"]
-
-[[bench]]
-name = "handle_lookup_diagnostics"
-harness = false
-required-features = ["bench-internals", "handle-lookup-diagnostics"]
 
 [[bench]]
 name = "formula_fingerprint"
