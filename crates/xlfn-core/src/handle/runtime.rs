@@ -391,17 +391,19 @@ impl HandleRuntime {
         // A provisional snapshot lets readers that raced with the publication
         // fall back to the canonical single-flight path. Make it Live only
         // after the initialization marker is removed.
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let token_wire = self.refinement_token(&publication.token);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let mut linearization = self.refinement.linearize();
         self.published.insert(key, Arc::clone(publication));
         topics.initializing.remove(&key);
         publication
             .state
             .store(PublishedTopicState::Live as u8, Ordering::Release);
         #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.refinement.commit_and_activate(
-            &key,
-            initialization.refinement_id,
-            self.refinement_token(&publication.token),
-        );
+        linearization.commit_and_activate(&key, initialization.refinement_id, token_wire);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        linearization.finish_initializer(initialization.refinement_id);
 
         drop(topics);
         initialization.complete();
@@ -420,9 +422,9 @@ impl HandleRuntime {
     {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
+        let _prepare = self.prepares.enter();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let _refinement_prepare = self.refinement.prepare_guard();
-        let _prepare = self.prepares.enter();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.begin_prepare();
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -430,45 +432,66 @@ impl HandleRuntime {
 
         {
             let published = self.published.load(&key);
-            if let Some(publication) = published.get(&key)
-                && publication.state() == PublishedTopicState::Live
-            {
+            if let Some(publication) = published.get(&key) {
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
-                let reader_id = self.refinement.begin_warm_read(&key);
-                let observed = observe(&publication.rtd_key, &publication.token);
-                #[allow(
-                    clippy::question_mark,
-                    reason = "the refinement trace must classify the failed warm read before returning"
-                )]
-                if let Err(error) = observed {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    match publication.state() {
-                        PublishedTopicState::Live => self.refinement.fail_warm_read(reader_id),
-                        PublishedTopicState::Stale | PublishedTopicState::Closing => {
-                            self.refinement.abandon_warm_read(reader_id)
-                        }
-                        PublishedTopicState::Provisional => {}
-                    }
-                    return Err(error);
-                }
-
-                return match publication.state() {
-                    PublishedTopicState::Live => {
-                        #[cfg(any(test, feature = "handle-refinement-trace"))]
-                        self.refinement.finish_warm_read(reader_id);
-                        Ok((publication.token.clone(), false))
-                    }
-                    PublishedTopicState::Closing => {
-                        #[cfg(any(test, feature = "handle-refinement-trace"))]
-                        self.refinement.abandon_warm_read(reader_id);
-                        Err(XllError::Closing)
-                    }
-                    PublishedTopicState::Provisional | PublishedTopicState::Stale => {
-                        #[cfg(any(test, feature = "handle-refinement-trace"))]
-                        self.refinement.abandon_warm_read(reader_id);
-                        Err(XllError::StaleHandle)
-                    }
+                let warm_reader = {
+                    let mut linearization = self.refinement.linearize();
+                    (publication.state() == PublishedTopicState::Live)
+                        .then(|| linearization.begin_warm_read(&key))
                 };
+                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                let warm_reader = (publication.state() == PublishedTopicState::Live).then_some(());
+
+                if let Some(reader_id) = warm_reader {
+                    #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                    let _ = reader_id;
+                    let observed = observe(&publication.rtd_key, &publication.token);
+                    #[allow(
+                        clippy::question_mark,
+                        reason = "the refinement trace must classify the failed warm read before returning"
+                    )]
+                    if let Err(error) = observed {
+                        #[cfg(any(test, feature = "handle-refinement-trace"))]
+                        let mut linearization = self.refinement.linearize();
+                        #[cfg(any(test, feature = "handle-refinement-trace"))]
+                        match publication.state() {
+                            PublishedTopicState::Live => linearization.fail_warm_read(reader_id),
+                            PublishedTopicState::Stale | PublishedTopicState::Closing => {
+                                linearization.abandon_warm_read(reader_id)
+                            }
+                            PublishedTopicState::Provisional => {}
+                        }
+                        return Err(error);
+                    }
+
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let result = {
+                        let mut linearization = self.refinement.linearize();
+                        match publication.state() {
+                            PublishedTopicState::Live => {
+                                linearization.finish_warm_read(reader_id);
+                                Ok((publication.token.clone(), false))
+                            }
+                            PublishedTopicState::Closing => {
+                                linearization.abandon_warm_read(reader_id);
+                                Err(XllError::Closing)
+                            }
+                            PublishedTopicState::Provisional | PublishedTopicState::Stale => {
+                                linearization.abandon_warm_read(reader_id);
+                                Err(XllError::StaleHandle)
+                            }
+                        }
+                    };
+                    #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                    let result = match publication.state() {
+                        PublishedTopicState::Live => Ok((publication.token.clone(), false)),
+                        PublishedTopicState::Closing => Err(XllError::Closing),
+                        PublishedTopicState::Provisional | PublishedTopicState::Stale => {
+                            Err(XllError::StaleHandle)
+                        }
+                    };
+                    return result;
+                }
             }
         }
 
@@ -579,6 +602,8 @@ impl HandleRuntime {
             |(topics, key, owned)| {
                 {
                     let mut topics = topics.write();
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let mut linearization = refinement.linearize();
                     if topics
                         .initializing
                         .get(&key)
@@ -587,7 +612,7 @@ impl HandleRuntime {
                         topics.initializing.remove(&key);
                     }
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    refinement.finish_initializer(owned.refinement_id);
+                    linearization.finish_initializer(owned.refinement_id);
                 }
                 owned.complete();
             },
@@ -632,6 +657,10 @@ impl HandleRuntime {
                 let removed = if let Some(topic) =
                     topics.by_key.get(&key).filter(|topic| topic.token == token)
                 {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let token_wire = self.refinement_token(token);
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let mut linearization = self.refinement.linearize();
                     topic
                         .publication
                         .state
@@ -648,11 +677,7 @@ impl HandleRuntime {
                         topics.by_excel_id.remove(&owner);
                     }
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    self.refinement.withdraw_and_invalidate(
-                        &key,
-                        refinement_id,
-                        self.refinement_token(token),
-                    );
+                    linearization.withdraw_and_invalidate(&key, refinement_id, token_wire);
                     true
                 } else {
                     false
@@ -740,9 +765,6 @@ impl HandleRuntime {
         self.commit_publication(key, generation, &initialization, &publication)?;
         let _ = scopeguard::ScopeGuard::into_inner(unpublished);
         let _ = scopeguard::ScopeGuard::into_inner(initializing);
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.refinement
-            .finish_initializer(initialization.refinement_id);
         Ok((token, true))
     }
 
@@ -980,6 +1002,8 @@ impl HandleRuntime {
                     .get(&key)
                     .map(|initialization| initialization.refinement_id);
             }
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let mut linearization = self.refinement.linearize();
             publication
                 .state
                 .store(PublishedTopicState::Stale as u8, Ordering::Release);
@@ -988,7 +1012,7 @@ impl HandleRuntime {
             topic.map(|topic| {
                 topics.by_rtd_key.remove(topic.rtd_key.as_ref());
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
-                self.refinement.disconnect(&key, owner);
+                linearization.disconnect(&key, owner);
                 (key, topic.token, was_provisional)
             })
         };
@@ -1044,6 +1068,8 @@ impl HandleRuntime {
     pub fn close(&self) -> XllResult<()> {
         let initializations = {
             let mut topics = self.topics.write();
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let mut linearization = self.refinement.linearize();
 
             topics.closed = true;
             topics.generation = topics.generation.wrapping_add(1);
@@ -1064,7 +1090,7 @@ impl HandleRuntime {
                 .map(|(_, value)| value)
                 .collect::<Vec<_>>();
             #[cfg(any(test, feature = "handle-refinement-trace"))]
-            self.refinement.seal_for_close();
+            linearization.seal_for_close();
             initializations
         };
 
@@ -1107,6 +1133,8 @@ impl HandleRuntime {
         let mut refinement_topics = Vec::new();
         let tokens = {
             let mut topics = self.topics.write();
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let mut linearization = self.refinement.linearize();
             let keys = topics
                 .by_key
                 .iter()
@@ -1148,7 +1176,7 @@ impl HandleRuntime {
                 .collect::<Vec<_>>();
             #[cfg(any(test, feature = "handle-refinement-trace"))]
             if !tokens.is_empty() {
-                self.refinement.detach_generation(server_generation);
+                linearization.detach_generation(server_generation);
             }
             tokens
         };

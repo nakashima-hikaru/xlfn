@@ -4,7 +4,7 @@
 )]
 
 use super::{FormulaTopicKey, HandleTopicKey, HandleTopicOwner};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -186,6 +186,8 @@ struct Machine {
     next_reader_id: u64,
     returned_success: bool,
     initializers: HashMap<TopicKeyWire, u64>,
+    #[cfg(test)]
+    before_seal_hook: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 impl Machine {
@@ -198,6 +200,8 @@ impl Machine {
             next_reader_id: 1,
             returned_success: false,
             initializers: HashMap::new(),
+            #[cfg(test)]
+            before_seal_hook: None,
         }
     }
 
@@ -220,6 +224,98 @@ impl Drop for PrepareGuard<'_> {
     }
 }
 
+/// Trace-only serialization domain for publication state and lifecycle events.
+///
+/// Production builds do not construct this guard. Test and trace builds use it
+/// to make an atomic publication state read/store and its corresponding event
+/// one observable linearization point.
+pub(crate) struct Linearization<'a> {
+    machine: MutexGuard<'a, Machine>,
+}
+
+impl Linearization<'_> {
+    pub(crate) fn finish_initializer(&mut self, runtime_id: u64) {
+        let key = self
+            .machine
+            .initializers
+            .iter()
+            .find_map(|(key, id)| (*id == runtime_id).then_some(key.clone()));
+        self.machine.initializers.retain(|_, id| *id != runtime_id);
+        if let Some(key) = key {
+            self.machine
+                .push(Event::FinishInitializer { key, runtime_id });
+        }
+    }
+
+    pub(crate) fn commit_and_activate(
+        &mut self,
+        key: &HandleTopicKey,
+        runtime_id: u64,
+        token: TokenWire,
+    ) {
+        self.machine.push(Event::CommitAndActivate {
+            key: topic_key(key),
+            runtime_id,
+            token,
+        });
+    }
+
+    pub(crate) fn begin_warm_read(&mut self, key: &HandleTopicKey) -> u64 {
+        let reader_id = self.machine.next_reader_id;
+        self.machine.next_reader_id = reader_id.saturating_add(1);
+        self.machine.push(Event::BeginWarmRead {
+            reader_id,
+            key: topic_key(key),
+        });
+        reader_id
+    }
+
+    pub(crate) fn finish_warm_read(&mut self, reader_id: u64) {
+        self.machine.push(Event::FinishWarmRead { reader_id });
+    }
+
+    pub(crate) fn fail_warm_read(&mut self, reader_id: u64) {
+        self.machine.push(Event::FailWarmRead { reader_id });
+    }
+
+    pub(crate) fn abandon_warm_read(&mut self, reader_id: u64) {
+        self.machine.push(Event::AbandonWarmRead { reader_id });
+    }
+
+    pub(crate) fn withdraw_and_invalidate(
+        &mut self,
+        key: &HandleTopicKey,
+        runtime_id: u64,
+        token: TokenWire,
+    ) {
+        self.machine.push(Event::WithdrawAndInvalidate {
+            key: topic_key(key),
+            runtime_id,
+            token,
+        });
+    }
+
+    pub(crate) fn disconnect(&mut self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+        self.machine.push(Event::Disconnect {
+            key: topic_key(key),
+            owner: owner_wire(owner),
+        });
+    }
+
+    pub(crate) fn detach_generation(&mut self, generation: u64) {
+        self.machine.push(Event::DetachGeneration { generation });
+    }
+
+    pub(crate) fn seal_for_close(&mut self) {
+        #[cfg(test)]
+        if let Some((entered, release)) = self.machine.before_seal_hook.take() {
+            entered.send(()).expect("H4 seal test hook receiver");
+            release.recv().expect("H4 seal test hook release");
+        }
+        self.machine.push(Event::SealForClose);
+    }
+}
+
 pub(crate) struct HandleRefinementTrace {
     inner: Mutex<Machine>,
 }
@@ -233,6 +329,21 @@ impl HandleRefinementTrace {
 
     pub(crate) fn prepare_guard(&self) -> PrepareGuard<'_> {
         PrepareGuard { trace: self }
+    }
+
+    pub(crate) fn linearize(&self) -> Linearization<'_> {
+        Linearization {
+            machine: self.inner.lock(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_seal_hook(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.inner.lock().before_seal_hook = Some((entered, release));
     }
 
     pub(crate) fn begin_prepare(&self) {
@@ -258,15 +369,7 @@ impl HandleRefinementTrace {
     }
 
     pub(crate) fn finish_initializer(&self, runtime_id: u64) {
-        let mut machine = self.inner.lock();
-        let key = machine
-            .initializers
-            .iter()
-            .find_map(|(key, id)| (*id == runtime_id).then_some(key.clone()));
-        machine.initializers.retain(|_, id| *id != runtime_id);
-        if let Some(key) = key {
-            machine.push(Event::FinishInitializer { key, runtime_id });
-        }
+        self.linearize().finish_initializer(runtime_id);
     }
 
     pub(crate) fn insert_pending_fresh(&self, key: &HandleTopicKey, runtime_id: u64) {
@@ -312,11 +415,7 @@ impl HandleRefinementTrace {
         runtime_id: u64,
         token: TokenWire,
     ) {
-        self.inner.lock().push(Event::CommitAndActivate {
-            key: topic_key(key),
-            runtime_id,
-            token,
-        });
+        self.linearize().commit_and_activate(key, runtime_id, token);
     }
 
     pub(crate) fn withdraw_and_invalidate(
@@ -355,26 +454,19 @@ impl HandleRefinementTrace {
     }
 
     pub(crate) fn begin_warm_read(&self, key: &HandleTopicKey) -> u64 {
-        let mut machine = self.inner.lock();
-        let reader_id = machine.next_reader_id;
-        machine.next_reader_id = reader_id.saturating_add(1);
-        machine.push(Event::BeginWarmRead {
-            reader_id,
-            key: topic_key(key),
-        });
-        reader_id
+        self.linearize().begin_warm_read(key)
     }
 
     pub(crate) fn finish_warm_read(&self, reader_id: u64) {
-        self.inner.lock().push(Event::FinishWarmRead { reader_id });
+        self.linearize().finish_warm_read(reader_id);
     }
 
     pub(crate) fn fail_warm_read(&self, reader_id: u64) {
-        self.inner.lock().push(Event::FailWarmRead { reader_id });
+        self.linearize().fail_warm_read(reader_id);
     }
 
     pub(crate) fn abandon_warm_read(&self, reader_id: u64) {
-        self.inner.lock().push(Event::AbandonWarmRead { reader_id });
+        self.linearize().abandon_warm_read(reader_id);
     }
 
     pub(crate) fn claim_server(&self, key: &HandleTopicKey, generation: u64) {
@@ -413,16 +505,11 @@ impl HandleRefinementTrace {
     }
 
     pub(crate) fn disconnect(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
-        self.inner.lock().push(Event::Disconnect {
-            key: topic_key(key),
-            owner: owner_wire(owner),
-        });
+        self.linearize().disconnect(key, owner);
     }
 
     pub(crate) fn detach_generation(&self, generation: u64) {
-        self.inner
-            .lock()
-            .push(Event::DetachGeneration { generation });
+        self.linearize().detach_generation(generation);
     }
 
     pub(crate) fn drain_pending(&self, token: TokenWire, runtime_id: u64, reusable: bool) {
@@ -451,7 +538,7 @@ impl HandleRefinementTrace {
     }
 
     pub(crate) fn seal_for_close(&self) {
-        self.inner.lock().push(Event::SealForClose);
+        self.linearize().seal_for_close();
     }
 
     pub(crate) fn close_registry(&self) {

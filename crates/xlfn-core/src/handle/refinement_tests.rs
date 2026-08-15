@@ -151,22 +151,35 @@ fn warm_close_trace() {
 
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let (observed_tx, observed_rx) = mpsc::channel();
     let worker_runtime = Arc::clone(&runtime);
     let worker = thread::spawn(move || {
         worker_runtime.prepare_observed(key, create_value, |_, _| {
             entered_tx.send(()).expect("warm reader entered");
             release_rx.recv().expect("warm reader release");
+            observed_tx.send(()).expect("warm reader observed");
             Ok(())
         })
     });
     entered_rx.recv().expect("warm reader did not enter");
 
+    let (seal_entered_tx, seal_entered_rx) = mpsc::channel();
+    let (seal_release_tx, seal_release_rx) = mpsc::channel();
+    runtime
+        .refinement
+        .set_before_seal_hook(seal_entered_tx, seal_release_rx);
     let close_runtime = Arc::clone(&runtime);
     let close_thread = thread::spawn(move || close_runtime.close());
-    while !runtime.topics.read().closed {
-        thread::yield_now();
-    }
+    seal_entered_rx
+        .recv()
+        .expect("close reached the Closing/SealForClose boundary");
     release_tx.send(()).expect("release warm reader");
+    observed_rx
+        .recv()
+        .expect("warm reader returned from observation");
+    seal_release_tx
+        .send(())
+        .expect("release close seal test hook");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
         Err(XllError::Closing)
