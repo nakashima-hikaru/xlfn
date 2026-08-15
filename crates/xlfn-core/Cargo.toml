@@ -18,7 +18,7 @@ async = [
     "dep:async-task",
     "dep:futures-util",
 ]
-bench-internals = []
+bench-internals = ["xlfn-sys/abi-probe"]
 
 [lib]
 bench = false
@@ -50,6 +50,11 @@ required-features = ["bench-internals"]
 
 [[bench]]
 name = "formula_fingerprint"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "formula_caller"
 harness = false
 required-features = ["bench-internals"]
 

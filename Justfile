@@ -84,6 +84,9 @@ bench-sync:
 bench-fingerprint:
     cargo bench --package xlfn-core --bench formula_fingerprint --features bench-internals --locked
 
+bench-formula-caller:
+    cargo bench --package xlfn-core --bench formula_caller --features bench-internals --locked
+
 bench-handle-prepare:
     cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
 

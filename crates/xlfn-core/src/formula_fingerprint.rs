@@ -31,6 +31,25 @@ pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<[u8; 
     }
 }
 
+#[cfg(feature = "bench-internals")]
+pub(crate) unsafe fn benchmark_scan_only(arguments: &[*mut XLOPER12]) -> XllResult<bool> {
+    arguments_require_buffer(arguments)
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) unsafe fn benchmark_encode_no_hash(
+    arguments: &[*mut XLOPER12],
+) -> XllResult<SmallVec<[u8; HASH_BUFFER_BYTES]>> {
+    let mut encoder = BenchmarkEncodingSink::new();
+    encode_arguments(&mut encoder, arguments)?;
+    Ok(encoder.into_bytes())
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_hash_preencoded(encoded: &[u8]) -> [u8; 32] {
+    *blake3::hash(encoded).as_bytes()
+}
+
 fn encode_arguments<S: FingerprintSink>(
     encoder: &mut S,
     arguments: &[*mut XLOPER12],
@@ -199,6 +218,54 @@ trait FingerprintSink: Sized {
                 },
             )),
         }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+struct BenchmarkEncodingSink {
+    bytes: usize,
+    encoded: SmallVec<[u8; HASH_BUFFER_BYTES]>,
+}
+
+#[cfg(feature = "bench-internals")]
+impl BenchmarkEncodingSink {
+    fn new() -> Self {
+        Self {
+            bytes: 0,
+            encoded: SmallVec::new(),
+        }
+    }
+
+    fn into_bytes(self) -> SmallVec<[u8; HASH_BUFFER_BYTES]> {
+        self.encoded
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+impl FingerprintSink for BenchmarkEncodingSink {
+    fn write(&mut self, bytes: &[u8]) -> XllResult<()> {
+        let actual = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(XllError::Domain {
+                code: crate::DomainErrorCode::Overflow,
+            })?;
+        if actual > MAX_FINGERPRINT_BYTES {
+            return Err(XllError::input(
+                "formula_fingerprint",
+                InputError::TooLarge {
+                    limit: MAX_FINGERPRINT_BYTES,
+                    actual,
+                },
+            ));
+        }
+        self.bytes = actual;
+        self.encoded.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        unreachable!("benchmark encoding sink is consumed as bytes")
     }
 }
 
