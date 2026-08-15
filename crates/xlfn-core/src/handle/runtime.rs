@@ -434,17 +434,19 @@ impl HandleRuntime {
             let published = self.published.load(&key);
             if let Some(publication) = published.get(&key) {
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
-                let warm_reader = {
+                let warm_reader_id = {
                     let mut linearization = self.refinement.linearize();
                     (publication.state() == PublishedTopicState::Live)
                         .then(|| linearization.begin_warm_read(&key))
                 };
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                let warm_reader = warm_reader_id.is_some();
                 #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                let warm_reader = (publication.state() == PublishedTopicState::Live).then_some(());
+                let warm_reader = publication.state() == PublishedTopicState::Live;
 
-                if let Some(reader_id) = warm_reader {
-                    #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                    let _ = reader_id;
+                if warm_reader {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let reader_id = warm_reader_id.expect("warm reader existence was checked");
                     let observed = observe(&publication.rtd_key, &publication.token);
                     #[allow(
                         clippy::question_mark,
