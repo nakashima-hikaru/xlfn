@@ -5,8 +5,8 @@ use std::time::Duration;
 const HANDLE_LEASE_STRIPE_COUNT: usize = 32;
 const HANDLE_LEASE_STRIPE_MASK: usize = HANDLE_LEASE_STRIPE_COUNT - 1;
 const HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
-const HANDLE_LEASE_ADMISSION_SEALED: usize = 1usize << (usize::BITS - 1);
-const HANDLE_LEASE_ADMISSION_COUNT_MASK: usize = !HANDLE_LEASE_ADMISSION_SEALED;
+const HANDLE_LEASE_SEALED: usize = 1usize << (usize::BITS - 1);
+const HANDLE_LEASE_COUNT_MASK: usize = !HANDLE_LEASE_SEALED;
 const HANDLE_PREPARE_STRIPE_COUNT: usize = 32;
 const HANDLE_PREPARE_STRIPE_MASK: usize = HANDLE_PREPARE_STRIPE_COUNT - 1;
 const HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
@@ -48,26 +48,77 @@ fn current_handle_prepare_stripe() -> usize {
 #[derive(Debug)]
 #[repr(C, align(128))]
 struct HandleLeaseStripe {
-    active: AtomicUsize,
+    state: AtomicUsize,
     cleanup_failure: Mutex<Option<XllError>>,
 }
 
 impl HandleLeaseStripe {
     fn new() -> Self {
         Self {
-            active: AtomicUsize::new(0),
+            state: AtomicUsize::new(0),
             cleanup_failure: Mutex::new(None),
         }
     }
 
     fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & HANDLE_LEASE_COUNT_MASK
+    }
+
+    fn try_acquire(&self) -> bool {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            if current & HANDLE_LEASE_SEALED != 0 {
+                return false;
+            }
+
+            let count = current & HANDLE_LEASE_COUNT_MASK;
+            let next_count = count
+                .checked_add(1)
+                .filter(|next| *next <= HANDLE_LEASE_COUNT_MASK)
+                .expect("handle lease count cannot overflow");
+            let next = (current & HANDLE_LEASE_SEALED) | next_count;
+
+            match self.state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn clone_existing(&self) {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let count = current & HANDLE_LEASE_COUNT_MASK;
+                let next_count = count
+                    .checked_add(1)
+                    .filter(|next| *next <= HANDLE_LEASE_COUNT_MASK)?;
+                Some((current & HANDLE_LEASE_SEALED) | next_count)
+            })
+            .expect("handle lease count cannot overflow");
+    }
+
+    fn release(&self) {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let count = current & HANDLE_LEASE_COUNT_MASK;
+                (count > 0).then_some((current & HANDLE_LEASE_SEALED) | (count - 1))
+            })
+            .expect("handle lease count remains balanced");
+    }
+
+    fn seal(&self) {
+        self.state.fetch_or(HANDLE_LEASE_SEALED, Ordering::AcqRel);
     }
 }
 
 pub(crate) struct HandleLeaseState {
     stripes: [Arc<HandleLeaseStripe>; HANDLE_LEASE_STRIPE_COUNT],
-    admission: AtomicUsize,
+    closing: AtomicBool,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
@@ -80,7 +131,7 @@ impl HandleLeaseState {
     pub(crate) fn new() -> Self {
         Self {
             stripes: std::array::from_fn(|_| Arc::new(HandleLeaseStripe::new())),
-            admission: AtomicUsize::new(0),
+            closing: AtomicBool::new(false),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
@@ -103,15 +154,22 @@ impl HandleLeaseState {
     }
 
     pub(crate) fn acquire(self: &Arc<Self>) -> Option<HandleLease> {
-        self.reserve_acquisition()?;
+        if self.closing.load(Ordering::Acquire) {
+            return None;
+        }
+
         let stripe = Arc::clone(&self.stripes[current_handle_lease_stripe()]);
-        stripe
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_add(1)
-            })
-            .expect("handle lease count cannot overflow");
-        self.release_acquisition_reservation();
+        if !stripe.try_acquire() {
+            return None;
+        }
+
+        // The first gate avoids work after close starts. The second gate closes
+        // the race where the selected stripe is acquired concurrently with
+        // close; the close path will drain the stripe count before returning.
+        if self.closing.load(Ordering::Acquire) {
+            stripe.release();
+            return None;
+        }
 
         #[cfg(test)]
         if let Some(hook) = self.after_acquire_hook.lock().take() {
@@ -133,42 +191,13 @@ impl HandleLeaseState {
         })
     }
 
-    fn reserve_acquisition(&self) -> Option<()> {
-        loop {
-            let current = self.admission.load(Ordering::Acquire);
-            if current & HANDLE_LEASE_ADMISSION_SEALED != 0 {
-                return None;
-            }
-            let count = current & HANDLE_LEASE_ADMISSION_COUNT_MASK;
-            let next_count = count
-                .checked_add(1)
-                .expect("handle lease acquisition reservation cannot overflow");
-            let next = next_count | (current & HANDLE_LEASE_ADMISSION_SEALED);
-            if self
-                .admission
-                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(());
-            }
-        }
-    }
-
-    fn release_acquisition_reservation(&self) {
-        self.admission
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                let count = current & HANDLE_LEASE_ADMISSION_COUNT_MASK;
-                debug_assert!(count > 0);
-                Some((current & HANDLE_LEASE_ADMISSION_SEALED) | (count - 1))
-            })
-            .expect("handle lease acquisition reservation remains balanced");
-    }
-
     pub(crate) fn seal(&self) {
-        self.admission
-            .fetch_or(HANDLE_LEASE_ADMISSION_SEALED, Ordering::AcqRel);
-        while self.admission.load(Ordering::Acquire) & HANDLE_LEASE_ADMISSION_COUNT_MASK != 0 {
-            std::thread::sleep(HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL);
+        // Close admission without waiting. Canonical values may contain nested
+        // handles, so active lease draining must happen only after those values
+        // have been dropped by the registry close path.
+        self.closing.store(true, Ordering::Release);
+        for stripe in &self.stripes {
+            stripe.seal();
         }
     }
 
@@ -214,12 +243,10 @@ impl HandleLease {
 
 impl Clone for HandleLease {
     fn clone(&self) -> Self {
-        self.stripe
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_add(1)
-            })
-            .expect("handle lease count cannot overflow");
+        // Cloning an already-admitted lease extends that lease lineage. It is
+        // intentionally allowed after seal; close waits for the resulting
+        // count to drain before returning.
+        self.stripe.clone_existing();
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let ghost = self.ghost.clone();
@@ -239,12 +266,7 @@ impl Clone for HandleLease {
 
 impl Drop for HandleLease {
     fn drop(&mut self) {
-        self.stripe
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_sub(1)
-            })
-            .expect("handle lease count remains balanced");
+        self.stripe.release();
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.ghost.as_ref() {

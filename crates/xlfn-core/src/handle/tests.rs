@@ -603,6 +603,54 @@ fn published_handle_remove_before_weak_upgrade_falls_back_to_stale() {
 }
 
 #[test]
+fn published_handle_close_after_first_live_rejects_admission_and_returns_closing() {
+    use std::sync::mpsc;
+
+    struct TestObj;
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = Arc::new(HandleRegistry::new(4));
+    let leases = Arc::new(HandleLeaseState::new());
+
+    let token = insert_production(&registry, Arc::new(TestObj)).unwrap();
+    let (first_live_tx, first_live_rx) = mpsc::sync_channel(0);
+    let release_reader = Arc::new(AtomicBool::new(false));
+    let release_reader_hook = Arc::clone(&release_reader);
+
+    *registry.before_fast_lease_acquire_hook.lock() = Some(Arc::new(move || {
+        first_live_tx
+            .send(())
+            .expect("reader must reach the pre-acquire gate");
+        while !release_reader_hook.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }));
+
+    let reader_registry = Arc::clone(&registry);
+    let reader_leases = Arc::clone(&leases);
+    let reader_token = token.clone();
+    let reader = std::thread::spawn(move || {
+        reader_registry.lookup_handle::<TestObj>(&reader_token, &reader_leases)
+    });
+
+    // The reader has passed its first Live check but has not acquired a lease yet.
+    first_live_rx
+        .recv()
+        .expect("reader must reach the pre-acquire gate");
+    assert_eq!(leases.active(), 0);
+
+    // Close runs completely, seals lease admission, drops canonical values, and returns.
+    registry.close_with_leases(&leases).unwrap();
+    assert_eq!(leases.active(), 0);
+
+    // Reader resumes and attempts leases.acquire(), which returns None because admission is sealed.
+    release_reader.store(true, Ordering::Release);
+    let lookup = reader.join().unwrap();
+    assert!(matches!(lookup, Err(XllError::Closing)));
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
 fn exhausted_generation_retires_the_slot_permanently() {
     let registry = HandleRegistry::new(2);
     insert_production(&registry, Arc::new(1_u32)).unwrap();
@@ -1871,6 +1919,46 @@ fn handle_lease_admission_rejects_new_acquisition_after_seal() {
 
     drop(existing);
     assert_eq!(leases.active(), 0);
+}
+
+#[test]
+fn handle_lease_clone_remains_admitted_after_seal() {
+    let leases = Arc::new(HandleLeaseState::new());
+    let existing = leases.acquire().expect("lease admission is open");
+
+    leases.seal();
+
+    let clone = existing.clone();
+    assert_eq!(leases.active(), 2);
+
+    drop(existing);
+    assert_eq!(leases.active(), 1);
+    drop(clone);
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
+fn handle_lease_acquire_race_with_seal_drains_without_late_active_lease() {
+    use std::sync::Barrier;
+
+    for _ in 0..64 {
+        let leases = Arc::new(HandleLeaseState::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_leases = Arc::clone(&leases);
+        let worker_barrier = Arc::clone(&barrier);
+
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            drop(worker_leases.acquire());
+        });
+
+        barrier.wait();
+        leases.seal();
+        worker.join().unwrap();
+
+        assert_eq!(leases.active(), 0);
+        assert!(leases.acquire().is_none());
+    }
 }
 
 #[test]

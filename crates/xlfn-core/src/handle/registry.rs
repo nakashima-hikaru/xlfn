@@ -148,6 +148,8 @@ pub(crate) struct HandleRegistry {
     pub(crate) published: PublishedHandles,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
     #[cfg(test)]
+    pub(crate) before_fast_lease_acquire_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
     pub(crate) before_fast_upgrade_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
@@ -252,6 +254,8 @@ impl HandleRegistry {
             }),
             published: PublishedHandles::new(),
             cleanup_failure: Mutex::new(None),
+            #[cfg(test)]
+            before_fast_lease_acquire_hook: Mutex::new(None),
             #[cfg(test)]
             before_fast_upgrade_hook: Mutex::new(None),
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -430,6 +434,11 @@ impl HandleRegistry {
                 PublishedHandleState::Live => {}
                 PublishedHandleState::Stale => return Err(XllError::StaleHandle),
                 PublishedHandleState::Closing => return Err(XllError::Closing),
+            }
+
+            #[cfg(test)]
+            if let Some(hook) = self.before_fast_lease_acquire_hook.lock().take() {
+                hook();
             }
 
             // The first state check only avoids entering the lease path for
