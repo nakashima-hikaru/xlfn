@@ -1633,7 +1633,7 @@ fn nested_handle_in_registry_does_not_deadlock_on_close() {
 }
 
 #[test]
-fn handle_lease_waiter_is_woken_by_last_release() {
+fn handle_lease_waiter_observes_last_release() {
     let leases = Arc::new(HandleLeaseState::new());
     let lease = leases.acquire();
 
@@ -1654,7 +1654,7 @@ fn handle_lease_waiter_is_woken_by_last_release() {
 }
 
 #[test]
-fn handle_lease_waiter_synchronization_prevents_lost_wakeup() {
+fn handle_lease_waiter_rechecks_after_release() {
     use std::sync::Barrier;
 
     let leases = Arc::new(HandleLeaseState::new());
@@ -1677,33 +1677,6 @@ fn handle_lease_waiter_synchronization_prevents_lost_wakeup() {
 
     waiter.join().unwrap();
     assert_eq!(leases.active(), 0);
-}
-
-#[test]
-fn final_lease_drop_does_not_take_wait_lock_without_waiters() {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let leases = Arc::new(HandleLeaseState::new());
-    let lease = leases.acquire();
-
-    // Deliberately occupy the shutdown-only mutex.
-    let wait_guard = leases.wait_lock.lock();
-
-    let (done_tx, done_rx) = mpsc::sync_channel(1);
-    let worker = std::thread::spawn(move || {
-        drop(lease);
-        done_tx.send(()).unwrap();
-    });
-
-    // The ordinary final-drop path must not depend on wait_lock when there
-    // are no shutdown waiters.
-    let completed = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
-
-    drop(wait_guard);
-    worker.join().unwrap();
-
-    assert!(completed);
 }
 
 #[test]

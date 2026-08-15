@@ -2,15 +2,33 @@ use super::*;
 use std::cell::Cell;
 use std::time::Duration;
 
+const HANDLE_LEASE_STRIPE_COUNT: usize = 32;
+const HANDLE_LEASE_STRIPE_MASK: usize = HANDLE_LEASE_STRIPE_COUNT - 1;
+const HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 const HANDLE_PREPARE_STRIPE_COUNT: usize = 32;
 const HANDLE_PREPARE_STRIPE_MASK: usize = HANDLE_PREPARE_STRIPE_COUNT - 1;
 const HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 thread_local! {
+    static HANDLE_LEASE_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
     static HANDLE_PREPARE_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
+static NEXT_HANDLE_LEASE_STRIPE: AtomicUsize = AtomicUsize::new(0);
 static NEXT_HANDLE_PREPARE_STRIPE: AtomicUsize = AtomicUsize::new(0);
+
+fn current_handle_lease_stripe() -> usize {
+    HANDLE_LEASE_STRIPE.with(|stripe| {
+        let current = stripe.get();
+        if current != usize::MAX {
+            return current;
+        }
+        let assigned =
+            NEXT_HANDLE_LEASE_STRIPE.fetch_add(1, Ordering::Relaxed) & HANDLE_LEASE_STRIPE_MASK;
+        stripe.set(assigned);
+        assigned
+    })
+}
 
 fn current_handle_prepare_stripe() -> usize {
     HANDLE_PREPARE_STRIPE.with(|stripe| {
@@ -25,12 +43,28 @@ fn current_handle_prepare_stripe() -> usize {
     })
 }
 
+#[derive(Debug)]
+#[repr(C, align(128))]
+struct HandleLeaseStripe {
+    active: AtomicUsize,
+    cleanup_failure: Mutex<Option<XllError>>,
+}
+
+impl HandleLeaseStripe {
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            cleanup_failure: Mutex::new(None),
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
 pub(crate) struct HandleLeaseState {
-    pub(crate) active: AtomicUsize,
-    pub(crate) waiters: AtomicUsize,
-    pub(crate) wait_lock: Mutex<()>,
-    pub(crate) idle: Condvar,
-    pub(crate) cleanup_failure: Mutex<Option<XllError>>,
+    stripes: [Arc<HandleLeaseStripe>; HANDLE_LEASE_STRIPE_COUNT],
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
@@ -40,11 +74,7 @@ pub(crate) struct HandleLeaseState {
 impl HandleLeaseState {
     pub(crate) fn new() -> Self {
         Self {
-            active: AtomicUsize::new(0),
-            waiters: AtomicUsize::new(0),
-            wait_lock: Mutex::new(()),
-            idle: Condvar::new(),
-            cleanup_failure: Mutex::new(None),
+            stripes: std::array::from_fn(|_| Arc::new(HandleLeaseStripe::new())),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
@@ -65,94 +95,107 @@ impl HandleLeaseState {
     }
 
     pub(crate) fn acquire(self: &Arc<Self>) -> HandleLease {
-        self.active
+        let stripe = Arc::clone(&self.stripes[current_handle_lease_stripe()]);
+        stripe
+            .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .expect("handle lease count cannot overflow");
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
+        let ghost = self.ghost.lock().clone();
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
+        }
 
         HandleLease {
-            state: Arc::clone(self),
+            stripe,
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost,
         }
     }
 
     pub(crate) fn wait_for_idle(&self) {
-        let mut guard = self.wait_lock.lock();
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-
-        while self.active.load(Ordering::Acquire) != 0 {
+        while self.active() != 0 {
             #[cfg(test)]
             if let Some(hook) = self.before_idle_wait_hook.lock().as_ref().cloned() {
                 hook();
             }
-            self.idle.wait(&mut guard);
-        }
-
-        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
-    }
-
-    pub(crate) fn record_cleanup_failure(&self, error: XllError) {
-        let mut failure = self.cleanup_failure.lock();
-        if failure.is_none() {
-            *failure = Some(error);
+            std::thread::sleep(HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL);
         }
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
-        let failure = self.cleanup_failure.lock();
-        match failure.as_ref() {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
+        for stripe in &self.stripes {
+            let failure = stripe.cleanup_failure.lock();
+            if let Some(error) = failure.as_ref() {
+                return Err(error.clone());
+            }
         }
+        Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.stripes.iter().map(|stripe| stripe.active()).sum()
     }
 }
 
 pub(crate) struct HandleLease {
-    pub(crate) state: Arc<HandleLeaseState>,
+    stripe: Arc<HandleLeaseStripe>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
 
 impl HandleLease {
     pub(crate) fn record_cleanup_failure(&self, error: XllError) {
-        self.state.record_cleanup_failure(error);
+        let mut failure = self.stripe.cleanup_failure.lock();
+        if failure.is_none() {
+            *failure = Some(error);
+        }
     }
 }
 
 impl Clone for HandleLease {
     fn clone(&self) -> Self {
-        self.state.acquire()
+        self.stripe
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .expect("handle lease count cannot overflow");
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let ghost = self.ghost.clone();
+
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if let Some(ghost) = ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
+        }
+
+        Self {
+            stripe: Arc::clone(&self.stripe),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost,
+        }
     }
 }
 
 impl Drop for HandleLease {
     fn drop(&mut self) {
-        let previous = self
-            .state
+        self.stripe
             .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_sub(1)
             })
             .expect("handle lease count remains balanced");
 
-        if previous == 1 && self.state.waiters.load(Ordering::Acquire) != 0 {
-            let _wait_guard = self.state.wait_lock.lock();
-
-            if self.state.active.load(Ordering::Acquire) == 0 {
-                self.state.idle.notify_all();
-            }
-        }
-
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        self.state
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
+        if let Some(ghost) = self.ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
+        }
     }
 }
 
