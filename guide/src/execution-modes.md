@@ -80,4 +80,4 @@ async fn slow(
 | Macro-sheet | `macro_sheet` or `macro_sheet` context | no | yes | no |
 | Asynchronous | `async fn` | native async ABI | no | no |
 
-A function marked `volatile` must still return a type valid for its mode. Handle objects and `Handle<T>` aliases support volatile main-thread return semantics.
+A function marked `volatile` must still return a type valid for its mode. Handle objects and `HandleAlias<'_, T>` support volatile main-thread return semantics. Borrowed `Handle<'_, T>` values are synchronous call-scoped inputs and cannot be used in async functions.

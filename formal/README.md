@@ -14,10 +14,10 @@ concurrency protocols implemented in `xlfn-core`:
 - **Composition**: Verified composition of lifecycle states and resource shutdown sessions.
 - **Handle safety**:
   - Handle registry slot allocation, generation monotonicity, and ABA protection.
-  - Handle runtime lease admission, lifetime tracking, and quiescent close draining.
+  - Handle prepare accounting and call-scoped borrow lifetime tracking.
   - Handle topic ownership, reverse-mapping consistency, and Excel connection transactions.
   - Published-topic snapshots with lock-free warm reads and generation isolation.
-  - Published-handle snapshots with three-stage fast lookups and sealed lease admission.
+  - Published-handle snapshots with strong RCU roots and call-scoped borrows.
   - RTD server-generation isolation and atomic detach-and-drain transactions.
   - RTD wire serialization and parser injectivity.
 
@@ -114,7 +114,7 @@ an explicit Add-in contract:
 - ingress, external entries, calls, worksheet return blocks and free callbacks;
 - async tasks and executor state;
 - subscriptions, callbacks, RTD operations, factories, servers and locks;
-- handle operations and published handles;
+- call-scoped handle borrows and published handles;
 - registration state and callback-gate state;
 - `stateUnique`, `addinQuiesced`, and `stateOwnedByRuntime` for Add-in state;
 - diagnostics and cleanup-issue accounting.
@@ -195,10 +195,10 @@ to newly inserted entries and that registry close drains all held roots.
 
 ### Runtime
 
-`XlFnFormal/Handle/Runtime` models the handle lease and prepare synchronization
-state: lease admission gates, active reader counters, quiescence wait loops,
-and uncommitted prepare tracking during lookup. It guarantees that `close()`
-blocks until all active handle operations complete.
+`XlFnFormal/Handle/Runtime` models prepare synchronization and the registry's
+call-scoped borrow accounting during lookup. The public Rust `Handle<'call, T>`
+cannot outlive its Excel call; the formal borrow counter records that call
+boundary while the registry closes only after those borrows have returned.
 
 ### Topic ownership
 
@@ -230,55 +230,22 @@ refinement layer over the canonical topic state:
 ### Published-handle snapshots
 
 `XlFnFormal/Handle/Registry/Snapshot` formalizes the `PublishedHandle`
-fast-lookup architecture as a refinement layer over canonical registry semantics:
+fast-lookup architecture as an RCU layer over canonical registry semantics:
 
-- **Model & Invariants** (`Model.lean`): Tracks `publications`, active
-  `snapshot` slot bindings, active `fastLookups` (with three stages:
-  `.observed`, `.tentative`, and `.validated`), and `leaseAdmission` (with three
-  phases: `.open`, `.sealing`, and `.sealed`) refining `registry`. Invariants preserve
-  publication uniqueness, snapshot uniqueness, fast lookup uniqueness,
-  fast lookup provenance, canonical live root correspondence, lease accounting
-  (`validatedFastLookups.length ≤ activeLeases`), and closed registry emptiness
-  with sealed admission (`closed = true → leaseAdmission = .sealed`).
-- **Transitions & Soundness/Completeness** (`Transition.lean`, `Checker.lean`):
-  Defines relational `Step` transitions:
-  - `beginFastObservation`: Reader observes current snapshot and passes first `Live` check
-    without acquiring a lease or modifying registry (`.observed`).
-  - `acquireTentativeLease`: Reader acquires tentative implementation lease (`.tentative`),
-    permitted in `.open` or `.sealing` phases (`leaseAdmission ≠ .sealed`) provided the registry is not closed.
-  - `abandonObservation`: Reader exits observation without acquiring a lease when admission is no longer open (`leaseAdmission ≠ .open`, i.e., `.sealing` or `.sealed`).
-  - `validateFastLookup`: Reader checks second `Live` state, linearizing to `beginLookup` and advancing to `.validated`.
-  - `rejectTentativeFastLookup`: If removed or closing before second check, reader observes
-    `Stale`/`Closing`, releases tentative lease, and exits without modifying registry state.
-  - `completeFastLookup` / `fallbackFastLookup`: Linearizes to `endLookup`.
-  - `beginSlowLookup`: Admitted when `leaseAdmission ≠ .sealed`, linearizing to `beginLookup`.
-  - `endSlowLookup`, `insertFresh`, `insertReuse`, `removeReuse`, `removeRetire`.
-  - `beginSealLeaseAdmission` (`.open → .sealing`) and `finishSealLeaseAdmission` (`.sealing → .sealed`).
-  - `closeRegistry`: Requires `.sealed` admission phase before closing canonical roots.
-  - `finishClose`: Requires `tentativeFastLookups = [] ∧ validatedFastLookups = [] ∧ activeLeases = 0`.
-  Executable `apply?` is proven sound and complete against `Step`.
-- **Invariant Preservation** (`Invariant.lean`): Proves `Step.invariant_preserved`
-  and `Reachable.invariant_preserved` across all transitions.
-- **Safety & Race Properties** (`Safety.lean`):
-  - *Linearization Point*: Proves the second `Live` state check linearizes
-    fast lookups to `beginLookup`; if removed first, tentative lookup is rejected
-    without modifying state.
-  - *Admission Sealing & Lease Gating*: Proves independent lease acquisition
-    (both fast and slow) is strictly rejected in `.sealed` phase, and `closeRegistry`
-    requires `.sealed` admission. Tentative and validated fast lookups prevent
-    `finishClose` until all leases are released (`tentative = [] ∧ validated = []`).
-    An `observed` reader is not waited on by close; once close seals admission,
-    its subsequent lease acquisition is rejected.
-  - *Slot Reuse ABA Protection*: Proves `stale_lookup_cannot_follow_reused_generation`.
-  - *Weak Upgrade Fallback*: Proves fallback drops lease and falls back cleanly
-    without assuming unconditional fast success.
-- **Executable Replay Traces** (`Trace.lean`): Proves replay traces for:
-  - Fast lookup success with orderly seal and close.
-  - Non-blocking admission race where an existing tentative reader completes after seal while a subsequent observed reader is rejected and abandons.
-  - Close racing observation before lease acquisition.
-  - Remove racing tentative lookup before second check.
-  - Slot reuse ABA protection.
-  - Reachable Weak upgrade fallback through `CloseCertified`.
+- **Model & Invariants** (`Model.lean`): Tracks published objects, the current
+  immutable snapshot, and active call-scoped `Borrow` records. A publication
+  remains rooted after it becomes `stale` or `closing` until no borrow refers to
+  it, matching the strong `Arc<PublishedHandle> → Arc<HandleObject>` chain.
+- **Transitions & Checker** (`Transition.lean`, `Checker.lean`):
+  `observeBorrow` performs the snapshot lookup, generation/authentication and
+  `Live` check at the borrow linearization point. `releaseBorrow` ends the call
+  scope. Removal unpublishes the slot but does not destroy a borrowed object;
+  `retirePublication` is allowed only after both the snapshot and all borrows
+  have released it. Close clears the new-reader snapshot and marks remaining
+  publications closing without a second admission protocol.
+  The executable checker accepts exactly these transitions, and the safety
+  lemmas cover stale/closing rejection, borrow-root preservation, and
+  reclamation only after the last borrow returns.
 
 ### RTD server generations
 

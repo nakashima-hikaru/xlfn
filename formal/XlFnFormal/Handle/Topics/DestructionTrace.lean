@@ -185,7 +185,7 @@ def replayCertified? (events : List MixedEvent) : Bool :=
       if h : s.runtime.phase = .closed ∧
           s.runtime.activePrepares = 0 ∧ s.runtime.initializers = [] ∧
           s.runtime.registry.closed = true ∧
-          s.runtime.registry.activeLeases = 0 ∧
+          s.runtime.registry.activeBorrows = 0 ∧
           noLiveSlots? s.runtime.registry.slots = true ∧
           s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧
           s.initializing = [] ∧ s.detached = [] then true else false
@@ -205,18 +205,18 @@ theorem replay_close_certified_of_check
           s.runtime.phase = .closed ∧
           s.runtime.activePrepares = 0 ∧ s.runtime.initializers = [] ∧
           s.runtime.registry.closed = true ∧
-          s.runtime.registry.activeLeases = 0 ∧
+          s.runtime.registry.activeBorrows = 0 ∧
           noLiveSlots? s.runtime.registry.slots = true ∧
           s.byKey = [] ∧ s.byRtdKey = [] ∧ s.byExcelOwner = [] ∧
           s.initializing = [] ∧ s.detached = [] := by
         simpa [hReplay] using hCheck
       rcases hFields with ⟨hPhase, hPrepares, hInitializers, hClosed,
-        hLeases, hNoLive, hByKey, hByRtdKey, hByOwner, hInitializing,
+        hBorrows, hNoLive, hByKey, hByRtdKey, hByOwner, hInitializing,
         hDetached⟩
       refine ⟨s, rfl, hPhase, ?_⟩
       exact ⟨
         ⟨hPhase, hPrepares, hInitializers,
-          ⟨hClosed, hLeases, noLiveSlots?_sound hNoLive⟩⟩,
+          ⟨hClosed, hBorrows, noLiveSlots?_sound hNoLive⟩⟩,
         hByKey, hByRtdKey, hByOwner, hInitializing, hDetached⟩
 
 def fixtureToken : Registry.Token :=

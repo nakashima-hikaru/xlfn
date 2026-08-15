@@ -41,7 +41,7 @@ def PhaseInvariant (s : State) : Prop :=
       s.registry.closed = true ∧
       s.activePrepares = 0 ∧
       s.initializers = [] ∧
-      s.registry.activeLeases = 0 ∧
+      s.registry.activeBorrows = 0 ∧
       Registry.NoLiveSlots s.registry
 
 def RuntimeInvariant (s : State) : Prop :=
@@ -76,7 +76,7 @@ theorem phaseInvariant_closed_fields
     s.registry.closed = true ∧
     s.activePrepares = 0 ∧
     s.initializers = [] ∧
-    s.registry.activeLeases = 0 ∧
+    s.registry.activeBorrows = 0 ∧
     Registry.NoLiveSlots s.registry := by
   dsimp [PhaseInvariant] at hInv
   rw [hPhase] at hInv
@@ -211,7 +211,7 @@ theorem Step.phaseInvariant_preserved
               contradiction
   | endLookup hRegStep =>
       cases hRegStep with
-      | endLookup hLeases =>
+      | endLookup hBorrows =>
           dsimp [PhaseInvariant] at hInv ⊢
           cases hP : s.phase with
           | «open» => simpa [hP, PhaseInvariant] using hInv
@@ -219,7 +219,7 @@ theorem Step.phaseInvariant_preserved
           | registryClosed => simpa [hP, PhaseInvariant, Registry.NoLiveSlots] using hInv
           | closed =>
               have hInv' := phaseInvariant_closed_fields hInv hP
-              rw [hInv'.2.2.2.1] at hLeases
+              rw [hInv'.2.2.2.1] at hBorrows
               contradiction
   | sealTopics hPhase =>
       dsimp [PhaseInvariant] at hInv ⊢
@@ -232,10 +232,10 @@ theorem Step.phaseInvariant_preserved
         Registry.map_closeSlot_noLiveSlots s.registry⟩
   | finishClose hPhase hRegStep =>
       cases hRegStep with
-      | finishClose hClosed hNoLeases =>
+      | finishClose hClosed hNoBorrows =>
           dsimp [PhaseInvariant] at hInv ⊢
           have hInv' := phaseInvariant_registryClosed_fields hInv hPhase
-          exact ⟨hClosed, hInv'.2.1, hInv'.2.2.1, hNoLeases, hInv'.2.2.2⟩
+          exact ⟨hClosed, hInv'.2.1, hInv'.2.2.1, hNoBorrows, hInv'.2.2.2⟩
 
 theorem Step.operationInvariant_preserved
     {s s' : State} {e : Event}

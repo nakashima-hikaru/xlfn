@@ -1,6 +1,6 @@
 # Formula-owned handles
 
-Handles let a worksheet formula own a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts `Handle<T>`. xlfn owns the formula token, registry entry, and Rust value lifetime; any resource managed inside `T` remains part of `T`'s application-level contract.
+Handles let a worksheet formula own a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts a call-scoped `Handle<'_, T>`. xlfn owns the formula token, published object, and Rust value lifetime; any resource managed inside `T` remains part of `T`'s application-level contract.
 
 ## Define a handle object
 
@@ -69,14 +69,17 @@ fn create_dataset(times: Row<f64>, values: Row<f64>) -> XllResult<Dataset> {
 }
 
 #[excel_function(name = "DATASET.EVALUATE", thread_safe)]
-fn dataset_evaluate(dataset: Handle<Dataset>, time: f64) -> XllResult<f64> {
+fn dataset_evaluate(dataset: Handle<'_, Dataset>, time: f64) -> XllResult<f64> {
     dataset.evaluate(time)
 }
 ```
 
-`Handle<T>` dereferences to `T` and retains an `Arc<T>` for the duration of the Rust value.
+`Handle<'call, T>` is a borrowed, call-scoped capability. It dereferences to `T`,
+and its lifetime cannot outlive the active Excel call. It is neither `Clone` nor
+an owned return value; do not store it in Add-in state, another handle object, or
+an async task.
 
-No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<T>`.
+No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<'_, T>`.
 
 ## Re-evaluation semantics
 
@@ -108,21 +111,24 @@ fn market() -> Market {
 fn market(snapshot_id: String) -> Market { .. }
 
 // OK: changing the upstream Handle token changes the downstream fingerprint.
-fn model(market: Handle<MarketSnapshot>) -> Model { .. }
+fn model(market: Handle<'_, MarketSnapshot>) -> Model { .. }
 ```
 
 ## Handle alias functions
 
-A function may return an existing `Handle<T>`:
+A function may explicitly republish an existing handle through `HandleAlias`:
 
 ```rust
 #[excel_function(name = "CURVE.ALIAS")]
-fn alias(dataset: Handle<Dataset>) -> Handle<Dataset> {
-    dataset
+fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
+    dataset.alias()
 }
 ```
 
-The function republishes the same underlying `Arc<T>` under the alias formula's ownership. It does not clone the business object.
+`HandleAlias<'call, T>` is the only handle return capability. It is created from
+the borrowed input and republishes the same published object under the alias
+formula's ownership; it does not clone the business object. A plain `Handle`
+cannot be returned, cloned, or retained after the call.
 
 ## Lifetime
 
@@ -164,7 +170,8 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 - functions with raw reference arguments;
 - volatile UDFs.
 
-`Handle<T>` aliases use main-thread return semantics.
+`HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
+`Handle<'_, T>` is an input capability only and is not a valid return type.
 
 ## Caller restrictions
 

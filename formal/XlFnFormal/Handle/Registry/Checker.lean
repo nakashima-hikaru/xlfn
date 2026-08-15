@@ -47,15 +47,15 @@ def apply? (s : State) (e : Event) : Option State :=
   | .beginLookup token =>
       if hPre : s.closed = false ∧ token.session = s.session ∧ token.slot < s.slots.length then
         if s.slots.get ⟨token.slot, hPre.2.2⟩ = .live token.generation then
-          some { s with activeLeases := s.activeLeases + 1 }
+          some { s with activeBorrows := s.activeBorrows + 1 }
         else
           none
       else
         none
 
   | .endLookup =>
-      if s.activeLeases > 0 then
-        some { s with activeLeases := s.activeLeases - 1 }
+      if s.activeBorrows > 0 then
+        some { s with activeBorrows := s.activeBorrows - 1 }
       else
         none
 
@@ -68,7 +68,7 @@ def apply? (s : State) (e : Event) : Option State :=
         none
 
   | .finishClose =>
-      if s.closed ∧ s.activeLeases = 0 then
+      if s.closed ∧ s.activeBorrows = 0 then
         some s
       else
         none
@@ -125,7 +125,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · contradiction
   | endLookup =>
       dsimp [apply?] at h
-      by_cases hP : s.activeLeases > 0
+      by_cases hP : s.activeBorrows > 0
       · rw [if_pos hP] at h; cases h; exact Step.endLookup hP
       · rw [if_neg hP] at h; contradiction
   | closeRegistry =>
@@ -135,7 +135,7 @@ theorem apply?_sound {s s' : State} {e : Event} (h : apply? s e = some s') : Ste
       · rw [if_neg hNotClosed] at h; contradiction
   | finishClose =>
       dsimp [apply?] at h
-      by_cases hP : s.closed ∧ s.activeLeases = 0
+      by_cases hP : s.closed ∧ s.activeBorrows = 0
       · rw [if_pos hP] at h; cases h; exact Step.finishClose hP.1 hP.2
       · rw [if_neg hP] at h; contradiction
 
@@ -164,9 +164,9 @@ theorem apply?_complete {s s' : State} {e : Event} (h : Step s e s') : apply? s 
       have hP : s.closed = false ∧ token.session = s.session ∧ token.slot < s.slots.length := ⟨hNotClosed, hAuth, hInBounds⟩
       change s.slots[token.slot] = .live token.generation at hLive
       dsimp [apply?]; rw [dif_pos hP]; rw [if_pos hLive]
-  | endLookup hLeases => simp [apply?, hLeases]
+  | endLookup hBorrows => simp [apply?, hBorrows]
   | closeRegistry hNotClosed =>
       dsimp [apply?]; rw [if_pos hNotClosed]
-  | finishClose hClosed hNoLeases => simp [apply?, hClosed, hNoLeases]
+  | finishClose hClosed hNoBorrows => simp [apply?, hClosed, hNoBorrows]
 
 end XlFnFormal.Handle.Registry

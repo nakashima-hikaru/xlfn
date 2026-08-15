@@ -93,7 +93,7 @@ pub use error::{
 pub use execution::{
     CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
 };
-pub use handle::{ExcelHandleObject, Handle};
+pub use handle::{ExcelHandleObject, Handle, HandleAlias};
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
 pub mod ingress;
 pub use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};

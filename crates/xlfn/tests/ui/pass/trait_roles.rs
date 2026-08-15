@@ -17,17 +17,17 @@ impl Addin for TestAddin {
 #[derive(ExcelHandleObject)]
 pub struct Dataset;
 
-type DatasetHandle = Handle<Dataset>;
+type DatasetHandle<'call> = Handle<'call, Dataset>;
 type DatasetObject = Dataset;
 type FunctionResult<T> = XllResult<T>;
 type MainContext<'state, 'scope> = MainThreadContext<'state, 'scope, State>;
 
 mod reexported {
     pub use xlfn::context::ThreadSafeContext as WorkerContext;
-    pub use xlfn::handle::Handle;
+    pub use xlfn::handle::{Handle, HandleAlias};
 }
 
-use xlfn::handle::Handle as ObjectHandle;
+use xlfn::handle::{Handle as ObjectHandle, HandleAlias as ObjectHandleAlias};
 
 #[excel_function(name = "TEST.HANDLE.DIRECT")]
 fn direct_handle() -> Dataset {
@@ -50,23 +50,25 @@ fn aliased_result_handle() -> FunctionResult<DatasetObject> {
 }
 
 #[excel_function(name = "TEST.HANDLE.REEXPORT")]
-fn reexport_handle(value: reexported::Handle<Dataset>) -> reexported::Handle<Dataset> {
-    value
+fn reexport_handle(
+    value: reexported::Handle<'_, Dataset>,
+) -> reexported::HandleAlias<'_, Dataset> {
+    value.alias()
 }
 
 #[excel_function(name = "TEST.HANDLE.RENAME")]
-fn renamed_handle(value: ObjectHandle<Dataset>) -> ObjectHandle<Dataset> {
-    value
+fn renamed_handle(value: ObjectHandle<'_, Dataset>) -> ObjectHandleAlias<'_, Dataset> {
+    value.alias()
 }
 
 #[excel_function(name = "TEST.HANDLE.CONSUME")]
-fn consume_handle(value: DatasetHandle) -> f64 {
+fn consume_handle(value: DatasetHandle<'_>) -> f64 {
     let _ = &*value;
     1.0
 }
 
 #[excel_function(name = "TEST.HANDLE.OPTION")]
-fn optional_handle(value: Option<DatasetHandle>) -> f64 {
+fn optional_handle(value: Option<DatasetHandle<'_>>) -> f64 {
     f64::from(u8::from(value.is_some()))
 }
 

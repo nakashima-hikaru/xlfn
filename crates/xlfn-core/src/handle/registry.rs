@@ -1,4 +1,6 @@
 use super::*;
+use std::mem::ManuallyDrop;
+use std::ptr::NonNull;
 
 const PUBLISHED_HANDLE_SHARD_COUNT: usize = 64;
 
@@ -21,17 +23,97 @@ impl PublishedHandleState {
     }
 }
 
-/// A read-optimized registry entry that does not own the registered object.
+pub(crate) struct HandleCleanupState {
+    failure: Mutex<Option<XllError>>,
+}
+
+impl HandleCleanupState {
+    fn new() -> Self {
+        Self {
+            failure: Mutex::new(None),
+        }
+    }
+
+    fn record(&self, error: XllError) {
+        let mut failure = self.failure.lock();
+        if failure.is_none() {
+            *failure = Some(error);
+        }
+    }
+
+    fn result(&self) -> XllResult<()> {
+        self.failure
+            .lock()
+            .as_ref()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+}
+
+/// Strongly owned storage for one formula-owned handle object.
 ///
-/// The canonical `RegistryState` remains the only strong owner used for
-/// lifecycle management. Keeping only a `Weak` here lets readers avoid the
-/// registry lock without allowing an ArcSwap snapshot to delay destruction
-/// during remove or terminal close.
+/// Published snapshots retain `Arc<HandleObject>` values. The object therefore
+/// remains alive for every borrowed `Handle` whose snapshot guard still points
+/// at the publication. Destruction is centralized here so consumer handles do
+/// not need ownership or cleanup behavior.
+pub(crate) struct HandleObject {
+    value: ManuallyDrop<Arc<dyn Any + Send + Sync>>,
+    cleanup: Arc<HandleCleanupState>,
+}
+
+impl HandleObject {
+    pub(crate) fn new<T>(value: Arc<T>, cleanup: Arc<HandleCleanupState>) -> Arc<Self>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let value: Arc<dyn Any + Send + Sync> = value;
+        Arc::new(Self {
+            value: ManuallyDrop::new(value),
+            cleanup,
+        })
+    }
+
+    pub(crate) fn get<T>(&self) -> Option<&T>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        (*self.value).as_ref().downcast_ref::<T>()
+    }
+
+    #[cfg(test)]
+    fn clone_typed<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Arc::downcast(Arc::clone(&*self.value)).ok()
+    }
+}
+
+impl Drop for HandleObject {
+    fn drop(&mut self) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: `value` is initialized exactly once and is never
+            // accessed again after this final drop.
+            unsafe { ManuallyDrop::drop(&mut self.value) };
+        }));
+        if result.is_err() {
+            let error = XllError::Panic;
+            crate::diagnostics::report_no_unwind("handle object drop", &error);
+            self.cleanup.record(error);
+        }
+    }
+}
+
+/// A read-optimized registry entry that strongly owns the registered object.
+///
+/// Immutable ArcSwap snapshots are the reclamation barrier. Removing a
+/// publication only makes it unavailable to new readers; an old snapshot
+/// keeps both the publication and its object alive until the reader releases
+/// the guard.
 pub(crate) struct PublishedHandle {
     pub(crate) generation: u64,
     pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
-    pub(crate) value: Weak<dyn Any + Send + Sync>,
+    pub(crate) object: Arc<HandleObject>,
     pub(crate) state: AtomicU8,
 }
 
@@ -40,13 +122,13 @@ impl PublishedHandle {
         generation: u64,
         type_id: TypeId,
         type_name: &'static str,
-        value: &Arc<dyn Any + Send + Sync>,
+        object: Arc<HandleObject>,
     ) -> Self {
         Self {
             generation,
             type_id,
             type_name,
-            value: Arc::downgrade(value),
+            object,
             state: AtomicU8::new(PublishedHandleState::Live as u8),
         }
     }
@@ -54,13 +136,10 @@ impl PublishedHandle {
     pub(crate) fn state(&self) -> PublishedHandleState {
         PublishedHandleState::from_raw(self.state.load(Ordering::Acquire))
     }
-
-    pub(crate) fn upgrade(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.value.upgrade()
-    }
 }
 
-type PublishedHandleMap = FxHashMap<u32, Arc<PublishedHandle>>;
+pub(crate) type PublishedHandleMap = FxHashMap<u32, Arc<PublishedHandle>>;
+pub(crate) type PublishedHandleSnapshot = arc_swap::Guard<Arc<PublishedHandleMap>>;
 
 /// Sharded immutable publication snapshots for warm handle lookup.
 pub(crate) struct PublishedHandles {
@@ -83,7 +162,7 @@ impl PublishedHandles {
     /// The guard must remain alive while the caller validates and uses the
     /// borrowed publication. This avoids cloning the publication's `Arc` on
     /// every warm lookup while still keeping the immutable snapshot alive.
-    pub(crate) fn load(&self, slot: u32) -> arc_swap::Guard<Arc<PublishedHandleMap>> {
+    pub(crate) fn load(&self, slot: u32) -> PublishedHandleSnapshot {
         self.shards[Self::shard_index(slot)].load()
     }
 
@@ -124,9 +203,6 @@ impl PublishedHandles {
 }
 
 pub(crate) struct HandleEntry {
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
-    pub(crate) value: Arc<dyn Any + Send + Sync>,
     pub(crate) publication: Arc<PublishedHandle>,
 }
 
@@ -148,31 +224,21 @@ pub(crate) struct HandleRegistry {
     pub(crate) maximum_handles: usize,
     pub(crate) state: RwLock<RegistryState>,
     pub(crate) published: PublishedHandles,
-    pub(crate) cleanup_failure: Mutex<Option<XllError>>,
-    #[cfg(test)]
-    pub(crate) before_fast_lease_acquire_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    pub(crate) before_fast_upgrade_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) cleanup: Arc<HandleCleanupState>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
-pub(crate) struct PendingHandleValue<'a, T>
-where
-    T: Any + Send + Sync + 'static,
-{
+pub(crate) struct PendingHandleValue<'a> {
     registry: &'a HandleRegistry,
-    value: Option<Arc<T>>,
+    value: Option<Arc<HandleObject>>,
     operation: &'static str,
 }
 
-impl<'a, T> PendingHandleValue<'a, T>
-where
-    T: Any + Send + Sync + 'static,
-{
+impl<'a> PendingHandleValue<'a> {
     pub(crate) fn new(
         registry: &'a HandleRegistry,
-        value: Arc<T>,
+        value: Arc<HandleObject>,
         operation: &'static str,
     ) -> Self {
         Self {
@@ -182,18 +248,14 @@ where
         }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<Arc<T>> {
+    pub(crate) fn slot(&mut self) -> &mut Option<Arc<HandleObject>> {
         &mut self.value
     }
 }
 
-impl<T> Drop for PendingHandleValue<'_, T>
-where
-    T: Any + Send + Sync + 'static,
-{
+impl Drop for PendingHandleValue<'_> {
     fn drop(&mut self) {
         if let Some(value) = self.value.take() {
-            let value: Arc<dyn Any + Send + Sync> = value;
             self.registry
                 .drop_values(std::iter::once(value), self.operation);
         }
@@ -255,11 +317,7 @@ impl HandleRegistry {
                 closed: false,
             }),
             published: PublishedHandles::new(),
-            cleanup_failure: Mutex::new(None),
-            #[cfg(test)]
-            before_fast_lease_acquire_hook: Mutex::new(None),
-            #[cfg(test)]
-            before_fast_upgrade_hook: Mutex::new(None),
+            cleanup: Arc::new(HandleCleanupState::new()),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
         }
@@ -299,13 +357,18 @@ impl HandleRegistry {
     where
         T: Any + Send + Sync + 'static,
     {
-        self.insert_pending_with_kind(value)
+        let object = HandleObject::new(
+            value.take().expect("pending handle value is armed"),
+            Arc::clone(&self.cleanup),
+        );
+        let mut object = Some(object);
+        self.insert_pending_object_with_kind::<T>(&mut object)
             .map(|(token, _reused)| token)
     }
 
-    pub(crate) fn insert_pending_with_kind<T>(
+    pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<Arc<T>>,
+        value: &mut Option<Arc<HandleObject>>,
     ) -> XllResult<(String, bool)>
     where
         T: Any + Send + Sync + 'static,
@@ -340,18 +403,13 @@ impl HandleRegistry {
             }
         };
         let generation = state.slots[index].generation.max(1);
-        let value: Arc<dyn Any + Send + Sync> =
-            value.take().expect("pending handle value is armed");
         let publication = Arc::new(PublishedHandle::new(
             generation,
             TypeId::of::<T>(),
             type_name::<T>(),
-            &value,
+            value.take().expect("pending handle object is armed"),
         ));
         state.slots[index].entry = Some(HandleEntry {
-            type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
-            value,
             publication: Arc::clone(&publication),
         });
         self.published.insert(slot, publication);
@@ -380,8 +438,8 @@ impl HandleRegistry {
             return Err(XllError::StaleHandle);
         }
         let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
-        if entry.type_id != TypeId::of::<T>() {
-            let actual_type = entry.type_name;
+        if entry.publication.type_id != TypeId::of::<T>() {
+            let actual_type = entry.publication.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -392,16 +450,20 @@ impl HandleRegistry {
             }));
             return Err(XllError::InvalidHandle);
         }
-        let value = Arc::clone(&entry.value);
+        let value = entry
+            .publication
+            .object
+            .clone_typed::<T>()
+            .ok_or(XllError::InvalidHandle)?;
         drop(state);
-        Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)
+        Ok(value)
     }
 
-    pub(crate) fn lookup_handle<T>(
+    pub(crate) fn lookup_handle<'call, T>(
         &self,
+        scope: &'call crate::CallScope<'call>,
         token: &str,
-        leases: &Arc<HandleLeaseState>,
-    ) -> XllResult<Handle<T>>
+    ) -> XllResult<Handle<'call, T>>
     where
         T: ExcelHandleObject,
     {
@@ -429,55 +491,23 @@ impl HandleRegistry {
                 PublishedHandleState::Closing => return Err(XllError::Closing),
             }
 
-            #[cfg(test)]
-            if let Some(hook) = self.before_fast_lease_acquire_hook.lock().take() {
-                hook();
-            }
-
-            // The first state check only avoids entering the lease path for
-            // obviously withdrawn entries. The second check is the actual
-            // lookup/close linearization point.
-            let Some(lease) = leases.acquire() else {
-                return Err(XllError::Closing);
-            };
-
-            match publication.state() {
-                PublishedHandleState::Live => {}
-                PublishedHandleState::Stale => {
-                    drop(lease);
-                    return Err(XllError::StaleHandle);
-                }
-                PublishedHandleState::Closing => {
-                    drop(lease);
-                    return Err(XllError::Closing);
-                }
-            }
-
-            #[cfg(test)]
-            if let Some(hook) = self.before_fast_upgrade_hook.lock().take() {
-                hook();
-            }
-
-            let Some(value) = publication.upgrade() else {
-                drop(lease);
-                return self.lookup_handle_slow(parsed, leases);
-            };
-            let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
-            return Ok(Handle {
-                value: Some(value),
-                lease: Some(lease),
-            });
+            let value = publication
+                .object
+                .get::<T>()
+                .ok_or(XllError::InvalidHandle)?;
+            let value = NonNull::from(value);
+            return Ok(Handle::new(published_snapshot, parsed.slot, value, scope));
         }
         drop(published_snapshot);
 
-        self.lookup_handle_slow(parsed, leases)
+        self.lookup_handle_slow(parsed, scope)
     }
 
-    fn lookup_handle_slow<T>(
+    fn lookup_handle_slow<'call, T>(
         &self,
         parsed: ParsedToken,
-        leases: &Arc<HandleLeaseState>,
-    ) -> XllResult<Handle<T>>
+        scope: &'call crate::CallScope<'call>,
+    ) -> XllResult<Handle<'call, T>>
     where
         T: ExcelHandleObject,
     {
@@ -493,8 +523,13 @@ impl HandleRegistry {
             return Err(XllError::StaleHandle);
         }
         let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
-        if entry.type_id != TypeId::of::<T>() {
-            let actual_type = entry.type_name;
+        let published_snapshot = self.published.load(parsed.slot);
+        let publication = published_snapshot
+            .get(&parsed.slot)
+            .filter(|publication| Arc::ptr_eq(publication, &entry.publication))
+            .ok_or(XllError::StaleHandle)?;
+        if publication.type_id != TypeId::of::<T>() {
+            let actual_type = publication.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -506,20 +541,20 @@ impl HandleRegistry {
             return Err(XllError::InvalidHandle);
         }
 
-        // Acquire the lease while the registry read lock is still held. The
-        // close path seals lease admission before taking the corresponding
-        // write lock, so it cannot observe zero leases while a new lease can
-        // still escape this read-side critical section.
-        let Some(lease) = leases.acquire() else {
-            return Err(XllError::Closing);
-        };
-        let value = Arc::clone(&entry.value);
+        if publication.state() != PublishedHandleState::Live {
+            return match publication.state() {
+                PublishedHandleState::Stale => Err(XllError::StaleHandle),
+                PublishedHandleState::Closing => Err(XllError::Closing),
+                PublishedHandleState::Live => unreachable!(),
+            };
+        }
+        let value = publication
+            .object
+            .get::<T>()
+            .ok_or(XllError::InvalidHandle)?;
+        let value = NonNull::from(value);
         drop(state);
-        let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
-        Ok(Handle {
-            value: Some(value),
-            lease: Some(lease),
-        })
+        Ok(Handle::new(published_snapshot, parsed.slot, value, scope))
     }
 
     #[cfg(test)]
@@ -541,10 +576,10 @@ impl HandleRegistry {
         }
         let publication = {
             let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
-            if entry.type_id != TypeId::of::<T>() {
+            if entry.publication.type_id != TypeId::of::<T>() {
                 return Err(XllError::InvalidHandle);
             }
-            if !entry.value.as_ref().is::<T>() {
+            if entry.publication.object.get::<T>().is_none() {
                 return Err(XllError::InvalidHandle);
             }
             Arc::clone(&entry.publication)
@@ -553,7 +588,7 @@ impl HandleRegistry {
             .state
             .store(PublishedHandleState::Stale as u8, Ordering::Release);
         self.published.remove(parsed.slot, &publication);
-        let entry = slot.entry.take().expect("entry was checked above");
+        drop(slot.entry.take().expect("entry was checked above"));
         let reusable = if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
             true
@@ -567,14 +602,17 @@ impl HandleRegistry {
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Arc::downcast::<T>(entry.value).map_err(|_| XllError::InvalidHandle)
+        publication
+            .object
+            .clone_typed::<T>()
+            .ok_or(XllError::InvalidHandle)
     }
 
     #[allow(
         dead_code,
         reason = "The kind-reporting wrapper is used by lifecycle trace production"
     )]
-    pub(crate) fn remove_any(&self, token: &str) -> XllResult<Arc<dyn Any + Send + Sync>> {
+    pub(crate) fn remove_any(&self, token: &str) -> XllResult<Arc<HandleObject>> {
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let result = self
             .remove_any_with_kind(token, |_| {})
@@ -590,7 +628,7 @@ impl HandleRegistry {
         &self,
         token: &str,
         #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
-    ) -> XllResult<(Arc<dyn Any + Send + Sync>, bool)> {
+    ) -> XllResult<(Arc<HandleObject>, bool)> {
         let parsed = self.parse_token(token)?;
         let mut state = self.state.write();
         if state.closed {
@@ -611,7 +649,7 @@ impl HandleRegistry {
             .state
             .store(PublishedHandleState::Stale as u8, Ordering::Release);
         self.published.remove(parsed.slot, &publication);
-        let entry = slot.entry.take().expect("entry was checked above");
+        drop(slot.entry.take().expect("entry was checked above"));
         let reusable = if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
             true
@@ -627,32 +665,25 @@ impl HandleRegistry {
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Ok((entry.value, reusable))
+        Ok((Arc::clone(&publication.object), reusable))
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
         if let Err(error) = result {
-            let mut failure = self.cleanup_failure.lock();
-            if failure.is_none() {
-                *failure = Some(error);
-            }
+            self.cleanup.record(error);
         }
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
-        let failure = self.cleanup_failure.lock();
-        match failure.as_ref() {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
+        self.cleanup.result()
     }
 
     pub(crate) fn drop_values(
         &self,
-        values: impl IntoIterator<Item = Arc<dyn Any + Send + Sync>>,
+        values: impl IntoIterator<Item = Arc<HandleObject>>,
         operation: &'static str,
     ) {
-        self.record_cleanup_result(drop_handle_values(values, operation));
+        self.record_cleanup_result(drop_handle_objects(values, operation));
     }
 
     pub(crate) fn remove_and_drop(&self, token: &str, operation: &'static str) {
@@ -691,7 +722,7 @@ impl HandleRegistry {
         }
     }
 
-    pub(crate) fn take_values_for_close(&self) -> Vec<Arc<dyn Any + Send + Sync>> {
+    pub(crate) fn take_values_for_close(&self) -> Vec<Arc<HandleObject>> {
         let mut state = self.state.write();
         state.closed = true;
         let live = state.live;
@@ -709,7 +740,7 @@ impl HandleRegistry {
         for index in 0..state.slots.len() {
             let slot = &mut state.slots[index];
             if let Some(entry) = slot.entry.take() {
-                values.push(entry.value);
+                values.push(Arc::clone(&entry.publication.object));
             }
             if let Some(next) = slot.generation.checked_add(1) {
                 slot.generation = next;
@@ -725,28 +756,10 @@ impl HandleRegistry {
         values
     }
 
-    #[cfg(test)]
-    pub fn close(&self) -> XllResult<()> {
+    pub(crate) fn close(&self) -> XllResult<()> {
         let values = self.take_values_for_close();
         self.drop_values(values, "handle registry close");
         self.cleanup_result()
-    }
-
-    pub(crate) fn close_with_leases(&self, leases: &HandleLeaseState) -> XllResult<()> {
-        // Seal lease admission before removing canonical values. Existing
-        // leases may still drain, but no new independent lookup lease can be
-        // admitted after this point.
-        leases.seal();
-        // Drop registry-held values first so any nested Handle<U> instances inside
-        // registry-owned objects release their RuntimeLease before we wait.
-        let values = self.take_values_for_close();
-        self.drop_values(values, "handle registry close");
-        leases.wait_for_idle();
-        let lease_cleanup = leases.cleanup_result();
-        match lease_cleanup {
-            Ok(()) => self.cleanup_result(),
-            Err(error) => Err(error),
-        }
     }
 
     pub(crate) fn format_token(&self, slot: u32, generation: u64) -> String {

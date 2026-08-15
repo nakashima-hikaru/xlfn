@@ -14,7 +14,7 @@ help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            Handle<'call, T>
             Option<T>
             OptionalExcelValue<T>
             OwnedExcelValue
@@ -42,7 +42,7 @@ help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            Handle<'call, T>
             Option<T>
             OptionalExcelValue<T>
             OwnedExcelValue

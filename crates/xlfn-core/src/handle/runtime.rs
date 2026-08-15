@@ -200,27 +200,6 @@ impl Drop for HandleInitializationGuard {
     }
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
-struct HandleOperationGhostGuard<'a> {
-    leases: &'a HandleLeaseState,
-}
-
-#[cfg(any(test, feature = "shutdown-refinement"))]
-impl<'a> HandleOperationGhostGuard<'a> {
-    fn enter(leases: &'a HandleLeaseState) -> Self {
-        leases.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
-        Self { leases }
-    }
-}
-
-#[cfg(any(test, feature = "shutdown-refinement"))]
-impl Drop for HandleOperationGhostGuard<'_> {
-    fn drop(&mut self) {
-        self.leases
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
-    }
-}
-
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct HandleRuntime {
@@ -228,7 +207,6 @@ pub(crate) struct HandleRuntime {
     pub(crate) topics: RwLock<TopicState>,
     pub(crate) published: PublishedTopics,
     pub(crate) prepares: HandlePrepareState,
-    pub(crate) leases: Arc<HandleLeaseState>,
     pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
     #[cfg(any(test, feature = "handle-refinement-trace"))]
     pub(crate) refinement: HandleRefinementTrace,
@@ -245,7 +223,6 @@ impl HandleRuntime {
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> XllResult<Self> {
         let registry = HandleRegistry::try_new(maximum_handles)?;
-        let leases = Arc::new(HandleLeaseState::new());
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let registry_session = registry.session;
         Ok(Self {
@@ -253,7 +230,6 @@ impl HandleRuntime {
             topics: RwLock::new(TopicState::default()),
             published: PublishedTopics::new(),
             prepares: HandlePrepareState::new(),
-            leases,
             _module_ingress: module_ingress,
             #[cfg(any(test, feature = "handle-refinement-trace"))]
             refinement: HandleRefinementTrace::new(registry_session),
@@ -262,8 +238,7 @@ impl HandleRuntime {
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.registry.set_ghost(Arc::clone(&ghost));
-        self.leases.set_ghost(ghost);
+        self.registry.set_ghost(ghost);
     }
 
     #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -417,6 +392,23 @@ impl HandleRuntime {
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
     {
+        self.prepare_observed_object::<T, K>(
+            key,
+            || create().map(|value| HandleObject::new(value, Arc::clone(&self.registry.cleanup))),
+            observe,
+        )
+    }
+
+    pub(crate) fn prepare_observed_object<T, K>(
+        &self,
+        key: K,
+        create: impl FnOnce() -> XllResult<Arc<HandleObject>>,
+        observe: impl FnOnce(&str, &str) -> XllResult<()>,
+    ) -> XllResult<(String, bool)>
+    where
+        T: ExcelHandleObject,
+        K: Into<HandleTopicKey>,
+    {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
         let _prepare = self.prepares.enter();
@@ -424,9 +416,6 @@ impl HandleRuntime {
         let _refinement_prepare = self.refinement.prepare_guard();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.begin_prepare();
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        let _ghost_handle_operation = HandleOperationGhostGuard::enter(&self.leases);
-
         {
             let published = self.published.load(&key);
             if let Some(publication) = published.get(&key) {
@@ -629,7 +618,9 @@ impl HandleRuntime {
         let mut value =
             PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
 
-        let (token, reused) = self.registry.insert_pending_with_kind(value.slot())?;
+        let (token, reused) = self
+            .registry
+            .insert_pending_object_with_kind::<T>(value.slot())?;
         #[cfg(not(any(test, feature = "handle-refinement-trace")))]
         let _ = reused;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -1057,11 +1048,15 @@ impl HandleRuntime {
         }
     }
 
-    pub fn lookup<T>(&self, token: &str) -> XllResult<Handle<T>>
+    pub fn lookup<'call, T>(
+        &self,
+        scope: &'call crate::CallScope<'call>,
+        token: &str,
+    ) -> XllResult<Handle<'call, T>>
     where
         T: ExcelHandleObject,
     {
-        self.registry.lookup_handle(token, &self.leases)
+        self.registry.lookup_handle(scope, token)
     }
 
     pub fn close(&self) -> XllResult<()> {
@@ -1114,7 +1109,7 @@ impl HandleRuntime {
         //
         self.prepares.wait_for_idle();
 
-        let result = self.registry.close_with_leases(&self.leases);
+        let result = self.registry.close();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         {
             self.refinement.close_registry();

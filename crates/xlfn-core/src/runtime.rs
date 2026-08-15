@@ -1540,9 +1540,21 @@ pub(crate) mod tests {
                 Ok(Arc::new(TestHandle(2)))
             })
             .unwrap();
-        assert_eq!(new_handles.lookup::<TestHandle>(&new_token).unwrap().0, 2);
+        assert_eq!(
+            crate::with_excel_call_scope(|scope| {
+                new_handles
+                    .lookup::<TestHandle>(scope, &new_token)
+                    .map(|value| value.0)
+            })
+            .unwrap(),
+            2
+        );
         assert!(matches!(
-            new_handles.lookup::<TestHandle>(&old_token),
+            crate::with_excel_call_scope(|scope| {
+                new_handles
+                    .lookup::<TestHandle>(scope, &old_token)
+                    .map(|_| ())
+            }),
             Err(XllError::StaleHandle | XllError::InvalidHandle)
         ));
     }

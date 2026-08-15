@@ -11,8 +11,8 @@ theorem trace_insert_lookup_close_completes
     let s0 := initialState session
     let token : Token := { session := session, slot := 0, generation := 1 }
     let s1 := { s0 with slots := [.live 1] }
-    let s2 := { s1 with activeLeases := 1 }
-    let s3 := { s2 with activeLeases := 0 }
+    let s2 := { s1 with activeBorrows := 1 }
+    let s3 := { s2 with activeBorrows := 0 }
     let s4 := { s3 with closed := true, slots := [.vacant 2] }
     Step s0 .insertFresh s1 ∧
     Step s1 (.beginLookup token) s2 ∧

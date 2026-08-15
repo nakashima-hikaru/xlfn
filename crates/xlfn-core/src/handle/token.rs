@@ -1,8 +1,8 @@
 use super::*;
 use std::cell::RefCell;
 
-pub(crate) fn drop_handle_values(
-    values: impl IntoIterator<Item = Arc<dyn Any + Send + Sync>>,
+pub(crate) fn drop_handle_objects(
+    values: impl IntoIterator<Item = Arc<HandleObject>>,
     operation: &'static str,
 ) -> XllResult<()> {
     let mut failure = None;

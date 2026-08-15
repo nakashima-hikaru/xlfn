@@ -1,0 +1,104 @@
+error[E0277]: `NonNull<Inner>` cannot be shared between threads safely
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be shared between threads safely
+  |
+  = help: within `Nested<'call>`, the trait `Sync` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub struct Handle<'call, T: ExcelHandleObject> {
+  |            ^^^^^^
+note: required because it appears within the type `Nested<'call>`
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
+  |                                           ^^^^ required by this bound in `ExcelHandleObject`
+
+error[E0277]: `NonNull<Inner>` cannot be sent between threads safely
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be sent between threads safely
+  |
+  = help: within `Nested<'call>`, the trait `Send` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub struct Handle<'call, T: ExcelHandleObject> {
+  |            ^^^^^^
+note: required because it appears within the type `Nested<'call>`
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
+  |                                    ^^^^ required by this bound in `ExcelHandleObject`
+
+error[E0277]: `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be shared between threads safely
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^^^^^^^^ `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be shared between threads safely
+  |
+  = help: within `Nested<'call>`, the trait `Sync` is not implemented for `Rc<xlfn_core::host_callback::HostCallbackShared>`
+note: required because it appears within the type `xlfn_core::host_callback::HostCallbackSession`
+ --> $WORKSPACE/crates/xlfn-core/src/host_callback.rs
+  |
+  | pub(crate) struct HostCallbackSession {
+  |                   ^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn_core::value::CallScope<'call>`
+ --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  |
+  | pub struct CallScope<'call> {
+  |            ^^^^^^^^^
+  = note: required because it appears within the type `&'call xlfn_core::value::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn_core::value::CallScope<'call>>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub struct Handle<'call, T: ExcelHandleObject> {
+  |            ^^^^^^
+note: required because it appears within the type `Nested<'call>`
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
+ --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+  |
+  | pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
+  |                                           ^^^^ required by this bound in `ExcelHandleObject`
+
+error: lifetime may not live long enough
+ --> tests/ui/fail/nested_handle_storage.rs:6:10
+  |
+6 | #[derive(ExcelHandleObject)]
+  |          ^^^^^^^^^^^^^^^^^ requires that `'call` must outlive `'static`
+7 | struct Nested<'call> {
+  |               ----- lifetime `'call` defined here
+  |
+  = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: lifetime may not live long enough
+ --> tests/ui/fail/nested_handle_storage.rs:6:10
+  |
+6 | #[derive(ExcelHandleObject)]
+  |          ^^^^^^^^^^^^^^^^^ returning this value requires that `'call` must outlive `'static`
+7 | struct Nested<'call> {
+  |               ----- lifetime `'call` defined here
+  |
+  = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)

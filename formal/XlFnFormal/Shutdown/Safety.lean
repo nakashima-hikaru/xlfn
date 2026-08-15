@@ -115,7 +115,6 @@ theorem reachable_closed_has_no_executable_work
     current.resources.rtdClassFactories = 0 ∧
     current.resources.rtdServers = 0 ∧
     current.resources.rtdServerLocks = 0 ∧
-    current.resources.handleOperations = 0 ∧
     current.resources.handles = 0 := by
   have hQuiescent := reachable_closed_is_quiescent
     hInitialOpen hReachable hClosed
@@ -130,10 +129,9 @@ theorem reachable_closed_has_no_executable_work
   rcases hAsync with ⟨hTasks, hExecutor⟩
   rcases hSubscriptions with ⟨hSubscriptions, hCallbacks⟩
   rcases hRtd with ⟨hOperations, hFactories, hServers, hLocks⟩
-  rcases hHandles with ⟨hHandleOperations, hHandleValues⟩
   exact ⟨hExternal, hCalls, hBlocks, hBlocksInFree, hFree, hTasks, hExecutor,
     hSubscriptions, hCallbacks, hOperations, hFactories, hServers, hLocks,
-    hHandleOperations, hHandleValues⟩
+    hHandles⟩
 
 theorem reachable_closed_has_no_host_or_dispatcher
     {initial current : State}

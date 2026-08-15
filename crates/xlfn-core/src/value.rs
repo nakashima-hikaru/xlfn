@@ -371,7 +371,7 @@ impl<'call> FromExcel<'call> for XlArrayRef<'call> {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         Self::from_value(value, argument)
     }
@@ -402,7 +402,7 @@ pub trait FromExcel<'call>: Sized {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self>;
 }
 
@@ -430,29 +430,40 @@ impl<S> HandleRuntimeProvider for crate::Runtime<S> {
 /// initialize handle registry state.
 pub struct CallContext<'call> {
     runtime: Option<&'call dyn HandleRuntimeProvider>,
+    scope: Option<&'call CallScope<'call>>,
 }
 
 impl<'call> CallContext<'call> {
-    pub(crate) fn new<S>(runtime: &'call crate::Runtime<S>) -> Self {
+    pub(crate) fn new<S>(
+        runtime: &'call crate::Runtime<S>,
+        scope: &'call CallScope<'call>,
+    ) -> Self {
         Self {
             runtime: Some(runtime),
+            scope: Some(scope),
         }
     }
 
     pub(crate) const fn without_runtime() -> Self {
-        Self { runtime: None }
+        Self {
+            runtime: None,
+            scope: None,
+        }
     }
 
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
-    ) -> XllResult<crate::Handle<T>> {
+    ) -> XllResult<crate::Handle<'call, T>> {
+        let scope = self.scope.ok_or(XllError::Internal {
+            diagnostic_id: 0x4841_4E44_5343_4F50,
+        })?;
         self.runtime
             .ok_or(XllError::Internal {
                 diagnostic_id: 0x4841_4E44_4E4F_4354,
             })?
             .handle_runtime()?
-            .lookup(token)
+            .lookup(scope, token)
     }
 }
 
@@ -599,7 +610,7 @@ pub fn assert_volatile_return<T: VolatileReturn>() {}
 /// The pointer must satisfy `XlValueRef::from_raw` for the duration of
 /// the conversion.
 pub unsafe fn argument_from_raw<'call, T>(
-    _scope: &CallScope<'call>,
+    _scope: &'call CallScope<'call>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
@@ -616,8 +627,8 @@ where
 
 #[doc(hidden)]
 pub unsafe fn argument_from_raw_with_context<'call, S, T>(
-    _scope: &CallScope<'call>,
-    runtime: &crate::Runtime<S>,
+    _scope: &'call CallScope<'call>,
+    runtime: &'call crate::Runtime<S>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
@@ -629,7 +640,7 @@ where
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::from_excel(borrowed, argument, &CallContext::new(runtime))
+    T::from_excel(borrowed, argument, &CallContext::new(runtime, _scope))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1266,7 +1277,7 @@ impl<'call> FromExcel<'call> for f64 {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let number = match value.base_type() {
             // SAFETY: The root type selects the corresponding union member.
@@ -1286,7 +1297,7 @@ impl<'call> FromExcel<'call> for bool {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         if value.base_type() != XLTYPE_BOOL {
             return Err(value.wrong_type(argument, "boolean"));
@@ -1319,7 +1330,7 @@ impl<'call> FromExcel<'call> for i32 {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         match value.base_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
@@ -1341,7 +1352,7 @@ impl<'call> FromExcel<'call> for i64 {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         match value.base_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
@@ -1364,21 +1375,21 @@ impl<'call> FromExcel<'call> for String {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         String::from_utf16(value.utf16(argument)?)
             .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))
     }
 }
 
-impl<'call, T> FromExcel<'call> for crate::Handle<T>
+impl<'call, T> FromExcel<'call> for crate::Handle<'call, T>
 where
     T: crate::handle::ExcelHandleObject,
 {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'_>,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let token = String::from_excel(value, argument, context)?;
         context.resolve_handle(&token)
@@ -1389,7 +1400,7 @@ impl<'call> FromExcel<'call> for ExcelErrorValue {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext,
+        _context: &CallContext<'call>,
     ) -> XllResult<Self> {
         if value.base_type() != XLTYPE_ERR {
             return Err(value.wrong_type(argument, "Excel error"));
@@ -1409,7 +1420,7 @@ where
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING => Ok(Self::Missing),
@@ -1426,7 +1437,7 @@ where
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING | XLTYPE_NIL => Ok(None),
@@ -1439,7 +1450,7 @@ impl<'call> FromExcel<'call> for ExcelSerialDate {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         Self::new(
             f64::from_excel(value, argument, context)?,
@@ -1459,7 +1470,7 @@ where
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let grid = GridView::from_value(value, argument)?;
         let (rows, columns) = grid.shape();
@@ -1532,7 +1543,7 @@ where
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let matrix = Matrix::<T>::from_excel(value, argument, context)?;
         if matrix.rows() != 1 && matrix.columns() != 1 {
@@ -1558,7 +1569,7 @@ where
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         if MAX == 0 {
             return Err(XllError::input(
@@ -1591,7 +1602,7 @@ impl<'call, T: FromExcel<'call>> FromExcel<'call> for Row<T> {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let matrix = Matrix::<T>::from_excel(value, argument, context)?;
         if matrix.rows() != 1 {
@@ -1614,7 +1625,7 @@ impl<'call, T: FromExcel<'call>> FromExcel<'call> for Column<T> {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let matrix = Matrix::<T>::from_excel(value, argument, context)?;
         if matrix.columns() != 1 {
@@ -1637,7 +1648,7 @@ impl<'call> FromExcel<'call> for OwnedExcelValue {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
+        context: &CallContext<'call>,
     ) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_NUM => f64::from_excel(value, argument, context).map(Self::Number),
@@ -2105,7 +2116,7 @@ mod tests {
             fn from_excel(
                 _value: XlValueRef<'call>,
                 _argument: &'static str,
-                _context: &CallContext,
+                _context: &CallContext<'call>,
             ) -> XllResult<Self> {
                 panic!("element conversion should not occur for oversized inputs");
             }
@@ -2193,7 +2204,7 @@ mod tests {
             fn from_excel(
                 value: XlValueRef<'call>,
                 argument: &'static str,
-                context: &CallContext,
+                context: &CallContext<'call>,
             ) -> XllResult<Self> {
                 f64::from_excel(value, argument, context).map(Self)
             }

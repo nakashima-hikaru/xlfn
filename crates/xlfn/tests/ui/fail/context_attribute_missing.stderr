@@ -9,7 +9,7 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            Handle<'call, T>
             Option<T>
             OptionalExcelValue<T>
             OwnedExcelValue
@@ -32,7 +32,7 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            Handle<'call, T>
             Option<T>
             OptionalExcelValue<T>
             OwnedExcelValue

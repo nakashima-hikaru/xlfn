@@ -14,7 +14,7 @@ help: the trait `MainThreadReturn` is not implemented for `XllResult`
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            HandleAlias<'_, T>
             OwnedExcelValue
             Result<T, E>
             Row<T>
@@ -41,7 +41,7 @@ help: the trait `ExcelReturn` is not implemented for `XllResult`
             Column<T>
             ExcelErrorValue
             ExcelSerialDate
-            Handle<T>
+            HandleAlias<'call, T>
             OwnedExcelValue
             Result<T, E>
             Row<T>

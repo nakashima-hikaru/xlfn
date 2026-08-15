@@ -76,8 +76,7 @@ pub trait Addin: Send + Sync + 'static {
     /// framework fail-stops rather than returning from `xlAutoClose` while code
     /// from this XLL may still run. The hook is terminal and is never retried.
     ///
-    /// Implementations must also release any `Handle<T>` instances stored in
-    /// `State` so that the framework registry can reach lease zero. Vendor
+    /// Handle values are call-scoped and cannot be stored in `State`. Vendor
     /// operations must be canceled cooperatively; unload waits rather than
     /// abandoning in-process code.
     fn quiesce(_state: &mut Self::State) -> Result<(), Self::Error> {

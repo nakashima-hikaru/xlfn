@@ -384,8 +384,9 @@ where
 
     crate::callback_gate::close_from_runtime();
 
-    // State may own framework Handle leases. Remove and quiesce it before the
-    // registry waits for those leases, matching the terminal close ordering.
+    // Remove and quiesce Add-in state before the registry drops its published
+    // object roots, matching the terminal close ordering. Public Handle values
+    // are call-scoped borrows and cannot be stored in state.
     let mut addin_state = None;
     let mut addin_quiesced = None;
     if let Some(state) = runtime.take_state() {
@@ -1636,8 +1637,6 @@ mod tests {
             "beginReturnFree",
             "releaseReturnBlock",
             "endReturnFree",
-            "beginHandleOperation",
-            "endHandleOperation",
             "addHandle",
             "removeHandle",
             "beginRtdOperation",
@@ -1971,59 +1970,6 @@ mod tests {
         runtime.publish((), Vec::new());
         runtime.finish_open(&mut reopened, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
-    }
-
-    struct StateOwnedHandleObject;
-
-    impl crate::ExcelHandleObject for StateOwnedHandleObject {}
-
-    struct StateWithHandle {
-        handle: Option<crate::Handle<StateOwnedHandleObject>>,
-        quiesced: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    struct StateHandleRollback;
-
-    impl Addin for StateHandleRollback {
-        type State = StateWithHandle;
-        type Error = XllError;
-
-        fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
-            unreachable!()
-        }
-
-        fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
-            drop(state.handle.take());
-            state.quiesced.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn failed_open_quiesces_state_owned_handle_before_registry_shutdown() {
-        let runtime = Runtime::new();
-        let handles = runtime.handles().unwrap();
-        let (token, _) = handles
-            .prepare(crate::handle::test_topic_key("state-owned"), || {
-                Ok(std::sync::Arc::new(StateOwnedHandleObject))
-            })
-            .unwrap();
-        let handle = handles.lookup(&token).unwrap();
-        let quiesced = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(
-            StateWithHandle {
-                handle: Some(handle),
-                quiesced: std::sync::Arc::clone(&quiesced),
-            },
-            Vec::new(),
-        );
-
-        assert!(open_attempt.fail());
-        let mut callbacks = HostCallbackSession::new();
-        assert!(rollback_open::<StateHandleRollback>(&runtime, &mut callbacks).unload_safe());
-        assert_eq!(quiesced.load(Ordering::Acquire), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
     }
 
     struct AlwaysFailClose;

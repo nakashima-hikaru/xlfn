@@ -81,7 +81,7 @@ private def rtdDrained (r : Resources) : Bool :=
     r.rtdServerLocks == 0
 
 private def handlesDrained (r : Resources) : Bool :=
-  r.handleOperations == 0 && r.handles == 0
+  r.handles == 0
 
 private def stateClosed (r : Resources) : Bool :=
   r.stateUnique == true && r.addinQuiesced == true && r.stateOwnedByRuntime == false
@@ -93,7 +93,7 @@ private def producerAlive (r : Resources) : Bool :=
   !(r.externalEntries == 0) || !(r.activeCalls == 0) ||
   !(r.returnFreeOperations == 0) || !(r.asyncTasks == 0) ||
   !(r.rtdOperations == 0) || !(r.subscriptions == 0) ||
-  !(r.callbacks == 0) || !(r.handleOperations == 0) ||
+  !(r.callbacks == 0) ||
   !(r.diagnosticsPending == 0)
 
 private def quiescent (r : Resources) : Bool :=
@@ -339,19 +339,8 @@ def apply? (s : State) (event : Event) : Option State :=
           { s.resources with
             rtdServerLocks := decrement s.resources.rtdServerLocks } }
       else none
-  | .beginHandleOperation =>
-      if allowsHandleCreation s.phase = true then
-        some { s with resources :=
-          { s.resources with handleOperations := s.resources.handleOperations + 1 } }
-      else none
-  | .endHandleOperation =>
-      if live s.phase ∧ s.resources.handleOperations > 0 then
-        some { s with resources :=
-          { s.resources with
-            handleOperations := decrement s.resources.handleOperations } }
-      else none
   | .addHandle =>
-      if allowsHandleCreation s.phase = true ∧ s.resources.handleOperations > 0 then
+      if allowsHandleCreation s.phase = true then
         some { s with resources :=
           { s.resources with handles := s.resources.handles + 1 } }
       else none
@@ -501,8 +490,6 @@ theorem apply?_sound
     | apply Step.removeRtdServer
     | apply Step.lockRtdServer
     | apply Step.unlockRtdServer
-    | apply Step.beginHandleOperation
-    | apply Step.endHandleOperation
     | apply Step.addHandle
     | apply Step.removeHandle
     | apply Step.startDiagnostics

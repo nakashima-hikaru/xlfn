@@ -164,9 +164,10 @@ struct Dataset {
 The type must satisfy `Any + Send + Sync + 'static`. Returning the object
 publishes it for the producer formula's identity; a changed formula identity
 publishes a new object while a same-identity recalculation reuses the memoized
-object. Accepting `Handle<Dataset>` resolves and type-checks the token. Handle
-objects are main-thread return values, including volatile main-thread
-functions, but are not thread-safe, macro-sheet, or async return values.
+object. Accepting `Handle<'_, Dataset>` resolves and type-checks the token.
+`HandleAlias<'_, Dataset>` is the explicit main-thread return capability for
+republishing an existing object. Borrowed `Handle` values are not return values,
+and cannot be used by thread-safe, macro-sheet, or async functions.
 
 See [Formula-owned handles](handles.md).
 

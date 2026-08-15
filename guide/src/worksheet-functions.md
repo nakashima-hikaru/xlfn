@@ -58,7 +58,7 @@ Add `thread_safe` only when the full call path is safe under Excel multi-threade
 
 ```rust
 #[excel_function(name = "DATASET.EVALUATE", thread_safe)]
-fn evaluate(dataset: Handle<Dataset>, time: f64) -> XllResult<f64> {
+fn evaluate(dataset: Handle<'_, Dataset>, time: f64) -> XllResult<f64> {
     dataset.evaluate(time)
 }
 ```

@@ -275,7 +275,7 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             fn from_excel(
                 __value: #krate::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
-                __context: &#krate::convert::CallContext,
+                __context: &#krate::convert::CallContext<'__xlfn_call>,
             ) -> #krate::error::XllResult<Self> {
                 let __text = __value.as_str_with_argument(__argument)?;
                 #(#comparisons)*
@@ -1586,7 +1586,7 @@ mod tests {
         let error = expand_excel_function(
             quote!(),
             function(quote!(
-                fn consume(#[excel_arg(handle)] value: Handle<Dataset>) -> f64 {
+                fn consume(#[excel_arg(handle)] value: Handle<'_, Dataset>) -> f64 {
                     value.size
                 }
             )),

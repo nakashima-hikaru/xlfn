@@ -90,7 +90,7 @@ pub mod convert {
 
 /// Formula-owned typed objects and their checked handles.
 pub mod handle {
-    pub use xlfn_core::{ExcelHandleObject, Handle};
+    pub use xlfn_core::{ExcelHandleObject, Handle, HandleAlias};
 }
 
 /// Real-time data subscriptions.
@@ -148,7 +148,7 @@ pub mod prelude {
         XlArrayRef, XlStrRef,
     };
     pub use crate::error::{ExcelError, IntoXllError, Shape, XllError, XllResult};
-    pub use crate::handle::{ExcelHandleObject, Handle};
+    pub use crate::handle::{ExcelHandleObject, Handle, HandleAlias};
     pub use crate::rtd::{
         IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue,
     };

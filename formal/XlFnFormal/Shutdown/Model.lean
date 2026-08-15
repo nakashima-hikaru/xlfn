@@ -165,7 +165,6 @@ structure Resources where
   rtdClassFactories : Nat := 0
   rtdServers : Nat := 0
   rtdServerLocks : Nat := 0
-  handleOperations : Nat := 0
   handles : Nat := 0
   stateUnique : Bool := false
   addinQuiesced : Bool := false
@@ -205,7 +204,7 @@ def RtdDrained (r : Resources) : Prop :=
   r.rtdServerLocks = 0
 
 def HandlesDrained (r : Resources) : Prop :=
-  r.handleOperations = 0 ∧ r.handles = 0
+  r.handles = 0
 
 def StateClosed (r : Resources) : Prop :=
   r.stateUnique = true ∧
@@ -237,7 +236,6 @@ def ProducerAlive (r : Resources) : Prop :=
   r.rtdOperations > 0 ∨
   r.subscriptions > 0 ∨
   r.callbacks > 0 ∨
-  r.handleOperations > 0 ∨
   r.diagnosticsPending > 0
 
 theorem quiescent_hostDetached {r : Resources}

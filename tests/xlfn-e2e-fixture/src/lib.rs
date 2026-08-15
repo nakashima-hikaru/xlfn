@@ -38,7 +38,7 @@ pub fn create_handle(value: i32) -> FixtureObject {
 }
 
 #[excel_function(name = "FRAMEWORK.HANDLE.VALUE")]
-pub fn handle_value(value: Handle<FixtureObject>) -> i32 {
+pub fn handle_value(value: Handle<'_, FixtureObject>) -> i32 {
     value.value
 }
 

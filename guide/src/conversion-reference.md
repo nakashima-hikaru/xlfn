@@ -13,7 +13,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `String` | string | validates UTF-16 |
 | `ExcelErrorValue` | Excel error | preserves the exact error |
 | `ExcelSerialDate` | finite number | starts with `ExcelDateSystem::Workbook` |
-| `Handle<T>` | string handle token | authenticates, checks generation, and checks object type |
+| `Handle<'_, T>` | string handle token | authenticates, checks generation, and checks object type; valid only for the active call |
 | `Option<T>` | value, blank, or missing | blank and missing become `None` |
 | `OptionalExcelValue<T>` | value, blank, or missing | preserves all three states |
 | `XlArrayRef<'call>` | rectangular multi-value | zero-allocation borrowed cells; synchronous UDFs only |
@@ -65,7 +65,7 @@ The following are direct scalar returns:
 | `ExcelEnum` | yes | yes | yes | yes | yes |
 | `Matrix<T>`, `Row<T>`, `Column<T>`, `XlArrayOutput` | yes | yes | yes | yes | yes |
 | `RtdValue` | yes | yes | yes | yes | yes |
-| `Handle<T>` | yes | no | no | no | yes |
+| `HandleAlias<'_, T>` | yes | no | no | no | yes |
 | object deriving `ExcelHandleObject` | yes | no | no | no | yes |
 | custom `T` | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits |
 

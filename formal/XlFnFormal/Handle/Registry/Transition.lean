@@ -62,13 +62,13 @@ inductive Step : State → Event → State → Prop where
       (hInBounds : token.slot < s.slots.length)
       (hLive : s.slots.get ⟨token.slot, hInBounds⟩ = .live token.generation) :
       Step s (.beginLookup token)
-        { s with activeLeases := s.activeLeases + 1 }
+        { s with activeBorrows := s.activeBorrows + 1 }
 
   | endLookup
       {s : State}
-      (hLeases : s.activeLeases > 0) :
+      (hBorrows : s.activeBorrows > 0) :
       Step s .endLookup
-        { s with activeLeases := s.activeLeases - 1 }
+        { s with activeBorrows := s.activeBorrows - 1 }
 
   | closeRegistry
       {s : State}
@@ -81,7 +81,7 @@ inductive Step : State → Event → State → Prop where
   | finishClose
       {s : State}
       (hClosed : s.closed)
-      (hNoLeases : s.activeLeases = 0) :
+      (hNoBorrows : s.activeBorrows = 0) :
       Step s .finishClose s
 
 inductive Reachable : State → State → Prop where

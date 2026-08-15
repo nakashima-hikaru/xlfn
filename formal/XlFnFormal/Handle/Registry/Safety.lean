@@ -42,7 +42,7 @@ theorem closeSlot_vacant_retires
 
 def CloseCertified (s : State) : Prop :=
   s.closed = true ∧
-  s.activeLeases = 0 ∧
+  s.activeBorrows = 0 ∧
   NoLiveSlots s
 
 theorem Step.closeCertified_of_finishClose
@@ -51,17 +51,17 @@ theorem Step.closeCertified_of_finishClose
     (hStep : Step s .finishClose s') :
     CloseCertified s' := by
   cases hStep with
-  | finishClose hClosed hNoLeases =>
-      exact ⟨hClosed, hNoLeases,
+  | finishClose hClosed hNoBorrows =>
+      exact ⟨hClosed, hNoBorrows,
         Reachable.noLiveSlots_when_closed hReach hClosed⟩
 
 theorem successful_close_is_certified
     {session : SessionId} {s : State}
     (hReach : Reachable (initialState session) s)
     (hClosed : s.closed = true)
-    (hNoLeases : s.activeLeases = 0) :
+    (hNoBorrows : s.activeBorrows = 0) :
     CloseCertified s := by
-  exact ⟨hClosed, hNoLeases,
+  exact ⟨hClosed, hNoBorrows,
     Reachable.noLiveSlots_when_closed hReach hClosed⟩
 
 theorem mismatched_generation_cannot_lookup

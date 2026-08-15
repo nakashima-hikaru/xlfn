@@ -78,7 +78,6 @@ pub(crate) struct GhostResources {
     pub(crate) rtd_class_factories: u64,
     pub(crate) rtd_servers: u64,
     pub(crate) rtd_server_locks: u64,
-    pub(crate) handle_operations: u64,
     pub(crate) handles: u64,
     pub(crate) state_unique: bool,
     pub(crate) addin_quiesced: bool,
@@ -109,7 +108,6 @@ impl GhostResources {
             rtd_class_factories: 0,
             rtd_servers: 0,
             rtd_server_locks: 0,
-            handle_operations: 0,
             handles: 0,
             state_unique: false,
             addin_quiesced: false,
@@ -145,7 +143,6 @@ impl GhostResources {
             rtd_class_factories: 0,
             rtd_servers: 0,
             rtd_server_locks: 0,
-            handle_operations: 0,
             handles: 0,
             state_unique: true,
             addin_quiesced: true,
@@ -190,7 +187,7 @@ impl GhostResources {
     }
 
     fn handles_drained(&self) -> bool {
-        self.handle_operations == 0 && self.handles == 0
+        self.handles == 0
     }
 
     fn state_closed(&self) -> bool {
@@ -221,7 +218,6 @@ impl GhostResources {
             || self.rtd_operations != 0
             || self.subscriptions != 0
             || self.callbacks != 0
-            || self.handle_operations != 0
             || self.diagnostics_pending != 0
     }
 }
@@ -264,8 +260,6 @@ pub(crate) enum GhostEvent {
     RemoveRtdServer,
     LockRtdServer,
     UnlockRtdServer,
-    BeginHandleOperation,
-    EndHandleOperation,
     AddHandle,
     RemoveHandle,
     StartDiagnostics,
@@ -643,21 +637,10 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
         GhostEvent::UnlockRtdServer => {
             decrement(&mut resources.rtd_server_locks, "RTD server locks")?
         }
-        GhostEvent::BeginHandleOperation => {
+        GhostEvent::AddHandle => {
             if !handle_creation_allowed(&source.phase) {
                 return Err(GhostViolation::Precondition(
-                    "handle operation is not allowed in this phase",
-                ));
-            }
-            increment(&mut resources.handle_operations, "handle operations")?;
-        }
-        GhostEvent::EndHandleOperation => {
-            decrement(&mut resources.handle_operations, "handle operations")?
-        }
-        GhostEvent::AddHandle => {
-            if !handle_creation_allowed(&source.phase) || resources.handle_operations == 0 {
-                return Err(GhostViolation::Precondition(
-                    "handle value requires a handle operation",
+                    "handle publication is not allowed in this phase",
                 ));
             }
             increment(&mut resources.handles, "handles")?;

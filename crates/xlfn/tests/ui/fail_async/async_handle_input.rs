@@ -19,12 +19,10 @@ struct Dataset {
     size: f64,
 }
 
-type DatasetHandle = Handle<Dataset>;
-
 #[excel_function(name = "TEST.HANDLE.ASYNC")]
 async fn async_handle_input(
     #[excel_context(asynchronous)] context: AsyncContext<State>,
-    dataset: DatasetHandle,
+    dataset: Handle<'_, Dataset>,
 ) -> XllResult<f64> {
     let _ = context.state();
     Ok(dataset.size)

@@ -97,8 +97,6 @@ private def simpleShutdownEvent : String → Option Shutdown.Event
   | "removeRtdServer" => some .removeRtdServer
   | "lockRtdServer" => some .lockRtdServer
   | "unlockRtdServer" => some .unlockRtdServer
-  | "beginHandleOperation" => some .beginHandleOperation
-  | "endHandleOperation" => some .endHandleOperation
   | "addHandle" => some .addHandle
   | "removeHandle" => some .removeHandle
   | "startDiagnostics" => some .startDiagnostics
@@ -156,7 +154,6 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
   let rtdClassFactories : Nat ← field json "rtdClassFactories"
   let rtdServers : Nat ← field json "rtdServers"
   let rtdServerLocks : Nat ← field json "rtdServerLocks"
-  let handleOperations : Nat ← field json "handleOperations"
   let handles : Nat ← field json "handles"
   let stateUnique : Bool ← field json "stateUnique"
   let addinQuiesced : Bool ← field json "addinQuiesced"
@@ -183,7 +180,6 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
     rtdClassFactories,
     rtdServers,
     rtdServerLocks,
-    handleOperations,
     handles,
     stateUnique,
     addinQuiesced,

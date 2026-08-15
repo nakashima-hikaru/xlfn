@@ -38,14 +38,14 @@ def closeSlot : SlotState → SlotState
 structure State where
   session : SessionId
   slots : List SlotState
-  activeLeases : Nat
+  activeBorrows : Nat
   closed : Bool
 deriving DecidableEq, Repr
 
 def initialState (session : SessionId) : State :=
   { session := session
     slots := []
-    activeLeases := 0
+    activeBorrows := 0
     closed := false }
 
 def State.AuthenticatedFor (s : State) (token : Token) : Prop :=

@@ -411,14 +411,38 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     }
 
     #[doc(hidden)]
-    pub fn publish_existing_handle<T>(
+    pub fn publish_existing_alias<'handle, T>(
         &mut self,
-        operation: impl FnOnce() -> XllResult<crate::Handle<T>>,
+        operation: impl FnOnce() -> XllResult<crate::HandleAlias<'handle, T>>,
     ) -> XllResult<String>
     where
         T: crate::handle::ExcelHandleObject,
     {
-        self.publish_handle_arc(|| operation().map(crate::Handle::into_arc))
+        let runtime = self.runtime.ok_or(crate::XllError::Internal {
+            diagnostic_id: 0x4841_4e44_4354_5854,
+        })?;
+        let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
+            diagnostic_id: 0x4841_4e44_5544_4649,
+        })?;
+        let raw_arguments = self.raw_arguments.ok_or(crate::XllError::Internal {
+            diagnostic_id: 0x4841_4e44_4449_4745,
+        })?;
+        let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
+            diagnostic_id: 0x4841_4e44_4342_4b53,
+        })?;
+        // SAFETY: for_call's contract keeps every argument and nested payload
+        // live for this context's lifetime.
+        let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
+        let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
+        let handles = runtime.handle_runtime()?;
+        let object = operation()?.into_object();
+        let observer_handles = Arc::clone(&handles);
+        let (token, _) = handles.prepare_observed_object::<T, _>(
+            key,
+            || Ok(object),
+            move |key, token| crate::rtd::observe(observer_handles, key, token, callbacks),
+        )?;
+        Ok(token)
     }
 
     fn publish_handle_arc<T>(
