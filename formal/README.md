@@ -546,3 +546,36 @@ through the relational H4 checker. Invalid close/quiescence fixtures are also
 required to be rejected. This keeps the Rust producer and Lean replay in the
 same CI boundary while leaving the H3 ownership and destruction invariants as
 the source of truth.
+
+## H4.3 PublishedHandle registry snapshot refinement
+
+`XlFnFormal/Handle/Registry/Snapshot` formalizes the `PublishedHandle`
+fast-lookup architecture as a refinement layer over the canonical H1 `Registry`
+semantics:
+
+* **Model & Invariants** (`Model.lean`): Tracks `publications`, active
+  `snapshot` slot bindings, and active `fastLookups` refining `registry`.
+  Invariants preserve publication uniqueness, snapshot uniqueness, fast lookup
+  provenance, canonical live root correspondence, lease accounting
+  (`fastLookups.length ≤ activeLeases`), and closed registry emptiness.
+* **Transitions & Soundness/Completeness** (`Transition.lean`, `Checker.lean`):
+  Defines relational `Step` transitions corresponding to H1 operations.
+  Executable `apply?` is proven sound and complete against `Step`.
+* **Invariant Preservation** (`Invariant.lean`): Proves `Step.invariant_preserved`
+  and `Reachable.invariant_preserved` across all 11 lifecycle and lookup steps.
+* **Safety & Race Properties** (`Safety.lean`):
+  - *Linearization Point*: Proves the second `Live` state check linearizes
+    fast lookups to H1 `beginLookup`; if removed first, second check fails as
+    `Stale` and drops the acquired lease.
+  - *Lease Accounting & Close Gating*: Proves active fast lookups prevent
+    `finishClose` until all leases are released.
+  - *Slot Reuse ABA Protection*: Proves `stale_lookup_cannot_follow_reused_generation`.
+  - *Weak Upgrade Fallback*: Proves fallback drops lease and falls back cleanly
+    without assuming unconditional fast success.
+* **Executable Replay Traces** (`Trace.lean`): Proves replay traces for fast
+  lookup success, fast lookup racing remove linearization, slot reuse ABA
+  protection, and Weak upgrade fallback through `CloseCertified`.
+* **Rust Deterministic Race Regressions** (`crates/xlfn-core/src/handle/tests.rs`):
+  Tests old generation rejection on reused slot, remove during lease acquire
+  linearizing as stale, and Weak upgrade failure falling back to slow path.
+

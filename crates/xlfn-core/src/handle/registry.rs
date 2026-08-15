@@ -86,7 +86,7 @@ impl PublishedHandles {
     }
 
     /// Update the snapshot while the canonical registry write lock is held.
-    fn insert(&self, slot: u32, publication: Arc<PublishedHandle>) {
+    pub(crate) fn insert(&self, slot: u32, publication: Arc<PublishedHandle>) {
         let shard = &self.shards[Self::shard_index(slot)];
         let current = shard.load_full();
         let mut next = current.as_ref().clone();

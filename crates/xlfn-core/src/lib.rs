@@ -266,6 +266,7 @@ pub(crate) mod test_callback {
         TERMINAL_USED.store(false, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn set_async_rejected(rejected: bool) {
         ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
     }
@@ -279,6 +280,7 @@ pub(crate) mod test_callback {
         TOTAL_CALLS.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn async_return_calls() -> usize {
         ASYNC_RETURN_CALLS.load(Ordering::Acquire)
     }
@@ -287,11 +289,12 @@ pub(crate) mod test_callback {
         FREE_CALLS.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn last_async_value() -> i32 {
         LAST_ASYNC_VALUE.load(Ordering::Relaxed)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(feature = "async", not(target_os = "windows")))]
     pub(crate) fn callback_order() -> Vec<i32> {
         CALLBACK_ORDER
             .lock()

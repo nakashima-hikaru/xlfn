@@ -58,3 +58,9 @@ import XlFnFormal.Handle.Topics.Serialization.Safety
 import XlFnFormal.Handle.Topics.Serialization.Golden
 import XlFnFormal.Rtd.ServerGeneration.Model
 import XlFnFormal.Rtd.ServerGeneration.Safety
+import XlFnFormal.Handle.Registry.Snapshot.Model
+import XlFnFormal.Handle.Registry.Snapshot.Transition
+import XlFnFormal.Handle.Registry.Snapshot.Invariant
+import XlFnFormal.Handle.Registry.Snapshot.Safety
+import XlFnFormal.Handle.Registry.Snapshot.Checker
+import XlFnFormal.Handle.Registry.Snapshot.Trace

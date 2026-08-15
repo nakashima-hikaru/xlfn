@@ -433,6 +433,116 @@ fn published_handle_index_does_not_extend_values_through_close() {
 }
 
 #[test]
+fn published_handle_reused_slot_cannot_be_resolved_by_stale_token() {
+    struct TestObj(&'static str);
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = HandleRegistry::new(4);
+    let leases = Arc::new(HandleLeaseState::new());
+
+    let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
+    let parsed1 = registry.parse_token(&token1).unwrap();
+    let publication1 = registry
+        .published
+        .lookup(parsed1.slot)
+        .expect("first handle must be published");
+
+    // Remove first handle: slot is now vacant with next generation, publication1 is Stale.
+    let _ = registry.remove::<TestObj>(&token1).unwrap();
+    assert_eq!(publication1.state(), PublishedHandleState::Stale);
+
+    // Insert replacement in the same slot (generation + 1).
+    let token2 = insert_production(&registry, Arc::new(TestObj("second"))).unwrap();
+    let parsed2 = registry.parse_token(&token2).unwrap();
+    assert_eq!(parsed1.slot, parsed2.slot);
+    assert_ne!(parsed1.generation, parsed2.generation);
+
+    let publication2 = registry
+        .published
+        .lookup(parsed2.slot)
+        .expect("reused handle must be published");
+    assert_eq!(publication2.state(), PublishedHandleState::Live);
+    assert_eq!(publication2.generation, parsed2.generation);
+
+    // Fast lookup on stale token1 is rejected as StaleHandle by generation check
+    let stale_lookup = registry.lookup_handle::<TestObj>(&token1, &leases);
+    assert!(matches!(stale_lookup, Err(XllError::StaleHandle)));
+
+    // Fast lookup on new token2 succeeds
+    let fresh_handle = registry.lookup_handle::<TestObj>(&token2, &leases).unwrap();
+    assert_eq!(fresh_handle.0, "second");
+    assert_eq!(leases.active(), 1);
+    drop(fresh_handle);
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
+fn published_handle_remove_during_lease_acquire_linearizes_as_stale() {
+    struct TestObj(&'static str);
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = Arc::new(HandleRegistry::new(4));
+    let leases = Arc::new(HandleLeaseState::new());
+
+    let token = insert_production(&registry, Arc::new(TestObj("target"))).unwrap();
+    let parsed = registry.parse_token(&token).unwrap();
+    let publication = registry
+        .published
+        .lookup(parsed.slot)
+        .expect("handle must be published");
+    assert_eq!(publication.state(), PublishedHandleState::Live);
+
+    // Simulate remove occurring between first state check and second state check:
+    // When remove() runs, it marks the publication Stale.
+    let removed = registry.remove::<TestObj>(&token).unwrap();
+    assert_eq!(removed.0, "target");
+    assert_eq!(publication.state(), PublishedHandleState::Stale);
+
+    // Any in-flight lookup that reaches second state check after lease acquire
+    // observes Stale, immediately drops its lease, and returns StaleHandle.
+    let lookup = registry.lookup_handle::<TestObj>(&token, &leases);
+    assert!(matches!(lookup, Err(XllError::StaleHandle)));
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
+fn published_handle_upgrade_failure_after_second_live_falls_back_cleanly() {
+    struct TestObj(u32);
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = HandleRegistry::new(4);
+    let leases = Arc::new(HandleLeaseState::new());
+
+    let value = Arc::new(TestObj(99));
+    let token = insert_production(&registry, Arc::clone(&value)).unwrap();
+    let parsed = registry.parse_token(&token).unwrap();
+
+    // Verify fast path works initially
+    let handle = registry.lookup_handle::<TestObj>(&token, &leases).unwrap();
+    assert_eq!(handle.0, 99);
+    drop(handle);
+    assert_eq!(leases.active(), 0);
+
+    // Inject a publication in the snapshot where state is Live but weak ref is dead
+    let dead_publication = Arc::new(PublishedHandle {
+        generation: parsed.generation,
+        type_id: TypeId::of::<TestObj>(),
+        type_name: std::any::type_name::<TestObj>(),
+        value: Weak::<TestObj>::new(),
+        state: AtomicU8::new(PublishedHandleState::Live as u8),
+    });
+    registry.published.insert(parsed.slot, dead_publication);
+
+    // Fast lookup reaches upgrade() -> None, drops lease, and falls back to slow path
+    // Slow path reads canonical registry.state and succeeds!
+    let fallback_handle = registry.lookup_handle::<TestObj>(&token, &leases).unwrap();
+    assert_eq!(fallback_handle.0, 99);
+    assert_eq!(leases.active(), 1);
+    drop(fallback_handle);
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
 fn exhausted_generation_retires_the_slot_permanently() {
     let registry = HandleRegistry::new(2);
     insert_production(&registry, Arc::new(1_u32)).unwrap();
