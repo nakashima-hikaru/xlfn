@@ -147,6 +147,8 @@ pub(crate) struct HandleRegistry {
     pub(crate) state: RwLock<RegistryState>,
     pub(crate) published: PublishedHandles,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
+    #[cfg(test)]
+    pub(crate) before_fast_upgrade_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
@@ -250,6 +252,8 @@ impl HandleRegistry {
             }),
             published: PublishedHandles::new(),
             cleanup_failure: Mutex::new(None),
+            #[cfg(test)]
+            before_fast_upgrade_hook: Mutex::new(None),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
         }
@@ -431,7 +435,9 @@ impl HandleRegistry {
             // The first state check only avoids entering the lease path for
             // obviously withdrawn entries. The second check is the actual
             // lookup/close linearization point.
-            let lease = leases.acquire();
+            let Some(lease) = leases.acquire() else {
+                return Err(XllError::Closing);
+            };
             match publication.state() {
                 PublishedHandleState::Live => {}
                 PublishedHandleState::Stale => {
@@ -442,6 +448,11 @@ impl HandleRegistry {
                     drop(lease);
                     return Err(XllError::Closing);
                 }
+            }
+
+            #[cfg(test)]
+            if let Some(hook) = self.before_fast_upgrade_hook.lock().take() {
+                hook();
             }
 
             let Some(value) = publication.upgrade() else {
@@ -492,9 +503,12 @@ impl HandleRegistry {
         }
 
         // Acquire the lease while the registry read lock is still held. The
-        // close path first takes the corresponding write lock and therefore
-        // cannot observe zero leases after this value has escaped.
-        let lease = leases.acquire();
+        // close path seals lease admission before taking the corresponding
+        // write lock, so it cannot observe zero leases while a new lease can
+        // still escape this read-side critical section.
+        let Some(lease) = leases.acquire() else {
+            return Err(XllError::Closing);
+        };
         let value = Arc::clone(&entry.value);
         drop(state);
         let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
@@ -719,8 +733,10 @@ impl HandleRegistry {
     }
 
     pub(crate) fn close_with_leases(&self, leases: &HandleLeaseState) -> XllResult<()> {
-        // The write lock in take_values_for_close linearizes closure against
-        // lookup_handle, which acquires its lease under the read lock.
+        // Seal lease admission before removing canonical values. Existing
+        // leases may still drain, but no new independent lookup lease can be
+        // admitted after this point.
+        leases.seal();
         // Drop registry-held values first so any nested Handle<U> instances inside
         // registry-owned objects release their RuntimeLease before we wait.
         let values = self.take_values_for_close();

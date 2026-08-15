@@ -5,6 +5,8 @@ use std::time::Duration;
 const HANDLE_LEASE_STRIPE_COUNT: usize = 32;
 const HANDLE_LEASE_STRIPE_MASK: usize = HANDLE_LEASE_STRIPE_COUNT - 1;
 const HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
+const HANDLE_LEASE_ADMISSION_SEALED: usize = 1usize << (usize::BITS - 1);
+const HANDLE_LEASE_ADMISSION_COUNT_MASK: usize = !HANDLE_LEASE_ADMISSION_SEALED;
 const HANDLE_PREPARE_STRIPE_COUNT: usize = 32;
 const HANDLE_PREPARE_STRIPE_MASK: usize = HANDLE_PREPARE_STRIPE_COUNT - 1;
 const HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
@@ -65,20 +67,26 @@ impl HandleLeaseStripe {
 
 pub(crate) struct HandleLeaseState {
     stripes: [Arc<HandleLeaseStripe>; HANDLE_LEASE_STRIPE_COUNT],
+    admission: AtomicUsize,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     pub(crate) before_idle_wait_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) after_acquire_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl HandleLeaseState {
     pub(crate) fn new() -> Self {
         Self {
             stripes: std::array::from_fn(|_| Arc::new(HandleLeaseStripe::new())),
+            admission: AtomicUsize::new(0),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
             before_idle_wait_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_acquire_hook: Mutex::new(None),
         }
     }
 
@@ -94,7 +102,8 @@ impl HandleLeaseState {
         }
     }
 
-    pub(crate) fn acquire(self: &Arc<Self>) -> HandleLease {
+    pub(crate) fn acquire(self: &Arc<Self>) -> Option<HandleLease> {
+        self.reserve_acquisition()?;
         let stripe = Arc::clone(&self.stripes[current_handle_lease_stripe()]);
         stripe
             .active
@@ -102,6 +111,12 @@ impl HandleLeaseState {
                 active.checked_add(1)
             })
             .expect("handle lease count cannot overflow");
+        self.release_acquisition_reservation();
+
+        #[cfg(test)]
+        if let Some(hook) = self.after_acquire_hook.lock().take() {
+            hook();
+        }
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let ghost = self.ghost.lock().clone();
@@ -111,10 +126,49 @@ impl HandleLeaseState {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
         }
 
-        HandleLease {
+        Some(HandleLease {
             stripe,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost,
+        })
+    }
+
+    fn reserve_acquisition(&self) -> Option<()> {
+        loop {
+            let current = self.admission.load(Ordering::Acquire);
+            if current & HANDLE_LEASE_ADMISSION_SEALED != 0 {
+                return None;
+            }
+            let count = current & HANDLE_LEASE_ADMISSION_COUNT_MASK;
+            let next_count = count
+                .checked_add(1)
+                .expect("handle lease acquisition reservation cannot overflow");
+            let next = next_count | (current & HANDLE_LEASE_ADMISSION_SEALED);
+            if self
+                .admission
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(());
+            }
+        }
+    }
+
+    fn release_acquisition_reservation(&self) {
+        self.admission
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let count = current & HANDLE_LEASE_ADMISSION_COUNT_MASK;
+                debug_assert!(count > 0);
+                Some((current & HANDLE_LEASE_ADMISSION_SEALED) | (count - 1))
+            })
+            .expect("handle lease acquisition reservation remains balanced");
+    }
+
+    pub(crate) fn seal(&self) {
+        self.admission
+            .fetch_or(HANDLE_LEASE_ADMISSION_SEALED, Ordering::AcqRel);
+        while self.admission.load(Ordering::Acquire) & HANDLE_LEASE_ADMISSION_COUNT_MASK != 0 {
+            std::thread::sleep(HANDLE_LEASE_QUIESCENCE_RECHECK_INTERVAL);
         }
     }
 

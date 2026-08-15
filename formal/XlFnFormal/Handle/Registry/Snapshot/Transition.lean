@@ -12,7 +12,9 @@ inductive Event where
   | insertReuse (slot : SlotId) (generation : Generation)
   | removeReuse (token : Token) (nextGeneration : Generation)
   | removeRetire (token : Token)
-  | beginFastLookup (readerId : Nat) (token : Token)
+  | beginTentativeFastLookup (readerId : Nat) (token : Token)
+  | validateFastLookup (readerId : Nat)
+  | rejectTentativeFastLookup (readerId : Nat)
   | completeFastLookup (readerId : Nat)
   | fallbackFastLookup (readerId : Nat)
   | beginSlowLookup (token : Token)
@@ -69,24 +71,44 @@ inductive Step : State → Event → State → Prop where
             publications := s.updatePublicationState token.slot token.generation .stale
             snapshot := s.removeSnapshot token.slot }
 
-  | beginFastLookup
-      {s : State} {reg' : Registry.State}
+  | beginTentativeFastLookup
+      {s : State}
       {readerId : Nat} {token : Token} {pub : Publication} {binding : SnapshotBinding}
       (hNoReader : s.findFastLookup? readerId = none)
       (hSnap : s.findSnapshot? token.slot = some binding)
       (hSnapGen : binding.generation = token.generation)
       (hPub : s.findPublication? token.slot token.generation = some pub)
-      (hLive : pub.state = .live)
-      (hReg : Registry.Step s.registry (.beginLookup token) reg') :
-      Step s (.beginFastLookup readerId token)
+      (hAuth : token.session = s.registry.session)
+      (hLive : pub.state = .live) :
+      Step s (.beginTentativeFastLookup readerId token)
+        { s with
+            fastLookups := s.fastLookups ++
+              [{ id := readerId, token := token, stage := .tentative }] }
+
+  | validateFastLookup
+      {s : State} {reg' : Registry.State}
+      {readerId : Nat} {lookup : FastLookup}
+      (hLookup : s.findFastLookup? readerId = some lookup)
+      (hTentative : lookup.stage = .tentative)
+      (hReg : Registry.Step s.registry (.beginLookup lookup.token) reg') :
+      Step s (.validateFastLookup readerId)
         { s with
             registry := reg'
-            fastLookups := s.fastLookups ++ [{ id := readerId, token := token }] }
+            fastLookups := s.updateFastLookupStage readerId .validated }
+
+  | rejectTentativeFastLookup
+      {s : State}
+      {readerId : Nat} {lookup : FastLookup}
+      (hLookup : s.findFastLookup? readerId = some lookup)
+      (hTentative : lookup.stage = .tentative) :
+      Step s (.rejectTentativeFastLookup readerId)
+        { s with fastLookups := s.removeFastLookup readerId }
 
   | completeFastLookup
       {s : State} {reg' : Registry.State}
       {readerId : Nat} {lookup : FastLookup}
       (hLookup : s.findFastLookup? readerId = some lookup)
+      (hValidated : lookup.stage = .validated)
       (hReg : Registry.Step s.registry .endLookup reg') :
       Step s (.completeFastLookup readerId)
         { s with
@@ -97,6 +119,7 @@ inductive Step : State → Event → State → Prop where
       {s : State} {reg' : Registry.State}
       {readerId : Nat} {lookup : FastLookup}
       (hLookup : s.findFastLookup? readerId = some lookup)
+      (hValidated : lookup.stage = .validated)
       (hReg : Registry.Step s.registry .endLookup reg') :
       Step s (.fallbackFastLookup readerId)
         { s with
@@ -112,7 +135,7 @@ inductive Step : State → Event → State → Prop where
 
   | endSlowLookup
       {s : State} {reg' : Registry.State}
-      (hSlowLease : s.fastLookups.length < s.registry.activeLeases)
+      (hSlowLease : s.validatedFastLookups.length < s.registry.activeLeases)
       (hReg : Registry.Step s.registry .endLookup reg') :
       Step s .endSlowLookup
         { s with registry := reg' }
@@ -128,6 +151,7 @@ inductive Step : State → Event → State → Prop where
 
   | finishClose
       {s : State} {reg' : Registry.State}
+      (hNoFast : s.fastLookups = [])
       (hReg : Registry.Step s.registry .finishClose reg') :
       Step s .finishClose s
 

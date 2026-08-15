@@ -24,9 +24,15 @@ structure SnapshotBinding where
   generation : Generation
 deriving DecidableEq, Repr
 
+inductive FastLookupStage where
+  | tentative
+  | validated
+deriving DecidableEq, Repr
+
 structure FastLookup where
   id : Nat
   token : Token
+  stage : FastLookupStage
 deriving DecidableEq, Repr
 
 structure State where
@@ -72,6 +78,16 @@ def State.removeSnapshot (s : State) (slot : SlotId) : List SnapshotBinding :=
 def State.removeFastLookup (s : State) (id : Nat) : List FastLookup :=
   s.fastLookups.filter (fun l => l.id != id)
 
+def State.updateFastLookupStage
+    (s : State) (id : Nat) (stage : FastLookupStage) : List FastLookup :=
+  s.fastLookups.map (fun l => if l.id = id then { l with stage := stage } else l)
+
+def State.validatedFastLookups (s : State) : List FastLookup :=
+  s.fastLookups.filter (fun l => l.stage = .validated)
+
+def State.tentativeFastLookups (s : State) : List FastLookup :=
+  s.fastLookups.filter (fun l => l.stage = .tentative)
+
 def State.PublicationIdentitiesUnique (s : State) : Prop :=
   s.publications.Pairwise (fun lhs rhs => lhs.slot ≠ rhs.slot ∨ lhs.generation ≠ rhs.generation)
 
@@ -107,7 +123,7 @@ def State.FastLookupSound (s : State) : Prop :=
       pub.generation = lookup.token.generation
 
 def State.LeaseAccounting (s : State) : Prop :=
-  s.fastLookups.length ≤ s.registry.activeLeases
+  s.validatedFastLookups.length ≤ s.registry.activeLeases
 
 def State.ClosedNoLiveSlots (s : State) : Prop :=
   s.registry.closed = true →

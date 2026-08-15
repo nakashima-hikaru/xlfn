@@ -139,6 +139,144 @@ theorem findFastLookup?_none
   subst hId
   simp at hFind
 
+theorem pairwise_updateFastLookupStage
+    {l : List FastLookup} {id : Nat} {stage : FastLookupStage}
+    (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id)) :
+    (l.map (fun lookup => if lookup.id = id then { lookup with stage := stage } else lookup)).Pairwise
+      (fun lhs rhs => lhs.id ≠ rhs.id) := by
+  apply pairwise_map hPair
+  intro a _ b _ hR
+  split <;> split <;> exact hR
+
+theorem validated_filter_append_tentative
+    {l : List FastLookup} {lookup : FastLookup}
+    (hStage : lookup.stage = .tentative) :
+    (l ++ [lookup]).filter (fun x => decide (x.stage = .validated)) =
+      l.filter (fun x => decide (x.stage = .validated)) := by
+  simp [hStage]
+
+theorem map_updateFastLookupStage_eq_self_of_id_ne
+    {l : List FastLookup} {id : Nat} {stage : FastLookupStage}
+    (hNe : ∀ lookup ∈ l, lookup.id ≠ id) :
+    l.map (fun lookup => if lookup.id = id then { lookup with stage := stage } else lookup) = l := by
+  induction l with
+  | nil => rfl
+  | cons head tail ih =>
+      have hHead := hNe head List.mem_cons_self
+      have hTail : ∀ lookup ∈ tail, lookup.id ≠ id := by
+        intro lookup hMem
+        exact hNe lookup (List.mem_cons_of_mem head hMem)
+      have hHeadUpdate :
+          (if head.id = id then { head with stage := stage } else head) = head := by
+        simp [hHead]
+      simp only [List.map]
+      rw [hHeadUpdate, ih hTail]
+
+theorem length_validated_updateFastLookupStage
+    {l : List FastLookup} {id : Nat} {lookup : FastLookup}
+    (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id))
+    (hFind : l.find? (fun x => x.id == id) = some lookup)
+    (hTentative : lookup.stage = .tentative) :
+    ((l.map (fun x => if x.id = id then { x with stage := .validated } else x)).filter
+        (fun x => decide (x.stage = .validated))).length =
+      (l.filter (fun x => decide (x.stage = .validated))).length + 1 := by
+  induction l with
+  | nil => simp at hFind
+  | cons head tail ih =>
+      cases hPair with
+      | cons hHead hTail =>
+          by_cases hId : head.id = id
+          · have hHeadId : head.id = id := hId
+            have hEq : head = lookup := by
+              simpa [List.find?, hId] using hFind
+            subst lookup
+            have hNoTail : ∀ x ∈ tail, x.id ≠ id := by
+              intro x hx hX
+              apply hHead x hx
+              exact hHeadId.trans hX.symm
+            have hIdNe : (head.id != id) = false := by simp [hHeadId]
+            have hTailMap := map_updateFastLookupStage_eq_self_of_id_ne
+              (l := tail) (id := id) (stage := FastLookupStage.validated) hNoTail
+            have hOldHead : decide (head.stage = FastLookupStage.validated) = false := by
+              simp [hTentative]
+            simp only [List.map, if_pos hId]
+            rw [hTailMap]
+            simp [List.filter, hOldHead]
+          · have hIdFalse : (head.id == id) = false := by
+              exact Bool.not_eq_true _ |>.mp (by simpa using hId)
+            have hFindTail : tail.find? (fun x => x.id == id) = some lookup := by
+              simpa [List.find?, hIdFalse] using hFind
+            have hTailResult := ih hTail hFindTail
+            rw [List.map, if_neg hId]
+            by_cases hStage : decide (head.stage = FastLookupStage.validated) = true
+            · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
+            · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
+
+theorem filter_validated_and_id_ne_eq
+    {l : List FastLookup} {id : Nat}
+    (hNe : ∀ lookup ∈ l, lookup.id ≠ id) :
+    l.filter (fun x => decide (x.stage = .validated) && x.id != id) =
+      l.filter (fun x => decide (x.stage = .validated)) := by
+  induction l with
+  | nil => rfl
+  | cons head tail ih =>
+      have hHeadNe := hNe head List.mem_cons_self
+      have hTailNe : ∀ lookup ∈ tail, lookup.id ≠ id := by
+        intro lookup hMem
+        exact hNe lookup (List.mem_cons_of_mem head hMem)
+      have hIdNe : (head.id != id) = true := bne_iff_ne.mpr hHeadNe
+      by_cases hStage : decide (head.stage = FastLookupStage.validated) = true
+      · simp [List.filter, hIdNe, hStage, ih hTailNe]
+      · simp [List.filter, hIdNe, hStage, ih hTailNe]
+
+theorem validated_removeFastLookup_eq
+    {l : List FastLookup} {id : Nat} {lookup : FastLookup}
+    (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id))
+    (hFind : l.find? (fun x => x.id == id) = some lookup)
+    (hTentative : lookup.stage = .tentative) :
+    (l.filter (fun x => x.id != id)).filter
+        (fun x => decide (x.stage = .validated)) =
+      l.filter (fun x => decide (x.stage = .validated)) := by
+  rw [List.filter_filter]
+  induction l with
+  | nil => simp at hFind
+  | cons head tail ih =>
+      cases hPair with
+      | cons hHead hTail =>
+          by_cases hId : head.id = id
+          · have hHeadId : head.id = id := hId
+            have hEq : head = lookup := by
+              simpa [List.find?, hId] using hFind
+            subst lookup
+            have hIdNe : (head.id != id) = false := by simp [hHeadId]
+            have hStageFalse : decide (head.stage = FastLookupStage.validated) = false := by
+              simp [hTentative]
+            have hTailNe : ∀ x ∈ tail, x.id ≠ id := by
+              intro x hx hX
+              apply hHead x hx
+              exact hHeadId.trans hX.symm
+            have hTailFilter := filter_validated_and_id_ne_eq
+              (l := tail) (id := id) hTailNe
+            simp [List.filter, hIdNe, hStageFalse, hTailFilter]
+          · have hIdFalse : (head.id == id) = false := by
+              exact Bool.not_eq_true _ |>.mp (by simpa using hId)
+            have hFindTail : tail.find? (fun x => x.id == id) = some lookup := by
+              simpa [List.find?, hIdFalse] using hFind
+            have hTailResult := ih hTail hFindTail
+            have hIdNe : (head.id != id) = true := bne_iff_ne.mpr hId
+            by_cases hStage : decide (head.stage = FastLookupStage.validated) = true
+            · simpa [List.filter, hIdFalse, hIdNe, hStage] using hTailResult
+            · simpa [List.filter, hIdFalse, hIdNe, hStage] using hTailResult
+
+theorem validated_removeFastLookup_filter_eq
+    {l : List FastLookup} {id : Nat} :
+    (l.filter (fun x => x.id != id)).filter
+        (fun x => decide (x.stage = .validated)) =
+      (l.filter (fun x => decide (x.stage = .validated))).filter
+        (fun x => x.id != id) := by
+  rw [List.filter_filter, List.filter_filter]
+  simp [Bool.and_comm]
+
 theorem updatePublicationState_eq_self_of_ne
     (p : Publication) (slot : SlotId) (gen : Generation) (st : PublicationState)
     (hNe : ¬ (p.slot = slot ∧ p.generation = gen)) :
@@ -615,63 +753,121 @@ theorem Step.invariant_preserved
         cases hNotLive True.intro
       exact ⟨hPubUniq', hSnapUniq', hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | beginFastLookup hNoReader hSnap hSnapGen hPub hLive hReg =>
-      rename_i reg' readerId token pub binding
-      have hRegInv : reg'.slots = s.registry.slots ∧
-                     reg'.activeLeases = s.registry.activeLeases + 1 ∧
-                     reg'.closed = s.registry.closed ∧
-                     reg'.session = s.registry.session ∧
-                     s.registry.closed = false ∧
-                     token.session = s.registry.session := by
-        cases hReg with
-        | beginLookup hNotClosed hAuth _ _ =>
-            refine ⟨rfl, rfl, rfl, rfl, hNotClosed, hAuth⟩
-      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession, hNotClosed, hAuth⟩
-      have hFastUniq' : (s.fastLookups ++ [FastLookup.mk readerId token]).Pairwise (fun lhs rhs => lhs.id ≠ rhs.id) := by
+  | beginTentativeFastLookup hNoReader hSnap hSnapGen hPub hAuth hLive =>
+      rename_i readerId token pub binding
+      have hFastUniq' :
+          (s.fastLookups ++ [FastLookup.mk readerId token .tentative]).Pairwise
+            (fun lhs rhs => lhs.id ≠ rhs.id) := by
         apply pairwise_append_singleton hFastUniq
         intro y hy
         exact findFastLookup?_none hNoReader y hy
       have hLivePub' : State.LivePublicationSound { s with
-          registry := reg',
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token] } := by
-        intro p hMem hLiveP
-        rw [hSlots]
-        exact hLivePub p hMem hLiveP
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := hLivePub
       have hLiveSnap' : State.LiveSnapshotSound { s with
-          registry := reg',
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token] } := hLiveSnap
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := hLiveSnap
       have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
       have hFastSound' : State.FastLookupSound { s with
-          registry := reg',
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token] } := by
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := by
         intro lookup hMem
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
-        | inl hOld =>
-            rcases hFastSound lookup hOld with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
-            refine ⟨by rw [hSession]; exact hSess, p, hPMem, hSlotEq, hGenEq⟩
+        | inl hOld => exact hFastSound lookup hOld
         | inr hNew =>
             subst hNew
             dsimp
             have hPMem := List.mem_of_find?_eq_some hPub
             have ⟨hPubSlot, hPubGen⟩ := findPublication?_some_prop hPub
-            refine ⟨by rw [hSession]; exact hAuth, pub, hPMem, hPubSlot, hPubGen⟩
+            exact ⟨hAuth, pub, hPMem, hPubSlot, hPubGen⟩
+      have hLeaseAcc' : State.LeaseAccounting { s with
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.updateFastLookupStage]
+        rw [validated_filter_append_tentative (l := s.fastLookups)
+          (lookup := FastLookup.mk readerId token .tentative) rfl]
+        exact hLeaseAcc
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+
+  | validateFastLookup hLookup hTentative hReg =>
+      rename_i reg' readerId lookup
+      have hRegInv : reg'.slots = s.registry.slots ∧
+                     reg'.activeLeases = s.registry.activeLeases + 1 ∧
+                     reg'.closed = s.registry.closed ∧
+                     reg'.session = s.registry.session ∧
+                     s.registry.closed = false ∧
+                     lookup.token.session = s.registry.session := by
+        cases hReg with
+        | beginLookup hNotClosed hAuth _ _ =>
+            refine ⟨rfl, rfl, rfl, rfl, hNotClosed, hAuth⟩
+      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession, hNotClosed, hAuth⟩
+      have hFastUniq' := pairwise_updateFastLookupStage
+        (id := readerId) (stage := FastLookupStage.validated) hFastUniq
+      have hLivePub' : State.LivePublicationSound { s with
+          registry := reg',
+          fastLookups := s.updateFastLookupStage readerId .validated } := by
+        intro p hMem hLiveP
+        rw [hSlots]
+        exact hLivePub p hMem hLiveP
+      have hLiveSnap' : State.LiveSnapshotSound { s with
+          registry := reg',
+          fastLookups := s.updateFastLookupStage readerId .validated } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with
+          registry := reg',
+          fastLookups := s.updateFastLookupStage readerId .validated } := by
+        intro l hMem
+        dsimp [State.updateFastLookupStage] at hMem
+        rcases List.mem_map.mp hMem with ⟨orig, hOrigMem, hMap⟩
+        rcases hFastSound orig hOrigMem with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
+        have hToken : l.token = orig.token := by
+          rw [← hMap]
+          split <;> rfl
+        refine ⟨?_, p, hPMem, ?_, ?_⟩
+        · rw [hToken, hSession]
+          exact hSess
+        · rw [hToken]
+          exact hSlotEq
+        · rw [hToken]
+          exact hGenEq
       have hLeaseAcc' : State.LeaseAccounting { s with
           registry := reg',
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token] } := by
-        dsimp [State.LeaseAccounting]
-        rw [List.length_append, List.length_singleton, hLeases]
+          fastLookups := s.updateFastLookupStage readerId .validated } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.updateFastLookupStage]
+        have hLen := length_validated_updateFastLookupStage
+          hFastUniq hLookup hTentative
+        rw [hLeases, hLen]
         exact Nat.add_le_add_right hLeaseAcc 1
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
           registry := reg',
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token] } := by
+          fastLookups := s.updateFastLookupStage readerId .validated } := by
         intro hCl
         rw [hClosed] at hCl
         rw [hCl] at hNotClosed
         contradiction
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | completeFastLookup hLookup hReg =>
+  | rejectTentativeFastLookup hLookup hTentative =>
+      rename_i readerId lookup
+      have hFastUniq' :
+          (s.removeFastLookup readerId).Pairwise (fun lhs rhs => lhs.id ≠ rhs.id) := by
+        dsimp [State.removeFastLookup]
+        exact pairwise_filter _ hFastUniq
+      have hLivePub' : State.LivePublicationSound { s with
+          fastLookups := s.removeFastLookup readerId } := hLivePub
+      have hLiveSnap' : State.LiveSnapshotSound { s with
+          fastLookups := s.removeFastLookup readerId } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        intro l hMem
+        dsimp [State.removeFastLookup] at hMem
+        exact hFastSound l (mem_of_mem_filter hMem)
+      have hLeaseAcc' : State.LeaseAccounting { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
+        rw [validated_removeFastLookup_eq hFastUniq hLookup hTentative]
+        exact hLeaseAcc
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+
+  | completeFastLookup hLookup hValidated hReg =>
       rename_i reg' readerId lookup
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases - 1 ∧
@@ -705,11 +901,17 @@ theorem Step.invariant_preserved
       have hLeaseAcc' : State.LeaseAccounting { s with
           registry := reg',
           fastLookups := s.removeFastLookup readerId } := by
-        dsimp [State.LeaseAccounting, State.removeFastLookup]
-        have hLen := length_filter_ne_of_mem hFastUniq hLookupMem
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
+        rw [validated_removeFastLookup_filter_eq]
+        have hLookupValidated : lookup ∈ s.validatedFastLookups := by
+          apply List.mem_filter.mpr
+          exact ⟨hLookupMem, by simp [hValidated]⟩
+        have hPairValidated := pairwise_filter
+          (fun x => decide (x.stage = FastLookupStage.validated)) hFastUniq
+        have hLen := length_filter_ne_of_mem hPairValidated hLookupValidated
         rw [hLookupId] at hLen
-        dsimp [State.LeaseAccounting] at hLeaseAcc
         rw [hLeases]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups] at hLeaseAcc
         omega
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
           registry := reg',
@@ -721,7 +923,7 @@ theorem Step.invariant_preserved
         exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | fallbackFastLookup hLookup hReg =>
+  | fallbackFastLookup hLookup hValidated hReg =>
       rename_i reg' readerId lookup
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases - 1 ∧
@@ -755,11 +957,17 @@ theorem Step.invariant_preserved
       have hLeaseAcc' : State.LeaseAccounting { s with
           registry := reg',
           fastLookups := s.removeFastLookup readerId } := by
-        dsimp [State.LeaseAccounting, State.removeFastLookup]
-        have hLen := length_filter_ne_of_mem hFastUniq hLookupMem
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
+        rw [validated_removeFastLookup_filter_eq]
+        have hLookupValidated : lookup ∈ s.validatedFastLookups := by
+          apply List.mem_filter.mpr
+          exact ⟨hLookupMem, by simp [hValidated]⟩
+        have hPairValidated := pairwise_filter
+          (fun x => decide (x.stage = FastLookupStage.validated)) hFastUniq
+        have hLen := length_filter_ne_of_mem hPairValidated hLookupValidated
         rw [hLookupId] at hLen
-        dsimp [State.LeaseAccounting] at hLeaseAcc
         rw [hLeases]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups] at hLeaseAcc
         omega
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
           registry := reg',
@@ -792,7 +1000,7 @@ theorem Step.invariant_preserved
         rcases hFastSound l hMem with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
         refine ⟨by rw [hSession]; exact hSess, p, hPMem, hSlotEq, hGenEq⟩
       have hLeaseAcc' : State.LeaseAccounting { s with registry := reg' } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact Nat.le_trans hLeaseAcc (Nat.le_succ _)
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with registry := reg' } := by
@@ -822,9 +1030,11 @@ theorem Step.invariant_preserved
         rcases hFastSound l hMem with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
         refine ⟨by rw [hSession]; exact hSess, p, hPMem, hSlotEq, hGenEq⟩
       have hLeaseAcc' : State.LeaseAccounting { s with registry := reg' } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
+        have hBound : s.validatedFastLookups.length ≤ s.registry.activeLeases - 1 := by
+          omega
         rw [hLeases]
-        omega
+        exact hBound
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with registry := reg' } := by
         intro hCl
         rw [hClosed] at hCl

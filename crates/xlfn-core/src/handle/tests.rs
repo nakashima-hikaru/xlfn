@@ -478,6 +478,8 @@ fn published_handle_reused_slot_cannot_be_resolved_by_stale_token() {
 
 #[test]
 fn published_handle_remove_during_lease_acquire_linearizes_as_stale() {
+    use std::sync::mpsc;
+
     struct TestObj(&'static str);
     impl ExcelHandleObject for TestObj {}
 
@@ -492,53 +494,94 @@ fn published_handle_remove_during_lease_acquire_linearizes_as_stale() {
         .expect("handle must be published");
     assert_eq!(publication.state(), PublishedHandleState::Live);
 
-    // Simulate remove occurring between first state check and second state check:
-    // When remove() runs, it marks the publication Stale.
+    let (lease_acquired_tx, lease_acquired_rx) = mpsc::sync_channel(0);
+    let release_reader = Arc::new(AtomicBool::new(false));
+    let release_reader_hook = Arc::clone(&release_reader);
+    *leases.after_acquire_hook.lock() = Some(Arc::new(move || {
+        lease_acquired_tx
+            .send(())
+            .expect("reader must reach the lease-acquired gate");
+        while !release_reader_hook.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }));
+
+    let reader_registry = Arc::clone(&registry);
+    let reader_leases = Arc::clone(&leases);
+    let reader_token = token.clone();
+    let reader = std::thread::spawn(move || {
+        reader_registry.lookup_handle::<TestObj>(&reader_token, &reader_leases)
+    });
+
+    // The reader has passed its first Live check and acquired the lease, but
+    // has not performed the second Live check yet.
+    lease_acquired_rx
+        .recv()
+        .expect("reader must acquire its tentative lease");
+    assert_eq!(leases.active(), 1);
+
+    // Remove wins before the reader's second state check.
     let removed = registry.remove::<TestObj>(&token).unwrap();
     assert_eq!(removed.0, "target");
     assert_eq!(publication.state(), PublishedHandleState::Stale);
 
-    // Any in-flight lookup that reaches second state check after lease acquire
-    // observes Stale, immediately drops its lease, and returns StaleHandle.
-    let lookup = registry.lookup_handle::<TestObj>(&token, &leases);
+    release_reader.store(true, Ordering::Release);
+    let lookup = reader.join().unwrap();
     assert!(matches!(lookup, Err(XllError::StaleHandle)));
     assert_eq!(leases.active(), 0);
 }
 
 #[test]
-fn published_handle_upgrade_failure_after_second_live_falls_back_cleanly() {
-    struct TestObj(u32);
+fn published_handle_remove_before_weak_upgrade_falls_back_to_stale() {
+    use std::sync::mpsc;
+
+    struct TestObj;
     impl ExcelHandleObject for TestObj {}
 
-    let registry = HandleRegistry::new(4);
+    let registry = Arc::new(HandleRegistry::new(4));
     let leases = Arc::new(HandleLeaseState::new());
 
-    let value = Arc::new(TestObj(99));
-    let token = insert_production(&registry, Arc::clone(&value)).unwrap();
+    let token = insert_production(&registry, Arc::new(TestObj)).unwrap();
     let parsed = registry.parse_token(&token).unwrap();
 
-    // Verify fast path works initially
-    let handle = registry.lookup_handle::<TestObj>(&token, &leases).unwrap();
-    assert_eq!(handle.0, 99);
-    drop(handle);
-    assert_eq!(leases.active(), 0);
+    let publication = registry
+        .published
+        .lookup(parsed.slot)
+        .expect("handle must be published");
+    let (validated_tx, validated_rx) = mpsc::sync_channel(0);
+    let release_reader = Arc::new(AtomicBool::new(false));
+    let release_reader_hook = Arc::clone(&release_reader);
+    *registry.before_fast_upgrade_hook.lock() = Some(Arc::new(move || {
+        validated_tx
+            .send(())
+            .expect("reader must reach the weak-upgrade gate");
+        while !release_reader_hook.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }));
 
-    // Inject a publication in the snapshot where state is Live but weak ref is dead
-    let dead_publication = Arc::new(PublishedHandle {
-        generation: parsed.generation,
-        type_id: TypeId::of::<TestObj>(),
-        type_name: std::any::type_name::<TestObj>(),
-        value: Weak::<TestObj>::new(),
-        state: AtomicU8::new(PublishedHandleState::Live as u8),
+    let reader_registry = Arc::clone(&registry);
+    let reader_leases = Arc::clone(&leases);
+    let reader_token = token.clone();
+    let reader = std::thread::spawn(move || {
+        reader_registry.lookup_handle::<TestObj>(&reader_token, &reader_leases)
     });
-    registry.published.insert(parsed.slot, dead_publication);
 
-    // Fast lookup reaches upgrade() -> None, drops lease, and falls back to slow path
-    // Slow path reads canonical registry.state and succeeds!
-    let fallback_handle = registry.lookup_handle::<TestObj>(&token, &leases).unwrap();
-    assert_eq!(fallback_handle.0, 99);
+    // The reader has passed the second Live check and holds a validated lease,
+    // but has not upgraded the weak snapshot yet.
+    validated_rx
+        .recv()
+        .expect("reader must reach the weak-upgrade gate");
     assert_eq!(leases.active(), 1);
-    drop(fallback_handle);
+
+    let removed = registry.remove::<TestObj>(&token).unwrap();
+    drop(removed);
+    assert!(publication.upgrade().is_none());
+    assert_eq!(publication.state(), PublishedHandleState::Stale);
+
+    release_reader.store(true, Ordering::Release);
+    let fallback = reader.join().unwrap();
+    assert!(matches!(fallback, Err(XllError::StaleHandle)));
     assert_eq!(leases.active(), 0);
 }
 
@@ -1800,9 +1843,23 @@ fn nested_handle_in_registry_does_not_deadlock_on_close() {
 }
 
 #[test]
+fn handle_lease_admission_rejects_new_acquisition_after_seal() {
+    let leases = Arc::new(HandleLeaseState::new());
+    let existing = leases.acquire().expect("lease admission is open");
+
+    leases.seal();
+
+    assert!(leases.acquire().is_none());
+    assert_eq!(leases.active(), 1);
+
+    drop(existing);
+    assert_eq!(leases.active(), 0);
+}
+
+#[test]
 fn handle_lease_waiter_observes_last_release() {
     let leases = Arc::new(HandleLeaseState::new());
-    let lease = leases.acquire();
+    let lease = leases.acquire().expect("lease admission is open");
 
     let waiting = Arc::clone(&leases);
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -1825,7 +1882,7 @@ fn handle_lease_waiter_rechecks_after_release() {
     use std::sync::Barrier;
 
     let leases = Arc::new(HandleLeaseState::new());
-    let lease = leases.acquire();
+    let lease = leases.acquire().expect("lease admission is open");
 
     let barrier = Arc::new(Barrier::new(2));
     let barrier_hook = Arc::clone(&barrier);
@@ -1894,6 +1951,10 @@ fn registry_close_with_leases_waits_for_active_handle_and_blocks_new_lookups() {
         .unwrap();
     closer.join().unwrap();
     assert_eq!(leases.active(), 0);
+    assert!(
+        leases.acquire().is_none(),
+        "close must seal independent lease admission"
+    );
 }
 
 #[test]

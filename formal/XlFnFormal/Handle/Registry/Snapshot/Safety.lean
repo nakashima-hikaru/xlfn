@@ -21,10 +21,10 @@ theorem stale_publication_cannot_start_fast_lookup
     {s : State} {readerId : Nat} {token : Token} {pub : Publication}
     (hPub : s.findPublication? token.slot token.generation = some pub)
     (hStale : pub.state = .stale) :
-    ¬ ∃ s', Step s (.beginFastLookup readerId token) s' := by
+    ¬ ∃ s', Step s (.beginTentativeFastLookup readerId token) s' := by
   intro ⟨s', hStep⟩
   cases hStep with
-  | beginFastLookup _ _ _ hPubStep hLiveStep _ =>
+  | beginTentativeFastLookup _ _ _ hPubStep _ hLiveStep =>
       rw [hPub] at hPubStep
       injection hPubStep with hEq
       subst hEq
@@ -35,10 +35,10 @@ theorem closing_publication_cannot_start_fast_lookup
     {s : State} {readerId : Nat} {token : Token} {pub : Publication}
     (hPub : s.findPublication? token.slot token.generation = some pub)
     (hClosing : pub.state = .closing) :
-    ¬ ∃ s', Step s (.beginFastLookup readerId token) s' := by
+    ¬ ∃ s', Step s (.beginTentativeFastLookup readerId token) s' := by
   intro ⟨s', hStep⟩
   cases hStep with
-  | beginFastLookup _ _ _ hPubStep hLiveStep _ =>
+  | beginTentativeFastLookup _ _ _ hPubStep _ hLiveStep =>
       rw [hPub] at hPubStep
       injection hPubStep with hEq
       subst hEq
@@ -57,21 +57,23 @@ theorem closed_registry_rejects_fast_lookup
     (hInv : s.Invariant)
     (hClosed : s.registry.closed = true)
     (readerId : Nat) (token : Token) :
-    ¬ ∃ s', Step s (.beginFastLookup readerId token) s' := by
+    ¬ ∃ s', Step s (.beginTentativeFastLookup readerId token) s' := by
   intro ⟨s', hStep⟩
   cases hStep with
-  | beginFastLookup _ hSnap _ _ _ _ =>
+  | beginTentativeFastLookup _ hSnap _ _ _ _ =>
       have hSnapNil := closed_registry_has_no_live_snapshot hInv hClosed
       have hSnapMem := List.mem_of_find?_eq_some hSnap
       rw [hSnapNil] at hSnapMem
       contradiction
 
 theorem fast_lookup_linearizes_to_registry_begin_lookup
-    {s s' : State} {readerId : Nat} {token : Token}
-    (hStep : Step s (.beginFastLookup readerId token) s') :
-    Registry.Step s.registry (.beginLookup token) s'.registry := by
-  cases hStep
-  assumption
+    {s s' : State} {readerId : Nat}
+    (hStep : Step s (.validateFastLookup readerId) s') :
+    ∃ lookup, s.findFastLookup? readerId = some lookup ∧
+      Registry.Step s.registry (.beginLookup lookup.token) s'.registry := by
+  cases hStep with
+  | validateFastLookup hLookup _ hReg =>
+      exact ⟨_, hLookup, hReg⟩
 
 theorem complete_fast_lookup_linearizes_to_registry_end_lookup
     {s s' : State} {readerId : Nat}
@@ -93,12 +95,12 @@ theorem stale_lookup_cannot_follow_reused_generation
     (hTokenSlot : token.slot = slot)
     (hTokenGen : token.generation = oldGen)
     (hBinding : s.findSnapshot? slot = some ⟨slot, newGen⟩) :
-    (¬ ∃ readerId s', Step s (.beginFastLookup readerId token) s') ∧
+    (¬ ∃ readerId s', Step s (.beginTentativeFastLookup readerId token) s') ∧
     (∀ pub, s.findPublication? slot newGen = some pub → pub.generation ≠ token.generation) := by
   refine ⟨?_, ?_⟩
   · intro ⟨readerId, s', hStep⟩
     cases hStep with
-    | beginFastLookup _ hSnap hSnapGen _ _ _ =>
+    | beginTentativeFastLookup _ hSnap hSnapGen _ _ _ =>
         rw [hTokenSlot] at hSnap
         rw [hBinding] at hSnap
         injection hSnap with hEq
@@ -121,13 +123,9 @@ theorem fast_lookup_prevents_finish_close
     ¬ ∃ s', Step s .finishClose s' := by
   intro ⟨s', hStep⟩
   cases hStep with
-  | finishClose hRegStep =>
-      cases hRegStep with
-      | finishClose _ hNoLeases =>
-          have hLeaseAcc := hInv.2.2.2.2.2.2.2.1
-          dsimp [State.LeaseAccounting] at hLeaseAcc
-          rw [hNoLeases] at hLeaseAcc
-          omega
+  | finishClose hNoFast _ =>
+      rw [hNoFast] at hLookups
+      contradiction
 
 theorem close_certified_when_finished
     {session : SessionId} {s s' : State}
@@ -135,21 +133,11 @@ theorem close_certified_when_finished
     (hStep : Step s .finishClose s') :
     Registry.CloseCertified s'.registry ∧ s'.fastLookups = [] := by
   cases hStep with
-  | finishClose hReg =>
+  | finishClose hNoFast hReg =>
       have hInv := Reachable.invariant_preserved (initialInvariant session) hReach
       cases hReg with
       | finishClose hClosed hNoLeases =>
           have hNoLive := (hInv.2.2.2.2.2.2.2.2 hClosed).1
-          have hLeaseAcc := hInv.2.2.2.2.2.2.2.1
-          dsimp [State.LeaseAccounting] at hLeaseAcc
-          rw [hNoLeases] at hLeaseAcc
-          have hLookupsNil : s.fastLookups = [] := by
-            cases hL : s.fastLookups with
-            | nil => rfl
-            | cons head tail =>
-                have hLen : (head :: tail).length > 0 := by simp
-                rw [hL] at hLeaseAcc
-                omega
-          exact ⟨⟨hClosed, hNoLeases, hNoLive⟩, hLookupsNil⟩
+          exact ⟨⟨hClosed, hNoLeases, hNoLive⟩, hNoFast⟩
 
 end XlFnFormal.Handle.Registry.Snapshot
