@@ -24,9 +24,7 @@ publish = true
 
 [workspace.dependencies]
 # Member crates
-cargo-xlfn = { version = "0.2.0", path = "crates/cargo-xlfn" }
 xlfn-common = { version = "0.2.0", path = "crates/xlfn-common" }
-xlfn = { version = "0.2.0", path = "crates/xlfn" }
 xlfn-core = { version = "0.2.0", path = "crates/xlfn-core" }
 xlfn-macros = { version = "0.2.0", path = "crates/xlfn-macros" }
 xlfn-package = { version = "0.2.0", path = "crates/xlfn-package" }
@@ -37,7 +35,6 @@ anyhow = "1.0.104"
 arc-swap = "1.9.2"
 async-channel = "2.5.0"
 async-task = "4.7.1"
-bindgen = "0.72.1"
 blake3 = "1.8.6"
 bumpalo = "3.20.3"
 cargo_metadata = "0.23.1"
@@ -49,7 +46,6 @@ futures-util = "0.3.34"
 getrandom = "0.4.3"
 inventory = "0.3.24"
 libc = "0.2.189"
-libloading = "0.9.0"
 loom = "0.7.2"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
 object = { version = "0.40.0", default-features = false, features = ["pe", "read", "std"] }
