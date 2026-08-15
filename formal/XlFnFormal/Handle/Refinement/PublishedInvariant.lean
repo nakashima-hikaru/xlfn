@@ -58,6 +58,11 @@ theorem warm_reads_bound_of_invariant
     s.WarmReadsBound := by
   exact hInv.2.2.2.2.2.2.2.2.2
 
+theorem prepare_accounting_of_invariant
+    {s : State} (hInv : s.Invariant) :
+    s.PrepareAccounting := by
+  exact hInv.2.2.2.2.2.2.2.2.2
+
 private theorem no_publication_identity
     {s : State} {key : TopicKey} {token : Registry.Token}
     {publication : Publication}
@@ -204,6 +209,25 @@ private theorem canonical_stage_after_disconnect_non_target
     exact hKeyNe (hOldKey.symm.trans hOldKeyEq)
   cases hStep with
   | disconnectTopic hTopic hTopicKey hTopicOwner hBinding hNoDetached =>
+      refine ⟨old, List.mem_filter.mpr ⟨hOld, by simp [hOldKeyNe]⟩,
+        hOldKey, hOldToken, hOldRtd, hOldStage⟩
+
+private theorem canonical_stage_after_withdraw_non_target
+    {s : State} {topics' : Topics.State}
+    {key : TopicKey} {runtimeId : Runtime.InitializerId}
+    (hStep : Topics.Step s.topics (.withdrawVisible key runtimeId) topics')
+    {publication : Publication} {stage : Topics.TopicStage}
+    (hCanonical : s.CanonicalTopicForStage publication stage)
+    (hKeyNe : publication.key ≠ key) :
+    ∃ topic' ∈ topics'.byKey,
+      topic'.key = publication.key ∧ topic'.token = publication.token ∧
+      topic'.rtdKey = publication.rtdKey ∧ topic'.stage = stage := by
+  rcases hCanonical with ⟨old, hOld, hOldKey, hOldToken, hOldRtd, hOldStage⟩
+  have hOldKeyNe : old.key ≠ key := by
+    intro hOldKeyEq
+    exact hKeyNe (hOldKey.symm.trans hOldKeyEq)
+  cases hStep with
+  | withdrawVisible hInit hTopic hTopicKey hExcelSettled hPending =>
       refine ⟨old, List.mem_filter.mpr ⟨hOld, by simp [hOldKeyNe]⟩,
         hOldKey, hOldToken, hOldRtd, hOldStage⟩
 
@@ -486,6 +510,22 @@ private theorem canonical_stage_after_topic_step
       simp [topicLiftable?] at hLiftable
   | finishClose hRuntime => exact ⟨old, hOld, hKey, hToken, hRtd, hStage⟩
 
+private theorem canonical_stage_after_publish
+    {s : State} {topics' : Topics.State}
+    {key : TopicKey} {runtimeId : Runtime.InitializerId} {rtdKey : RtdKey}
+    (hStep : Topics.Step s.topics (.publishVisible key runtimeId rtdKey) topics')
+    {publication : Publication} {stage : Topics.TopicStage}
+    (hCanonical : s.CanonicalTopicForStage publication stage) :
+    ∃ topic ∈ topics'.byKey,
+      topic.key = publication.key ∧
+      topic.token = publication.token ∧
+      topic.rtdKey = publication.rtdKey ∧
+      topic.stage = stage := by
+  rcases hCanonical with ⟨old, hOld, hKey, hToken, hRtd, hStage⟩
+  cases hStep with
+  | publishVisible hPhase hInit hNoTopic hNoRtdKey hNoToken hNoDetachedToken hPending hRoot =>
+      exact ⟨old, List.mem_append_left _ hOld, hKey, hToken, hRtd, hStage⟩
+
 private theorem live_snapshot_root_of_sound
     {s : State}
     (hTopics : s.topics.Invariant)
@@ -728,9 +768,10 @@ theorem Step.invariant_preserved
       · exact hSnapshots'
       · exact hSnapshotRoots'
       · exact hWarmKnown
-  | installProvisional hTopic hTopicKey hTopicToken hTopicRtdKey hStage
-      hNoPublication hNoSnapshot =>
-      rename_i topic key token rtdKey
+  | publishAndInstallProvisional hTopicStep hTopic hTopicKey hTopicToken hTopicRtdKey
+      hStage hNoPublication hNoSnapshot =>
+      rename_i topics' topic key runtimeId token rtdKey
+      have hTopics' := Topics.Step.invariant_preserved hTopics hTopicStep
       have hTopicMem := Topics.mem_of_findTopic_some hTopic
       have hSep : ∀ old ∈ s.publications,
           old.key ≠ key ∨ old.token ≠ token := by
@@ -746,39 +787,190 @@ theorem Step.invariant_preserved
         intro old hOld
         simpa [newPublication] using hSep old hOld
       have hNewCanonical :
-          ∃ topic ∈ s.topics.byKey,
+          ∃ topic ∈ topics'.byKey,
             topic.key = key ∧ topic.token = token ∧
             topic.rtdKey = rtdKey ∧ topic.stage = .provisional := by
         exact ⟨topic, hTopicMem, hTopicKey, hTopicToken, hTopicRtdKey, hStage⟩
-      refine ⟨hTopics, hPublicationUnique, hSnapshots, hWarmReaders, ?_, ?_,
-        ?_, ?_, ?_, hBound⟩
+      have hLive' : ∀ publication ∈ s.publications,
+          publication.state = .live →
+          (State.mk topics' (s.publications ++ [newPublication])
+            s.snapshot s.warmReads).CanonicalTopicFor publication := by
+        intro publication hPublication hLive
+        have hCanonical := hLivePublications publication hPublication hLive
+        exact canonical_stage_after_publish hTopicStep hCanonical
+      have hProvisional' : ∀ publication ∈ s.publications,
+          publication.state = .provisional →
+          (State.mk topics' (s.publications ++ [newPublication])
+            s.snapshot s.warmReads).CanonicalTopicForStage publication .provisional := by
+        intro publication hPublication hProvisional
+        have hCanonical := hProvisionalPublications publication hPublication hProvisional
+        exact canonical_stage_after_publish hTopicStep hCanonical
+      have hSnapshots' : ∀ binding ∈ s.snapshot,
+          ∃ publication ∈ s.publications ++ [newPublication],
+            publication.state = .live ∧
+            publication.key = binding.key ∧
+            publication.token = binding.token ∧
+            (State.mk topics' (s.publications ++ [newPublication])
+              s.snapshot s.warmReads).CanonicalTopicFor publication := by
+        intro binding hBinding
+        rcases hLiveSnapshots binding hBinding with
+          ⟨publication, hPublication, hLive, hKey, hToken, hCanonical⟩
+        exact ⟨publication, List.mem_append_left _ hPublication, hLive, hKey, hToken,
+          canonical_stage_after_publish hTopicStep hCanonical⟩
+      refine ⟨hTopics', hPublicationUnique, hSnapshots, hWarmReaders, ?_, ?_,
+        ?_, ?_, ?_, ?_⟩
       · intro publication hMem hLive
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
-        | inl hOld => exact hLivePublications publication hOld hLive
+        | inl hOld => exact hLive' publication hOld hLive
         | inr hNew => subst hNew; cases hLive
       · intro publication hMem hProvisional
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
-        | inl hOld => exact hProvisionalPublications publication hOld hProvisional
+        | inl hOld => exact hProvisional' publication hOld hProvisional
         | inr hNew =>
             subst hNew
             exact hNewCanonical
       · intro binding hBinding
-        rcases hLiveSnapshots binding hBinding with
-          ⟨publication, hPublication, hLive, hKey, hToken, hCanonical⟩
-        exact ⟨publication, List.mem_append_left _ hPublication, hLive, hKey, hToken,
-          hCanonical⟩
-      · exact live_snapshot_root_of_sound hTopics (by
-          intro binding hBinding
-          rcases hLiveSnapshots binding hBinding with
-            ⟨publication, hPublication, hLive, hKey, hToken, hCanonical⟩
-          exact ⟨publication, List.mem_append_left _ hPublication, hLive, hKey, hToken,
-            hCanonical⟩)
+        exact hSnapshots' binding hBinding
+      · exact live_snapshot_root_of_sound
+          (s := State.mk topics' (s.publications ++ [newPublication])
+            s.snapshot s.warmReads) hTopics' hSnapshots'
       · intro read hRead
         rcases hWarmKnown read hRead with
           ⟨publication, hPublication, hKey, hToken, hRtdKey⟩
         exact ⟨publication, List.mem_append_left _ hPublication, hKey, hToken, hRtdKey⟩
+      · cases hTopicStep
+        exact hBound
+  | withdrawAndInvalidate hTopic hTopicKey hTopicToken hPublication
+      hPublicationRtdKey hStage hPublicationState hNoSnapshot hTopicStep =>
+      rename_i topics' topic publication0 key runtimeId token
+      have hTopics' := Topics.Step.invariant_preserved hTopics hTopicStep
+      have hPublicationKey := publication_key_of_find hPublication
+      have hPublicationToken := publication_token_of_find hPublication
+      have hPublicationMem := mem_publication_of_find hPublication
+      have hPublicationUnique :
+          (s.updatePublicationState key token .stale).Pairwise
+            (fun lhs rhs => lhs.key ≠ rhs.key ∨ lhs.token ≠ rhs.token) := by
+        apply publication_pairwise_map_identity hPublications
+        · intro publication
+          split <;> rfl
+        · intro publication
+          split <;> rfl
+      have hLiveSnapshots' :
+          ∀ binding ∈ s.snapshot,
+            ∃ publication ∈ s.updatePublicationState key token .stale,
+              publication.state = .live ∧
+              publication.key = binding.key ∧
+              publication.token = binding.token ∧
+              (State.mk topics' (s.updatePublicationState key token .stale)
+                s.snapshot s.warmReads).CanonicalTopicFor publication := by
+        intro binding hBinding
+        rcases hLiveSnapshots binding hBinding with
+          ⟨old, hOld, hOldLive, hBindingKey, hBindingToken, hOldCanonical⟩
+        have hBindingKeyNe : binding.key ≠ key := no_snapshot_key hNoSnapshot hBinding
+        have hOldKeyNe : old.key ≠ key := by
+          intro hOldKey
+          exact hBindingKeyNe (hBindingKey.symm.trans hOldKey)
+        have hCanonical := canonical_stage_after_withdraw_non_target
+          hTopicStep hOldCanonical hOldKeyNe
+        have hMappedMem : old ∈ s.updatePublicationState key token .stale := by
+          apply List.mem_map.mpr
+          exact ⟨old, hOld, by simp [State.updatePublicationState, hOldKeyNe]⟩
+        exact ⟨old, hMappedMem, hOldLive, hBindingKey, hBindingToken, hCanonical⟩
+      refine ⟨hTopics', hPublicationUnique, hSnapshots, hWarmReaders, ?_, ?_,
+        ?_, ?_, ?_, ?_⟩
+      · intro publication' hMem hLive
+        rcases mem_update_publication_identity hMem with
+          ⟨old, hOld, hKey, hToken, hRtd, hState⟩
+        by_cases hTarget : old.key == key && old.token == token
+        · have hStale : publication'.state = .stale := by
+            simpa [hTarget] using hState
+          exact False.elim (by cases hLive.symm.trans hStale)
+        · have hOldLive : old.state = .live := by
+            have hState' : publication'.state = old.state := by
+              simpa [hTarget] using hState
+            exact hState'.symm.trans hLive
+          have hOldCanonical := hLivePublications old hOld hOldLive
+          have hDifferent : old.key ≠ key ∨ old.token ≠ token := by
+            by_cases hOldKey : old.key = key
+            · right
+              intro hOldToken
+              apply hTarget
+              simp [hOldKey, hOldToken]
+            · exact Or.inl hOldKey
+          have hDifferent' : old.key ≠ key ∨ old.token ≠ topic.token := by
+            rcases hDifferent with hKeyNe | hTokenNe
+            · exact Or.inl hKeyNe
+            · right
+              intro hEq
+              apply hTokenNe
+              exact hEq.trans hTopicToken
+          have hOldKeyNe := canonical_key_ne_provisional_topic
+            hTopics hTopic hTopicKey hOldCanonical hDifferent'
+          have hCanonical := canonical_stage_after_withdraw_non_target
+            hTopicStep hOldCanonical hOldKeyNe
+          rcases hCanonical with
+            ⟨newTopic, hNewMem, hNewKey, hNewToken, hNewRtd, hNewStage⟩
+          exact ⟨newTopic, hNewMem, hNewKey.trans hKey.symm,
+            hNewToken.trans hToken.symm, hNewRtd.trans hRtd.symm, hNewStage⟩
+      · intro publication' hMem hProvisional
+        rcases mem_update_publication_identity hMem with
+          ⟨old, hOld, hKey, hToken, hRtd, hState⟩
+        by_cases hTarget : old.key == key && old.token == token
+        · have hStale : publication'.state = .stale := by
+            simpa [hTarget] using hState
+          exact False.elim (by cases hProvisional.symm.trans hStale)
+        · have hOldProvisional : old.state = .provisional := by
+            have hState' : publication'.state = old.state := by
+              simpa [hTarget] using hState
+            exact hState'.symm.trans hProvisional
+          have hOldCanonical := hProvisionalPublications old hOld hOldProvisional
+          have hDifferent : old.key ≠ key ∨ old.token ≠ token := by
+            by_cases hOldKey : old.key = key
+            · right
+              intro hOldToken
+              apply hTarget
+              simp [hOldKey, hOldToken]
+            · exact Or.inl hOldKey
+          have hDifferent' : old.key ≠ key ∨ old.token ≠ topic.token := by
+            rcases hDifferent with hKeyNe | hTokenNe
+            · exact Or.inl hKeyNe
+            · right
+              intro hEq
+              apply hTokenNe
+              exact hEq.trans hTopicToken
+          have hOldKeyNe := canonical_key_ne_provisional_topic
+            hTopics hTopic hTopicKey hOldCanonical hDifferent'
+          have hCanonical := canonical_stage_after_withdraw_non_target
+            hTopicStep hOldCanonical hOldKeyNe
+          rcases hCanonical with
+            ⟨newTopic, hNewMem, hNewKey, hNewToken, hNewRtd, hNewStage⟩
+          exact ⟨newTopic, hNewMem, hNewKey.trans hKey.symm,
+            hNewToken.trans hToken.symm, hNewRtd.trans hRtd.symm, hNewStage⟩
+      · exact hLiveSnapshots'
+      · exact live_snapshot_root_of_sound
+          (s := State.mk topics' (s.updatePublicationState key token .stale)
+            s.snapshot s.warmReads) hTopics' hLiveSnapshots'
+      · intro read hRead
+        rcases hWarmKnown read hRead with
+          ⟨old, hOld, hKey, hToken, hRtd⟩
+        let mapped : Publication :=
+          if old.key == key && old.token == token then
+            { old with state := .stale }
+          else old
+        have hMappedMem : mapped ∈ s.updatePublicationState key token .stale := by
+          apply List.mem_map.mpr
+          exact ⟨old, hOld, rfl⟩
+        refine ⟨mapped, hMappedMem, ?_, ?_, ?_⟩
+        · by_cases h : old.key == key && old.token == token <;>
+            simpa [mapped, h] using hKey
+        · by_cases h : old.key == key && old.token == token <;>
+            simpa [mapped, h] using hToken
+        · by_cases h : old.key == key && old.token == token <;>
+            simpa [mapped, h] using hRtd
+      · cases hTopicStep
+        exact hBound
   | commitAndActivate hPublication hTopic hTopicKey hTopicToken hTopicRtdKey
       hStage hPublicationState hNoSnapshot hTopicStep =>
       rename_i topics' publication topic key runtimeId token
@@ -806,12 +998,13 @@ theorem Step.invariant_preserved
         refine ⟨target, hTarget, ?_, ?_, hTargetRtd, hTargetStage⟩
         · exact hTargetKey.trans hPublicationKey.symm
         · exact hTargetToken.trans hPublicationToken.symm
-      have hBound' :
-          s.warmReads.length ≤ topics'.runtime.activePrepares := by
+      have hAccounting' :
+          s.warmReads.length + topics'.runtime.initializers.length
+            ≤ topics'.runtime.activePrepares := by
         cases hTopicStep with
         | commitPublication hInit hTopic' hTopicKey' hExcelSettled hPending hRuntime =>
             cases hRuntime
-            exact hBound
+            simpa [State.PrepareAccounting, Runtime.State.updateInitializer] using hBound
       have hPublicationUnique :
           (s.updatePublicationState key token .live).Pairwise
             (fun lhs rhs => lhs.key ≠ rhs.key ∨ lhs.token ≠ rhs.token) := by
@@ -1026,7 +1219,7 @@ theorem Step.invariant_preserved
             simpa [mapped, h] using hToken
         · by_cases h : oldPublication.key == key && oldPublication.token == token <;>
             simpa [mapped, h] using hRtd
-      · exact hBound'
+      · exact hAccounting'
   | beginWarmRead hSnapshot hPublication hLive hCanonical hNoReader hBoundWarm =>
       rename_i binding publication readerId key
       let newRead : WarmRead :=
@@ -1055,8 +1248,9 @@ theorem Step.invariant_preserved
             exact ⟨publication, mem_publication_of_find hPublication,
               publication_key_of_find hPublication,
               publication_token_of_find hPublication, rfl⟩
-      · dsimp [State.WarmReadsBound]
-        simpa using Nat.succ_le_of_lt hBoundWarm
+      · dsimp [State.PrepareAccounting]
+        simpa [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using
+          (Nat.succ_le_of_lt hBoundWarm)
   | finishWarmRead hRead hPublication hLive hRtdKey =>
       rename_i read0 publication0 readerId0
       have hWarmReaders' :
@@ -1072,8 +1266,10 @@ theorem Step.invariant_preserved
         exact hWarmKnown read (Topics.mem_of_mem_filter_topics hMem)
       refine ⟨hTopics, hPublications, hSnapshots, hWarmReaders', hLivePublications,
         hProvisionalPublications, hLiveSnapshots, hSnapshotRoots, hWarmKnown', ?_⟩
-      dsimp [State.WarmReadsBound, State.removeWarmRead]
-      exact Nat.le_trans filter_length_le hBound
+      dsimp [State.PrepareAccounting, State.removeWarmRead]
+      exact Nat.le_trans
+        (Nat.add_le_add_right filter_length_le s.topics.runtime.initializers.length)
+        hBound
 
   | disconnect hTopic hTopicKey hTopicOwner hPublication hDestroy =>
       rename_i topics' topic publication0 key owner
@@ -1381,7 +1577,7 @@ theorem Step.invariant_preserved
       cases hDestroy with
       | drainPendingReuse hDetached hInit hPending hRuntime =>
           cases hRuntime
-          exact hBound
+          simpa [State.PrepareAccounting, Runtime.State.updateInitializer] using hBound
 
   | drainPendingRetire hDestroy =>
       rename_i topics' token runtimeId
@@ -1421,7 +1617,7 @@ theorem Step.invariant_preserved
       cases hDestroy with
       | drainPendingRetire hDetached hInit hPending hRuntime =>
           cases hRuntime
-          exact hBound
+          simpa [State.PrepareAccounting, Runtime.State.updateInitializer] using hBound
 
   | drainPublishedReuse hDestroy =>
       rename_i topics' token nextGeneration
@@ -1526,7 +1722,8 @@ theorem Step.invariant_preserved
           · intro read hRead
             rw [hNoWarmReads] at hRead
             contradiction
-          · simp [State.WarmReadsBound, hNoWarmReads]
+          · cases hRuntime
+            simp_all [State.PrepareAccounting]
 
   | sealForClose hTopicsStep =>
       rename_i topics'
@@ -1614,8 +1811,10 @@ theorem Step.invariant_preserved
         exact hWarmKnown read (Topics.mem_of_mem_filter_topics hMem)
       refine ⟨hTopics, hPublications, hSnapshots, hWarmReaders', hLivePublications,
         hProvisionalPublications, hLiveSnapshots, hSnapshotRoots, hWarmKnown', ?_⟩
-      dsimp [State.WarmReadsBound, State.removeWarmRead]
-      exact Nat.le_trans filter_length_le hBound
+      dsimp [State.PrepareAccounting, State.removeWarmRead]
+      exact Nat.le_trans
+        (Nat.add_le_add_right filter_length_le s.topics.runtime.initializers.length)
+        hBound
 
   | abandonWarmRead hRead hPublication hInvalidated hRtdKey =>
       rename_i read0 publication0 readerId0
@@ -1632,8 +1831,10 @@ theorem Step.invariant_preserved
         exact hWarmKnown read (Topics.mem_of_mem_filter_topics hMem)
       refine ⟨hTopics, hPublications, hSnapshots, hWarmReaders', hLivePublications,
         hProvisionalPublications, hLiveSnapshots, hSnapshotRoots, hWarmKnown', ?_⟩
-      dsimp [State.WarmReadsBound, State.removeWarmRead]
-      exact Nat.le_trans filter_length_le hBound
+      dsimp [State.PrepareAccounting, State.removeWarmRead]
+      exact Nat.le_trans
+        (Nat.add_le_add_right filter_length_le s.topics.runtime.initializers.length)
+        hBound
 
 inductive Reachable : State → State → Prop where
   | refl (s : State) : Reachable s s

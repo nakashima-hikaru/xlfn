@@ -500,13 +500,18 @@ observation. This keeps publication-object lifetime distinct from snapshot
 membership and makes same-key replacement an explicit ABA boundary.
 
 The relational H4 `Step` composes H3 `Topics.Step` and
-`Topics.DestructionStep`: provisional installation stutters H3, publication
-activation is combined with H3 `commitPublication`, disconnect and generation
-termination update both layers, and close delegates to H3 `closeRegistry`.
-Warm readers are bounded by H3 `activePrepares`, so prepare entry/exit and
-close quiescence are part of the same reachable state. Observation failure is
-represented by `failWarmRead`; it removes only the reader and leaves a live
-publication intact.
+`Topics.DestructionStep`: publication installation is combined with H3
+`publishVisible`, activation is combined with H3 `commitPublication`, and a
+cold observation failure withdraws the provisional publication through H3
+`withdrawVisible`. Disconnect and generation termination update both layers,
+and close delegates to H3 `closeRegistry`.
+Warm readers and H3 initializer owners are accounted for together:
+`warmReads.length + topics.runtime.initializers.length` must not exceed H3
+`activePrepares`. Thus prepare entry/exit, initializer completion, warm-reader
+drain, and close quiescence are part of the same reachable state. A failed
+warm observation is represented by `failWarmRead`; it removes only the reader
+and leaves a live publication intact, while the cold provisional failure path
+uses the combined withdraw event.
 
 The invariant proves publication identity uniqueness, provisional/live
 canonical soundness, snapshot soundness and root liveness, warm-reader

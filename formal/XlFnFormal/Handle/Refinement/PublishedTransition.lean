@@ -10,8 +10,11 @@ open XlFnFormal.Handle.Topics
 
 inductive Event where
   | topic (event : Topics.Event)
-  | installProvisional (key : TopicKey) (token : Registry.Token) (rtdKey : RtdKey)
+  | publishAndInstallProvisional (key : TopicKey) (runtimeId : Runtime.InitializerId)
+      (token : Registry.Token) (rtdKey : RtdKey)
   | commitAndActivate (key : TopicKey) (runtimeId : Runtime.InitializerId)
+      (token : Registry.Token)
+  | withdrawAndInvalidate (key : TopicKey) (runtimeId : Runtime.InitializerId)
       (token : Registry.Token)
   | beginWarmRead (readerId : Nat) (key : TopicKey)
   | finishWarmRead (readerId : Nat)
@@ -34,6 +37,7 @@ def closingState : PublicationState → PublicationState
   | state => state
 
 def topicLiftable? : Topics.Event → Bool
+  | .publishVisible _ _ _ => false
   | .commitPublication _ _ => false
   | .withdrawVisible _ _ => false
   | .sealTopics => false
@@ -80,21 +84,26 @@ inductive Step : State → Event → State → Prop where
       {s : State} {topics' : Topics.State} {event : Topics.Event}
       (hLiftable : topicLiftable? event = true)
       (hTopics : Topics.Step s.topics event topics')
-      (hBound : ({ s with topics := topics' }).WarmReadsBound) :
+      (hAccounting : ({ s with topics := topics' }).PrepareAccounting) :
       Step s (.topic event) { s with topics := topics' }
 
-  | installProvisional
-      {s : State} {topic : Topic}
-      {key : TopicKey} {token : Registry.Token} {rtdKey : RtdKey}
-      (hTopic : s.topics.findTopic? key = some topic)
+  | publishAndInstallProvisional
+      {s : State} {topics' : Topics.State} {topic : Topic}
+      {key : TopicKey} {runtimeId : Runtime.InitializerId}
+      {token : Registry.Token} {rtdKey : RtdKey}
+      (hTopics : Topics.Step s.topics
+        (.publishVisible key runtimeId rtdKey) topics')
+      (hTopic : topics'.findTopic? key = some topic)
       (hTopicKey : topic.key = key)
       (hTopicToken : topic.token = token)
       (hTopicRtdKey : topic.rtdKey = rtdKey)
       (hStage : topic.stage = .provisional)
       (hNoPublication : s.findPublication? key token = none)
       (hNoSnapshot : s.findSnapshot? key = none) :
-      Step s (.installProvisional key token rtdKey)
-        { s with publications := s.publications ++
+      Step s (.publishAndInstallProvisional key runtimeId token rtdKey)
+        { s with
+            topics := topics'
+            publications := s.publications ++
             [{ key := key, token := token, rtdKey := rtdKey, state := .provisional }] }
 
   | commitAndActivate
@@ -115,6 +124,23 @@ inductive Step : State → Event → State → Prop where
             publications := s.updatePublicationState key token .live
             snapshot := s.snapshot ++ [{ key := key, token := token }] }
 
+  | withdrawAndInvalidate
+      {s : State} {topics' : Topics.State} {topic : Topic} {publication : Publication}
+      {key : TopicKey} {runtimeId : Runtime.InitializerId} {token : Registry.Token}
+      (hTopic : s.topics.findTopic? key = some topic)
+      (hTopicKey : topic.key = key)
+      (hTopicToken : topic.token = token)
+      (hPublication : s.findPublication? key token = some publication)
+      (hPublicationRtdKey : publication.rtdKey = topic.rtdKey)
+      (hStage : topic.stage = .provisional)
+      (hPublicationState : publication.state = .provisional)
+      (hNoSnapshot : s.findSnapshot? key = none)
+      (hTopics : Topics.Step s.topics (.withdrawVisible key runtimeId) topics') :
+      Step s (.withdrawAndInvalidate key runtimeId token)
+        { s with
+            topics := topics'
+            publications := s.updatePublicationState key token .stale }
+
   | beginWarmRead
       {s : State} {binding : SnapshotBinding} {publication : Publication}
       {readerId : Nat} {key : TopicKey}
@@ -123,7 +149,8 @@ inductive Step : State → Event → State → Prop where
       (hLive : publication.state = .live)
       (hCanonical : s.canonicalTopic? publication = true)
       (hNoReader : s.findWarmRead? readerId = none)
-      (hBound : s.warmReads.length < s.topics.runtime.activePrepares) :
+      (hAccounting : s.warmReads.length + s.topics.runtime.initializers.length
+        < s.topics.runtime.activePrepares) :
       Step s (.beginWarmRead readerId key)
         { s with warmReads := s.warmReads ++
             [{ id := readerId, key := binding.key, token := binding.token,
@@ -234,21 +261,27 @@ def apply? (s : State) (event : Event) : Option State :=
       if topicLiftable? event then
         match Topics.apply? s.topics event with
         | some topics' =>
-            if hBound : ({ s with topics := topics' }).WarmReadsBound? = true then
+            if hAccounting : ({ s with topics := topics' }).PrepareAccounting? = true then
               some { s with topics := topics' }
             else none
         | none => none
       else none
-  | .installProvisional key token rtdKey =>
-      match s.topics.findTopic? key with
-      | some topic =>
-          if topic.key = key ∧ topic.token = token ∧ topic.rtdKey = rtdKey ∧
-              topic.stage = .provisional ∧
-              s.findPublication? key token = none ∧
-              s.findSnapshot? key = none then
-            some { s with publications := s.publications ++
-                [{ key := key, token := token, rtdKey := rtdKey, state := .provisional }] }
-          else none
+  | .publishAndInstallProvisional key runtimeId token rtdKey =>
+      match Topics.apply? s.topics (.publishVisible key runtimeId rtdKey) with
+      | some topics' =>
+          match topics'.findTopic? key with
+          | some topic =>
+              if topic.key = key ∧ topic.token = token ∧ topic.rtdKey = rtdKey ∧
+                  topic.stage = .provisional ∧
+                  s.findPublication? key token = none ∧
+                  s.findSnapshot? key = none then
+                some { s with
+                  topics := topics'
+                  publications := s.publications ++
+                    [{ key := key, token := token, rtdKey := rtdKey,
+                       state := .provisional }] }
+              else none
+          | none => none
       | none => none
   | .commitAndActivate key runtimeId token =>
       match s.findPublication? key token, s.topics.findTopic? key with
@@ -265,6 +298,22 @@ def apply? (s : State) (event : Event) : Option State :=
             | none => none
           else none
       | _, _ => none
+  | .withdrawAndInvalidate key runtimeId token =>
+      match s.topics.findTopic? key, s.findPublication? key token with
+      | some topic, some publication =>
+          if topic.key = key ∧ topic.token = token ∧
+              publication.rtdKey = topic.rtdKey ∧
+              topic.stage = .provisional ∧
+              publication.state = .provisional ∧
+              s.findSnapshot? key = none then
+            match Topics.apply? s.topics (.withdrawVisible key runtimeId) with
+            | some topics' =>
+                some { s with
+                  topics := topics'
+                  publications := s.updatePublicationState key token .stale }
+            | none => none
+          else none
+      | _, _ => none
   | .beginWarmRead readerId key =>
       match s.findSnapshot? key with
       | some binding =>
@@ -273,7 +322,8 @@ def apply? (s : State) (event : Event) : Option State :=
               if publication.state = .live ∧
                   s.canonicalTopic? publication = true ∧
                   s.findWarmRead? readerId = none ∧
-                  s.warmReads.length < s.topics.runtime.activePrepares then
+                  s.warmReads.length + s.topics.runtime.initializers.length
+                    < s.topics.runtime.activePrepares then
                 some { s with warmReads := s.warmReads ++
                     [{ id := readerId, key := binding.key, token := binding.token,
                        rtdKey := publication.rtdKey }] }
@@ -381,30 +431,35 @@ theorem apply?_sound
         | none => simp [hTopics] at h
         | some topics' =>
             simp only [hTopics] at h
-            by_cases hBound : ({ s with topics := topics' }).WarmReadsBound? = true
-            · rw [if_pos hBound] at h
+            by_cases hAccounting : ({ s with topics := topics' }).PrepareAccounting? = true
+            · rw [if_pos hAccounting] at h
               cases h
               exact Step.liftTopic hLiftable
-                (Topics.apply?_sound hTopics) (warmReadsBound?_iff.mp hBound)
-            · rw [if_neg hBound] at h
+                (Topics.apply?_sound hTopics) (prepareAccounting?_iff.mp hAccounting)
+            · rw [if_neg hAccounting] at h
               contradiction
       · rw [if_neg hLiftable] at h
         contradiction
-  | installProvisional key token rtdKey =>
+  | publishAndInstallProvisional key runtimeId token rtdKey =>
       dsimp [apply?] at h
-      cases hTopic : s.topics.findTopic? key with
-      | none => simp [hTopic] at h
-      | some topic =>
-          simp only [hTopic] at h
-          by_cases hPre : topic.key = key ∧ topic.token = token ∧
-              topic.rtdKey = rtdKey ∧ topic.stage = .provisional ∧
-              s.findPublication? key token = none ∧ s.findSnapshot? key = none
-          · rw [if_pos hPre] at h
-            cases h
-            exact Step.installProvisional hTopic hPre.1 hPre.2.1 hPre.2.2.1
-              hPre.2.2.2.1 hPre.2.2.2.2.1 hPre.2.2.2.2.2
-          · rw [if_neg hPre] at h
-            contradiction
+      cases hTopics : Topics.apply? s.topics (.publishVisible key runtimeId rtdKey) with
+      | none => simp [hTopics] at h
+      | some topics' =>
+          simp only [hTopics] at h
+          cases hTopic : topics'.findTopic? key with
+          | none => simp [hTopic] at h
+          | some topic =>
+              simp only [hTopic] at h
+              by_cases hPre : topic.key = key ∧ topic.token = token ∧
+                  topic.rtdKey = rtdKey ∧ topic.stage = .provisional ∧
+                  s.findPublication? key token = none ∧ s.findSnapshot? key = none
+              · rw [if_pos hPre] at h
+                cases h
+                exact Step.publishAndInstallProvisional
+                  (Topics.apply?_sound hTopics) hTopic hPre.1 hPre.2.1 hPre.2.2.1
+                  hPre.2.2.2.1 hPre.2.2.2.2.1 hPre.2.2.2.2.2
+              · rw [if_neg hPre] at h
+                contradiction
   | commitAndActivate key runtimeId token =>
       dsimp [apply?] at h
       cases hPub : s.findPublication? key token with
@@ -430,6 +485,30 @@ theorem apply?_sound
                       (Topics.apply?_sound hTopics)
               · rw [if_neg hPre] at h
                 contradiction
+  | withdrawAndInvalidate key runtimeId token =>
+      dsimp [apply?] at h
+      cases hTopic : s.topics.findTopic? key with
+      | none => simp [hTopic] at h
+      | some topic =>
+          simp only [hTopic] at h
+          cases hPublication : s.findPublication? key token with
+          | none => simp [hPublication] at h
+          | some publication =>
+              simp only [hPublication] at h
+              by_cases hPre : topic.key = key ∧ topic.token = token ∧
+                  publication.rtdKey = topic.rtdKey ∧ topic.stage = .provisional ∧
+                  publication.state = .provisional ∧ s.findSnapshot? key = none
+              · rw [if_pos hPre] at h
+                cases hTopics : Topics.apply? s.topics (.withdrawVisible key runtimeId) with
+                | none => simp [hTopics] at h
+                | some topics' =>
+                    rw [hTopics] at h
+                    cases h
+                    exact Step.withdrawAndInvalidate hTopic hPre.1 hPre.2.1
+                      hPublication hPre.2.2.1 hPre.2.2.2.1 hPre.2.2.2.2.1
+                      hPre.2.2.2.2.2 (Topics.apply?_sound hTopics)
+              · rw [if_neg hPre] at h
+                contradiction
   | beginWarmRead readerId key =>
       dsimp [apply?] at h
       cases hSnapshot : s.findSnapshot? key with
@@ -443,7 +522,8 @@ theorem apply?_sound
               by_cases hPre : publication.state = .live ∧
                   s.canonicalTopic? publication = true ∧
                   s.findWarmRead? readerId = none ∧
-                  s.warmReads.length < s.topics.runtime.activePrepares
+                  s.warmReads.length + s.topics.runtime.initializers.length <
+                    s.topics.runtime.activePrepares
               · rw [if_pos hPre] at h
                 cases h
                 exact Step.beginWarmRead hSnapshot hPub hPre.1 hPre.2.1 hPre.2.2.1
@@ -597,12 +677,13 @@ theorem apply?_complete
     (h : Step s event s') :
     apply? s event = some s' := by
   cases h with
-  | liftTopic hLiftable hTopics hBound =>
+  | liftTopic hLiftable hTopics hAccounting =>
       simp [apply?, hLiftable, Topics.apply?_complete hTopics,
-        warmReadsBound?_iff.mpr hBound]
-  | installProvisional hTopic hTopicKey hTopicToken hTopicRtdKey hStage
-      hNoPublication hNoSnapshot =>
+        prepareAccounting?_iff.mpr hAccounting]
+  | publishAndInstallProvisional hTopics hTopic hTopicKey hTopicToken hTopicRtdKey
+      hStage hNoPublication hNoSnapshot =>
       dsimp [apply?]
+      rw [Topics.apply?_complete hTopics]
       simp only [hTopic]
       rw [if_pos ⟨hTopicKey, hTopicToken, hTopicRtdKey, hStage,
         hNoPublication, hNoSnapshot⟩]
@@ -611,6 +692,13 @@ theorem apply?_complete
       dsimp [apply?]
       simp only [hPublication, hTopic]
       rw [if_pos ⟨hTopicKey, hTopicToken, hTopicRtdKey, hStage,
+        hPublicationState, hNoSnapshot⟩]
+      rw [Topics.apply?_complete hTopics]
+  | withdrawAndInvalidate hTopic hTopicKey hTopicToken hPublication
+      hPublicationRtdKey hStage hPublicationState hNoSnapshot hTopics =>
+      dsimp [apply?]
+      simp only [hTopic, hPublication]
+      rw [if_pos ⟨hTopicKey, hTopicToken, hPublicationRtdKey, hStage,
         hPublicationState, hNoSnapshot⟩]
       rw [Topics.apply?_complete hTopics]
   | beginWarmRead hSnapshot hPublication hLive hCanonical hNoReader hBound =>

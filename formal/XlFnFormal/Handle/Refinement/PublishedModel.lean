@@ -152,16 +152,30 @@ def State.WarmReaderReferencesKnownPublication (s : State) : Prop :=
       publication.token = read.token ∧
       publication.rtdKey = read.rtdKey
 
+def State.PrepareAccounting (s : State) : Prop :=
+  s.warmReads.length + s.topics.runtime.initializers.length
+    ≤ s.topics.runtime.activePrepares
+
+def State.PrepareAccounting? (s : State) : Bool :=
+  s.warmReads.length + s.topics.runtime.initializers.length
+    ≤ s.topics.runtime.activePrepares
+
+theorem prepareAccounting?_iff
+    {s : State} :
+    s.PrepareAccounting? = true ↔ s.PrepareAccounting := by
+  simp [State.PrepareAccounting?, State.PrepareAccounting]
+
 def State.WarmReadsBound (s : State) : Prop :=
-  s.warmReads.length ≤ s.topics.runtime.activePrepares
+  s.PrepareAccounting
 
 def State.WarmReadsBound? (s : State) : Bool :=
-  s.warmReads.length ≤ s.topics.runtime.activePrepares
+  s.PrepareAccounting?
 
 theorem warmReadsBound?_iff
     {s : State} :
     s.WarmReadsBound? = true ↔ s.WarmReadsBound := by
-  simp [State.WarmReadsBound?, State.WarmReadsBound]
+  simp [State.WarmReadsBound?, State.WarmReadsBound,
+    prepareAccounting?_iff]
 
 def State.Invariant (s : State) : Prop :=
   s.topics.Invariant ∧
@@ -173,7 +187,7 @@ def State.Invariant (s : State) : Prop :=
   s.LiveSnapshotSound ∧
   s.LiveSnapshotRootIsLive ∧
   s.WarmReaderReferencesKnownPublication ∧
-  s.WarmReadsBound
+  s.PrepareAccounting
 
 theorem initialInvariant
     {topics : Topics.State} (hTopics : topics.Invariant) :
@@ -190,6 +204,7 @@ theorem initialInvariant
     contradiction
   · intro read hMem
     contradiction
-  · simp [State.WarmReadsBound, initialState]
+  · simpa [State.PrepareAccounting, Runtime.OperationInvariant, initialState] using
+      hTopics.1.2.1
 
 end XlFnFormal.Handle.Refinement

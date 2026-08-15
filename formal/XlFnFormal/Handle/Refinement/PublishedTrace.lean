@@ -16,11 +16,10 @@ def replacementPublicationToken : Registry.Token :=
   { session := 0, slot := 0, generation := 2 }
 
 def publishedPrefix : List Event :=
-  [.topic .beginPrepare,
-   .topic (.beginInitializer fixtureKey 1),
-   .topic (.insertPendingFresh fixtureKey 1),
-   .topic (.publishVisible fixtureKey 1 fixtureRtdKey),
-   .installProvisional fixtureKey fixtureToken fixtureRtdKey,
+   [.topic .beginPrepare,
+    .topic (.beginInitializer fixtureKey 1),
+    .topic (.insertPendingFresh fixtureKey 1),
+   .publishAndInstallProvisional fixtureKey 1 fixtureToken fixtureRtdKey,
    .commitAndActivate fixtureKey 1 fixtureToken,
    .topic (.finishInitializer fixtureKey 1),
    .topic .endPrepare]
@@ -43,6 +42,16 @@ def failWarmReadTrace : List Event :=
      .beginWarmRead 1 fixtureKey,
      .failWarmRead 1,
      .topic .endPrepare]
+
+def coldObserveFailureTrace : List Event :=
+  [.topic .beginPrepare,
+   .topic (.beginInitializer fixtureKey 1),
+   .topic (.insertPendingFresh fixtureKey 1),
+   .publishAndInstallProvisional fixtureKey 1 fixtureToken fixtureRtdKey,
+   .withdrawAndInvalidate fixtureKey 1 fixtureToken,
+   .topic (.rollbackPendingReuse fixtureKey 1 2),
+   .topic (.finishInitializer fixtureKey 1),
+   .topic .endPrepare]
 
 def disconnectWarmPrefix : List Event :=
   publishedWithConnectionPrefix ++
@@ -91,12 +100,21 @@ def abaTrace : List Event :=
      .beginWarmRead 1 fixtureKey,
      .disconnect fixtureKey fixtureOwner1,
      .drainPublishedReuse fixtureToken 2,
+     .topic .beginPrepare,
      .topic (.beginInitializer fixtureKey 2),
      .topic (.insertPendingReuse fixtureKey 2 0 2),
-     .topic (.publishVisible fixtureKey 2 fixtureRtdKey),
-     .installProvisional fixtureKey replacementPublicationToken fixtureRtdKey,
+     .publishAndInstallProvisional fixtureKey 2 replacementPublicationToken fixtureRtdKey,
      .commitAndActivate fixtureKey 2 replacementPublicationToken,
-     .topic (.finishInitializer fixtureKey 2)]
+     .topic (.finishInitializer fixtureKey 2),
+     .topic .endPrepare]
+
+def abaCloseTrace : List Event :=
+  abaTrace ++
+    [.abandonWarmRead 1,
+     .topic .endPrepare,
+     .sealForClose,
+     .closeRegistry,
+     .topic .finishClose]
 
 def closeCertificate? (s : State) : Bool :=
   s.topics.runtime.phase == .closed &&
@@ -137,6 +155,24 @@ def failWarmReadCertified? : Bool :=
       state.warmReads = [] &&
       (state.findPublication? fixtureKey fixtureToken).isSome
   | none => false
+
+def coldObserveFailureCertified? : Bool :=
+  match replay? (initialState (Topics.initialState 0)) coldObserveFailureTrace with
+  | some state =>
+      state.topics.findTopic? fixtureKey == none &&
+      state.topics.findReverse? fixtureRtdKey == none &&
+      state.snapshot == [] &&
+      (match state.findPublication? fixtureKey fixtureToken with
+       | some publication => publication.state == .stale
+       | none => false) &&
+      state.topics.runtime.activePrepares == 0 &&
+      state.topics.runtime.initializers == [] &&
+      tokenLive? state.topics.runtime.registry fixtureToken == false
+  | none => false
+
+theorem cold_observation_failure_trace_replays :
+    coldObserveFailureCertified? = true := by
+  native_decide
 
 def closeWarmCertified? : Bool :=
   match replay? (initialState (Topics.initialState 0)) closeWarmTrace with
@@ -190,6 +226,15 @@ theorem stale_reader_cannot_follow_replacement_publication_trace :
 
 theorem aba_trace_replays :
     (replay? (initialState (Topics.initialState 0)) abaTrace).isSome = true := by
+  native_decide
+
+def abaCloseCertified? : Bool :=
+  match replay? (initialState (Topics.initialState 0)) abaCloseTrace with
+  | some state => closeCertificate? state
+  | none => false
+
+theorem aba_close_trace_replays :
+    abaCloseCertified? = true := by
   native_decide
 
 theorem aba_trace_preserves_invariant :
