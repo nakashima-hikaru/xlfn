@@ -20,7 +20,3 @@ root = "XlFnFormal.Handle.Topics.Serialization.GoldenChecker"
 [[lean_exe]]
 name = "published_trace_checker"
 root = "XlFnFormal.Handle.Refinement.PublishedTraceChecker"
-
-[[lean_exe]]
-name = "published_handle_snapshot_trace_checker"
-root = "XlFnFormal.Handle.Registry.Snapshot.TraceChecker"

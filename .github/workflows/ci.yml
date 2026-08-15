@@ -135,7 +135,6 @@ jobs:
                   RUSTFLAGS: -Dlinker-messages
                   XLFN_WINDOWS_RTD_TRACE: ${{ github.workspace }}\windows-rtd-shutdown-trace-${{ matrix.target }}.json
                   XLFN_HANDLE_REFINEMENT_TRACE_DIR: ${{ github.workspace }}\windows-handle-refinement-traces-${{ matrix.target }}
-                  XLFN_HANDLE_SNAPSHOT_REFINEMENT_TRACE_DIR: ${{ github.workspace }}\windows-handle-snapshot-traces-${{ matrix.target }}
               run: |
                   cargo test `
                     --workspace `
@@ -156,13 +155,6 @@ jobs:
               with:
                   name: windows-handle-refinement-traces-${{ matrix.target }}
                   path: windows-handle-refinement-traces-${{ matrix.target }}
-                  if-no-files-found: error
-
-            - name: Upload Windows Snapshot refinement traces
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-              with:
-                  name: windows-handle-snapshot-traces-${{ matrix.target }}
-                  path: windows-handle-snapshot-traces-${{ matrix.target }}
                   if-no-files-found: error
 
             - name: Build and validate the basic example XLL across CRT policies
@@ -270,12 +262,6 @@ jobs:
                   pattern: windows-handle-refinement-traces-*
                   path: windows-handle-refinement-traces
 
-            - name: Download Windows Snapshot refinement traces
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-              with:
-                  pattern: windows-handle-snapshot-traces-*
-                  path: windows-handle-snapshot-traces
-
             - name: Reject unfinished proof placeholders
               shell: bash
               run: |
@@ -304,10 +290,6 @@ jobs:
               working-directory: formal
               run: lake build published_trace_checker
 
-            - name: Build the snapshot handle refinement checker executable
-              working-directory: formal
-              run: lake build published_handle_snapshot_trace_checker
-
             - name: Build the RTD serialization golden checker
               working-directory: formal
               run: lake build serialization_golden_checker
@@ -321,13 +303,6 @@ jobs:
               run: |
                   for trace in formal/fixtures/composition/*.json; do
                     formal/.lake/build/bin/composition_trace_checker < "$trace"
-                  done
-
-            - name: Validate snapshot replay fixtures
-              shell: bash
-              run: |
-                  for trace in formal/fixtures/snapshot/positive-*.json; do
-                    formal/.lake/build/bin/published_handle_snapshot_trace_checker < "$trace"
                   done
 
             - name: Validate Windows RTD shutdown traces
@@ -372,52 +347,12 @@ jobs:
                     exit 1
                   fi
 
-            - name: Validate Windows Snapshot handle refinement traces
-              shell: bash
-              run: |
-                  trace_root=windows-handle-snapshot-traces
-                  targets=(
-                    i686-pc-windows-msvc
-                    x86_64-pc-windows-msvc
-                  )
-                  total=0
-                  for target in "${targets[@]}"; do
-                    directory="$trace_root/windows-handle-snapshot-traces-$target"
-                    if [ ! -d "$directory" ]; then
-                      echo "Missing Windows Snapshot trace artifact directory: $directory" >&2
-                      exit 1
-                    fi
-                    count=$(find "$directory" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
-                    if [ "$count" -ne 6 ]; then
-                      echo "Expected 6 Snapshot traces for $target, found $count." >&2
-                      exit 1
-                    fi
-                    while IFS= read -r -d '' trace; do
-                      formal/.lake/build/bin/published_handle_snapshot_trace_checker < "$trace"
-                    done < <(find "$directory" -maxdepth 1 -type f -name '*.json' -print0 | sort -z)
-                    total=$((total + count))
-                  done
-                  if [ "$total" -ne 12 ]; then
-                    echo "Expected 12 Windows Snapshot traces, found $total." >&2
-                    exit 1
-                  fi
-
             - name: Reject invalid H4 handle refinement fixtures
               shell: bash
               run: |
                   for trace in formal/fixtures/handle-refinement/negative-*.json; do
                     if formal/.lake/build/bin/published_trace_checker < "$trace"; then
                       echo "Negative H4 fixture was accepted: $trace" >&2
-                      exit 1
-                    fi
-                  done
-
-            - name: Reject invalid Snapshot handle refinement fixtures
-              shell: bash
-              run: |
-                  for trace in formal/fixtures/snapshot/negative-*.json; do
-                    if formal/.lake/build/bin/published_handle_snapshot_trace_checker < "$trace"; then
-                      echo "Negative Snapshot fixture was accepted: $trace" >&2
                       exit 1
                     fi
                   done

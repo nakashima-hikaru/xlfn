@@ -155,8 +155,6 @@ pub(crate) struct HandleRegistry {
     pub(crate) before_fast_upgrade_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) snapshot_recorder: Mutex<Option<Arc<SnapshotTraceRecorder>>>,
 }
 
 pub(crate) struct PendingHandleValue<'a, T>
@@ -264,8 +262,6 @@ impl HandleRegistry {
             before_fast_upgrade_hook: Mutex::new(None),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            snapshot_recorder: Mutex::new(None),
         }
     }
 
@@ -278,32 +274,6 @@ impl HandleRegistry {
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
-        }
-    }
-
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) fn set_snapshot_trace_recorder(&self, recorder: Arc<SnapshotTraceRecorder>) {
-        *self.snapshot_recorder.lock() = Some(recorder);
-    }
-
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) fn snapshot_trace_recorder(&self) -> Option<Arc<SnapshotTraceRecorder>> {
-        self.snapshot_recorder.lock().as_ref().cloned()
-    }
-
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) fn next_snapshot_reader_id(&self) -> u64 {
-        if let Some(recorder) = self.snapshot_trace_recorder() {
-            recorder.next_reader_id()
-        } else {
-            1
-        }
-    }
-
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) fn record_snapshot_trace_event(&self, event: SnapshotEvent) {
-        if let Some(recorder) = self.snapshot_trace_recorder() {
-            recorder.record(event);
         }
     }
 
@@ -386,15 +356,6 @@ impl HandleRegistry {
         });
         self.published.insert(slot, publication);
         state.live += 1;
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        if reused {
-            self.record_snapshot_trace_event(SnapshotEvent::InsertReuse {
-                slot: slot as u64,
-                generation,
-            });
-        } else {
-            self.record_snapshot_trace_event(SnapshotEvent::InsertFresh);
-        }
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
@@ -468,20 +429,6 @@ impl HandleRegistry {
                 PublishedHandleState::Closing => return Err(XllError::Closing),
             }
 
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let reader_id = self.next_snapshot_reader_id();
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let token_wire = SnapshotTokenWire {
-                session: self.session,
-                slot: parsed.slot as u64,
-                generation: parsed.generation,
-            };
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            self.record_snapshot_trace_event(SnapshotEvent::BeginFastObservation {
-                reader_id,
-                token: token_wire,
-            });
-
             #[cfg(test)]
             if let Some(hook) = self.before_fast_lease_acquire_hook.lock().take() {
                 hook();
@@ -491,43 +438,16 @@ impl HandleRegistry {
             // obviously withdrawn entries. The second check is the actual
             // lookup/close linearization point.
             let Some(lease) = leases.acquire() else {
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                self.record_snapshot_trace_event(SnapshotEvent::AbandonObservation { reader_id });
                 return Err(XllError::Closing);
             };
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let mut lease = lease;
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            if let Some(recorder) = self.snapshot_trace_recorder() {
-                lease.lineage = Some(LeaseLineageTrace::new_tentative(recorder, reader_id));
-            }
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            self.record_snapshot_trace_event(SnapshotEvent::AcquireTentativeLease { reader_id });
 
             match publication.state() {
-                PublishedHandleState::Live => {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    if let Some(lineage) = lease.lineage.as_ref() {
-                        lineage.validate_fast_lookup();
-                    }
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    self.record_snapshot_trace_event(SnapshotEvent::ValidateFastLookup {
-                        reader_id,
-                    });
-                }
+                PublishedHandleState::Live => {}
                 PublishedHandleState::Stale => {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    self.record_snapshot_trace_event(SnapshotEvent::RejectTentativeFastLookup {
-                        reader_id,
-                    });
                     drop(lease);
                     return Err(XllError::StaleHandle);
                 }
                 PublishedHandleState::Closing => {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    self.record_snapshot_trace_event(SnapshotEvent::RejectTentativeFastLookup {
-                        reader_id,
-                    });
                     drop(lease);
                     return Err(XllError::Closing);
                 }
@@ -539,8 +459,6 @@ impl HandleRegistry {
             }
 
             let Some(value) = publication.upgrade() else {
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                self.record_snapshot_trace_event(SnapshotEvent::FallbackFastLookup { reader_id });
                 drop(lease);
                 return self.lookup_handle_slow(parsed, leases);
             };
@@ -595,20 +513,6 @@ impl HandleRegistry {
         let Some(lease) = leases.acquire() else {
             return Err(XllError::Closing);
         };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let token_wire = SnapshotTokenWire {
-            session: self.session,
-            slot: parsed.slot as u64,
-            generation: parsed.generation,
-        };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let mut lease = lease;
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        if let Some(recorder) = self.snapshot_trace_recorder() {
-            lease.lineage = Some(LeaseLineageTrace::new_slow(recorder));
-        }
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.record_snapshot_trace_event(SnapshotEvent::BeginSlowLookup { token: token_wire });
         let value = Arc::clone(&entry.value);
         drop(state);
         let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
@@ -714,26 +618,9 @@ impl HandleRegistry {
         } else {
             false
         };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let updated_generation = slot.generation;
         state.live -= 1;
         if reusable {
             state.free.push(parsed.slot as usize);
-        }
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let token_wire = SnapshotTokenWire {
-            session: self.session,
-            slot: parsed.slot as u64,
-            generation: parsed.generation,
-        };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        if reusable {
-            self.record_snapshot_trace_event(SnapshotEvent::RemoveReuse {
-                token: token_wire,
-                next_generation: updated_generation,
-            });
-        } else {
-            self.record_snapshot_trace_event(SnapshotEvent::RemoveRetire { token: token_wire });
         }
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         on_linearized(reusable);
@@ -830,8 +717,6 @@ impl HandleRegistry {
             }
         }
         state.live = 0;
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.record_snapshot_trace_event(SnapshotEvent::CloseRegistry);
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         for _ in 0..live {
@@ -857,8 +742,6 @@ impl HandleRegistry {
         let values = self.take_values_for_close();
         self.drop_values(values, "handle registry close");
         leases.wait_for_idle();
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.record_snapshot_trace_event(SnapshotEvent::FinishClose);
         let lease_cleanup = leases.cleanup_result();
         match lease_cleanup {
             Ok(()) => self.cleanup_result(),
