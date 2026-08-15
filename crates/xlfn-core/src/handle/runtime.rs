@@ -586,10 +586,10 @@ impl HandleRuntime {
                     {
                         topics.initializing.remove(&key);
                     }
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    refinement.finish_initializer(owned.refinement_id);
                 }
                 owned.complete();
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                refinement.finish_initializer(owned.refinement_id);
             },
         );
 
@@ -657,22 +657,29 @@ impl HandleRuntime {
                 } else {
                     false
                 };
+                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                let _ = removed;
                 drop(topics);
-                if let Some(reusable) =
-                    registry.remove_and_drop_with_kind(token, "handle publication rollback")
-                {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    if removed {
-                        self.refinement.rollback_pending(
-                            &key,
-                            refinement_id,
-                            reusable,
-                            self.refinement_token(token),
-                        );
-                    }
-                    #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                    let _ = (removed, reusable);
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                if removed {
+                    let token_wire = self.refinement_token(token);
+                    let refinement = &self.refinement;
+                    let _ = registry.remove_and_drop_with_trace(
+                        token,
+                        "handle publication rollback",
+                        move |reusable| {
+                            refinement.rollback_pending(&key, refinement_id, reusable, token_wire);
+                        },
+                    );
+                } else {
+                    let _ = registry.remove_and_drop_with_trace(
+                        token,
+                        "handle publication rollback",
+                        |_| {},
+                    );
                 }
+                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                registry.remove_and_drop_with_kind(token, "handle publication rollback");
             },
         );
 
@@ -980,32 +987,50 @@ impl HandleRuntime {
             let topic = topics.by_key.remove(&key);
             topic.map(|topic| {
                 topics.by_rtd_key.remove(topic.rtd_key.as_ref());
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                self.refinement.disconnect(&key, owner);
                 (key, topic.token, was_provisional)
             })
         };
         if let Some((key, token, was_provisional)) = removed {
             #[cfg(any(test, feature = "handle-refinement-trace"))]
-            self.refinement.disconnect(&key, owner);
-            if let Some(reusable) = self
-                .registry
-                .remove_and_drop_with_kind(&token, "handle topic disconnect")
-            {
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                if was_provisional {
-                    if let Some(runtime_id) = pending_runtime_id {
-                        self.refinement.drain_pending(
-                            self.refinement_token(&token),
-                            runtime_id,
-                            reusable,
-                        );
-                    }
+            if was_provisional {
+                if let Some(runtime_id) = pending_runtime_id {
+                    let token_wire = self.refinement_token(&token);
+                    let refinement = &self.refinement;
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &token,
+                        "handle topic disconnect",
+                        move |reusable| {
+                            refinement.drain_pending(token_wire, runtime_id, reusable);
+                        },
+                    );
                 } else {
-                    self.refinement
-                        .drain_published(self.refinement_token(&token), reusable);
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &token,
+                        "handle topic disconnect",
+                        |_| {},
+                    );
                 }
-                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                let _ = (key, reusable, was_provisional);
+            } else {
+                let token_wire = self.refinement_token(&token);
+                let refinement = &self.refinement;
+                let _ = self.registry.remove_and_drop_with_trace(
+                    &token,
+                    "handle topic disconnect",
+                    move |reusable| {
+                        refinement.drain_published(token_wire, reusable);
+                    },
+                );
             }
+            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+            {
+                self.registry
+                    .remove_and_drop_with_kind(&token, "handle topic disconnect");
+                let _ = (key, was_provisional);
+            }
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let _ = key;
         }
     }
 
@@ -1033,14 +1058,15 @@ impl HandleRuntime {
             topics.by_rtd_key.clear();
             topics.by_excel_id.clear();
 
-            topics
+            let initializations = topics
                 .initializing
                 .drain()
                 .map(|(_, value)| value)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            self.refinement.seal_for_close();
+            initializations
         };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.refinement.seal_for_close();
 
         //
         // Wake cold-path waiters.
@@ -1087,7 +1113,8 @@ impl HandleRuntime {
                 .filter(|(_, topic)| topic.server_generation == Some(server_generation))
                 .map(|(key, _)| *key)
                 .collect::<Vec<_>>();
-            keys.into_iter()
+            let tokens = keys
+                .into_iter()
                 .filter_map(|key| {
                     let publication = topics
                         .by_key
@@ -1118,39 +1145,53 @@ impl HandleRuntime {
                     ));
                     Some(topic.token)
                 })
-                .collect::<Vec<_>>()
-        };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        if !tokens.is_empty() {
-            self.refinement.detach_generation(server_generation);
-        }
-        for token in tokens {
-            if let Some(reusable) = self
-                .registry
-                .remove_and_drop_with_kind(&token, "handle RTD termination")
-            {
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                if let Some((key, _, was_provisional, refinement_id)) = refinement_topics
-                    .iter()
-                    .find(|(_, value, _, _)| value == &token)
-                {
-                    if *was_provisional {
-                        if let Some(runtime_id) = refinement_id {
-                            self.refinement.drain_pending(
-                                self.refinement_token(&token),
-                                *runtime_id,
-                                reusable,
-                            );
-                        }
-                    } else {
-                        self.refinement
-                            .drain_published(self.refinement_token(&token), reusable);
-                    }
-                    let _ = key;
-                }
-                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                let _ = reusable;
+                .collect::<Vec<_>>();
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            if !tokens.is_empty() {
+                self.refinement.detach_generation(server_generation);
             }
+            tokens
+        };
+        for token in tokens {
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            match refinement_topics
+                .iter()
+                .find(|(_, value, _, _)| value == &token)
+                .map(|(_, _, was_provisional, refinement_id)| (*was_provisional, *refinement_id))
+            {
+                Some((true, Some(runtime_id))) => {
+                    let token_wire = self.refinement_token(&token);
+                    let refinement = &self.refinement;
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &token,
+                        "handle RTD termination",
+                        move |reusable| {
+                            refinement.drain_pending(token_wire, runtime_id, reusable);
+                        },
+                    );
+                }
+                Some((false, _)) => {
+                    let token_wire = self.refinement_token(&token);
+                    let refinement = &self.refinement;
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &token,
+                        "handle RTD termination",
+                        move |reusable| {
+                            refinement.drain_published(token_wire, reusable);
+                        },
+                    );
+                }
+                _ => {
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &token,
+                        "handle RTD termination",
+                        |_| {},
+                    );
+                }
+            }
+            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+            self.registry
+                .remove_and_drop_with_kind(&token, "handle RTD termination");
         }
     }
 

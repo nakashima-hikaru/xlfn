@@ -557,11 +557,22 @@ impl HandleRegistry {
         reason = "The kind-reporting wrapper is used by lifecycle trace production"
     )]
     pub(crate) fn remove_any(&self, token: &str) -> XllResult<Arc<dyn Any + Send + Sync>> {
-        self.remove_any_with_kind(token)
-            .map(|(value, _reusable)| value)
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let result = self
+            .remove_any_with_kind(token, |_| {})
+            .map(|(value, _reusable)| value);
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        let result = self
+            .remove_any_with_kind(token)
+            .map(|(value, _reusable)| value);
+        result
     }
 
-    fn remove_any_with_kind(&self, token: &str) -> XllResult<(Arc<dyn Any + Send + Sync>, bool)> {
+    fn remove_any_with_kind(
+        &self,
+        token: &str,
+        #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
+    ) -> XllResult<(Arc<dyn Any + Send + Sync>, bool)> {
         let parsed = self.parse_token(token)?;
         let mut state = self.state.write();
         if state.closed {
@@ -593,6 +604,8 @@ impl HandleRegistry {
         if reusable {
             state.free.push(parsed.slot as usize);
         }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        on_linearized(reusable);
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
@@ -633,7 +646,30 @@ impl HandleRegistry {
         token: &str,
         operation: &'static str,
     ) -> Option<bool> {
-        if let Ok((value, reusable)) = self.remove_any_with_kind(token) {
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let result = self.remove_any_with_kind(token, |_| {});
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        let result = self.remove_any_with_kind(token);
+        if let Ok((value, reusable)) = result {
+            self.drop_values(std::iter::once(value), operation);
+            Some(reusable)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    #[allow(
+        dead_code,
+        reason = "The trace callback is used by Windows/test lifecycle paths"
+    )]
+    pub(crate) fn remove_and_drop_with_trace(
+        &self,
+        token: &str,
+        operation: &'static str,
+        on_linearized: impl FnOnce(bool),
+    ) -> Option<bool> {
+        if let Ok((value, reusable)) = self.remove_any_with_kind(token, on_linearized) {
             self.drop_values(std::iter::once(value), operation);
             Some(reusable)
         } else {

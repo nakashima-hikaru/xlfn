@@ -261,7 +261,6 @@ jobs:
               with:
                   pattern: windows-handle-refinement-traces-*
                   path: windows-handle-refinement-traces
-                  merge-multiple: true
 
             - name: Reject unfinished proof placeholders
               shell: bash
@@ -321,14 +320,32 @@ jobs:
             - name: Validate Windows H4 handle refinement traces
               shell: bash
               run: |
-                  traces=(windows-handle-refinement-traces/*.json)
-                  if [ "${#traces[@]}" -eq 0 ]; then
-                    echo "No Windows H4 handle refinement traces were downloaded." >&2
+                  trace_root=windows-handle-refinement-traces
+                  targets=(
+                    i686-pc-windows-msvc
+                    x86_64-pc-windows-msvc
+                  )
+                  total=0
+                  for target in "${targets[@]}"; do
+                    directory="$trace_root/windows-handle-refinement-traces-$target"
+                    if [ ! -d "$directory" ]; then
+                      echo "Missing Windows H4 trace artifact directory: $directory" >&2
+                      exit 1
+                    fi
+                    count=$(find "$directory" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+                    if [ "$count" -ne 6 ]; then
+                      echo "Expected 6 H4 traces for $target, found $count." >&2
+                      exit 1
+                    fi
+                    while IFS= read -r -d '' trace; do
+                      formal/.lake/build/bin/published_trace_checker < "$trace"
+                    done < <(find "$directory" -maxdepth 1 -type f -name '*.json' -print0 | sort -z)
+                    total=$((total + count))
+                  done
+                  if [ "$total" -ne 12 ]; then
+                    echo "Expected 12 Windows H4 traces, found $total." >&2
                     exit 1
                   fi
-                  for trace in "${traces[@]}"; do
-                    formal/.lake/build/bin/published_trace_checker < "$trace"
-                  done
 
             - name: Reject invalid H4 handle refinement fixtures
               shell: bash
