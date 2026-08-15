@@ -376,6 +376,63 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
 }
 
 #[test]
+fn published_handle_index_is_weak_and_generation_scoped() {
+    let registry = HandleRegistry::new(4);
+    let first = Arc::new(String::from("first"));
+    let first_weak = Arc::downgrade(&first);
+    let token = insert_production(&registry, Arc::clone(&first)).unwrap();
+    let parsed = registry.parse_token(&token).unwrap();
+    let first_publication = registry
+        .published
+        .lookup(parsed.slot)
+        .expect("inserted handle must be published");
+
+    assert_eq!(first_publication.generation, parsed.generation);
+    assert_eq!(first_publication.state(), PublishedHandleState::Live);
+    drop(first);
+    assert!(first_weak.upgrade().is_some());
+
+    let removed = registry.remove::<String>(&token).unwrap();
+    assert_eq!(first_publication.state(), PublishedHandleState::Stale);
+    drop(removed);
+    assert!(first_weak.upgrade().is_none());
+    assert!(first_publication.upgrade().is_none());
+
+    let replacement = insert_production(&registry, Arc::new(String::from("replacement"))).unwrap();
+    let replacement_parsed = registry.parse_token(&replacement).unwrap();
+    let replacement_publication = registry
+        .published
+        .lookup(replacement_parsed.slot)
+        .expect("reused handle must be republished");
+
+    assert_eq!(replacement_parsed.slot, parsed.slot);
+    assert_ne!(replacement_parsed.generation, parsed.generation);
+    assert!(!Arc::ptr_eq(&first_publication, &replacement_publication));
+    assert_eq!(replacement_publication.state(), PublishedHandleState::Live);
+}
+
+#[test]
+fn published_handle_index_does_not_extend_values_through_close() {
+    let registry = HandleRegistry::new(2);
+    let value = Arc::new(42_u32);
+    let value_weak = Arc::downgrade(&value);
+    let token = insert_production(&registry, Arc::clone(&value)).unwrap();
+    let parsed = registry.parse_token(&token).unwrap();
+    let publication = registry
+        .published
+        .lookup(parsed.slot)
+        .expect("inserted handle must be published");
+
+    drop(value);
+    registry.close().unwrap();
+
+    assert_eq!(publication.state(), PublishedHandleState::Closing);
+    assert!(registry.published.lookup(parsed.slot).is_none());
+    assert!(value_weak.upgrade().is_none());
+    assert!(publication.upgrade().is_none());
+}
+
+#[test]
 fn exhausted_generation_retires_the_slot_permanently() {
     let registry = HandleRegistry::new(2);
     insert_production(&registry, Arc::new(1_u32)).unwrap();

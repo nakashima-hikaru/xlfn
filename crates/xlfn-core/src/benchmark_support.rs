@@ -293,6 +293,7 @@ impl Drop for SyncBoundaryWorkerPool {
 
 use crate::handle::{
     ExcelHandleObject, FormulaCaller, FormulaTopicKey, HandleRuntime, HandleTopicKey,
+    PublishedHandle, PublishedHandleState,
 };
 use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
@@ -771,91 +772,81 @@ impl Drop for HandleLookupBenchmark {
 /// Internal decomposition target for the temporary handle-lookup study.
 #[derive(Clone, Copy, Debug)]
 pub enum HandleLookupDiagnosticCase {
-    /// Measure token authentication and parsing without touching registry state.
-    TokenParseOnly,
-    /// Measure parsed-token registry validation without cloning the value.
-    RegistryLookupOnly,
-    /// Measure the escaped-handle lease acquire/drop pair.
-    LeaseOnly,
-    /// Measure the production lookup path without acquiring an escaped-handle lease.
-    LookupWithoutLease,
+    /// Measure token parsing plus the published registry snapshot lookup and
+    /// metadata/state validation.
+    PublishedRegistryLookupOnly,
+    /// Measure only the weak-to-strong object reference upgrade.
+    PublishedRegistryUpgradeOnly,
+    /// Measure the published registry lookup, validation, weak upgrade, and
+    /// downcast without acquiring an escaped-handle lease.
+    PublishedRegistryFullWithoutLease,
 }
 
 impl HandleLookupDiagnosticCase {
     /// All decomposition targets used by the temporary benchmark.
-    pub const ALL: [Self; 4] = [
-        Self::TokenParseOnly,
-        Self::RegistryLookupOnly,
-        Self::LeaseOnly,
-        Self::LookupWithoutLease,
+    pub const ALL: [Self; 3] = [
+        Self::PublishedRegistryLookupOnly,
+        Self::PublishedRegistryUpgradeOnly,
+        Self::PublishedRegistryFullWithoutLease,
     ];
 
     /// Stable benchmark path component for this target.
     pub const fn name(self) -> &'static str {
         match self {
-            Self::TokenParseOnly => "token_parse_only",
-            Self::RegistryLookupOnly => "registry_lookup_only",
-            Self::LeaseOnly => "lease_only",
-            Self::LookupWithoutLease => "lookup_without_lease",
+            Self::PublishedRegistryLookupOnly => "published_registry_lookup_only",
+            Self::PublishedRegistryUpgradeOnly => "published_registry_upgrade_only",
+            Self::PublishedRegistryFullWithoutLease => "published_registry_full_without_lease",
         }
     }
 }
 
-fn benchmark_lookup_token_parse(runtime: &HandleRuntime, token: &str) {
+fn benchmark_published_registry_lookup_only(runtime: &HandleRuntime, token: &str) {
     let parsed = runtime
         .registry
         .parse_token(token)
-        .expect("diagnostic token parse failed");
-    std::hint::black_box((parsed.slot, parsed.generation));
+        .expect("diagnostic published lookup token parse failed");
+    let publication = runtime
+        .registry
+        .published
+        .lookup(parsed.slot)
+        .expect("diagnostic published registry entry is missing");
+    assert_eq!(publication.generation, parsed.generation);
+    assert_eq!(
+        publication.type_id,
+        std::any::TypeId::of::<BenchHandleObject>()
+    );
+    assert_eq!(publication.state(), PublishedHandleState::Live);
+    std::hint::black_box(publication);
 }
 
-fn benchmark_lookup_registry_only(runtime: &HandleRuntime, token: &str) {
+fn benchmark_published_registry_upgrade_only(publication: &PublishedHandle) {
+    let value = publication
+        .upgrade()
+        .expect("diagnostic published registry weak upgrade failed");
+    std::hint::black_box(value);
+}
+
+fn benchmark_published_registry_full_without_lease(runtime: &HandleRuntime, token: &str) {
     let parsed = runtime
         .registry
         .parse_token(token)
-        .expect("diagnostic registry token parse failed");
-    let state = runtime.registry.state.read();
-    assert!(!state.closed);
-    let slot = state
-        .slots
-        .get(parsed.slot as usize)
-        .expect("diagnostic registry slot is missing");
-    assert_eq!(slot.generation, parsed.generation);
-    let entry = slot
-        .entry
-        .as_ref()
-        .expect("diagnostic registry entry is missing");
-    assert_eq!(entry.type_id, std::any::TypeId::of::<BenchHandleObject>());
-    std::hint::black_box(entry.value.as_ref());
-}
-
-fn benchmark_lookup_lease_only(runtime: &HandleRuntime) {
-    let lease = runtime.leases.acquire();
-    std::hint::black_box(&lease);
-    drop(lease);
-}
-
-fn benchmark_lookup_without_lease(runtime: &HandleRuntime, token: &str) {
-    let parsed = runtime
+        .expect("diagnostic published full lookup token parse failed");
+    let publication = runtime
         .registry
-        .parse_token(token)
-        .expect("diagnostic lookup token parse failed");
-    let state = runtime.registry.state.read();
-    assert!(!state.closed);
-    let slot = state
-        .slots
-        .get(parsed.slot as usize)
-        .expect("diagnostic lookup slot is missing");
-    assert_eq!(slot.generation, parsed.generation);
-    let entry = slot
-        .entry
-        .as_ref()
-        .expect("diagnostic lookup entry is missing");
-    assert_eq!(entry.type_id, std::any::TypeId::of::<BenchHandleObject>());
-    let value = Arc::clone(&entry.value);
-    drop(state);
+        .published
+        .lookup(parsed.slot)
+        .expect("diagnostic published full registry entry is missing");
+    assert_eq!(publication.generation, parsed.generation);
+    assert_eq!(
+        publication.type_id,
+        std::any::TypeId::of::<BenchHandleObject>()
+    );
+    assert_eq!(publication.state(), PublishedHandleState::Live);
+    let value = publication
+        .upgrade()
+        .expect("diagnostic published full weak upgrade failed");
     let value = Arc::downcast::<BenchHandleObject>(value)
-        .expect("diagnostic lookup downcast unexpectedly failed");
+        .expect("diagnostic published full lookup downcast unexpectedly failed");
     std::hint::black_box(value);
 }
 
@@ -898,6 +889,22 @@ impl HandleLookupDiagnostics {
         }
 
         let tokens = Arc::new(tokens);
+        let publications = Arc::new(
+            tokens
+                .iter()
+                .map(|token| {
+                    let parsed = runtime
+                        .registry
+                        .parse_token(token)
+                        .expect("diagnostic published token parse failed");
+                    runtime
+                        .registry
+                        .published
+                        .lookup(parsed.slot)
+                        .expect("diagnostic published registry seed is missing")
+                })
+                .collect::<Vec<_>>(),
+        );
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
         let mut start_tx = Vec::with_capacity(worker_count);
         let mut workers = Vec::with_capacity(worker_count);
@@ -907,24 +914,27 @@ impl HandleLookupDiagnostics {
             let done_tx = done_tx.clone();
             let worker_runtime = Arc::clone(&runtime);
             let worker_tokens = Arc::clone(&tokens);
+            let worker_publications = Arc::clone(&publications);
             start_tx.push(worker_tx);
 
             workers.push(std::thread::spawn(move || {
                 while worker_rx.recv().is_ok() {
-                    let token = worker_tokens[worker.min(worker_tokens.len() - 1)].as_ref();
+                    let token_index = worker.min(worker_tokens.len() - 1);
+                    let token = worker_tokens[token_index].as_ref();
+                    let publication = worker_publications[token_index].as_ref();
                     for _ in 0..iterations_per_worker {
                         match case {
-                            HandleLookupDiagnosticCase::TokenParseOnly => {
-                                benchmark_lookup_token_parse(&worker_runtime, token);
+                            HandleLookupDiagnosticCase::PublishedRegistryLookupOnly => {
+                                benchmark_published_registry_lookup_only(&worker_runtime, token);
                             }
-                            HandleLookupDiagnosticCase::RegistryLookupOnly => {
-                                benchmark_lookup_registry_only(&worker_runtime, token);
+                            HandleLookupDiagnosticCase::PublishedRegistryUpgradeOnly => {
+                                benchmark_published_registry_upgrade_only(publication);
                             }
-                            HandleLookupDiagnosticCase::LeaseOnly => {
-                                benchmark_lookup_lease_only(&worker_runtime);
-                            }
-                            HandleLookupDiagnosticCase::LookupWithoutLease => {
-                                benchmark_lookup_without_lease(&worker_runtime, token);
+                            HandleLookupDiagnosticCase::PublishedRegistryFullWithoutLease => {
+                                benchmark_published_registry_full_without_lease(
+                                    &worker_runtime,
+                                    token,
+                                );
                             }
                         }
                     }
