@@ -16,3 +16,7 @@ root = "XlFnFormal.Composition.TraceChecker"
 [[lean_exe]]
 name = "serialization_golden_checker"
 root = "XlFnFormal.Handle.Topics.Serialization.GoldenChecker"
+
+[[lean_exe]]
+name = "published_trace_checker"
+root = "XlFnFormal.Handle.Refinement.PublishedTraceChecker"

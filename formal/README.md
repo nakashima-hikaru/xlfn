@@ -525,3 +525,24 @@ publication, warm success/failure, disconnect, generation termination, close,
 and a reachable same-key ABA sequence. Rust regressions cover a warm
 observation racing generation-wide termination and a warm reader that must not
 follow a recreated publication for the same key.
+
+## H4.2 Rust-to-Lean handle trace bridge
+
+The `handle-refinement-trace` feature adds a production-path recorder without
+adding recorder state or event calls to the default build. The recorder emits
+the H4 event schema at the same lifecycle boundaries used by the concrete
+runtime: prepare entry/exit, initializer ownership, pending registry
+allocation, provisional publication, publication activation, warm observation,
+Excel connection transactions, disconnect, generation termination, and close.
+Tokens, Excel owners, topic keys, and canonical RTD wire keys are serialized in
+the trace so the Lean boundary checker can validate identity and serialization
+correspondence rather than replaying labels alone.
+
+Windows x86 and x64 test jobs write cold-success, cold-observation-failure,
+warm-disconnect, warm-generation-termination, same-key ABA, and warm-close
+traces as CI artifacts. The Lean `published_trace_checker` executable parses
+those artifacts, checks the canonical RTD key encoding, and replays every event
+through the relational H4 checker. Invalid close/quiescence fixtures are also
+required to be rejected. This keeps the Rust producer and Lean replay in the
+same CI boundary while leaving the H3 ownership and destruction invariants as
+the source of truth.

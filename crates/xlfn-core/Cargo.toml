@@ -12,6 +12,7 @@ description = "Safe value, lifecycle, registration, and ownership layer for Exce
 default = []
 shutdown-refinement = []
 shutdown-trace = ["shutdown-refinement"]
+handle-refinement-trace = []
 async = [
     "dep:async-channel",
     "dep:async-task",

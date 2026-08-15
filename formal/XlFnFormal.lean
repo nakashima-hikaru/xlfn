@@ -50,6 +50,7 @@ import XlFnFormal.Handle.Refinement.PublishedInvariant
 import XlFnFormal.Handle.Refinement.PublishedChecker
 import XlFnFormal.Handle.Refinement.PublishedSafety
 import XlFnFormal.Handle.Refinement.PublishedTrace
+import XlFnFormal.Handle.Refinement.PublishedTraceChecker
 import XlFnFormal.Handle.Topics.Serialization.Model
 import XlFnFormal.Handle.Topics.Serialization.Format
 import XlFnFormal.Handle.Topics.Serialization.Parser

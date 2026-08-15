@@ -130,6 +130,8 @@ pub(crate) struct Initialization {
     pub(crate) owner_done: AtomicBool,
     pub(crate) wait: Mutex<()>,
     pub(crate) completed: Condvar,
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) refinement_id: u64,
 }
 
 impl Initialization {
@@ -228,6 +230,8 @@ pub(crate) struct HandleRuntime {
     pub(crate) prepares: HandlePrepareState,
     pub(crate) leases: Arc<HandleLeaseState>,
     pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    pub(crate) refinement: HandleRefinementTrace,
 }
 
 impl HandleRuntime {
@@ -240,13 +244,18 @@ impl HandleRuntime {
         maximum_handles: usize,
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> XllResult<Self> {
+        let registry = HandleRegistry::try_new(maximum_handles)?;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let registry_session = registry.session;
         Ok(Self {
-            registry: HandleRegistry::try_new(maximum_handles)?,
+            registry,
             topics: RwLock::new(TopicState::default()),
             published: PublishedTopics::new(),
             prepares: HandlePrepareState::new(),
             leases: Arc::new(HandleLeaseState::new()),
             _module_ingress: module_ingress,
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            refinement: HandleRefinementTrace::new(registry_session),
         })
     }
 
@@ -254,6 +263,28 @@ impl HandleRuntime {
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.registry.set_ghost(Arc::clone(&ghost));
         self.leases.set_ghost(ghost);
+    }
+
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    fn refinement_token(&self, token: &str) -> TokenWire {
+        let parsed = self
+            .registry
+            .parse_token(token)
+            .expect("H4 trace token must be authenticated");
+        TokenWire {
+            session: self.registry.session,
+            slot: u64::from(parsed.slot),
+            generation: parsed.generation,
+        }
+    }
+
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    #[allow(
+        dead_code,
+        reason = "H4 trace extraction is consumed by the feature-gated checker test"
+    )]
+    pub(crate) fn refinement_trace_json(&self) -> String {
+        self.refinement.trace_json()
     }
 
     #[cfg(target_os = "windows")]
@@ -365,6 +396,12 @@ impl HandleRuntime {
         publication
             .state
             .store(PublishedTopicState::Live as u8, Ordering::Release);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.commit_and_activate(
+            &key,
+            initialization.refinement_id,
+            self.refinement_token(&publication.token),
+        );
 
         drop(topics);
         initialization.complete();
@@ -383,7 +420,11 @@ impl HandleRuntime {
     {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let _refinement_prepare = self.refinement.prepare_guard();
         let _prepare = self.prepares.enter();
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.begin_prepare();
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let _ghost_handle_operation = HandleOperationGhostGuard::enter(&self.leases);
 
@@ -392,12 +433,39 @@ impl HandleRuntime {
             if let Some(publication) = published.get(&key)
                 && publication.state() == PublishedTopicState::Live
             {
-                observe(&publication.rtd_key, &publication.token)?;
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                let reader_id = self.refinement.begin_warm_read(&key);
+                let observed = observe(&publication.rtd_key, &publication.token);
+                #[allow(
+                    clippy::question_mark,
+                    reason = "the refinement trace must classify the failed warm read before returning"
+                )]
+                if let Err(error) = observed {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    match publication.state() {
+                        PublishedTopicState::Live => self.refinement.fail_warm_read(reader_id),
+                        PublishedTopicState::Stale | PublishedTopicState::Closing => {
+                            self.refinement.abandon_warm_read(reader_id)
+                        }
+                        PublishedTopicState::Provisional => {}
+                    }
+                    return Err(error);
+                }
 
                 return match publication.state() {
-                    PublishedTopicState::Live => Ok((publication.token.clone(), false)),
-                    PublishedTopicState::Closing => Err(XllError::Closing),
+                    PublishedTopicState::Live => {
+                        #[cfg(any(test, feature = "handle-refinement-trace"))]
+                        self.refinement.finish_warm_read(reader_id);
+                        Ok((publication.token.clone(), false))
+                    }
+                    PublishedTopicState::Closing => {
+                        #[cfg(any(test, feature = "handle-refinement-trace"))]
+                        self.refinement.abandon_warm_read(reader_id);
+                        Err(XllError::Closing)
+                    }
                     PublishedTopicState::Provisional | PublishedTopicState::Stale => {
+                        #[cfg(any(test, feature = "handle-refinement-trace"))]
+                        self.refinement.abandon_warm_read(reader_id);
                         Err(XllError::StaleHandle)
                     }
                 };
@@ -468,14 +536,20 @@ impl HandleRuntime {
                 break decision;
             }
 
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let refinement_id = self.refinement.allocate_initializer_id();
             let initialization = Arc::new(Initialization {
                 owner: std::thread::current().id(),
                 owner_done: AtomicBool::new(false),
                 wait: Mutex::new(()),
                 completed: Condvar::new(),
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                refinement_id,
             });
 
             topics.initializing.insert(key, Arc::clone(&initialization));
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            self.refinement.begin_initializer(&key, refinement_id);
 
             break PrepareDecision::Initialize {
                 initialization,
@@ -498,6 +572,8 @@ impl HandleRuntime {
             } => (initialization, generation),
         };
 
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let refinement = &self.refinement;
         let initializing = scopeguard::guard(
             (&self.topics, key, Arc::clone(&initialization)),
             |(topics, key, owned)| {
@@ -512,6 +588,8 @@ impl HandleRuntime {
                     }
                 }
                 owned.complete();
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                refinement.finish_initializer(owned.refinement_id);
             },
         );
 
@@ -527,12 +605,33 @@ impl HandleRuntime {
         let mut value =
             PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
 
-        let token = self.registry.insert_pending(value.slot())?;
+        let (token, reused) = self.registry.insert_pending_with_kind(value.slot())?;
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        let _ = reused;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        {
+            let parsed = self.refinement_token(&token);
+            if reused {
+                self.refinement.insert_pending_reuse(
+                    &key,
+                    initialization.refinement_id,
+                    parsed.slot,
+                    parsed.generation,
+                );
+            } else {
+                self.refinement
+                    .insert_pending_fresh(&key, initialization.refinement_id);
+            }
+        }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let refinement_id = initialization.refinement_id;
         let unpublished = scopeguard::guard(
             (&self.registry, &self.topics, key, token.as_str()),
             |(registry, topics, key, token)| {
                 let mut topics = topics.write();
-                if let Some(topic) = topics.by_key.get(&key).filter(|topic| topic.token == token) {
+                let removed = if let Some(topic) =
+                    topics.by_key.get(&key).filter(|topic| topic.token == token)
+                {
                     topic
                         .publication
                         .state
@@ -548,9 +647,32 @@ impl HandleRuntime {
                     if let Some(owner) = owner {
                         topics.by_excel_id.remove(&owner);
                     }
-                }
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    self.refinement.withdraw_and_invalidate(
+                        &key,
+                        refinement_id,
+                        self.refinement_token(token),
+                    );
+                    true
+                } else {
+                    false
+                };
                 drop(topics);
-                registry.remove_and_drop(token, "handle publication rollback");
+                if let Some(reusable) =
+                    registry.remove_and_drop_with_kind(token, "handle publication rollback")
+                {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    if removed {
+                        self.refinement.rollback_pending(
+                            &key,
+                            refinement_id,
+                            reusable,
+                            self.refinement_token(token),
+                        );
+                    }
+                    #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                    let _ = (removed, reusable);
+                }
             },
         );
 
@@ -579,6 +701,13 @@ impl HandleRuntime {
             },
         );
         topics.by_rtd_key.insert(rtd_key.clone(), key);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.publish_and_install(
+            &key,
+            initialization.refinement_id,
+            self.refinement_token(&token),
+            &rtd_key,
+        );
         drop(topics);
 
         {
@@ -604,6 +733,9 @@ impl HandleRuntime {
         self.commit_publication(key, generation, &initialization, &publication)?;
         let _ = scopeguard::ScopeGuard::into_inner(unpublished);
         let _ = scopeguard::ScopeGuard::into_inner(initializing);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement
+            .finish_initializer(initialization.refinement_id);
         Ok((token, true))
     }
 
@@ -631,6 +763,8 @@ impl HandleRuntime {
             return Err(XllError::InvalidHandle);
         }
         topic.server_generation = Some(server_generation);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.claim_server(&key, server_generation);
         Ok(())
     }
 
@@ -725,6 +859,12 @@ impl HandleRuntime {
             (topic.token.clone(), created)
         };
         topics.by_excel_id.insert(owner, key);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        if created {
+            self.refinement.begin_connection(&key, owner);
+        } else {
+            self.refinement.reuse_committed_connection(&key, owner);
+        }
         Ok((key, token, created))
     }
 
@@ -746,6 +886,8 @@ impl HandleRuntime {
             return Err(XllError::StaleHandle);
         }
         topic.excel_topic_committed = true;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.commit_connection(&key, owner);
         Ok(())
     }
 
@@ -766,6 +908,8 @@ impl HandleRuntime {
             topic.excel_topic = None;
             topic.excel_topic_committed = false;
         }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.rollback_connection(&key, owner);
     }
 
     #[cfg(test)]
@@ -807,7 +951,9 @@ impl HandleRuntime {
             server_generation,
             topic_id: excel_topic_id,
         };
-        let token = {
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let mut pending_runtime_id = None;
+        let removed = {
             let mut topics = self.topics.write();
             let Some(key) = topics.by_excel_id.remove(&owner) else {
                 return;
@@ -819,6 +965,14 @@ impl HandleRuntime {
             else {
                 return;
             };
+            let was_provisional = publication.state() == PublishedTopicState::Provisional;
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            if was_provisional {
+                pending_runtime_id = topics
+                    .initializing
+                    .get(&key)
+                    .map(|initialization| initialization.refinement_id);
+            }
             publication
                 .state
                 .store(PublishedTopicState::Stale as u8, Ordering::Release);
@@ -826,12 +980,32 @@ impl HandleRuntime {
             let topic = topics.by_key.remove(&key);
             topic.map(|topic| {
                 topics.by_rtd_key.remove(topic.rtd_key.as_ref());
-                topic.token
+                (key, topic.token, was_provisional)
             })
         };
-        if let Some(token) = token {
-            self.registry
-                .remove_and_drop(&token, "handle topic disconnect");
+        if let Some((key, token, was_provisional)) = removed {
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            self.refinement.disconnect(&key, owner);
+            if let Some(reusable) = self
+                .registry
+                .remove_and_drop_with_kind(&token, "handle topic disconnect")
+            {
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                if was_provisional {
+                    if let Some(runtime_id) = pending_runtime_id {
+                        self.refinement.drain_pending(
+                            self.refinement_token(&token),
+                            runtime_id,
+                            reusable,
+                        );
+                    }
+                } else {
+                    self.refinement
+                        .drain_published(self.refinement_token(&token), reusable);
+                }
+                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                let _ = (key, reusable, was_provisional);
+            }
         }
     }
 
@@ -865,6 +1039,8 @@ impl HandleRuntime {
                 .map(|(_, value)| value)
                 .collect::<Vec<_>>()
         };
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.seal_for_close();
 
         //
         // Wake cold-path waiters.
@@ -887,11 +1063,22 @@ impl HandleRuntime {
         //
         self.prepares.wait_for_idle();
 
-        self.registry.close_with_leases(&self.leases)
+        let result = self.registry.close_with_leases(&self.leases);
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        {
+            self.refinement.close_registry();
+            self.refinement.finish_close();
+            if result.is_ok() {
+                self.refinement.mark_returned_success();
+            }
+        }
+        result
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub fn terminate_topics(&self, server_generation: u64) {
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        let mut refinement_topics = Vec::new();
         let tokens = {
             let mut topics = self.topics.write();
             let keys = topics
@@ -906,6 +1093,13 @@ impl HandleRuntime {
                         .by_key
                         .get(&key)
                         .map(|topic| Arc::clone(&topic.publication))?;
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let was_provisional = publication.state() == PublishedTopicState::Provisional;
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    let refinement_id = topics
+                        .initializing
+                        .get(&key)
+                        .map(|initialization| initialization.refinement_id);
                     publication
                         .state
                         .store(PublishedTopicState::Stale as u8, Ordering::Release);
@@ -915,13 +1109,48 @@ impl HandleRuntime {
                     if let Some(owner) = topic.excel_topic {
                         topics.by_excel_id.remove(&owner);
                     }
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    refinement_topics.push((
+                        key,
+                        topic.token.clone(),
+                        was_provisional,
+                        refinement_id,
+                    ));
                     Some(topic.token)
                 })
                 .collect::<Vec<_>>()
         };
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        if !tokens.is_empty() {
+            self.refinement.detach_generation(server_generation);
+        }
         for token in tokens {
-            self.registry
-                .remove_and_drop(&token, "handle RTD termination");
+            if let Some(reusable) = self
+                .registry
+                .remove_and_drop_with_kind(&token, "handle RTD termination")
+            {
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                if let Some((key, _, was_provisional, refinement_id)) = refinement_topics
+                    .iter()
+                    .find(|(_, value, _, _)| value == &token)
+                {
+                    if *was_provisional {
+                        if let Some(runtime_id) = refinement_id {
+                            self.refinement.drain_pending(
+                                self.refinement_token(&token),
+                                *runtime_id,
+                                reusable,
+                            );
+                        }
+                    } else {
+                        self.refinement
+                            .drain_published(self.refinement_token(&token), reusable);
+                    }
+                    let _ = key;
+                }
+                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+                let _ = reusable;
+            }
         }
     }
 

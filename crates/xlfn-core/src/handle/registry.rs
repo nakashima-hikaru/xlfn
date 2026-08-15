@@ -1,9 +1,131 @@
 use super::*;
 
+const PUBLISHED_HANDLE_SHARD_COUNT: usize = 64;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublishedHandleState {
+    Live = 0,
+    Stale = 1,
+    Closing = 2,
+}
+
+impl PublishedHandleState {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            value if value == Self::Live as u8 => Self::Live,
+            value if value == Self::Stale as u8 => Self::Stale,
+            value if value == Self::Closing as u8 => Self::Closing,
+            _ => Self::Stale,
+        }
+    }
+}
+
+/// A read-optimized registry entry that does not own the registered object.
+///
+/// The canonical `RegistryState` remains the only strong owner used for
+/// lifecycle management. Keeping only a `Weak` here lets readers avoid the
+/// registry lock without allowing an ArcSwap snapshot to delay destruction
+/// during remove or terminal close.
+pub(crate) struct PublishedHandle {
+    pub(crate) generation: u64,
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    pub(crate) value: Weak<dyn Any + Send + Sync>,
+    pub(crate) state: AtomicU8,
+}
+
+impl PublishedHandle {
+    fn new(
+        generation: u64,
+        type_id: TypeId,
+        type_name: &'static str,
+        value: &Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            generation,
+            type_id,
+            type_name,
+            value: Arc::downgrade(value),
+            state: AtomicU8::new(PublishedHandleState::Live as u8),
+        }
+    }
+
+    pub(crate) fn state(&self) -> PublishedHandleState {
+        PublishedHandleState::from_raw(self.state.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn upgrade(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.value.upgrade()
+    }
+}
+
+type PublishedHandleMap = FxHashMap<u32, Arc<PublishedHandle>>;
+
+/// Sharded immutable publication snapshots for warm handle lookup.
+pub(crate) struct PublishedHandles {
+    shards: [ArcSwap<PublishedHandleMap>; PUBLISHED_HANDLE_SHARD_COUNT],
+}
+
+impl PublishedHandles {
+    pub(crate) fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| ArcSwap::from_pointee(PublishedHandleMap::default())),
+        }
+    }
+
+    fn shard_index(slot: u32) -> usize {
+        (slot as usize) & (PUBLISHED_HANDLE_SHARD_COUNT - 1)
+    }
+
+    /// Load one publication while retaining no snapshot lock beyond the Arc
+    /// clone needed to validate and use the publication.
+    pub(crate) fn lookup(&self, slot: u32) -> Option<Arc<PublishedHandle>> {
+        let snapshot = self.shards[Self::shard_index(slot)].load();
+        snapshot.get(&slot).cloned()
+    }
+
+    /// Update the snapshot while the canonical registry write lock is held.
+    fn insert(&self, slot: u32, publication: Arc<PublishedHandle>) {
+        let shard = &self.shards[Self::shard_index(slot)];
+        let current = shard.load_full();
+        let mut next = current.as_ref().clone();
+        next.insert(slot, publication);
+        shard.store(Arc::new(next));
+    }
+
+    /// Remove only the publication that belongs to the canonical entry being
+    /// removed. The identity check keeps a future slot reuse from removing a
+    /// newer generation if this helper is ever called outside the current
+    /// write-lock discipline.
+    fn remove(&self, slot: u32, expected: &Arc<PublishedHandle>) {
+        let shard = &self.shards[Self::shard_index(slot)];
+        let current = shard.load_full();
+        if !current
+            .get(&slot)
+            .is_some_and(|publication| Arc::ptr_eq(publication, expected))
+        {
+            return;
+        }
+        let mut next = current.as_ref().clone();
+        next.remove(&slot);
+        shard.store(Arc::new(next));
+    }
+
+    /// Clear all publication snapshots while the canonical registry is being
+    /// closed.
+    fn clear(&self) {
+        for shard in &self.shards {
+            shard.store(Arc::new(PublishedHandleMap::default()));
+        }
+    }
+}
+
 pub(crate) struct HandleEntry {
     pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
     pub(crate) value: Arc<dyn Any + Send + Sync>,
+    pub(crate) publication: Arc<PublishedHandle>,
 }
 
 pub(crate) struct Slot {
@@ -23,6 +145,7 @@ pub(crate) struct HandleRegistry {
     pub(crate) secret: [u8; 32],
     pub(crate) maximum_handles: usize,
     pub(crate) state: RwLock<RegistryState>,
+    pub(crate) published: PublishedHandles,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
@@ -125,6 +248,7 @@ impl HandleRegistry {
                 live: 0,
                 closed: false,
             }),
+            published: PublishedHandles::new(),
             cleanup_failure: Mutex::new(None),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
@@ -167,7 +291,22 @@ impl HandleRegistry {
         self.state.read().live
     }
 
+    #[allow(
+        dead_code,
+        reason = "The kind-reporting wrapper is used by lifecycle trace production"
+    )]
     pub(crate) fn insert_pending<T>(&self, value: &mut Option<Arc<T>>) -> XllResult<String>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.insert_pending_with_kind(value)
+            .map(|(token, _reused)| token)
+    }
+
+    pub(crate) fn insert_pending_with_kind<T>(
+        &self,
+        value: &mut Option<Arc<T>>,
+    ) -> XllResult<(String, bool)>
     where
         T: Any + Send + Sync + 'static,
     {
@@ -181,12 +320,12 @@ impl HandleRegistry {
             });
         }
 
-        let (index, slot) = match state.free.pop() {
+        let (index, slot, reused) = match state.free.pop() {
             Some(index) => {
                 let slot = u32::try_from(index).map_err(|_| XllError::Internal {
                     diagnostic_id: 0x4841_4e44_534c_4f54,
                 })?;
-                (index, slot)
+                (index, slot, true)
             }
             None => {
                 let index = state.slots.len();
@@ -197,21 +336,30 @@ impl HandleRegistry {
                     generation: 1,
                     entry: None,
                 });
-                (index, slot)
+                (index, slot, false)
             }
         };
         let generation = state.slots[index].generation.max(1);
-        let value = value.take().expect("pending handle value is armed");
+        let value: Arc<dyn Any + Send + Sync> =
+            value.take().expect("pending handle value is armed");
+        let publication = Arc::new(PublishedHandle::new(
+            generation,
+            TypeId::of::<T>(),
+            type_name::<T>(),
+            &value,
+        ));
         state.slots[index].entry = Some(HandleEntry {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
             value,
+            publication: Arc::clone(&publication),
         });
+        self.published.insert(slot, publication);
         state.live += 1;
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
-        Ok(self.format_token(slot, generation))
+        Ok((self.format_token(slot, generation), reused))
     }
 
     #[cfg(test)]
@@ -258,6 +406,66 @@ impl HandleRegistry {
         T: ExcelHandleObject,
     {
         let parsed = self.parse_token(token)?;
+        if let Some(publication) = self.published.lookup(parsed.slot) {
+            if publication.generation != parsed.generation {
+                return Err(XllError::StaleHandle);
+            }
+            if publication.type_id != TypeId::of::<T>() {
+                let actual_type = publication.type_name;
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    tracing::warn!(
+                        expected_type = type_name::<T>(),
+                        actual_type,
+                        "Excel handle type mismatch"
+                    );
+                }));
+                return Err(XllError::InvalidHandle);
+            }
+
+            match publication.state() {
+                PublishedHandleState::Live => {}
+                PublishedHandleState::Stale => return Err(XllError::StaleHandle),
+                PublishedHandleState::Closing => return Err(XllError::Closing),
+            }
+
+            // The first state check only avoids entering the lease path for
+            // obviously withdrawn entries. The second check is the actual
+            // lookup/close linearization point.
+            let lease = leases.acquire();
+            match publication.state() {
+                PublishedHandleState::Live => {}
+                PublishedHandleState::Stale => {
+                    drop(lease);
+                    return Err(XllError::StaleHandle);
+                }
+                PublishedHandleState::Closing => {
+                    drop(lease);
+                    return Err(XllError::Closing);
+                }
+            }
+
+            let Some(value) = publication.upgrade() else {
+                drop(lease);
+                return self.lookup_handle_slow(parsed, leases);
+            };
+            let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
+            return Ok(Handle {
+                value: Some(value),
+                lease: Some(lease),
+            });
+        }
+
+        self.lookup_handle_slow(parsed, leases)
+    }
+
+    fn lookup_handle_slow<T>(
+        &self,
+        parsed: ParsedToken,
+        leases: &Arc<HandleLeaseState>,
+    ) -> XllResult<Handle<T>>
+    where
+        T: ExcelHandleObject,
+    {
         let state = self.state.read();
         if state.closed {
             return Err(XllError::Closing);
@@ -313,13 +521,20 @@ impl HandleRegistry {
         if slot.generation != parsed.generation {
             return Err(XllError::StaleHandle);
         }
-        let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
-        if entry.type_id != TypeId::of::<T>() {
-            return Err(XllError::InvalidHandle);
-        }
-        if !entry.value.as_ref().is::<T>() {
-            return Err(XllError::InvalidHandle);
-        }
+        let publication = {
+            let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
+            if entry.type_id != TypeId::of::<T>() {
+                return Err(XllError::InvalidHandle);
+            }
+            if !entry.value.as_ref().is::<T>() {
+                return Err(XllError::InvalidHandle);
+            }
+            Arc::clone(&entry.publication)
+        };
+        publication
+            .state
+            .store(PublishedHandleState::Stale as u8, Ordering::Release);
+        self.published.remove(parsed.slot, &publication);
         let entry = slot.entry.take().expect("entry was checked above");
         let reusable = if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
@@ -337,7 +552,16 @@ impl HandleRegistry {
         Arc::downcast::<T>(entry.value).map_err(|_| XllError::InvalidHandle)
     }
 
+    #[allow(
+        dead_code,
+        reason = "The kind-reporting wrapper is used by lifecycle trace production"
+    )]
     pub(crate) fn remove_any(&self, token: &str) -> XllResult<Arc<dyn Any + Send + Sync>> {
+        self.remove_any_with_kind(token)
+            .map(|(value, _reusable)| value)
+    }
+
+    fn remove_any_with_kind(&self, token: &str) -> XllResult<(Arc<dyn Any + Send + Sync>, bool)> {
         let parsed = self.parse_token(token)?;
         let mut state = self.state.write();
         if state.closed {
@@ -350,7 +574,14 @@ impl HandleRegistry {
         if slot.generation != parsed.generation {
             return Err(XllError::StaleHandle);
         }
-        slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
+        let publication = {
+            let entry = slot.entry.as_ref().ok_or(XllError::StaleHandle)?;
+            Arc::clone(&entry.publication)
+        };
+        publication
+            .state
+            .store(PublishedHandleState::Stale as u8, Ordering::Release);
+        self.published.remove(parsed.slot, &publication);
         let entry = slot.entry.take().expect("entry was checked above");
         let reusable = if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
@@ -365,7 +596,7 @@ impl HandleRegistry {
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Ok(entry.value)
+        Ok((entry.value, reusable))
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
@@ -394,8 +625,19 @@ impl HandleRegistry {
     }
 
     pub(crate) fn remove_and_drop(&self, token: &str, operation: &'static str) {
-        if let Ok(value) = self.remove_any(token) {
+        let _ = self.remove_and_drop_with_kind(token, operation);
+    }
+
+    pub(crate) fn remove_and_drop_with_kind(
+        &self,
+        token: &str,
+        operation: &'static str,
+    ) -> Option<bool> {
+        if let Ok((value, reusable)) = self.remove_any_with_kind(token) {
             self.drop_values(std::iter::once(value), operation);
+            Some(reusable)
+        } else {
+            None
         }
     }
 
@@ -405,6 +647,15 @@ impl HandleRegistry {
         let live = state.live;
         let mut values = Vec::with_capacity(live);
         state.free.clear();
+        for slot in &state.slots {
+            if let Some(entry) = slot.entry.as_ref() {
+                entry
+                    .publication
+                    .state
+                    .store(PublishedHandleState::Closing as u8, Ordering::Release);
+            }
+        }
+        self.published.clear();
         for index in 0..state.slots.len() {
             let slot = &mut state.slots[index];
             if let Some(entry) = slot.entry.take() {

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "initial": {"session": 0},
+  "events": [
+    {"event": "beginPrepare"},
+    {
+      "event": "beginInitializer",
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runtimeId": 1
+    },
+    {
+      "event": "insertPendingFresh",
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runtimeId": 1
+    },
+    {
+      "event": "publishAndInstallProvisional",
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runtimeId": 1,
+      "token": {"session": 0, "slot": 0, "generation": 1},
+      "rtdKey": "0\u001f0\u001f0\u001fTEST.HANDLE\u001f0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "event": "commitAndActivate",
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runtimeId": 1,
+      "token": {"session": 0, "slot": 0, "generation": 1}
+    },
+    {
+      "event": "finishInitializer",
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runtimeId": 1
+    },
+    {
+      "event": "beginWarmRead",
+      "readerId": 1,
+      "key": {
+        "sheetId": 0,
+        "row": 0,
+        "column": 0,
+        "udfId": "TEST.HANDLE",
+        "argumentDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {"event": "closeRegistry"}
+  ],
+  "trace_truncated": false,
+  "outcome": "in_progress"
+}
