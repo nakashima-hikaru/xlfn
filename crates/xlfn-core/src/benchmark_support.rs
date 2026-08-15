@@ -292,7 +292,8 @@ impl Drop for SyncBoundaryWorkerPool {
 // ---------------------------------------------------------------------------
 
 use crate::handle::{
-    ExcelHandleObject, FormulaCaller, FormulaTopicKey, HandleRuntime, HandleTopicKey,
+    ExcelHandleObject, FormulaCaller, FormulaTopicKey, HandleInitializationGuard, HandleRuntime,
+    HandleTopicKey, PublishedTopicState,
 };
 use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
@@ -426,14 +427,23 @@ pub enum HandlePrepareDiagnosticCase {
     PublishedLookupSameKey,
     /// Measure the production warm prepare path through the published snapshot.
     PublishedWarmPath,
+    /// Measure the published warm path without the operation-wide handle lease.
+    PublishedWarmWithoutLease,
+    /// Measure the published warm path without the prepare counter.
+    PublishedWarmWithoutPrepare,
+    /// Measure the published warm path without either operation-wide counter.
+    PublishedWarmWithoutAccounting,
 }
 
 impl HandlePrepareDiagnosticCase {
     /// All decomposition targets used by the temporary benchmark.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 6] = [
         Self::PublishedLookupDistinct,
         Self::PublishedLookupSameKey,
         Self::PublishedWarmPath,
+        Self::PublishedWarmWithoutLease,
+        Self::PublishedWarmWithoutPrepare,
+        Self::PublishedWarmWithoutAccounting,
     ];
 
     /// Stable benchmark path component for this target.
@@ -442,6 +452,9 @@ impl HandlePrepareDiagnosticCase {
             Self::PublishedLookupDistinct => "published_lookup_distinct",
             Self::PublishedLookupSameKey => "published_lookup_same_key",
             Self::PublishedWarmPath => "published_warm_path",
+            Self::PublishedWarmWithoutLease => "published_warm_without_lease",
+            Self::PublishedWarmWithoutPrepare => "published_warm_without_prepare",
+            Self::PublishedWarmWithoutAccounting => "published_warm_without_accounting",
         }
     }
 }
@@ -452,6 +465,60 @@ fn benchmark_published_lookup(runtime: &HandleRuntime, key: HandleTopicKey) {
         .get(&key)
         .expect("diagnostic published topic is missing");
     std::hint::black_box((topic.token.as_str(), topic.rtd_key.as_ref()));
+}
+
+#[inline(always)]
+fn benchmark_published_observe(_rtd_key: &str, _token: &str) -> crate::XllResult<()> {
+    Ok(())
+}
+
+fn benchmark_published_warm_snapshot(runtime: &HandleRuntime, key: HandleTopicKey) {
+    let published = runtime.published.load(&key);
+    let topic = published
+        .get(&key)
+        .expect("diagnostic published topic is missing");
+    assert_eq!(
+        topic.state.load(Ordering::Acquire),
+        PublishedTopicState::Live as u8
+    );
+
+    std::hint::black_box((topic.rtd_key.as_ref(), topic.token.as_str()));
+    benchmark_published_observe(&topic.rtd_key, &topic.token)
+        .expect("diagnostic published observation failed");
+
+    let state = topic.state.load(Ordering::Acquire);
+    assert_eq!(state, PublishedTopicState::Live as u8);
+    std::hint::black_box(topic.token.clone());
+}
+
+fn benchmark_published_warm_without_accounting(
+    runtime: &HandleRuntime,
+    key: HandleTopicKey,
+    include_prepare: bool,
+    include_lease: bool,
+) {
+    let initialization =
+        HandleInitializationGuard::enter().expect("diagnostic initialization guard rejected");
+
+    if include_prepare {
+        let prepare = runtime.prepares.enter();
+        if include_lease {
+            let lease = runtime.leases.acquire();
+            benchmark_published_warm_snapshot(runtime, key);
+            drop(lease);
+        } else {
+            benchmark_published_warm_snapshot(runtime, key);
+        }
+        drop(prepare);
+    } else if include_lease {
+        let lease = runtime.leases.acquire();
+        benchmark_published_warm_snapshot(runtime, key);
+        drop(lease);
+    } else {
+        benchmark_published_warm_snapshot(runtime, key);
+    }
+
+    drop(initialization);
 }
 
 /// Persistent worker pool for the temporary handle-prepare decomposition.
@@ -525,6 +592,30 @@ impl HandlePrepareDiagnostics {
                                     )
                                     .expect("published warm observation failed");
                                 std::hint::black_box(result);
+                            }
+                            HandlePrepareDiagnosticCase::PublishedWarmWithoutLease => {
+                                benchmark_published_warm_without_accounting(
+                                    &worker_runtime,
+                                    worker_key,
+                                    true,
+                                    false,
+                                );
+                            }
+                            HandlePrepareDiagnosticCase::PublishedWarmWithoutPrepare => {
+                                benchmark_published_warm_without_accounting(
+                                    &worker_runtime,
+                                    worker_key,
+                                    false,
+                                    true,
+                                );
+                            }
+                            HandlePrepareDiagnosticCase::PublishedWarmWithoutAccounting => {
+                                benchmark_published_warm_without_accounting(
+                                    &worker_runtime,
+                                    worker_key,
+                                    false,
+                                    false,
+                                );
                             }
                         }
                     }

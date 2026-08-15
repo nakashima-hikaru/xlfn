@@ -198,6 +198,27 @@ impl Drop for HandleInitializationGuard {
     }
 }
 
+#[cfg(any(test, feature = "shutdown-refinement"))]
+struct HandleOperationGhostGuard<'a> {
+    leases: &'a HandleLeaseState,
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+impl<'a> HandleOperationGhostGuard<'a> {
+    fn enter(leases: &'a HandleLeaseState) -> Self {
+        leases.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginHandleOperation);
+        Self { leases }
+    }
+}
+
+#[cfg(any(test, feature = "shutdown-refinement"))]
+impl Drop for HandleOperationGhostGuard<'_> {
+    fn drop(&mut self) {
+        self.leases
+            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndHandleOperation);
+    }
+}
+
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct HandleRuntime {
@@ -363,7 +384,8 @@ impl HandleRuntime {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
         let _prepare = self.prepares.enter();
-        let _handle_operation = self.leases.acquire();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        let _ghost_handle_operation = HandleOperationGhostGuard::enter(&self.leases);
 
         {
             let published = self.published.load(&key);
