@@ -147,11 +147,6 @@ impl SubscriptionIdentityIndex {
         self.key_by_identity.get(identity)
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_identity(&self, key: &SubscriptionKey) -> Option<&SubscriptionIdentity> {
-        self.identity_by_key.get(key)
-    }
-
     pub(crate) fn insert(
         &mut self,
         identity: SubscriptionIdentity,

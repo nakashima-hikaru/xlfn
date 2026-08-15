@@ -64,3 +64,4 @@ import XlFnFormal.Handle.Registry.Snapshot.Invariant
 import XlFnFormal.Handle.Registry.Snapshot.Safety
 import XlFnFormal.Handle.Registry.Snapshot.Checker
 import XlFnFormal.Handle.Registry.Snapshot.Trace
+import XlFnFormal.Handle.Registry.Snapshot.Refinement

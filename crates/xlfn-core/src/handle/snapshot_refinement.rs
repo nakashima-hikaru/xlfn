@@ -137,35 +137,47 @@ impl SnapshotTraceRecorder {
 }
 
 pub(crate) enum LineageKind {
-    Fast { reader_id: u64 },
+    TentativeFast { reader_id: u64 },
+    ValidatedFast { reader_id: u64 },
     Slow,
 }
 
 pub(crate) struct LeaseLineageTrace {
     recorder: Arc<SnapshotTraceRecorder>,
-    kind: LineageKind,
+    kind: Mutex<LineageKind>,
 }
 
 impl LeaseLineageTrace {
-    pub(crate) fn new_fast(recorder: Arc<SnapshotTraceRecorder>, reader_id: u64) -> Arc<Self> {
+    pub(crate) fn new_tentative(
+        recorder: Arc<SnapshotTraceRecorder>,
+        reader_id: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             recorder,
-            kind: LineageKind::Fast { reader_id },
+            kind: Mutex::new(LineageKind::TentativeFast { reader_id }),
         })
     }
 
     pub(crate) fn new_slow(recorder: Arc<SnapshotTraceRecorder>) -> Arc<Self> {
         Arc::new(Self {
             recorder,
-            kind: LineageKind::Slow,
+            kind: Mutex::new(LineageKind::Slow),
         })
+    }
+
+    pub(crate) fn validate_fast_lookup(&self) {
+        let mut kind = self.kind.lock();
+        if let LineageKind::TentativeFast { reader_id } = *kind {
+            *kind = LineageKind::ValidatedFast { reader_id };
+        }
     }
 }
 
 impl Drop for LeaseLineageTrace {
     fn drop(&mut self) {
-        match self.kind {
-            LineageKind::Fast { reader_id } => {
+        match *self.kind.lock() {
+            LineageKind::TentativeFast { .. } => {}
+            LineageKind::ValidatedFast { reader_id } => {
                 self.recorder
                     .record(Event::CompleteFastLookup { reader_id });
             }

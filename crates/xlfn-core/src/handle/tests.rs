@@ -407,7 +407,7 @@ fn published_handle_index_is_weak_and_generation_scoped() {
 
     assert_eq!(replacement_parsed.slot, parsed.slot);
     assert_ne!(replacement_parsed.generation, parsed.generation);
-    assert!(!Arc::ptr_eq(&first_publication, &replacement_publication));
+    assert!(!Arc::ptr_eq(first_publication, replacement_publication));
     assert_eq!(replacement_publication.state(), PublishedHandleState::Live);
 }
 
@@ -482,8 +482,8 @@ fn published_handle_reused_slot_retains_stale_publication_arc() {
     );
     assert_eq!(retained_old_publication.generation, parsed1.generation);
     assert!(!Arc::ptr_eq(
-        &retained_old_publication,
-        &replacement_publication
+        retained_old_publication,
+        replacement_publication
     ));
     assert!(retained_old_publication.upgrade().is_none());
 

@@ -496,10 +496,20 @@ impl HandleRegistry {
                 return Err(XllError::Closing);
             };
             #[cfg(any(test, feature = "handle-refinement-trace"))]
+            let mut lease = lease;
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            if let Some(recorder) = self.snapshot_trace_recorder() {
+                lease.lineage = Some(LeaseLineageTrace::new_tentative(recorder, reader_id));
+            }
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
             self.record_snapshot_trace_event(SnapshotEvent::AcquireTentativeLease { reader_id });
 
             match publication.state() {
                 PublishedHandleState::Live => {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    if let Some(lineage) = lease.lineage.as_ref() {
+                        lineage.validate_fast_lookup();
+                    }
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
                     self.record_snapshot_trace_event(SnapshotEvent::ValidateFastLookup {
                         reader_id,
@@ -535,12 +545,6 @@ impl HandleRegistry {
                 return self.lookup_handle_slow(parsed, leases);
             };
             let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let mut lease = lease;
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            if let Some(recorder) = self.snapshot_trace_recorder() {
-                lease.lineage = Some(LeaseLineageTrace::new_fast(recorder, reader_id));
-            }
             return Ok(Handle {
                 value: Some(value),
                 lease: Some(lease),
@@ -598,13 +602,13 @@ impl HandleRegistry {
             generation: parsed.generation,
         };
         #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.record_snapshot_trace_event(SnapshotEvent::BeginSlowLookup { token: token_wire });
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
         let mut lease = lease;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         if let Some(recorder) = self.snapshot_trace_recorder() {
             lease.lineage = Some(LeaseLineageTrace::new_slow(recorder));
         }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.record_snapshot_trace_event(SnapshotEvent::BeginSlowLookup { token: token_wire });
         let value = Arc::clone(&entry.value);
         drop(state);
         let value = Arc::downcast::<T>(value).map_err(|_| XllError::InvalidHandle)?;

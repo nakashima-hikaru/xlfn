@@ -292,6 +292,9 @@ impl Clone for HandleLease {
 
 impl Drop for HandleLease {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        drop(self.lineage.take());
+
         self.stripe.release();
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
