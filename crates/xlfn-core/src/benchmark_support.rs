@@ -764,6 +764,217 @@ impl Drop for HandleLookupBenchmark {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Temporary handle-lookup decomposition diagnostics
+// ---------------------------------------------------------------------------
+
+/// Internal decomposition target for the temporary handle-lookup study.
+#[derive(Clone, Copy, Debug)]
+pub enum HandleLookupDiagnosticCase {
+    /// Measure token authentication and parsing without touching registry state.
+    TokenParseOnly,
+    /// Measure parsed-token registry validation without cloning the value.
+    RegistryLookupOnly,
+    /// Measure the escaped-handle lease acquire/drop pair.
+    LeaseOnly,
+    /// Measure the production lookup path without acquiring an escaped-handle lease.
+    LookupWithoutLease,
+}
+
+impl HandleLookupDiagnosticCase {
+    /// All decomposition targets used by the temporary benchmark.
+    pub const ALL: [Self; 4] = [
+        Self::TokenParseOnly,
+        Self::RegistryLookupOnly,
+        Self::LeaseOnly,
+        Self::LookupWithoutLease,
+    ];
+
+    /// Stable benchmark path component for this target.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TokenParseOnly => "token_parse_only",
+            Self::RegistryLookupOnly => "registry_lookup_only",
+            Self::LeaseOnly => "lease_only",
+            Self::LookupWithoutLease => "lookup_without_lease",
+        }
+    }
+}
+
+fn benchmark_lookup_token_parse(runtime: &HandleRuntime, token: &str) {
+    let parsed = runtime
+        .registry
+        .parse_token(token)
+        .expect("diagnostic token parse failed");
+    std::hint::black_box((parsed.slot, parsed.generation));
+}
+
+fn benchmark_lookup_registry_only(runtime: &HandleRuntime, token: &str) {
+    let parsed = runtime
+        .registry
+        .parse_token(token)
+        .expect("diagnostic registry token parse failed");
+    let state = runtime.registry.state.read();
+    assert!(!state.closed);
+    let slot = state
+        .slots
+        .get(parsed.slot as usize)
+        .expect("diagnostic registry slot is missing");
+    assert_eq!(slot.generation, parsed.generation);
+    let entry = slot
+        .entry
+        .as_ref()
+        .expect("diagnostic registry entry is missing");
+    assert_eq!(entry.type_id, std::any::TypeId::of::<BenchHandleObject>());
+    std::hint::black_box(entry.value.as_ref());
+}
+
+fn benchmark_lookup_lease_only(runtime: &HandleRuntime) {
+    let lease = runtime.leases.acquire();
+    std::hint::black_box(&lease);
+    drop(lease);
+}
+
+fn benchmark_lookup_without_lease(runtime: &HandleRuntime, token: &str) {
+    let parsed = runtime
+        .registry
+        .parse_token(token)
+        .expect("diagnostic lookup token parse failed");
+    let state = runtime.registry.state.read();
+    assert!(!state.closed);
+    let slot = state
+        .slots
+        .get(parsed.slot as usize)
+        .expect("diagnostic lookup slot is missing");
+    assert_eq!(slot.generation, parsed.generation);
+    let entry = slot
+        .entry
+        .as_ref()
+        .expect("diagnostic lookup entry is missing");
+    assert_eq!(entry.type_id, std::any::TypeId::of::<BenchHandleObject>());
+    let value = Arc::clone(&entry.value);
+    drop(state);
+    let value = Arc::downcast::<BenchHandleObject>(value)
+        .expect("diagnostic lookup downcast unexpectedly failed");
+    std::hint::black_box(value);
+}
+
+/// Persistent worker pool for the temporary handle-lookup decomposition.
+pub struct HandleLookupDiagnostics {
+    runtime: Arc<HandleRuntime>,
+    worker_count: usize,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HandleLookupDiagnostics {
+    /// Create a prepared diagnostic pool with no thread creation in `run`.
+    pub fn new(
+        case: HandleLookupDiagnosticCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let mut tokens = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let key = benchmark_topic_key("BENCH.LOOKUP.DIAGNOSTIC", worker as u64);
+            let token = runtime
+                .prepare_observed(
+                    key,
+                    || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                    |_, _| Ok(()),
+                )
+                .expect("diagnostic handle lookup seed publication failed")
+                .0;
+            tokens.push(Arc::<str>::from(token));
+        }
+
+        let tokens = Arc::new(tokens);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_tokens = Arc::clone(&tokens);
+            start_tx.push(worker_tx);
+
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    let token = worker_tokens[worker.min(worker_tokens.len() - 1)].as_ref();
+                    for _ in 0..iterations_per_worker {
+                        match case {
+                            HandleLookupDiagnosticCase::TokenParseOnly => {
+                                benchmark_lookup_token_parse(&worker_runtime, token);
+                            }
+                            HandleLookupDiagnosticCase::RegistryLookupOnly => {
+                                benchmark_lookup_registry_only(&worker_runtime, token);
+                            }
+                            HandleLookupDiagnosticCase::LeaseOnly => {
+                                benchmark_lookup_lease_only(&worker_runtime);
+                            }
+                            HandleLookupDiagnosticCase::LookupWithoutLease => {
+                                benchmark_lookup_without_lease(&worker_runtime, token);
+                            }
+                        }
+                    }
+                    done_tx
+                        .send(())
+                        .expect("diagnostic lookup benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            worker_count,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    /// Run one synchronized batch across all persistent workers.
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("diagnostic lookup worker received start signal");
+        }
+        for _ in 0..self.worker_count {
+            self.done_rx
+                .recv()
+                .expect("diagnostic lookup worker finished batch");
+        }
+    }
+
+    /// Number of measured operations in one batch.
+    pub fn total_iterations(&self) -> usize {
+        self.worker_count * self.iterations_per_worker
+    }
+}
+
+impl Drop for HandleLookupDiagnostics {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
 /// A persistent worker pool that looks up a different warm topic per worker.
 ///
 /// The topics, worker threads, and synchronization channels are all prepared
