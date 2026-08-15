@@ -433,7 +433,7 @@ fn published_handle_index_does_not_extend_values_through_close() {
 }
 
 #[test]
-fn published_handle_reused_slot_cannot_be_resolved_by_stale_token() {
+fn published_handle_reused_slot_retains_stale_publication_arc() {
     struct TestObj(&'static str);
     impl ExcelHandleObject for TestObj {}
 
@@ -442,14 +442,19 @@ fn published_handle_reused_slot_cannot_be_resolved_by_stale_token() {
 
     let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
     let parsed1 = registry.parse_token(&token1).unwrap();
-    let publication1 = registry
+    let retained_old_publication = registry
         .published
         .lookup(parsed1.slot)
         .expect("first handle must be published");
 
-    // Remove first handle: slot is now vacant with next generation, publication1 is Stale.
-    let _ = registry.remove::<TestObj>(&token1).unwrap();
-    assert_eq!(publication1.state(), PublishedHandleState::Stale);
+    // Remove first handle: slot is now vacant with next generation, retained_old_publication is Stale.
+    let removed = registry.remove::<TestObj>(&token1).unwrap();
+    assert_eq!(removed.0, "first");
+    assert_eq!(
+        retained_old_publication.state(),
+        PublishedHandleState::Stale
+    );
+    drop(removed);
 
     // Insert replacement in the same slot (generation + 1).
     let token2 = insert_production(&registry, Arc::new(TestObj("second"))).unwrap();
@@ -457,12 +462,24 @@ fn published_handle_reused_slot_cannot_be_resolved_by_stale_token() {
     assert_eq!(parsed1.slot, parsed2.slot);
     assert_ne!(parsed1.generation, parsed2.generation);
 
-    let publication2 = registry
+    let replacement_publication = registry
         .published
         .lookup(parsed2.slot)
         .expect("reused handle must be published");
-    assert_eq!(publication2.state(), PublishedHandleState::Live);
-    assert_eq!(publication2.generation, parsed2.generation);
+    assert_eq!(replacement_publication.state(), PublishedHandleState::Live);
+    assert_eq!(replacement_publication.generation, parsed2.generation);
+
+    // The retained old publication remains Stale and its Weak is dead; it did NOT update to the replacement.
+    assert_eq!(
+        retained_old_publication.state(),
+        PublishedHandleState::Stale
+    );
+    assert_eq!(retained_old_publication.generation, parsed1.generation);
+    assert!(!Arc::ptr_eq(
+        &retained_old_publication,
+        &replacement_publication
+    ));
+    assert!(retained_old_publication.upgrade().is_none());
 
     // Fast lookup on stale token1 is rejected as StaleHandle by generation check
     let stale_lookup = registry.lookup_handle::<TestObj>(&token1, &leases);

@@ -780,14 +780,18 @@ pub enum HandleLookupDiagnosticCase {
     /// Measure the published registry lookup, validation, weak upgrade, and
     /// downcast without acquiring an escaped-handle lease.
     PublishedRegistryFullWithoutLease,
+    /// Measure the complete escaped-handle lease acquire/drop pair,
+    /// including admission reservation.
+    LeaseAcquireOnly,
 }
 
 impl HandleLookupDiagnosticCase {
     /// All decomposition targets used by the temporary benchmark.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::PublishedRegistryLookupOnly,
         Self::PublishedRegistryUpgradeOnly,
         Self::PublishedRegistryFullWithoutLease,
+        Self::LeaseAcquireOnly,
     ];
 
     /// Stable benchmark path component for this target.
@@ -796,6 +800,7 @@ impl HandleLookupDiagnosticCase {
             Self::PublishedRegistryLookupOnly => "published_registry_lookup_only",
             Self::PublishedRegistryUpgradeOnly => "published_registry_upgrade_only",
             Self::PublishedRegistryFullWithoutLease => "published_registry_full_without_lease",
+            Self::LeaseAcquireOnly => "lease_acquire_only",
         }
     }
 }
@@ -848,6 +853,15 @@ fn benchmark_published_registry_full_without_lease(runtime: &HandleRuntime, toke
     let value = Arc::downcast::<BenchHandleObject>(value)
         .expect("diagnostic published full lookup downcast unexpectedly failed");
     std::hint::black_box(value);
+}
+
+fn benchmark_lease_acquire_only(runtime: &HandleRuntime) {
+    let lease = runtime
+        .leases
+        .acquire()
+        .expect("diagnostic lease admission must remain open");
+    std::hint::black_box(&lease);
+    drop(lease);
 }
 
 /// Persistent worker pool for the temporary handle-lookup decomposition.
@@ -935,6 +949,9 @@ impl HandleLookupDiagnostics {
                                     &worker_runtime,
                                     token,
                                 );
+                            }
+                            HandleLookupDiagnosticCase::LeaseAcquireOnly => {
+                                benchmark_lease_acquire_only(&worker_runtime);
                             }
                         }
                     }

@@ -554,28 +554,45 @@ fast-lookup architecture as a refinement layer over the canonical H1 `Registry`
 semantics:
 
 * **Model & Invariants** (`Model.lean`): Tracks `publications`, active
-  `snapshot` slot bindings, and active `fastLookups` refining `registry`.
-  Invariants preserve publication uniqueness, snapshot uniqueness, fast lookup
-  provenance, canonical live root correspondence, lease accounting
-  (`fastLookups.length ≤ activeLeases`), and closed registry emptiness.
+  `snapshot` slot bindings, and active `fastLookups` (with two stages:
+  `.tentative` and `.validated`) refining `registry`. Invariants preserve
+  publication uniqueness, snapshot uniqueness, fast lookup uniqueness,
+  fast lookup provenance, canonical live root correspondence, lease accounting
+  (`validatedFastLookups.length ≤ activeLeases`), and closed registry emptiness.
 * **Transitions & Soundness/Completeness** (`Transition.lean`, `Checker.lean`):
-  Defines relational `Step` transitions corresponding to H1 operations.
+  Defines relational `Step` transitions:
+  - `beginTentativeFastLookup`: Reader checks first `Live` state and acquires
+    tentative implementation lease without touching H1 registry.
+  - `validateFastLookup`: Reader checks second `Live` state, linearizing to H1
+    `beginLookup` and advancing to `.validated`.
+  - `rejectTentativeFastLookup`: If removed before second check, reader observes
+    `Stale`/`Closing`, releases tentative lease, and exits without modifying H1.
+  - `completeFastLookup` / `fallbackFastLookup`: Linearizes to H1 `endLookup`.
+  - `beginSlowLookup`, `endSlowLookup`, `insertFresh`, `insertReuse`, `removeReuse`, `removeRetire`, `closeRegistry`, `finishClose`.
   Executable `apply?` is proven sound and complete against `Step`.
 * **Invariant Preservation** (`Invariant.lean`): Proves `Step.invariant_preserved`
-  and `Reachable.invariant_preserved` across all 11 lifecycle and lookup steps.
+  and `Reachable.invariant_preserved` across all transitions.
 * **Safety & Race Properties** (`Safety.lean`):
   - *Linearization Point*: Proves the second `Live` state check linearizes
-    fast lookups to H1 `beginLookup`; if removed first, second check fails as
-    `Stale` and drops the acquired lease.
-  - *Lease Accounting & Close Gating*: Proves active fast lookups prevent
-    `finishClose` until all leases are released.
+    fast lookups to H1 `beginLookup`; if removed first, tentative lookup is rejected
+    without modifying H1 state.
+  - *Lease Accounting & Close Gating*: Proves both tentative and validated fast lookups
+    prevent `finishClose` until all leases are released (`fastLookups = []`).
   - *Slot Reuse ABA Protection*: Proves `stale_lookup_cannot_follow_reused_generation`.
   - *Weak Upgrade Fallback*: Proves fallback drops lease and falls back cleanly
     without assuming unconditional fast success.
 * **Executable Replay Traces** (`Trace.lean`): Proves replay traces for fast
-  lookup success, fast lookup racing remove linearization, slot reuse ABA
-  protection, and Weak upgrade fallback through `CloseCertified`.
-* **Rust Deterministic Race Regressions** (`crates/xlfn-core/src/handle/tests.rs`):
-  Tests old generation rejection on reused slot, remove during lease acquire
-  linearizing as stale, and Weak upgrade failure falling back to slow path.
+  lookup success, real remove-before-second-check race linearization, slot reuse ABA
+  protection, and reachable Weak upgrade fallback through `CloseCertified`.
+* **Rust Concrete Quiescence & Deterministic Race Regressions** (`crates/xlfn-core/src/handle/`):
+  - `HandleLeaseState::seal`: Atomic admission gate with in-flight reservation
+    counter ensuring no new independent lookup lease can be admitted after close.
+  - `published_handle_reused_slot_retains_stale_publication_arc`: Verifies
+    retained old `Arc<PublishedHandle>` stays `Stale` with dead weak reference.
+  - `published_handle_remove_during_lease_acquire_linearizes_as_stale`: Deterministic
+    2-thread race using `after_acquire_hook` verifying `remove()` during tentative lease
+    returns `StaleHandle` with 0 residual leases.
+  - `published_handle_remove_before_weak_upgrade_falls_back_to_stale`: Deterministic
+    2-thread race using `before_fast_upgrade_hook` verifying `remove()` after second Live
+    check causes Weak upgrade failure, clean slow fallback, and 0 residual leases.
 
