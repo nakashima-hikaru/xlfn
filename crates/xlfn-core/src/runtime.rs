@@ -491,7 +491,10 @@ impl<S> Runtime<S> {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
             Ok(CallGuard {
+                #[cfg(any(test, feature = "shutdown-refinement"))]
                 runtime: self,
+                #[cfg(not(any(test, feature = "shutdown-refinement")))]
+                _runtime: std::marker::PhantomData,
                 state,
             })
         })
@@ -797,22 +800,14 @@ impl<S> Runtime<S> {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "shutdown-trace"))]
-    #[allow(
-        dead_code,
-        reason = "Trace extraction is consumed by the feature-gated Lean checker test"
-    )]
+    #[cfg(test)]
     pub(crate) fn ghost_trace_json(&self) -> String {
         self.ghost_handle()
             .trace_json()
             .expect("ghost trace serialization")
     }
 
-    #[cfg(any(test, feature = "shutdown-trace"))]
-    #[allow(
-        dead_code,
-        reason = "Trace extraction is consumed by the feature-gated Lean checker test"
-    )]
+    #[cfg(test)]
     pub(crate) fn composition_trace_json(&self) -> String {
         self.composition_trace()
             .trace_json()
@@ -1407,11 +1402,10 @@ impl<S> Drop for OpenAttemptGuard<'_, S> {
 }
 
 pub struct CallGuard<'runtime, S> {
-    #[allow(
-        dead_code,
-        reason = "Runtime reference used for shutdown refinement ghost event recording"
-    )]
+    #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime: &'runtime Runtime<S>,
+    #[cfg(not(any(test, feature = "shutdown-refinement")))]
+    _runtime: std::marker::PhantomData<&'runtime Runtime<S>>,
     state: arc_swap::Guard<Option<Arc<S>>>,
 }
 

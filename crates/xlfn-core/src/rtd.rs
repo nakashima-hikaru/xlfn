@@ -31,10 +31,6 @@ pub(crate) fn certify_module_unload() {
     MODULE_UNLOAD_CERTIFIED.store(true, Ordering::Release);
 }
 
-#[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "Used by COM integration on Windows")
-)]
 pub(crate) fn module_unload_certified() -> bool {
     MODULE_UNLOAD_CERTIFIED.load(Ordering::Acquire)
         && crate::ingress::global_ingress().phase() == crate::ingress::PHASE_CLOSED

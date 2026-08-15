@@ -1,11 +1,9 @@
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "Each CRT-specific build constructs exactly one embedded policy variant"
-)]
 pub(crate) enum EmbeddedCrtPolicy {
+    #[cfg(not(target_feature = "crt-static"))]
     Dynamic = 0,
+    #[cfg(target_feature = "crt-static")]
     Static = 1,
 }
 

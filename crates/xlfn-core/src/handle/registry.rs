@@ -305,14 +305,7 @@ impl HandleRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    #[cfg_attr(
-        not(target_os = "windows"),
-        allow(
-            dead_code,
-            reason = "Ghost handle only used in Windows COM shutdown path"
-        )
-    )]
+    #[cfg(all(target_os = "windows", any(test, feature = "shutdown-refinement")))]
     pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()
     }
@@ -329,10 +322,7 @@ impl HandleRegistry {
         self.state.read().live
     }
 
-    #[allow(
-        dead_code,
-        reason = "The kind-reporting wrapper is used by lifecycle trace production"
-    )]
+    #[cfg(test)]
     pub(crate) fn insert_pending<T>(&self, value: &mut Option<Arc<T>>) -> XllResult<String>
     where
         T: Any + Send + Sync + 'static,
@@ -792,10 +782,6 @@ impl HandleRegistry {
     }
 
     #[cfg(any(test, feature = "handle-refinement-trace"))]
-    #[allow(
-        dead_code,
-        reason = "The trace callback is used by Windows/test lifecycle paths"
-    )]
     pub(crate) fn remove_and_drop_with_trace(
         &self,
         token: &str,

@@ -212,10 +212,6 @@ pub(crate) struct ReturnObligation {
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
 impl ReturnObligation {
-    #[allow(
-        dead_code,
-        reason = "Internal tracker accessor for testing or ghost events"
-    )]
     fn tracker(&self) -> &ReturnTracker {
         &self.tracker
     }

@@ -147,10 +147,7 @@ impl SubscriptionIdentityIndex {
         self.key_by_identity.get(identity)
     }
 
-    #[allow(
-        dead_code,
-        reason = "Bidirectional index accessor for identity lookup by key"
-    )]
+    #[cfg(test)]
     pub(crate) fn get_identity(&self, key: &SubscriptionKey) -> Option<&SubscriptionIdentity> {
         self.identity_by_key.get(key)
     }
