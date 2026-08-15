@@ -13,8 +13,8 @@ use crate::async_udf::AsyncManager;
 use crate::cancellation::CancellationSource;
 #[cfg(feature = "async")]
 use crate::{CancellationGuarantee, XllError};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 #[cfg(feature = "async")]
 pub struct AsyncSpawnBenchmark {
@@ -755,6 +755,137 @@ impl HandleLookupBenchmark {
 }
 
 impl Drop for HandleLookupBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weak upgrade benchmarks
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub enum WeakUpgradeBenchCase {
+    SameObject,
+    DistinctObjects,
+}
+
+impl WeakUpgradeBenchCase {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SameObject => "weak_upgrade_same_object",
+            Self::DistinctObjects => "weak_upgrade_distinct_objects",
+        }
+    }
+}
+
+/// Measures `Weak::upgrade` contention independently of token parsing,
+/// ArcSwap lookup, lease admission, and handle construction.
+pub struct WeakUpgradeBenchmark {
+    runtime: Arc<HandleRuntime>,
+    worker_count: usize,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl WeakUpgradeBenchmark {
+    pub fn new(
+        case: WeakUpgradeBenchCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(worker_count, None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let mut weak_values = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let key = benchmark_topic_key("BENCH.WEAK_UPGRADE", worker as u64);
+            let token = runtime
+                .prepare_observed(
+                    key,
+                    || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
+                    |_, _| Ok(()),
+                )
+                .expect("weak upgrade warm seed publication failed")
+                .0;
+            let parsed = runtime
+                .registry
+                .parse_token(&token)
+                .expect("weak upgrade benchmark token must be valid");
+            let snapshot = runtime.registry.published.load(parsed.slot);
+            let publication = snapshot
+                .get(&parsed.slot)
+                .expect("weak upgrade benchmark publication must exist");
+            weak_values.push(Weak::clone(&publication.value));
+        }
+
+        if matches!(case, WeakUpgradeBenchCase::SameObject) {
+            weak_values.truncate(1);
+        }
+
+        let weak_values = Arc::new(weak_values);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_weak_values = Arc::clone(&weak_values);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    let weak_index = worker.min(worker_weak_values.len() - 1);
+                    let weak = &worker_weak_values[weak_index];
+                    for _ in 0..iterations_per_worker {
+                        std::hint::black_box(weak.upgrade());
+                    }
+                    done_tx
+                        .send(())
+                        .expect("weak upgrade benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            runtime,
+            worker_count,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("weak upgrade benchmark worker received start signal");
+        }
+        for _ in 0..self.worker_count {
+            self.done_rx
+                .recv()
+                .expect("weak upgrade benchmark worker finished batch");
+        }
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.worker_count * self.iterations_per_worker
+    }
+}
+
+impl Drop for WeakUpgradeBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
