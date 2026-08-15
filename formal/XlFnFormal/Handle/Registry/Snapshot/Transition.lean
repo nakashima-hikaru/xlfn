@@ -103,7 +103,8 @@ inductive Step : State → Event → State → Prop where
       {s : State}
       {readerId : Nat} {lookup : FastLookup}
       (hLookup : s.findFastLookup? readerId = some lookup)
-      (hObserved : lookup.stage = .observed) :
+      (hObserved : lookup.stage = .observed)
+      (hNotOpen : s.leaseAdmission ≠ .open) :
       Step s (.abandonObservation readerId)
         { s with fastLookups := s.removeFastLookup readerId }
 

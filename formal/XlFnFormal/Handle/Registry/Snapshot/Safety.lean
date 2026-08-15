@@ -83,6 +83,16 @@ theorem sealed_admission_rejects_tentative_lease_acquisition
   | acquireTentativeLease _ _ hNotSealed _ =>
       exact hNotSealed hSealed
 
+theorem open_admission_cannot_abandon_observation
+    {s : State}
+    (hOpen : s.leaseAdmission = .open)
+    (readerId : Nat) :
+    ¬ ∃ s', Step s (.abandonObservation readerId) s' := by
+  intro ⟨s', hStep⟩
+  cases hStep with
+  | abandonObservation _ _ hNotOpen =>
+      exact hNotOpen hOpen
+
 theorem sealed_admission_rejects_slow_lookup
     {s : State}
     (hSealed : s.leaseAdmission = .sealed)

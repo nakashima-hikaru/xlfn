@@ -148,7 +148,7 @@ theorem non_blocking_lease_admission_race_trace
   have hAcq20Rejected : ¬ ∃ s', Step s6 (.acquireTentativeLease 20) s' :=
     sealed_admission_rejects_tentative_lease_acquisition rfl 20
   have hStep7 : Step s6 (.abandonObservation 20) s7 :=
-    Step.abandonObservation (by rfl) (by rfl)
+    Step.abandonObservation (by rfl) (by rfl) (by intro h; cases h)
   have hReg8 : Registry.Step s7.registry (.beginLookup token) s8.registry :=
     Registry.Step.beginLookup (by rfl) (by rfl) Nat.zero_lt_one (by rfl)
   have hStep8 : Step s7 (.validateFastLookup 10) s8 :=
@@ -221,7 +221,7 @@ theorem fast_lookup_close_before_lease_acquire_trace
   have hAcqRejected : ¬ ∃ s', Step s4 (.acquireTentativeLease 10) s' :=
     sealed_admission_rejects_tentative_lease_acquisition rfl 10
   have hStep5 : Step s4 (.abandonObservation 10) s5 :=
-    Step.abandonObservation (by rfl) (by rfl)
+    Step.abandonObservation (by rfl) (by rfl) (by intro h; cases h)
   have hReg6 : Registry.Step s5.registry .closeRegistry s6.registry :=
     Registry.Step.closeRegistry (s := s5.registry) rfl
   have hStep6 : Step s5 .closeRegistry s6 := Step.closeRegistry (by rfl) hReg6

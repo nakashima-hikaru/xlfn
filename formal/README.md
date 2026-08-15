@@ -567,7 +567,7 @@ semantics:
     without acquiring a lease or modifying H1 registry (`.observed`).
   - `acquireTentativeLease`: Reader acquires tentative implementation lease (`.tentative`),
     permitted in `.open` or `.sealing` phases (`leaseAdmission ≠ .sealed`) provided the registry is not closed.
-  - `abandonObservation`: Reader exits observation without acquiring a lease.
+  - `abandonObservation`: Reader exits observation without acquiring a lease when admission is no longer open (`leaseAdmission ≠ .open`, i.e., `.sealing` or `.sealed`).
   - `validateFastLookup`: Reader checks second `Live` state, linearizing to H1
     `beginLookup` and advancing to `.validated`.
   - `rejectTentativeFastLookup`: If removed or closing before second check, reader observes

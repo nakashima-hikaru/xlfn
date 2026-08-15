@@ -876,7 +876,7 @@ theorem Step.invariant_preserved
         contradiction
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | abandonObservation hLookup hObs =>
+  | abandonObservation hLookup hObs hNotOpen =>
       rename_i readerId lookup
       have hFastUniq' :
           (s.removeFastLookup readerId).Pairwise (fun lhs rhs => lhs.id ≠ rhs.id) := by

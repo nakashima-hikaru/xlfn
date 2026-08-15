@@ -102,7 +102,7 @@ def apply? (s : State) (e : Event) : Option State :=
   | .abandonObservation readerId =>
     match s.findFastLookup? readerId with
     | some lookup =>
-        if lookup.stage = .observed then
+        if lookup.stage = .observed ∧ s.leaseAdmission ≠ .open then
           some { s with fastLookups := s.removeFastLookup readerId }
         else none
     | none => none
@@ -345,11 +345,11 @@ theorem apply?_sound
       | some lookup =>
           rw [hLookup] at h
           dsimp at h
-          by_cases hObs : lookup.stage = .observed
-          · rw [if_pos hObs] at h
+          by_cases hCond : lookup.stage = .observed ∧ s.leaseAdmission ≠ .open
+          · rw [if_pos hCond] at h
             cases h
-            exact Step.abandonObservation hLookup hObs
-          · rw [if_neg hObs] at h; contradiction
+            exact Step.abandonObservation hLookup hCond.1 hCond.2
+          · rw [if_neg hCond] at h; contradiction
   | validateFastLookup readerId =>
       dsimp [apply?] at h
       cases hLookup : s.findFastLookup? readerId with
@@ -564,11 +564,11 @@ theorem apply?_complete
       rw [hLookup]
       dsimp
       simp [hObs, hNotSealed, hNotClosed]
-  | abandonObservation hLookup hObs =>
+  | abandonObservation hLookup hObs hNotOpen =>
       dsimp [apply?]
       rw [hLookup]
       dsimp
-      simp [hObs]
+      simp [hObs, hNotOpen]
   | validateFastLookup hLookup hTentative hPub hLive hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
