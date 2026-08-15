@@ -1360,3 +1360,19 @@ pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_acti
 
     termination_status
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_generation_allocator_refuses_wrap_without_mutating_after_exhaustion() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+
+        assert_eq!(allocate_server_generation(&counter), Some(u64::MAX));
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+
+        assert_eq!(allocate_server_generation(&counter), None);
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+    }
+}
