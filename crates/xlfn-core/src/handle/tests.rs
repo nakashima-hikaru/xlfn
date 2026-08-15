@@ -1167,6 +1167,83 @@ fn published_warm_observation_rejects_topic_removed_reentrantly() {
 }
 
 #[test]
+fn warm_observation_rejects_generation_terminated_topic() {
+    let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("warm-generation-terminated");
+    let rtd_key = key.format_rtd_key();
+    let (token, created) = runtime
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .unwrap();
+    assert!(created);
+
+    runtime.claim_server(&rtd_key, 1).unwrap();
+
+    let observed_runtime = Arc::clone(&runtime);
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        move |observed_rtd_key, observed_token| {
+            assert_eq!(observed_rtd_key, rtd_key);
+            assert_eq!(observed_token, token);
+            observed_runtime.terminate_topics(1);
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn warm_observation_does_not_follow_recreated_same_key() {
+    let runtime = Arc::new(HandleRuntime::new(8));
+    let key = test_topic_key("warm-same-key-aba");
+    let rtd_key = key.format_rtd_key();
+    let (old_token, created) = runtime
+        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .unwrap();
+    assert!(created);
+
+    let (observation_started_tx, observation_started_rx) = std::sync::mpsc::sync_channel(0);
+    let (replacement_ready_tx, replacement_ready_rx) = std::sync::mpsc::sync_channel(0);
+    let replacement_runtime = Arc::clone(&runtime);
+    let replacement_rtd_key = rtd_key.clone();
+    let replacement_old_token = old_token.clone();
+    let replacement = std::thread::spawn(move || {
+        observation_started_rx.recv().unwrap();
+        replacement_runtime.rollback(&replacement_rtd_key);
+        let (new_token, created) = replacement_runtime
+            .prepare(key, || Ok(Arc::new(DataRecord(2))))
+            .unwrap();
+        assert!(created);
+        assert_ne!(new_token, replacement_old_token);
+        replacement_ready_tx.send(new_token).unwrap();
+    });
+
+    let observed_runtime = Arc::clone(&runtime);
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        move |observed_rtd_key, observed_token| {
+            assert_eq!(observed_rtd_key, rtd_key);
+            assert_eq!(observed_token, old_token);
+            observation_started_tx.send(()).unwrap();
+            let replacement_token = replacement_ready_rx.recv().unwrap();
+            assert_ne!(replacement_token, observed_token);
+            assert!(matches!(
+                observed_runtime.lookup::<DataRecord>(&replacement_token),
+                Ok(_)
+            ));
+            Ok(())
+        },
+    );
+
+    replacement.join().unwrap();
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 1);
+}
+
+#[test]
 fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
     let runtime = Arc::new(HandleRuntime::new(8));
     let observed_runtime = Arc::clone(&runtime);

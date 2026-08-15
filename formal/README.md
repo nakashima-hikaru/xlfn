@@ -403,9 +403,9 @@ generation. The JSON fixtures are
 `fixtures/topics/server-generation-mismatch-rejected.json`, and
 `fixtures/topics/server-generation-rollback-rejected.json`.
 
-Termination of topics by server generation is intentionally deferred to H3.5;
-H3.4 proves isolation and ownership provenance without adding the termination
-transaction.
+Generation-wide topic termination is modeled in H3.5 by the detach-and-drain
+transaction described below; H3.4 remains the isolation and ownership
+provenance layer used by that transaction.
 
 The allocator boundary is modeled independently under
 `XlFnFormal/Rtd/ServerGeneration`. Its `State.last` is a non-wrapping natural
@@ -480,6 +480,31 @@ published drains invalidate it, and a published drain rejects a pending root.
 settled published-root path through `CloseCertified`; a negative replay proves
 that the published drain cannot bypass pending rollback.
 
-Generation-wide `terminate_topics` still remains to be modeled using the same
-detach/drain split. The current H3.5 scope is the single-topic
-`DisconnectData` path that establishes the concrete destruction boundary.
+Generation-wide `terminate_topics(server_generation)` is modeled by
+`detachGeneration`. It atomically removes all visible topics, reverse RTD
+entries, and Excel-owner bindings belonging to the target server generation,
+then moves their roots into the detached set. Registry-root destruction
+reuses the existing pending/published drain transitions. The model proves
+that nonmatching server generations retain their topics, reverse mappings,
+Excel ownership, and live registry roots; provisional and published
+generation-termination traces are replayed through `CloseCertified`.
+
+## Published-topic snapshot refinement: H4.1
+
+`XlFnFormal/Handle/Refinement` models the published-topic fast path separately
+from the canonical H3 topic maps. A `Publication` records one `(key, token)`
+incarnation and its lifecycle state (`provisional`, `live`, `stale`, or
+`closing`); the snapshot map contains only the currently published bindings,
+while a warm reader retains the identity it loaded before observation. This
+keeps publication-object lifetime distinct from snapshot membership and makes
+same-key replacement an explicit ABA boundary.
+
+The invariant proves publication identity uniqueness, snapshot soundness and
+root liveness, and that every warm reader refers to a known publication. The
+checker has sound and complete per-event validation plus a replay relation.
+Named safety theorems cover successful warm reads, invalidated or closing
+readers, generation termination, same-key replacement, and registry close only
+after warm readers drain. Lean traces cover warm success, disconnect,
+generation termination, close, and same-key ABA. Rust regressions cover a
+warm observation racing generation-wide termination and a warm reader that
+must not follow a recreated publication for the same key.

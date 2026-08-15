@@ -44,6 +44,12 @@ import XlFnFormal.Handle.Topics.Trace
 import XlFnFormal.Handle.Topics.Destruction
 import XlFnFormal.Handle.Topics.DestructionSafety
 import XlFnFormal.Handle.Topics.DestructionTrace
+import XlFnFormal.Handle.Refinement.PublishedModel
+import XlFnFormal.Handle.Refinement.PublishedInvariant
+import XlFnFormal.Handle.Refinement.PublishedTransition
+import XlFnFormal.Handle.Refinement.PublishedChecker
+import XlFnFormal.Handle.Refinement.PublishedSafety
+import XlFnFormal.Handle.Refinement.PublishedTrace
 import XlFnFormal.Handle.Topics.Serialization.Model
 import XlFnFormal.Handle.Topics.Serialization.Format
 import XlFnFormal.Handle.Topics.Serialization.Parser
