@@ -148,9 +148,9 @@ theorem pairwise_updateFastLookupStage
   intro a _ b _ hR
   split <;> split <;> exact hR
 
-theorem validated_filter_append_tentative
+theorem validated_filter_append_observed
     {l : List FastLookup} {lookup : FastLookup}
-    (hStage : lookup.stage = .tentative) :
+    (hStage : lookup.stage = .observed) :
     (l ++ [lookup]).filter (fun x => decide (x.stage = .validated)) =
       l.filter (fun x => decide (x.stage = .validated)) := by
   simp [hStage]
@@ -172,7 +172,7 @@ theorem map_updateFastLookupStage_eq_self_of_id_ne
       simp only [List.map]
       rw [hHeadUpdate, ih hTail]
 
-theorem length_validated_updateFastLookupStage
+theorem length_validated_updateFastLookupStage_validated
     {l : List FastLookup} {id : Nat} {lookup : FastLookup}
     (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id))
     (hFind : l.find? (fun x => x.id == id) = some lookup)
@@ -212,6 +212,45 @@ theorem length_validated_updateFastLookupStage
             · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
             · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
 
+theorem length_validated_updateFastLookupStage_tentative_eq
+    {l : List FastLookup} {id : Nat} {lookup : FastLookup}
+    (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id))
+    (hFind : l.find? (fun x => x.id == id) = some lookup)
+    (hObserved : lookup.stage = .observed) :
+    ((l.map (fun x => if x.id = id then { x with stage := .tentative } else x)).filter
+        (fun x => decide (x.stage = .validated))).length =
+      (l.filter (fun x => decide (x.stage = .validated))).length := by
+  induction l with
+  | nil => simp at hFind
+  | cons head tail ih =>
+      cases hPair with
+      | cons hHead hTail =>
+          by_cases hId : head.id = id
+          · have hHeadId : head.id = id := hId
+            have hEq : head = lookup := by
+              simpa [List.find?, hId] using hFind
+            subst lookup
+            have hNoTail : ∀ x ∈ tail, x.id ≠ id := by
+              intro x hx hX
+              apply hHead x hx
+              exact hHeadId.trans hX.symm
+            have hTailMap := map_updateFastLookupStage_eq_self_of_id_ne
+              (l := tail) (id := id) (stage := FastLookupStage.tentative) hNoTail
+            have hOldHead : decide (head.stage = FastLookupStage.validated) = false := by
+              simp [hObserved]
+            simp only [List.map, if_pos hId]
+            rw [hTailMap]
+            simp [List.filter, hOldHead]
+          · have hIdFalse : (head.id == id) = false := by
+              exact Bool.not_eq_true _ |>.mp (by simpa using hId)
+            have hFindTail : tail.find? (fun x => x.id == id) = some lookup := by
+              simpa [List.find?, hIdFalse] using hFind
+            have hTailResult := ih hTail hFindTail
+            rw [List.map, if_neg hId]
+            by_cases hStage : decide (head.stage = FastLookupStage.validated) = true
+            · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
+            · simpa [List.map, List.filter, hIdFalse, hStage] using hTailResult
+
 theorem filter_validated_and_id_ne_eq
     {l : List FastLookup} {id : Nat}
     (hNe : ∀ lookup ∈ l, lookup.id ≠ id) :
@@ -233,7 +272,7 @@ theorem validated_removeFastLookup_eq
     {l : List FastLookup} {id : Nat} {lookup : FastLookup}
     (hPair : l.Pairwise (fun lhs rhs => lhs.id ≠ rhs.id))
     (hFind : l.find? (fun x => x.id == id) = some lookup)
-    (hTentative : lookup.stage = .tentative) :
+    (hNotValidated : lookup.stage ≠ .validated) :
     (l.filter (fun x => x.id != id)).filter
         (fun x => decide (x.stage = .validated)) =
       l.filter (fun x => decide (x.stage = .validated)) := by
@@ -250,7 +289,7 @@ theorem validated_removeFastLookup_eq
             subst lookup
             have hIdNe : (head.id != id) = false := by simp [hHeadId]
             have hStageFalse : decide (head.stage = FastLookupStage.validated) = false := by
-              simp [hTentative]
+              simp [hNotValidated]
             have hTailNe : ∀ x ∈ tail, x.id ≠ id := by
               intro x hx hX
               apply hHead x hx
@@ -326,6 +365,19 @@ theorem noLiveSlots_of_eq_slots
   subst hSlots
   exact hNL
 
+theorem closeSlot_not_live (slot : SlotState) :
+    ¬ (closeSlot slot).IsLive := by
+  cases slot with
+  | vacant g =>
+      dsimp [closeSlot]
+      cases nextGeneration? g <;> (intro h; cases h)
+  | live g =>
+      dsimp [closeSlot]
+      cases nextGeneration? g <;> (intro h; cases h)
+  | retired =>
+      intro h
+      cases h
+
 theorem noLiveSlots_of_map_closeSlot
     {slots1 slots2 : List SlotState} (hSlots : slots1 = slots2.map closeSlot) :
     ∀ (slot : Nat) (h : slot < slots1.length), ¬ (slots1.get ⟨slot, h⟩).IsLive := by
@@ -364,8 +416,7 @@ theorem Step.invariant_preserved
                      reg'.closed = s.registry.closed ∧
                      reg'.session = s.registry.session := by
         cases hReg with
-        | insertFresh hMay =>
-            refine ⟨rfl, rfl, rfl, rfl⟩
+        | insertFresh _ => refine ⟨rfl, rfl, rfl, rfl⟩
       rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession⟩
       have hPubUniq' : (s.publications ++ [Publication.mk s.registry.slots.length 1 .live]).Pairwise
           (fun lhs rhs => lhs.slot ≠ rhs.slot ∨ lhs.generation ≠ rhs.generation) := by
@@ -433,7 +484,7 @@ theorem Step.invariant_preserved
           registry := reg',
           publications := s.publications ++ [Publication.mk s.registry.slots.length 1 .live],
           snapshot := s.snapshot ++ [SnapshotBinding.mk s.registry.slots.length 1] } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact hLeaseAcc
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
@@ -443,25 +494,23 @@ theorem Step.invariant_preserved
         intro hCl
         cases hReg with
         | insertFresh hMay =>
-            dsimp [State.MayInsert] at hMay
+            dsimp [Registry.State.MayInsert] at hMay
             rw [hClosed] at hCl
             rw [hCl] at hMay
             contradiction
       exact ⟨hPubUniq', hSnapUniq', hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
   | insertReuse hReg hNoSnap hNoPub =>
-      rename_i reg' slot gen
-      have hRegInv : reg'.slots = s.registry.slots.set slot (SlotState.live gen) ∧
+      rename_i reg' slot generation
+      have hRegInv : reg'.slots = s.registry.slots.set slot (SlotState.live generation) ∧
                      reg'.activeLeases = s.registry.activeLeases ∧
                      reg'.closed = s.registry.closed ∧
                      reg'.session = s.registry.session ∧
-                     slot < s.registry.slots.length ∧
-                     s.registry.slots.get ⟨slot, by cases hReg; assumption⟩ = SlotState.vacant gen := by
+                     slot < s.registry.slots.length := by
         cases hReg with
-        | insertReuse hMay hInBounds hVacant =>
-            refine ⟨rfl, rfl, rfl, rfl, hInBounds, hVacant⟩
-      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession, hInBounds, hVacant⟩
-      have hPubUniq' : (s.publications ++ [Publication.mk slot gen .live]).Pairwise
+        | insertReuse _ hInB _ => refine ⟨rfl, rfl, rfl, rfl, hInB⟩
+      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession, hInBounds⟩
+      have hPubUniq' : (s.publications ++ [Publication.mk slot generation .live]).Pairwise
           (fun lhs rhs => lhs.slot ≠ rhs.slot ∨ lhs.generation ≠ rhs.generation) := by
         apply pairwise_append_singleton hPubUniq
         intro y hy
@@ -471,46 +520,50 @@ theorem Step.invariant_preserved
           intro hG
           exact hNot ⟨hS, hG⟩
         · left; exact hS
-      have hSnapUniq' : (s.snapshot ++ [SnapshotBinding.mk slot gen]).Pairwise
+      have hSnapUniq' : (s.snapshot ++ [SnapshotBinding.mk slot generation]).Pairwise
           (fun lhs rhs => lhs.slot ≠ rhs.slot) := by
         apply pairwise_append_singleton hSnapUniq
         intro y hy
         exact findSnapshot?_none hNoSnap y hy
       have hLivePub' : State.LivePublicationSound { s with
           registry := reg',
-          publications := s.publications ++ [Publication.mk slot gen .live],
-          snapshot := s.snapshot ++ [SnapshotBinding.mk slot gen] } := by
+          publications := s.publications ++ [Publication.mk slot generation .live],
+          snapshot := s.snapshot ++ [SnapshotBinding.mk slot generation] } := by
         intro pub hMem hLive
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
         | inl hOld =>
-            rcases hLivePub pub hOld hLive with ⟨hOldInBounds, hSlotLive⟩
+            rcases hLivePub pub hOld hLive with ⟨hOldInB, hSlotLive⟩
             rw [hSlots]
-            have hLen : (s.registry.slots.set slot (SlotState.live gen)).length = s.registry.slots.length := List.length_set
-            have hInBounds' : pub.slot < (s.registry.slots.set slot (SlotState.live gen)).length := by
-              rw [hLen]; exact hOldInBounds
-            refine ⟨hInBounds', ?_⟩
+            have hLen : (s.registry.slots.set slot (SlotState.live generation)).length = s.registry.slots.length := List.length_set
+            have hInB' : pub.slot < (s.registry.slots.set slot (SlotState.live generation)).length := by
+              rw [hLen]; exact hOldInB
+            refine ⟨hInB', ?_⟩
             simp only [List.get_eq_getElem]
-            by_cases hEq : pub.slot = slot
-            · have hVacant' : s.registry.slots.get ⟨slot, hInBounds⟩ = SlotState.vacant gen := hVacant
-              have hSlotLive' : s.registry.slots.get ⟨pub.slot, hOldInBounds⟩ = SlotState.live pub.generation := hSlotLive
-              cases hEq
-              rw [hVacant'] at hSlotLive'
-              contradiction
-            · rw [List.getElem_set_ne (Ne.symm hEq)]
+            by_cases hEqSlot : pub.slot = slot
+            · rcases pub with ⟨pslot, pgen, pst⟩
+              dsimp at hEqSlot hSlotLive ⊢
+              subst hEqSlot
+              cases hReg with
+              | insertReuse _ _ hVacant =>
+                  simp only [List.get_eq_getElem] at hVacant
+                  rw [hVacant] at hSlotLive
+                  contradiction
+            · rw [List.getElem_set_ne (Ne.symm hEqSlot)]
               exact hSlotLive
         | inr hNew =>
             subst hNew
             dsimp
             rw [hSlots]
-            have hLen : (s.registry.slots.set slot (SlotState.live gen)).length = s.registry.slots.length := List.length_set
-            have hInBounds' : slot < (s.registry.slots.set slot (SlotState.live gen)).length := by
+            have hLen : (s.registry.slots.set slot (SlotState.live generation)).length = s.registry.slots.length := List.length_set
+            have hInB' : slot < (s.registry.slots.set slot (SlotState.live generation)).length := by
               rw [hLen]; exact hInBounds
-            refine ⟨hInBounds', by simp⟩
+            refine ⟨hInB', ?_⟩
+            simp only [List.getElem_set_self]
       have hLiveSnap' : State.LiveSnapshotSound { s with
           registry := reg',
-          publications := s.publications ++ [Publication.mk slot gen .live],
-          snapshot := s.snapshot ++ [SnapshotBinding.mk slot gen] } := by
+          publications := s.publications ++ [Publication.mk slot generation .live],
+          snapshot := s.snapshot ++ [SnapshotBinding.mk slot generation] } := by
         intro binding hMem
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
@@ -519,33 +572,33 @@ theorem Step.invariant_preserved
             refine ⟨pub, List.mem_append_left _ hPubMem, hSlotEq, hGenEq, hLiveState⟩
         | inr hNew =>
             subst hNew
-            refine ⟨Publication.mk slot gen .live, ?_, rfl, rfl, rfl⟩
+            refine ⟨Publication.mk slot generation .live, ?_, rfl, rfl, rfl⟩
             rw [List.mem_append]
             right
             exact List.mem_singleton_self _
       have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
       have hFastSound' : State.FastLookupSound { s with
           registry := reg',
-          publications := s.publications ++ [Publication.mk slot gen .live],
-          snapshot := s.snapshot ++ [SnapshotBinding.mk slot gen] } := by
+          publications := s.publications ++ [Publication.mk slot generation .live],
+          snapshot := s.snapshot ++ [SnapshotBinding.mk slot generation] } := by
         intro lookup hMem
         rcases hFastSound lookup hMem with ⟨hSess, pub, hPubMem, hSlotEq, hGenEq⟩
         refine ⟨by rw [hSession]; exact hSess, pub, List.mem_append_left _ hPubMem, hSlotEq, hGenEq⟩
       have hLeaseAcc' : State.LeaseAccounting { s with
           registry := reg',
-          publications := s.publications ++ [Publication.mk slot gen .live],
-          snapshot := s.snapshot ++ [SnapshotBinding.mk slot gen] } := by
-        dsimp [State.LeaseAccounting]
+          publications := s.publications ++ [Publication.mk slot generation .live],
+          snapshot := s.snapshot ++ [SnapshotBinding.mk slot generation] } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact hLeaseAcc
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
           registry := reg',
-          publications := s.publications ++ [Publication.mk slot gen .live],
-          snapshot := s.snapshot ++ [SnapshotBinding.mk slot gen] } := by
+          publications := s.publications ++ [Publication.mk slot generation .live],
+          snapshot := s.snapshot ++ [SnapshotBinding.mk slot generation] } := by
         intro hCl
         cases hReg with
         | insertReuse hMay _ _ =>
-            dsimp [State.MayInsert] at hMay
+            dsimp [Registry.State.MayInsert] at hMay
             rw [hClosed] at hCl
             rw [hCl] at hMay
             contradiction
@@ -637,7 +690,7 @@ theorem Step.invariant_preserved
           registry := reg',
           publications := s.updatePublicationState token.slot token.generation .stale,
           snapshot := s.removeSnapshot token.slot } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact hLeaseAcc
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
@@ -738,7 +791,7 @@ theorem Step.invariant_preserved
           registry := reg',
           publications := s.updatePublicationState token.slot token.generation .stale,
           snapshot := s.removeSnapshot token.slot } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact hLeaseAcc
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
@@ -753,21 +806,21 @@ theorem Step.invariant_preserved
         cases hNotLive True.intro
       exact ⟨hPubUniq', hSnapUniq', hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | beginTentativeFastLookup hNoReader hSnap hSnapGen hPub hAuth hLive =>
+  | beginFastObservation hNoReader hSnap hSnapGen hPub hAuth hLive =>
       rename_i readerId token pub binding
       have hFastUniq' :
-          (s.fastLookups ++ [FastLookup.mk readerId token .tentative]).Pairwise
+          (s.fastLookups ++ [FastLookup.mk readerId token .observed]).Pairwise
             (fun lhs rhs => lhs.id ≠ rhs.id) := by
         apply pairwise_append_singleton hFastUniq
         intro y hy
         exact findFastLookup?_none hNoReader y hy
       have hLivePub' : State.LivePublicationSound { s with
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := hLivePub
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .observed] } := hLivePub
       have hLiveSnap' : State.LiveSnapshotSound { s with
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := hLiveSnap
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .observed] } := hLiveSnap
       have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
       have hFastSound' : State.FastLookupSound { s with
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := by
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .observed] } := by
         intro lookup hMem
         simp only [List.mem_append, List.mem_singleton] at hMem
         cases hMem with
@@ -779,15 +832,65 @@ theorem Step.invariant_preserved
             have ⟨hPubSlot, hPubGen⟩ := findPublication?_some_prop hPub
             exact ⟨hAuth, pub, hPMem, hPubSlot, hPubGen⟩
       have hLeaseAcc' : State.LeaseAccounting { s with
-          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .tentative] } := by
-        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.updateFastLookupStage]
-        rw [validated_filter_append_tentative (l := s.fastLookups)
-          (lookup := FastLookup.mk readerId token .tentative) rfl]
+          fastLookups := s.fastLookups ++ [FastLookup.mk readerId token .observed] } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
+        rw [validated_filter_append_observed (lookup := FastLookup.mk readerId token .observed) rfl]
         exact hLeaseAcc
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
 
-  | validateFastLookup hLookup hTentative hReg =>
-      rename_i reg' readerId lookup
+  | acquireTentativeLease hLookup hObs hNotClosed =>
+      rename_i readerId lookup
+      have hFastUniq' := pairwise_updateFastLookupStage
+        (id := readerId) (stage := FastLookupStage.tentative) hFastUniq
+      have hLivePub' : State.LivePublicationSound { s with
+          fastLookups := s.updateFastLookupStage readerId .tentative } := hLivePub
+      have hLiveSnap' : State.LiveSnapshotSound { s with
+          fastLookups := s.updateFastLookupStage readerId .tentative } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with
+          fastLookups := s.updateFastLookupStage readerId .tentative } := by
+        intro l hMem
+        dsimp [State.updateFastLookupStage] at hMem
+        rcases List.mem_map.mp hMem with ⟨orig, hOrigMem, hMap⟩
+        rcases hFastSound orig hOrigMem with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
+        have hToken : l.token = orig.token := by
+          rw [← hMap]
+          split <;> rfl
+        refine ⟨by rw [hToken]; exact hSess, p, hPMem, by rw [hToken]; exact hSlotEq, by rw [hToken]; exact hGenEq⟩
+      have hLeaseAcc' : State.LeaseAccounting { s with
+          fastLookups := s.updateFastLookupStage readerId .tentative } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.updateFastLookupStage]
+        have hLen := length_validated_updateFastLookupStage_tentative_eq
+          hFastUniq hLookup hObs
+        rw [hLen]
+        exact hLeaseAcc
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+
+  | abandonObservation hLookup hObs =>
+      rename_i readerId lookup
+      have hFastUniq' :
+          (s.removeFastLookup readerId).Pairwise (fun lhs rhs => lhs.id ≠ rhs.id) := by
+        dsimp [State.removeFastLookup]
+        exact pairwise_filter _ hFastUniq
+      have hLivePub' : State.LivePublicationSound { s with
+          fastLookups := s.removeFastLookup readerId } := hLivePub
+      have hLiveSnap' : State.LiveSnapshotSound { s with
+          fastLookups := s.removeFastLookup readerId } := hLiveSnap
+      have hLiveSnapRoot' := liveSnapshotRoot_from_sound hLiveSnap' hLivePub'
+      have hFastSound' : State.FastLookupSound { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        intro l hMem
+        dsimp [State.removeFastLookup] at hMem
+        exact hFastSound l (mem_of_mem_filter hMem)
+      have hLeaseAcc' : State.LeaseAccounting { s with
+          fastLookups := s.removeFastLookup readerId } := by
+        dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
+        rw [validated_removeFastLookup_eq hFastUniq hLookup (by simp [hObs])]
+        exact hLeaseAcc
+      exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
+
+  | validateFastLookup hLookup hTentative hPub hLive hReg =>
+      rename_i reg' readerId lookup origPub
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases + 1 ∧
                      reg'.closed = s.registry.closed ∧
@@ -820,18 +923,12 @@ theorem Step.invariant_preserved
         have hToken : l.token = orig.token := by
           rw [← hMap]
           split <;> rfl
-        refine ⟨?_, p, hPMem, ?_, ?_⟩
-        · rw [hToken, hSession]
-          exact hSess
-        · rw [hToken]
-          exact hSlotEq
-        · rw [hToken]
-          exact hGenEq
+        refine ⟨by rw [hToken, hSession]; exact hSess, p, hPMem, by rw [hToken]; exact hSlotEq, by rw [hToken]; exact hGenEq⟩
       have hLeaseAcc' : State.LeaseAccounting { s with
           registry := reg',
           fastLookups := s.updateFastLookupStage readerId .validated } := by
         dsimp [State.LeaseAccounting, State.validatedFastLookups, State.updateFastLookupStage]
-        have hLen := length_validated_updateFastLookupStage
+        have hLen := length_validated_updateFastLookupStage_validated
           hFastUniq hLookup hTentative
         rw [hLeases, hLen]
         exact Nat.add_le_add_right hLeaseAcc 1
@@ -844,8 +941,8 @@ theorem Step.invariant_preserved
         contradiction
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | rejectTentativeFastLookup hLookup hTentative =>
-      rename_i readerId lookup
+  | rejectTentativeFastLookup hLookup hTentative hPub hNotLive =>
+      rename_i readerId lookup origPub
       have hFastUniq' :
           (s.removeFastLookup readerId).Pairwise (fun lhs rhs => lhs.id ≠ rhs.id) := by
         dsimp [State.removeFastLookup]
@@ -863,7 +960,7 @@ theorem Step.invariant_preserved
       have hLeaseAcc' : State.LeaseAccounting { s with
           fastLookups := s.removeFastLookup readerId } := by
         dsimp [State.LeaseAccounting, State.validatedFastLookups, State.removeFastLookup]
-        rw [validated_removeFastLookup_eq hFastUniq hLookup hTentative]
+        rw [validated_removeFastLookup_eq hFastUniq hLookup (by simp [hTentative])]
         exact hLeaseAcc
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive⟩
 
@@ -919,12 +1016,13 @@ theorem Step.invariant_preserved
         intro hCl
         rw [hClosed] at hCl
         rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
-        have hNoLive' : NoLiveSlots reg' := noLiveSlots_of_eq_slots hSlots hNoLiveSlots
+        have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
+          noLiveSlots_of_eq_slots hSlots hNoLiveSlots
         exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | fallbackFastLookup hLookup hValidated hReg =>
-      rename_i reg' readerId lookup
+  | fallbackFastLookup hLookup hValidated hPub hNotLive hReg =>
+      rename_i reg' readerId lookup origPub
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases - 1 ∧
                      reg'.closed = s.registry.closed ∧
@@ -975,7 +1073,8 @@ theorem Step.invariant_preserved
         intro hCl
         rw [hClosed] at hCl
         rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
-        have hNoLive' : NoLiveSlots reg' := noLiveSlots_of_eq_slots hSlots hNoLiveSlots
+        have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
+          noLiveSlots_of_eq_slots hSlots hNoLiveSlots
         exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq', hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
@@ -1015,10 +1114,11 @@ theorem Step.invariant_preserved
       have hRegInv : reg'.slots = s.registry.slots ∧
                      reg'.activeLeases = s.registry.activeLeases - 1 ∧
                      reg'.closed = s.registry.closed ∧
-                     reg'.session = s.registry.session := by
+                     reg'.session = s.registry.session ∧
+                     s.registry.activeLeases > 0 := by
         cases hReg with
-        | endLookup _ => refine ⟨rfl, rfl, rfl, rfl⟩
-      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession⟩
+        | endLookup hL => refine ⟨rfl, rfl, rfl, rfl, hL⟩
+      rcases hRegInv with ⟨hSlots, hLeases, hClosed, hSession, hL⟩
       have hLivePub' : State.LivePublicationSound { s with registry := reg' } := by
         intro p hMem hLiveP
         rw [hSlots]
@@ -1030,16 +1130,15 @@ theorem Step.invariant_preserved
         rcases hFastSound l hMem with ⟨hSess, p, hPMem, hSlotEq, hGenEq⟩
         refine ⟨by rw [hSession]; exact hSess, p, hPMem, hSlotEq, hGenEq⟩
       have hLeaseAcc' : State.LeaseAccounting { s with registry := reg' } := by
-        dsimp [State.LeaseAccounting, State.validatedFastLookups]
-        have hBound : s.validatedFastLookups.length ≤ s.registry.activeLeases - 1 := by
-          omega
+        dsimp [State.LeaseAccounting, State.validatedFastLookups] at hSlowLease ⊢
         rw [hLeases]
-        exact hBound
+        omega
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with registry := reg' } := by
         intro hCl
         rw [hClosed] at hCl
         rcases hClosedNoLive hCl with ⟨hNoLiveSlots, hSnapNil, hNoLivePubs⟩
-        have hNoLive' : NoLiveSlots reg' := noLiveSlots_of_eq_slots hSlots hNoLiveSlots
+        have hNoLive' : ∀ (slot : Nat) (h : slot < reg'.slots.length), ¬ (reg'.slots.get ⟨slot, h⟩).IsLive :=
+          noLiveSlots_of_eq_slots hSlots hNoLiveSlots
         exact ⟨hNoLive', hSnapNil, hNoLivePubs⟩
       exact ⟨hPubUniq, hSnapUniq, hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
@@ -1101,7 +1200,7 @@ theorem Step.invariant_preserved
           registry := reg',
           publications := s.updateClosingPublications,
           snapshot := [] } := by
-        dsimp [State.LeaseAccounting]
+        dsimp [State.LeaseAccounting, State.validatedFastLookups]
         rw [hLeases]
         exact hLeaseAcc
       have hClosedNoLive' : State.ClosedNoLiveSlots { s with
@@ -1109,7 +1208,7 @@ theorem Step.invariant_preserved
           publications := s.updateClosingPublications,
           snapshot := [] } := by
         intro _
-        have hNoLive' : NoLiveSlots reg' := noLiveSlots_of_map_closeSlot hSlots
+        have hNoLive' := noLiveSlots_of_map_closeSlot hSlots
         refine ⟨hNoLive', rfl, ?_⟩
         intro p hMem
         dsimp [State.updateClosingPublications] at hMem
@@ -1130,16 +1229,17 @@ theorem Step.invariant_preserved
           exact hOrigLive
       exact ⟨hPubUniq', hSnapUniq', hFastUniq, hLivePub', hLiveSnap', hLiveSnapRoot', hFastSound', hLeaseAcc', hClosedNoLive'⟩
 
-  | finishClose hReg =>
+  | finishClose hNoTentative hNoValidated hReg =>
       exact ⟨hPubUniq, hSnapUniq, hFastUniq, hLivePub, hLiveSnap, hLiveSnapRoot, hFastSound, hLeaseAcc, hClosedNoLive⟩
 
 theorem Reachable.invariant_preserved
-    {s t : State}
+    {s s' : State}
     (hInv : s.Invariant)
-    (hReach : Reachable s t) :
-    t.Invariant := by
+    (hReach : Reachable s s') :
+    s'.Invariant := by
   induction hReach with
   | refl => exact hInv
-  | tail _ hStep ih => exact Step.invariant_preserved ih hStep
+  | tail hInit hStep ih =>
+      exact Step.invariant_preserved ih hStep
 
 end XlFnFormal.Handle.Registry.Snapshot

@@ -25,6 +25,7 @@ structure SnapshotBinding where
 deriving DecidableEq, Repr
 
 inductive FastLookupStage where
+  | observed
   | tentative
   | validated
 deriving DecidableEq, Repr
@@ -82,11 +83,14 @@ def State.updateFastLookupStage
     (s : State) (id : Nat) (stage : FastLookupStage) : List FastLookup :=
   s.fastLookups.map (fun l => if l.id = id then { l with stage := stage } else l)
 
-def State.validatedFastLookups (s : State) : List FastLookup :=
-  s.fastLookups.filter (fun l => l.stage = .validated)
+def State.observedFastLookups (s : State) : List FastLookup :=
+  s.fastLookups.filter (fun l => l.stage = .observed)
 
 def State.tentativeFastLookups (s : State) : List FastLookup :=
   s.fastLookups.filter (fun l => l.stage = .tentative)
+
+def State.validatedFastLookups (s : State) : List FastLookup :=
+  s.fastLookups.filter (fun l => l.stage = .validated)
 
 def State.PublicationIdentitiesUnique (s : State) : Prop :=
   s.publications.Pairwise (fun lhs rhs => lhs.slot ≠ rhs.slot ∨ lhs.generation ≠ rhs.generation)

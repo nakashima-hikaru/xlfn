@@ -70,7 +70,7 @@ def apply? (s : State) (e : Event) : Option State :=
           | none => none
       | none => none
 
-  | .beginTentativeFastLookup readerId token =>
+  | .beginFastObservation readerId token =>
       match s.findFastLookup? readerId with
       | none =>
           if token.session = s.registry.session then
@@ -83,7 +83,7 @@ def apply? (s : State) (e : Event) : Option State :=
                       | .live =>
                           some { s with
                             fastLookups := s.fastLookups ++
-                              [{ id := readerId, token := token, stage := .tentative }] }
+                              [{ id := readerId, token := token, stage := .observed }] }
                       | _ => none
                   | none => none
                 else none
@@ -91,15 +91,37 @@ def apply? (s : State) (e : Event) : Option State :=
           else none
       | some _ => none
 
+  | .acquireTentativeLease readerId =>
+      match s.findFastLookup? readerId with
+      | some lookup =>
+          if lookup.stage = .observed ∧ s.registry.closed = false then
+            some { s with fastLookups := s.updateFastLookupStage readerId .tentative }
+          else none
+      | none => none
+
+  | .abandonObservation readerId =>
+      match s.findFastLookup? readerId with
+      | some lookup =>
+          if lookup.stage = .observed then
+            some { s with fastLookups := s.removeFastLookup readerId }
+          else none
+      | none => none
+
   | .validateFastLookup readerId =>
       match s.findFastLookup? readerId with
       | some lookup =>
           if lookup.stage = .tentative then
-            match Registry.apply? s.registry (.beginLookup lookup.token) with
-            | some reg' =>
-                some { s with
-                  registry := reg'
-                  fastLookups := s.updateFastLookupStage readerId .validated }
+            match s.findPublication? lookup.token.slot lookup.token.generation with
+            | some pub =>
+                match pub.state with
+                | .live =>
+                    match Registry.apply? s.registry (.beginLookup lookup.token) with
+                    | some reg' =>
+                        some { s with
+                          registry := reg'
+                          fastLookups := s.updateFastLookupStage readerId .validated }
+                    | none => none
+                | _ => none
             | none => none
           else none
       | none => none
@@ -108,7 +130,12 @@ def apply? (s : State) (e : Event) : Option State :=
       match s.findFastLookup? readerId with
       | some lookup =>
           if lookup.stage = .tentative then
-            some { s with fastLookups := s.removeFastLookup readerId }
+            match s.findPublication? lookup.token.slot lookup.token.generation with
+            | some pub =>
+                if pub.state ≠ .live then
+                  some { s with fastLookups := s.removeFastLookup readerId }
+                else none
+            | none => none
           else none
       | none => none
 
@@ -129,11 +156,16 @@ def apply? (s : State) (e : Event) : Option State :=
       match s.findFastLookup? readerId with
       | some lookup =>
           if lookup.stage = .validated then
-            match Registry.apply? s.registry .endLookup with
-            | some reg' =>
-                some { s with
-                  registry := reg'
-                  fastLookups := s.removeFastLookup readerId }
+            match s.findPublication? lookup.token.slot lookup.token.generation with
+            | some pub =>
+                if pub.state ≠ .live then
+                  match Registry.apply? s.registry .endLookup with
+                  | some reg' =>
+                      some { s with
+                        registry := reg'
+                        fastLookups := s.removeFastLookup readerId }
+                  | none => none
+                else none
             | none => none
           else none
       | none => none
@@ -160,7 +192,7 @@ def apply? (s : State) (e : Event) : Option State :=
       | none => none
 
   | .finishClose =>
-      if s.fastLookups = [] then
+      if s.tentativeFastLookups = [] ∧ s.validatedFastLookups = [] then
         match Registry.apply? s.registry .finishClose with
         | some reg' => some s
         | none => none
@@ -249,7 +281,7 @@ theorem apply?_sound
                   exact Step.removeRetire (Registry.apply?_sound hReg) hPub hLive
               | closing => rw [hLive] at h; contradiction
               | stale => rw [hLive] at h; contradiction
-  | beginTentativeFastLookup readerId token =>
+  | beginFastObservation readerId token =>
       dsimp [apply?] at h
       cases hNoReader : s.findFastLookup? readerId with
       | some _ => rw [hNoReader] at h; contradiction
@@ -275,11 +307,35 @@ theorem apply?_sound
                           rw [hLive] at h
                           dsimp at h
                           cases h
-                          exact Step.beginTentativeFastLookup hNoReader hSnap hSnapGen hPub hAuth hLive
+                          exact Step.beginFastObservation hNoReader hSnap hSnapGen hPub hAuth hLive
                       | closing => rw [hLive] at h; contradiction
                       | stale => rw [hLive] at h; contradiction
                 · rw [if_neg hSnapGen] at h; contradiction
           · rw [if_neg hAuth] at h; contradiction
+  | acquireTentativeLease readerId =>
+      dsimp [apply?] at h
+      cases hLookup : s.findFastLookup? readerId with
+      | none => rw [hLookup] at h; contradiction
+      | some lookup =>
+          rw [hLookup] at h
+          dsimp at h
+          by_cases hCond : lookup.stage = .observed ∧ s.registry.closed = false
+          · rw [if_pos hCond] at h
+            cases h
+            exact Step.acquireTentativeLease hLookup hCond.1 hCond.2
+          · rw [if_neg hCond] at h; contradiction
+  | abandonObservation readerId =>
+      dsimp [apply?] at h
+      cases hLookup : s.findFastLookup? readerId with
+      | none => rw [hLookup] at h; contradiction
+      | some lookup =>
+          rw [hLookup] at h
+          dsimp at h
+          by_cases hObs : lookup.stage = .observed
+          · rw [if_pos hObs] at h
+            cases h
+            exact Step.abandonObservation hLookup hObs
+          · rw [if_neg hObs] at h; contradiction
   | validateFastLookup readerId =>
       dsimp [apply?] at h
       cases hLookup : s.findFastLookup? readerId with
@@ -288,16 +344,28 @@ theorem apply?_sound
           rw [hLookup] at h
           dsimp at h
           cases hTentative : lookup.stage with
+          | observed => rw [hTentative] at h; contradiction
           | tentative =>
               rw [hTentative] at h
               dsimp at h
-              cases hReg : Registry.apply? s.registry (.beginLookup lookup.token) with
-              | none => rw [hReg] at h; contradiction
-              | some reg' =>
-                  rw [hReg] at h
+              cases hPub : s.findPublication? lookup.token.slot lookup.token.generation with
+              | none => rw [hPub] at h; contradiction
+              | some pub =>
+                  rw [hPub] at h
                   dsimp at h
-                  cases h
-                  exact Step.validateFastLookup hLookup hTentative (Registry.apply?_sound hReg)
+                  cases hLive : pub.state with
+                  | live =>
+                      rw [hLive] at h
+                      dsimp at h
+                      cases hReg : Registry.apply? s.registry (.beginLookup lookup.token) with
+                      | none => rw [hReg] at h; contradiction
+                      | some reg' =>
+                          rw [hReg] at h
+                          dsimp at h
+                          cases h
+                          exact Step.validateFastLookup hLookup hTentative hPub hLive (Registry.apply?_sound hReg)
+                  | closing => rw [hLive] at h; contradiction
+                  | stale => rw [hLive] at h; contradiction
           | validated => rw [hTentative] at h; contradiction
   | rejectTentativeFastLookup readerId =>
       dsimp [apply?] at h
@@ -307,11 +375,20 @@ theorem apply?_sound
           rw [hLookup] at h
           dsimp at h
           cases hTentative : lookup.stage with
+          | observed => rw [hTentative] at h; contradiction
           | tentative =>
               rw [hTentative] at h
               dsimp at h
-              cases h
-              exact Step.rejectTentativeFastLookup hLookup hTentative
+              cases hPub : s.findPublication? lookup.token.slot lookup.token.generation with
+              | none => rw [hPub] at h; contradiction
+              | some pub =>
+                  rw [hPub] at h
+                  dsimp at h
+                  by_cases hNotLive : pub.state ≠ .live
+                  · rw [if_pos hNotLive] at h
+                    cases h
+                    exact Step.rejectTentativeFastLookup hLookup hTentative hPub hNotLive
+                  · rw [if_neg hNotLive] at h; contradiction
           | validated => rw [hTentative] at h; contradiction
   | completeFastLookup readerId =>
       dsimp [apply?] at h
@@ -321,6 +398,7 @@ theorem apply?_sound
           rw [hLookup] at h
           dsimp at h
           cases hValidated : lookup.stage with
+          | observed => rw [hValidated] at h; contradiction
           | tentative => rw [hValidated] at h; contradiction
           | validated =>
               rw [hValidated] at h
@@ -340,17 +418,26 @@ theorem apply?_sound
           rw [hLookup] at h
           dsimp at h
           cases hValidated : lookup.stage with
+          | observed => rw [hValidated] at h; contradiction
           | tentative => rw [hValidated] at h; contradiction
           | validated =>
               rw [hValidated] at h
               dsimp at h
-              cases hReg : Registry.apply? s.registry .endLookup with
-              | none => rw [hReg] at h; contradiction
-              | some reg' =>
-                  rw [hReg] at h
+              cases hPub : s.findPublication? lookup.token.slot lookup.token.generation with
+              | none => rw [hPub] at h; contradiction
+              | some pub =>
+                  rw [hPub] at h
                   dsimp at h
-                  cases h
-                  exact Step.fallbackFastLookup hLookup hValidated (Registry.apply?_sound hReg)
+                  by_cases hNotLive : pub.state ≠ .live
+                  · rw [if_pos hNotLive] at h
+                    cases hReg : Registry.apply? s.registry .endLookup with
+                    | none => rw [hReg] at h; contradiction
+                    | some reg' =>
+                        rw [hReg] at h
+                        dsimp at h
+                        cases h
+                        exact Step.fallbackFastLookup hLookup hValidated hPub hNotLive (Registry.apply?_sound hReg)
+                  · rw [if_neg hNotLive] at h; contradiction
   | beginSlowLookup token =>
       dsimp [apply?] at h
       cases hReg : Registry.apply? s.registry (.beginLookup token) with
@@ -392,7 +479,7 @@ theorem apply?_sound
             rw [hReg] at h
             dsimp at h
             cases h
-            exact Step.finishClose hNoFast (Registry.apply?_sound hReg)
+            exact Step.finishClose hNoFast.1 hNoFast.2 (Registry.apply?_sound hReg)
       · contradiction
 
 theorem apply?_complete
@@ -428,7 +515,7 @@ theorem apply?_complete
       rw [hPub]
       dsimp
       rw [hLive]
-  | beginTentativeFastLookup hNoReader hSnap hSnapGen hPub hAuth hLive =>
+  | beginFastObservation hNoReader hSnap hSnapGen hPub hAuth hLive =>
       dsimp [apply?]
       rw [hNoReader]
       dsimp
@@ -438,29 +525,39 @@ theorem apply?_complete
       rw [if_pos hSnapGen, hPub]
       dsimp
       simp [hLive]
-  | validateFastLookup hLookup hTentative hReg =>
+  | acquireTentativeLease hLookup hObs hNotClosed =>
+      dsimp [apply?]
+      rw [hLookup]
+      dsimp
+      simp [hObs, hNotClosed]
+  | abandonObservation hLookup hObs =>
+      dsimp [apply?]
+      rw [hLookup]
+      dsimp
+      simp [hObs]
+  | validateFastLookup hLookup hTentative hPub hLive hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
       rw [hLookup]
       dsimp
-      simp [hTentative, hRegApp]
-  | rejectTentativeFastLookup hLookup hTentative =>
+      simp [hTentative, hPub, hLive, hRegApp]
+  | rejectTentativeFastLookup hLookup hTentative hPub hNotLive =>
       dsimp [apply?]
       rw [hLookup]
       dsimp
-      simp [hTentative]
+      simp [hTentative, hPub, hNotLive]
   | completeFastLookup hLookup hValidated hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
       rw [hLookup]
       dsimp
       simp [hValidated, hRegApp]
-  | fallbackFastLookup hLookup hValidated hReg =>
+  | fallbackFastLookup hLookup hValidated hPub hNotLive hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
       rw [hLookup]
       dsimp
-      simp [hValidated, hRegApp]
+      simp [hValidated, hPub, hNotLive, hRegApp]
   | beginSlowLookup hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
@@ -473,10 +570,10 @@ theorem apply?_complete
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
       rw [hRegApp]
-  | finishClose hNoFast hReg =>
+  | finishClose hNoTentative hNoValidated hReg =>
       have hRegApp := Registry.apply?_complete hReg
       dsimp [apply?]
-      rw [if_pos hNoFast]
+      rw [if_pos ⟨hNoTentative, hNoValidated⟩]
       rw [hRegApp]
 
 end XlFnFormal.Handle.Registry.Snapshot

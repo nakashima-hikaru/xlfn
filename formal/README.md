@@ -554,18 +554,21 @@ fast-lookup architecture as a refinement layer over the canonical H1 `Registry`
 semantics:
 
 * **Model & Invariants** (`Model.lean`): Tracks `publications`, active
-  `snapshot` slot bindings, and active `fastLookups` (with two stages:
-  `.tentative` and `.validated`) refining `registry`. Invariants preserve
+  `snapshot` slot bindings, and active `fastLookups` (with three stages:
+  `.observed`, `.tentative`, and `.validated`) refining `registry`. Invariants preserve
   publication uniqueness, snapshot uniqueness, fast lookup uniqueness,
   fast lookup provenance, canonical live root correspondence, lease accounting
   (`validatedFastLookups.length ≤ activeLeases`), and closed registry emptiness.
 * **Transitions & Soundness/Completeness** (`Transition.lean`, `Checker.lean`):
   Defines relational `Step` transitions:
-  - `beginTentativeFastLookup`: Reader checks first `Live` state and acquires
-    tentative implementation lease without touching H1 registry.
+  - `beginFastObservation`: Reader observes current snapshot and passes first `Live` check
+    without acquiring a lease or modifying H1 registry (`.observed`).
+  - `acquireTentativeLease`: Reader acquires tentative implementation lease (`.tentative`).
+    If the registry was closed in between, admission is sealed and the reader instead exits
+    via `abandonObservation`.
   - `validateFastLookup`: Reader checks second `Live` state, linearizing to H1
     `beginLookup` and advancing to `.validated`.
-  - `rejectTentativeFastLookup`: If removed before second check, reader observes
+  - `rejectTentativeFastLookup`: If removed or closing before second check, reader observes
     `Stale`/`Closing`, releases tentative lease, and exits without modifying H1.
   - `completeFastLookup` / `fallbackFastLookup`: Linearizes to H1 `endLookup`.
   - `beginSlowLookup`, `endSlowLookup`, `insertFresh`, `insertReuse`, `removeReuse`, `removeRetire`, `closeRegistry`, `finishClose`.
@@ -576,17 +579,24 @@ semantics:
   - *Linearization Point*: Proves the second `Live` state check linearizes
     fast lookups to H1 `beginLookup`; if removed first, tentative lookup is rejected
     without modifying H1 state.
-  - *Lease Accounting & Close Gating*: Proves both tentative and validated fast lookups
-    prevent `finishClose` until all leases are released (`fastLookups = []`).
+  - *Lease Accounting & Close Gating*: Proves tentative and validated fast lookups
+    prevent `finishClose` until all leases are released (`tentative = [] ∧ validated = []`).
+    An `observed` reader is not waited on by close; once close returns and seals admission,
+    its subsequent lease acquisition is rejected.
   - *Slot Reuse ABA Protection*: Proves `stale_lookup_cannot_follow_reused_generation`.
   - *Weak Upgrade Fallback*: Proves fallback drops lease and falls back cleanly
     without assuming unconditional fast success.
 * **Executable Replay Traces** (`Trace.lean`): Proves replay traces for fast
-  lookup success, real remove-before-second-check race linearization, slot reuse ABA
-  protection, and reachable Weak upgrade fallback through `CloseCertified`.
+  lookup success, observation abandonment on close, remove-before-second-check race
+  linearization, slot reuse ABA protection, and reachable Weak upgrade fallback through
+  `CloseCertified`.
 * **Rust Concrete Quiescence & Deterministic Race Regressions** (`crates/xlfn-core/src/handle/`):
   - `HandleLeaseState::seal`: Atomic admission gate with in-flight reservation
     counter ensuring no new independent lookup lease can be admitted after close.
+  - `published_handle_close_after_first_live_rejects_admission_and_returns_closing`:
+    Deterministic 2-thread race using `before_fast_lease_acquire_hook` verifying that
+    a reader paused after first `Live` check encounters sealed admission on resume after
+    close, returning `Err(XllError::Closing)` with 0 leases held.
   - `published_handle_reused_slot_retains_stale_publication_arc`: Verifies
     retained old `Arc<PublishedHandle>` stays `Stale` with dead weak reference.
   - `published_handle_remove_during_lease_acquire_linearizes_as_stale`: Deterministic
