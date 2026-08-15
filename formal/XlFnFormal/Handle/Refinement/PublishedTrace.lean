@@ -1,3 +1,4 @@
+import XlFnFormal.Handle.Refinement.PublishedInvariant
 import XlFnFormal.Handle.Refinement.PublishedSafety
 import XlFnFormal.Handle.Topics.Trace
 
@@ -11,121 +12,191 @@ open XlFnFormal.Handle.Topics
 def fixtureToken : Registry.Token :=
   { session := 0, slot := 0, generation := 1 }
 
-def publishedTopicsPrefix : List Topics.Event :=
-  [.beginPrepare,
-   .beginInitializer fixtureKey 1,
-   .insertPendingFresh fixtureKey 1,
-   .publishVisible fixtureKey 1 fixtureRtdKey,
-   .commitPublication fixtureKey 1,
-   .finishInitializer fixtureKey 1]
+def replacementPublicationToken : Registry.Token :=
+  { session := 0, slot := 0, generation := 2 }
 
-def publishedTopics : Topics.State :=
-  match Topics.replay? (Topics.initialState 0) publishedTopicsPrefix with
-  | some state => state
-  | none => Topics.initialState 0
+def publishedPrefix : List Event :=
+  [.topic .beginPrepare,
+   .topic (.beginInitializer fixtureKey 1),
+   .topic (.insertPendingFresh fixtureKey 1),
+   .topic (.publishVisible fixtureKey 1 fixtureRtdKey),
+   .installProvisional fixtureKey fixtureToken fixtureRtdKey,
+   .commitAndActivate fixtureKey 1 fixtureToken,
+   .topic (.finishInitializer fixtureKey 1),
+   .topic .endPrepare]
 
-def generationTopicsPrefix : List Topics.Event :=
-  [.beginPrepare,
-   .beginInitializer fixtureKey 1,
-   .insertPendingFresh fixtureKey 1,
-   .publishVisible fixtureKey 1 fixtureRtdKey,
-   .claimServer fixtureKey 1,
-   .commitPublication fixtureKey 1,
-   .finishInitializer fixtureKey 1]
-
-def generationTopics : Topics.State :=
-  match Topics.replay? (Topics.initialState 0) generationTopicsPrefix with
-  | some state => state
-  | none => Topics.initialState 0
+def publishedWithConnectionPrefix : List Event :=
+  publishedPrefix ++
+    [.topic (.beginConnection fixtureKey fixtureOwner1),
+     .topic (.commitConnection fixtureKey fixtureOwner1)]
 
 def warmSuccessTrace : List Event :=
-  [.installProvisional fixtureKey fixtureToken fixtureRtdKey,
-   .activatePublication fixtureKey fixtureToken,
-   .beginWarmRead 1 fixtureKey,
-   .finishWarmRead 1]
+  publishedPrefix ++
+    [.topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .finishWarmRead 1,
+     .topic .endPrepare]
 
-def disconnectWarmTrace : List Event :=
-  [.installProvisional fixtureKey fixtureToken fixtureRtdKey,
-   .activatePublication fixtureKey fixtureToken,
-   .beginWarmRead 1 fixtureKey,
-   .invalidatePublication fixtureKey fixtureToken]
+def failWarmReadTrace : List Event :=
+  publishedPrefix ++
+    [.topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .failWarmRead 1,
+     .topic .endPrepare]
 
-def generationTerminationWarmTrace : List Event :=
-  [.installProvisional fixtureKey fixtureToken fixtureRtdKey,
-   .activatePublication fixtureKey fixtureToken,
-   .beginWarmRead 1 fixtureKey,
-   .invalidatePublication fixtureKey fixtureToken]
+def disconnectWarmPrefix : List Event :=
+  publishedWithConnectionPrefix ++
+    [.topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .disconnect fixtureKey fixtureOwner1]
+
+def disconnectCloseTrace : List Event :=
+  disconnectWarmPrefix ++
+    [.abandonWarmRead 1,
+     .topic .endPrepare,
+     .drainPublishedReuse fixtureToken 2,
+     .sealForClose,
+     .closeRegistry,
+     .topic .finishClose]
+
+def generationWarmPrefix : List Event :=
+  publishedPrefix ++
+    [.topic (.claimServer fixtureKey 1),
+     .topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .detachGeneration 1]
+
+def generationTerminationCloseTrace : List Event :=
+  generationWarmPrefix ++
+    [.abandonWarmRead 1,
+     .topic .endPrepare,
+     .drainPublishedReuse fixtureToken 2,
+     .sealForClose,
+     .closeRegistry,
+     .topic .finishClose]
 
 def closeWarmTrace : List Event :=
-  [.installProvisional fixtureKey fixtureToken fixtureRtdKey,
-   .activatePublication fixtureKey fixtureToken,
-   .beginWarmRead 1 fixtureKey,
-   .closePublications,
-   .abandonWarmRead 1,
-   .registryClose]
+  publishedPrefix ++
+    [.topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .sealForClose,
+     .abandonWarmRead 1,
+     .topic .endPrepare,
+     .closeRegistry,
+     .topic .finishClose]
+
+def abaTrace : List Event :=
+  publishedWithConnectionPrefix ++
+    [.topic .beginPrepare,
+     .beginWarmRead 1 fixtureKey,
+     .disconnect fixtureKey fixtureOwner1,
+     .drainPublishedReuse fixtureToken 2,
+     .topic (.beginInitializer fixtureKey 2),
+     .topic (.insertPendingReuse fixtureKey 2 0 2),
+     .topic (.publishVisible fixtureKey 2 fixtureRtdKey),
+     .installProvisional fixtureKey replacementPublicationToken fixtureRtdKey,
+     .commitAndActivate fixtureKey 2 replacementPublicationToken,
+     .topic (.finishInitializer fixtureKey 2)]
+
+def closeCertificate? (s : State) : Bool :=
+  s.topics.runtime.phase == .closed &&
+  s.topics.byKey == [] &&
+  s.topics.byRtdKey == [] &&
+  s.topics.byExcelOwner == [] &&
+  s.topics.initializing == [] &&
+  s.topics.detached == [] &&
+  s.snapshot == [] &&
+  s.warmReads == []
+
+theorem replay_invariant
+    {s t : State} {events : List Event}
+    (hInv : s.Invariant)
+    (hReplay : replay? s events = some t) :
+    t.Invariant := by
+  exact ReplayReachable.invariant_preserved hInv (replay?_sound hReplay)
+
+theorem replay_close_certificate
+    {events : List Event} {s : State}
+    (hReplay : replay? (initialState (Topics.initialState 0)) events = some s)
+    (hClosed : closeCertificate? s = true) :
+    s.Invariant ∧ closeCertificate? s = true := by
+  exact ⟨replay_invariant (initialInvariant (Topics.initial_invariant 0)) hReplay,
+    hClosed⟩
 
 def warmSuccessCertified? : Bool :=
-  match replay? (initialState publishedTopics) warmSuccessTrace with
+  match replay? (initialState (Topics.initialState 0)) warmSuccessTrace with
   | some state =>
+      state.warmReads = [] &&
       (state.findSnapshot? fixtureKey).isSome &&
+      (state.findPublication? fixtureKey fixtureToken).isSome
+  | none => false
+
+def failWarmReadCertified? : Bool :=
+  match replay? (initialState (Topics.initialState 0)) failWarmReadTrace with
+  | some state =>
       state.warmReads = [] &&
       (state.findPublication? fixtureKey fixtureToken).isSome
   | none => false
 
 def closeWarmCertified? : Bool :=
-  match replay? (initialState publishedTopics) closeWarmTrace with
-  | some state =>
-      state.snapshot = [] && state.warmReads = [] &&
-      (state.findPublication? fixtureKey fixtureToken).isSome
+  match replay? (initialState (Topics.initialState 0)) closeWarmTrace with
+  | some state => closeCertificate? state
+  | none => false
+
+def disconnectCloseCertified? : Bool :=
+  match replay? (initialState (Topics.initialState 0)) disconnectCloseTrace with
+  | some state => closeCertificate? state
+  | none => false
+
+def generationTerminationCloseCertified? : Bool :=
+  match replay? (initialState (Topics.initialState 0)) generationTerminationCloseTrace with
+  | some state => closeCertificate? state
   | none => false
 
 theorem warm_success_trace_replays :
     warmSuccessCertified? = true := by
   native_decide
 
-theorem invalidated_warm_reader_cannot_succeed_trace :
-    (replay? (initialState publishedTopics) disconnectWarmTrace).bind
-      (fun state => apply? state (.finishWarmRead 1)) = none := by
-  native_decide
-
-theorem close_warm_reader_cannot_succeed_trace :
-    (replay? (initialState publishedTopics)
-      [.installProvisional fixtureKey fixtureToken fixtureRtdKey,
-       .activatePublication fixtureKey fixtureToken,
-       .beginWarmRead 1 fixtureKey,
-       .closePublications]).bind
-      (fun state => apply? state (.finishWarmRead 1)) = none := by
+theorem warm_observation_failure_trace_replays :
+    failWarmReadCertified? = true := by
   native_decide
 
 theorem close_warm_trace_replays :
     closeWarmCertified? = true := by
   native_decide
 
-theorem terminated_generation_warm_reader_cannot_succeed_trace :
-    (replay? (initialState generationTopics) generationTerminationWarmTrace).bind
+theorem invalidated_warm_reader_cannot_succeed_trace :
+    (replay? (initialState (Topics.initialState 0)) disconnectWarmPrefix).bind
       (fun state => apply? state (.finishWarmRead 1)) = none := by
   native_decide
 
-def oldPublicationToken : Registry.Token :=
-  { session := 0, slot := 0, generation := 1 }
+theorem disconnect_close_trace_replays :
+    disconnectCloseCertified? = true := by
+  native_decide
 
-def replacementPublicationToken : Registry.Token :=
-  { session := 0, slot := 0, generation := 2 }
+theorem terminated_generation_warm_reader_cannot_succeed_trace :
+    (replay? (initialState (Topics.initialState 0)) generationWarmPrefix).bind
+      (fun state => apply? state (.finishWarmRead 1)) = none := by
+  native_decide
 
-def abaState : State :=
-  { topics := Topics.initialState 0
-    publications :=
-      [{ key := fixtureKey, token := oldPublicationToken, rtdKey := fixtureRtdKey,
-         state := .stale },
-       { key := fixtureKey, token := replacementPublicationToken,
-         rtdKey := fixtureRtdKey, state := .live }]
-    snapshot := [{ key := fixtureKey, token := replacementPublicationToken }]
-    warmReads :=
-      [{ id := 1, key := fixtureKey, token := oldPublicationToken,
-         rtdKey := fixtureRtdKey }] }
+theorem generation_termination_close_trace_replays :
+    generationTerminationCloseCertified? = true := by
+  native_decide
 
 theorem stale_reader_cannot_follow_replacement_publication_trace :
-    apply? abaState (.finishWarmRead 1) = none := by
+    (replay? (initialState (Topics.initialState 0)) abaTrace).bind
+      (fun state => apply? state (.finishWarmRead 1)) = none := by
   native_decide
+
+theorem aba_trace_replays :
+    (replay? (initialState (Topics.initialState 0)) abaTrace).isSome = true := by
+  native_decide
+
+theorem aba_trace_preserves_invariant :
+    ∀ state,
+      replay? (initialState (Topics.initialState 0)) abaTrace = some state →
+      state.Invariant := by
+  intro state hReplay
+  exact replay_invariant (initialInvariant (Topics.initial_invariant 0)) hReplay
 
 end XlFnFormal.Handle.Refinement

@@ -491,20 +491,32 @@ generation-termination traces are replayed through `CloseCertified`.
 
 ## Published-topic snapshot refinement: H4.1
 
-`XlFnFormal/Handle/Refinement` models the published-topic fast path separately
-from the canonical H3 topic maps. A `Publication` records one `(key, token)`
-incarnation and its lifecycle state (`provisional`, `live`, `stale`, or
-`closing`); the snapshot map contains only the currently published bindings,
-while a warm reader retains the identity it loaded before observation. This
-keeps publication-object lifetime distinct from snapshot membership and makes
-same-key replacement an explicit ABA boundary.
+`XlFnFormal/Handle/Refinement` models the published-topic fast path as a
+refinement layer over the canonical H3 topic state. A `Publication` records one
+`(key, token)` incarnation and its lifecycle state (`provisional`, `live`,
+`stale`, or `closing`); the snapshot map contains only the currently published
+bindings, while a warm reader retains the identity it loaded before
+observation. This keeps publication-object lifetime distinct from snapshot
+membership and makes same-key replacement an explicit ABA boundary.
 
-The invariant proves publication identity uniqueness, snapshot soundness and
-root liveness, and that every warm reader refers to a known publication. The
-checker has sound and complete per-event validation plus a replay relation.
-Named safety theorems cover successful warm reads, invalidated or closing
-readers, generation termination, same-key replacement, and registry close only
-after warm readers drain. Lean traces cover warm success, disconnect,
-generation termination, close, and same-key ABA. Rust regressions cover a
-warm observation racing generation-wide termination and a warm reader that
-must not follow a recreated publication for the same key.
+The relational H4 `Step` composes H3 `Topics.Step` and
+`Topics.DestructionStep`: provisional installation stutters H3, publication
+activation is combined with H3 `commitPublication`, disconnect and generation
+termination update both layers, and close delegates to H3 `closeRegistry`.
+Warm readers are bounded by H3 `activePrepares`, so prepare entry/exit and
+close quiescence are part of the same reachable state. Observation failure is
+represented by `failWarmRead`; it removes only the reader and leaves a live
+publication intact.
+
+The invariant proves publication identity uniqueness, provisional/live
+canonical soundness, snapshot soundness and root liveness, warm-reader
+provenance, and preservation for every H4 step. The checker has independent
+sound and complete per-event validation against the relational step relation,
+and replay traces are lifted to reachable invariant preservation. Named safety
+theorems cover successful, failed, invalidated, and closing warm reads,
+generation termination, same-key replacement, and registry close only after
+both warm-reader and H3 prepare quiescence. Lean traces cover cold
+publication, warm success/failure, disconnect, generation termination, close,
+and a reachable same-key ABA sequence. Rust regressions cover a warm
+observation racing generation-wide termination and a warm reader that must not
+follow a recreated publication for the same key.

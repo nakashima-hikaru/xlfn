@@ -1,4 +1,4 @@
-import XlFnFormal.Handle.Refinement.PublishedTransition
+import XlFnFormal.Handle.Refinement.PublishedInvariant
 
 set_option autoImplicit false
 set_option linter.unusedVariables false
@@ -29,15 +29,14 @@ theorem check?_sound
   unfold check? at h
   cases hApply : apply? s event with
   | none => simp [hApply] at h
-  | some next => exact ⟨next, hApply⟩
+  | some next => exact ⟨next, apply?_sound hApply⟩
 
 theorem check?_complete
     {s s' : State} {event : Event}
     (h : Step s event s') :
     check? s event = true := by
-  unfold Step at h
-  unfold check?
-  simp [h]
+  have hApply : apply? s event = some s' := apply?_complete h
+  simp [check?, hApply]
 
 theorem replay?_sound
     {s t : State} {events : List Event}
@@ -65,7 +64,17 @@ theorem replay?_complete
   | nil state =>
       rfl
   | @cons state next output event events hStep hTail ih =>
-      change apply? state event = some next at hStep
-      simp [replay?, hStep, ih]
+      have hApply : apply? state event = some next := apply?_complete hStep
+      simp [replay?, hApply, ih]
+
+theorem ReplayReachable.invariant_preserved
+    {s t : State} {events : List Event}
+    (hInv : s.Invariant)
+    (hReach : ReplayReachable s events t) :
+    t.Invariant := by
+  induction hReach with
+  | nil => exact hInv
+  | cons hStep hTail ih =>
+      exact ih (Step.invariant_preserved hInv hStep)
 
 end XlFnFormal.Handle.Refinement

@@ -1230,10 +1230,11 @@ fn warm_observation_does_not_follow_recreated_same_key() {
             observation_started_tx.send(()).unwrap();
             let replacement_token = replacement_ready_rx.recv().unwrap();
             assert_ne!(replacement_token, observed_token);
-            assert!(matches!(
-                observed_runtime.lookup::<DataRecord>(&replacement_token),
-                Ok(_)
-            ));
+            assert!(
+                observed_runtime
+                    .lookup::<DataRecord>(&replacement_token)
+                    .is_ok()
+            );
             Ok(())
         },
     );

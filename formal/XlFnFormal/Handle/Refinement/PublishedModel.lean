@@ -80,6 +80,14 @@ def State.CanonicalTopicFor (s : State) (publication : Publication) : Prop :=
     topic.rtdKey = publication.rtdKey ∧
     topic.stage = .committed
 
+def State.CanonicalTopicForStage
+    (s : State) (publication : Publication) (stage : Topics.TopicStage) : Prop :=
+  ∃ topic ∈ s.topics.byKey,
+    topic.key = publication.key ∧
+    topic.token = publication.token ∧
+    topic.rtdKey = publication.rtdKey ∧
+    topic.stage = stage
+
 def State.canonicalTopic? (s : State) (publication : Publication) : Bool :=
   s.topics.byKey.any (fun topic =>
     topic.key == publication.key &&
@@ -101,6 +109,11 @@ def State.LivePublicationSound (s : State) : Prop :=
   ∀ publication ∈ s.publications,
     publication.state = .live →
       s.CanonicalTopicFor publication
+
+def State.ProvisionalPublicationSound (s : State) : Prop :=
+  ∀ publication ∈ s.publications,
+    publication.state = .provisional →
+      s.CanonicalTopicForStage publication .provisional
 
 def State.LiveSnapshotSound (s : State) : Prop :=
   ∀ binding ∈ s.snapshot,
@@ -139,22 +152,37 @@ def State.WarmReaderReferencesKnownPublication (s : State) : Prop :=
       publication.token = read.token ∧
       publication.rtdKey = read.rtdKey
 
+def State.WarmReadsBound (s : State) : Prop :=
+  s.warmReads.length ≤ s.topics.runtime.activePrepares
+
+def State.WarmReadsBound? (s : State) : Bool :=
+  s.warmReads.length ≤ s.topics.runtime.activePrepares
+
+theorem warmReadsBound?_iff
+    {s : State} :
+    s.WarmReadsBound? = true ↔ s.WarmReadsBound := by
+  simp [State.WarmReadsBound?, State.WarmReadsBound]
+
 def State.Invariant (s : State) : Prop :=
   s.topics.Invariant ∧
   s.PublicationIdentitiesUnique ∧
   s.SnapshotKeysUnique ∧
   s.WarmReadersUnique ∧
   s.LivePublicationSound ∧
+  s.ProvisionalPublicationSound ∧
   s.LiveSnapshotSound ∧
   s.LiveSnapshotRootIsLive ∧
-  s.WarmReaderReferencesKnownPublication
+  s.WarmReaderReferencesKnownPublication ∧
+  s.WarmReadsBound
 
 theorem initialInvariant
     {topics : Topics.State} (hTopics : topics.Invariant) :
     (initialState topics).Invariant := by
   refine ⟨hTopics, List.Pairwise.nil, List.Pairwise.nil, List.Pairwise.nil,
-    ?_, ?_, ?_, ?_⟩
+    ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro publication hMem hLive
+    contradiction
+  · intro publication hMem hProvisional
     contradiction
   · intro binding hMem
     contradiction
@@ -162,5 +190,6 @@ theorem initialInvariant
     contradiction
   · intro read hMem
     contradiction
+  · simp [State.WarmReadsBound, initialState]
 
 end XlFnFormal.Handle.Refinement
