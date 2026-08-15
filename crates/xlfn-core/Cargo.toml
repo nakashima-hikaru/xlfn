@@ -18,8 +18,6 @@ async = [
     "dep:futures-util",
 ]
 bench-internals = []
-# Temporary opt-in for the short-lived handle-prepare decomposition.
-handle-prepare-diagnostics = ["bench-internals"]
 
 [lib]
 bench = false
@@ -38,11 +36,6 @@ required-features = ["bench-internals"]
 name = "handle_prepare"
 harness = false
 required-features = ["bench-internals"]
-
-[[bench]]
-name = "handle_prepare_diagnostics"
-harness = false
-required-features = ["bench-internals", "handle-prepare-diagnostics"]
 
 [[bench]]
 name = "handle_formula"

@@ -87,9 +87,6 @@ bench-fingerprint:
 bench-handle-prepare:
     cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
 
-bench-handle-prepare-diagnostics:
-    cargo bench --package xlfn-core --bench handle_prepare_diagnostics --features "bench-internals handle-prepare-diagnostics" --locked
-
 bench-handle-lookup:
     cargo bench --package xlfn-core --bench handle_lookup --features bench-internals --locked
 
