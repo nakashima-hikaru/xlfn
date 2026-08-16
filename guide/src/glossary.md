@@ -18,7 +18,7 @@
 
 **Formula owner** — The worksheet cell identified by the caller coordinates. It owns the formula binding, but is distinct from the input revision and the underlying handle object.
 
-**Formula revision** — The computation revision identified by a formula owner, stable producer UDF ID, and canonical input fingerprint. Re-evaluation with the same revision reuses the memoized binding and object; a changed revision creates a new one.
+**Formula revision** — The computation revision identified by a formula owner, stable producer UDF ID, and semantic input fingerprint of the converted Rust arguments. Re-evaluation with the same revision reuses the memoized binding and object; a changed revision creates a new one.
 
 **Cancellation guarantee** — The documented strength of cancellation for an async or application operation, such as guaranteed cancellation before start versus best-effort observation after start.
 

@@ -81,8 +81,8 @@ bench-async:
 bench-sync:
     cargo bench --package xlfn-core --bench sync_boundary --features bench-internals --locked
 
-bench-fingerprint:
-    cargo bench --package xlfn-core --bench formula_fingerprint --features bench-internals --locked
+bench-input-identity:
+    cargo bench --package xlfn-core --bench input_identity --features bench-internals --locked
 
 bench-formula-caller:
     cargo bench --package xlfn-core --bench formula_caller --features bench-internals --locked

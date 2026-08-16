@@ -1,24 +1,11 @@
 use super::*;
+use crate::InputFingerprint;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {
     pub(crate) sheet_id: xlfn_sys::IDSHEET,
     pub(crate) row: i32,
     pub(crate) column: i32,
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct InputFingerprint([u8; 32]);
-
-impl InputFingerprint {
-    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

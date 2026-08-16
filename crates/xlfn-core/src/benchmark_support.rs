@@ -293,11 +293,10 @@ impl Drop for SyncBoundaryWorkerPool {
 
 use crate::handle::{
     ExcelHandleObject, FormulaCaller, FormulaRevisionKey, HandleRuntime, HandleTopicKey,
-    InputFingerprint, resolve_formula_caller,
+    resolve_formula_caller,
 };
 use crate::host_callback::HostCallbackSession;
-use smallvec::SmallVec;
-use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
+use crate::{InputFingerprint, OwnedExcelValue};
 
 struct BenchHandleObject {
     _payload: u64,
@@ -453,143 +452,70 @@ impl HandleFormulaBenchCase {
     }
 }
 
-/// XLOPER12 arguments whose backing storage is allocated before measurement.
-///
-/// The raw argument pointer remains valid because the root XLOPER12 lives in a
-/// Box and array/string payloads live in Vec allocations whose addresses do not
-/// change when the owner is moved into the benchmark.
-#[allow(
-    dead_code,
-    reason = "Fields intentionally keep benchmark pointers alive"
-)]
+/// Converted semantic arguments whose identity is measured before the timed
+/// handle lookup.
 struct PreparedFormulaArguments {
-    root: Box<XLOPER12>,
-    string_storage: Option<Vec<u16>>,
-    cell_storage: Option<Vec<XLOPER12>>,
-    raw_args: [*mut XLOPER12; 1],
+    value: OwnedExcelValue,
 }
 
 impl PreparedFormulaArguments {
     fn new(case: HandleFormulaBenchCase) -> Self {
-        let (root, string_storage, cell_storage) = match case {
-            HandleFormulaBenchCase::ScalarNumber => (XLOPER12::number(42.0), None, None),
-            HandleFormulaBenchCase::ShortString => {
-                let mut storage = Vec::with_capacity(6);
-                storage.push(5);
-                storage.extend("short".encode_utf16());
-                let root = XLOPER12 {
-                    value: XLOPER12Value {
-                        string: storage.as_mut_ptr(),
-                    },
-                    xltype: XLTYPE_STR,
-                };
-                (root, Some(storage), None)
-            }
-            HandleFormulaBenchCase::Utf16String32KiB => {
-                let units = 16 * 1024;
-                let mut storage = Vec::with_capacity(units + 1);
-                storage.push(u16::try_from(units).expect("benchmark string fits XLOPER12 length"));
-                storage.extend((0..units).map(|index| (b'a' + (index % 26) as u8) as u16));
-                let root = XLOPER12 {
-                    value: XLOPER12Value {
-                        string: storage.as_mut_ptr(),
-                    },
-                    xltype: XLTYPE_STR,
-                };
-                (root, Some(storage), None)
-            }
+        let value = match case {
+            HandleFormulaBenchCase::ScalarNumber => OwnedExcelValue::Number(42.0),
+            HandleFormulaBenchCase::ShortString => OwnedExcelValue::String("short".to_owned()),
+            HandleFormulaBenchCase::Utf16String32KiB => OwnedExcelValue::String(
+                (0..16 * 1024)
+                    .map(|index| char::from(b'a' + (index % 26) as u8))
+                    .collect(),
+            ),
             HandleFormulaBenchCase::NumericCells10K => Self::numeric_array(10_000),
             HandleFormulaBenchCase::NumericCells100K => Self::numeric_array(100_000),
         };
 
-        let mut root = Box::new(root);
-        let raw_args = [root.as_mut() as *mut XLOPER12];
-        Self {
-            root,
-            string_storage,
-            cell_storage,
-            raw_args,
-        }
+        Self { value }
     }
 
-    fn numeric_array(cells: usize) -> (XLOPER12, Option<Vec<u16>>, Option<Vec<XLOPER12>>) {
-        let mut storage = (0..cells)
-            .map(|index| XLOPER12::number(index as f64))
-            .collect::<Vec<_>>();
+    fn numeric_array(cells: usize) -> OwnedExcelValue {
         let columns = cells.min(10_000);
         let rows = cells.div_ceil(columns);
-        let root = XLOPER12 {
-            value: XLOPER12Value {
-                array: XLOPER12Array {
-                    values: storage.as_mut_ptr(),
-                    rows: i32::try_from(rows).expect("benchmark array fits Excel rows"),
-                    columns: i32::try_from(columns).expect("benchmark array fits Excel columns"),
-                },
-            },
-            xltype: XLTYPE_MULTI,
-        };
-        (root, None, Some(storage))
+        OwnedExcelValue::Matrix(
+            crate::Matrix::new(
+                rows,
+                columns,
+                (0..cells)
+                    .map(|index| OwnedExcelValue::Number(index as f64))
+                    .collect(),
+            )
+            .expect("benchmark matrix dimensions must be valid"),
+        )
     }
 
     pub fn fingerprint(&self) -> [u8; 32] {
-        // SAFETY: `raw_args` points to the root XLOPER12 and its backing storage,
-        // which remain live for the lifetime of `PreparedFormulaArguments`.
-        unsafe { crate::formula_fingerprint::fingerprint(&self.raw_args) }
-            .expect("benchmark XLOPER12 arguments must fingerprint successfully")
+        let mut builder = crate::input_identity::InputFingerprintBuilder::new();
+        builder
+            .record(&self.value)
+            .expect("benchmark semantic argument must fingerprint successfully");
+        builder
+            .finish()
+            .expect("benchmark semantic argument fingerprint must finish")
             .as_bytes()
             .to_owned()
     }
-
-    fn scan_only(&self) -> bool {
-        // SAFETY: `raw_args` points to the root XLOPER12 and its backing storage,
-        // which remain live for the lifetime of `PreparedFormulaArguments`.
-        unsafe { crate::formula_fingerprint::benchmark_scan_only(&self.raw_args) }
-            .expect("benchmark fingerprint scan must succeed")
-    }
-
-    fn encode_no_hash(&self) -> SmallVec<[u8; 256]> {
-        // SAFETY: `raw_args` points to the root XLOPER12 and its backing storage,
-        // which remain live for the lifetime of `PreparedFormulaArguments`.
-        unsafe { crate::formula_fingerprint::benchmark_encode_no_hash(&self.raw_args) }
-            .expect("benchmark fingerprint encoding must succeed")
-    }
 }
 
-pub struct XloperFingerprintBenchmark {
+pub struct InputIdentityBenchmark {
     arguments: PreparedFormulaArguments,
-    encoded: SmallVec<[u8; 256]>,
 }
 
-impl XloperFingerprintBenchmark {
+impl InputIdentityBenchmark {
     pub fn new(case: HandleFormulaBenchCase) -> Self {
-        let arguments = PreparedFormulaArguments::new(case);
-        let encoded = arguments.encode_no_hash();
-        let benchmark = Self { arguments, encoded };
-        assert_eq!(
-            benchmark.run(),
-            benchmark.hash_preencoded(),
-            "preencoded fingerprint must match the current implementation"
-        );
-        benchmark
+        Self {
+            arguments: PreparedFormulaArguments::new(case),
+        }
     }
 
     pub fn run(&self) -> [u8; 32] {
         self.arguments.fingerprint()
-    }
-
-    pub fn scan_only(&self) -> bool {
-        self.arguments.scan_only()
-    }
-
-    pub fn encode_no_hash(&self) -> usize {
-        let encoded = self.arguments.encode_no_hash();
-        let length = encoded.len();
-        std::hint::black_box(&encoded);
-        length
-    }
-
-    pub fn hash_preencoded(&self) -> [u8; 32] {
-        crate::formula_fingerprint::benchmark_hash_preencoded(&self.encoded)
     }
 }
 
@@ -662,14 +588,11 @@ fn formula_revision_key(
     arguments: &PreparedFormulaArguments,
     caller: FormulaCaller,
 ) -> HandleTopicKey {
-    // SAFETY: the root XLOPER12 and all backing storage were allocated before
-    // the benchmark began and remain owned by `arguments` for this call.
-    let inputs = unsafe { crate::formula_fingerprint::fingerprint(&arguments.raw_args) }
-        .expect("benchmark XLOPER12 arguments must fingerprint successfully");
+    let inputs = arguments.fingerprint();
     HandleTopicKey::Formula(FormulaRevisionKey::new(
         caller,
         HANDLE_FORMULA_UDF_ID,
-        inputs,
+        InputFingerprint::from_bytes(inputs),
     ))
 }
 

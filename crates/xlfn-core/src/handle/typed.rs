@@ -1,4 +1,5 @@
 use super::*;
+use crate::{ExcelInputIdentity, InputIdentityEncoder};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -69,6 +70,13 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
+impl<T: ExcelHandleObject> ExcelInputIdentity for Handle<'_, T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.handle-object.v1");
+        encoder.u64(self.object_id.0);
+    }
+}
+
 /// A call-scoped capability that creates a formula binding to an existing
 /// object identity.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
@@ -86,6 +94,7 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
 
 impl<'call, T: ExcelHandleObject> crate::ExcelReturn for HandleAlias<'call, T> {
     type Output = String;
+    const USES_FORMULA_REVISION: bool = true;
 
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         context.publish_existing_alias(|| Ok(self))

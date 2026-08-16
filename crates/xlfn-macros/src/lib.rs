@@ -268,6 +268,11 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .iter()
         .map(|(variant, name)| quote!(Self::#variant => #name))
         .collect::<Vec<_>>();
+    let identity_variants = variants
+        .iter()
+        .enumerate()
+        .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
+        .collect::<Vec<_>>();
     Ok(quote! {
         impl #from_excel_impl_generics #krate::convert::FromExcel<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
@@ -303,6 +308,26 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                     #(#outputs,)*
                 };
                 <&str as #krate::convert::IntoExcelValue>::into_excel_value(__text)
+            }
+        }
+
+        impl #base_impl_generics #krate::convert::ExcelInputIdentity
+            for #ident #type_generics #base_where_clause
+        {
+            fn input_identity(
+                &self,
+                __encoder: &mut #krate::convert::InputIdentityEncoder<'_>,
+            ) {
+                __encoder.domain(concat!(
+                    "xlfn.input.excel-enum.",
+                    module_path!(),
+                    "::",
+                    stringify!(#ident),
+                    ".v1",
+                ).as_bytes());
+                __encoder.u32(match self {
+                    #(#identity_variants,)*
+                });
             }
         }
 
@@ -369,6 +394,7 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
             for #ident #type_generics #where_clause
         {
             type Output = ::std::string::String;
+            const USES_FORMULA_REVISION: bool = true;
 
             fn invoke(
                 __context: &mut #krate::__private::ReturnContext<'_, '_>,
@@ -841,9 +867,8 @@ fn expand_excel_function(
                         // SAFETY: Excel supplies the live XLOPER12 pointer and
                         // raw argument slot for this ABI call.
                         unsafe {
-                            #krate::__private::argument_from_raw_with_context(
-                                __call_scope,
-                                &crate::__XLFN_RUNTIME,
+                            #krate::__private::argument_from_raw_with_arguments(
+                                &__arguments,
                                 #argument,
                                 #raw,
                             )
@@ -883,10 +908,14 @@ fn expand_excel_function(
                         #missing_arm
                         _ => #conversion?,
                     };
+                    #krate::__private::assert_input_identity::<#ty>();
+                    __arguments.record(&#converted)?;
                 }
             } else {
                 quote! {
                     let #converted: #ty = #conversion?;
+                    #krate::__private::assert_input_identity::<#ty>();
+                    __arguments.record(&#converted)?;
                 }
             }
         })
@@ -905,8 +934,14 @@ fn expand_excel_function(
                         __async_handle,
                         |__state, __cancellation| {
                             #krate::__private::with_excel_call_scope(|__call_scope| {
+                                let mut __arguments =
+                                    #krate::__private::ArgumentContext::for_return::<#return_type, _>(
+                                        &crate::__XLFN_RUNTIME,
+                                        __call_scope,
+                                    );
                                 #context_setup
                                 #(#conversions)*
+                                let _ = __arguments.finish()?;
                                 ::core::result::Result::Ok(async move {
                                     #return_assertion
                                     #async_result_expression
@@ -918,7 +953,6 @@ fn expand_excel_function(
             }
         }
     } else {
-        let raw_argument_count = raw_names.len();
         quote! {
             #krate::__private::udf_boundary_named(
                 &crate::__XLFN_RUNTIME,
@@ -926,27 +960,25 @@ fn expand_excel_function(
                 #excel_name,
                 |__state| {
                     #return_assertion
-                    let __raw_arguments:
-                        [*mut #krate::__private::XLOPER12; #raw_argument_count] =
-                        [#(#raw_names),*];
-                    // SAFETY: the raw argument array and runtime belong to
-                    // this Excel ABI invocation.
                     #krate::__private::with_excel_call_scope(|__call_scope| {
-                        let mut __return_context = unsafe {
+                        let mut __arguments =
+                            #krate::__private::ArgumentContext::for_return::<#return_type, _>(
+                                &crate::__XLFN_RUNTIME,
+                                __call_scope,
+                            );
+                        #(#conversions)*
+                        let __inputs = __arguments.finish()?;
+                        let mut __return_context =
                             #krate::__private::ReturnContext::for_call(
                                 &crate::__XLFN_RUNTIME,
                                 #udf_id,
-                                &__raw_arguments,
+                                __inputs,
                                 __call_scope,
-                            )
-                        };
+                            );
+                        #context_setup
                         #krate::convert::ExcelReturn::invoke(
                             &mut __return_context,
-                            || {
-                                #context_setup
-                                #(#conversions)*
-                                ::core::result::Result::Ok(#invocation)
-                            },
+                            || ::core::result::Result::Ok(#invocation),
                         )
                     })
                 },
@@ -1486,7 +1518,7 @@ mod tests {
         .to_string();
         assert!(expanded.contains("volatile : true"));
         assert!(expanded.contains("ExcelReturn :: invoke"));
-        assert!(expanded.contains("argument_from_raw_with_context"));
+        assert!(expanded.contains("argument_from_raw_with_arguments"));
         assert!(expanded.contains("ReturnContext :: for_call"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
@@ -1629,6 +1661,8 @@ mod tests {
         let expanded = expand_excel_enum(input).unwrap().to_string();
         assert!(expanded.contains("eq_ignore_ascii_case"));
         assert!(expanded.contains("FromExcel"));
+        assert!(expanded.contains("ExcelInputIdentity"));
+        assert!(expanded.contains("xlfn.input.excel-enum"));
         assert!(expanded.contains("IntoExcelValue"));
         assert!(expanded.contains("ExcelReturn"));
         assert!(expanded.contains("MainThreadReturn"));
@@ -1852,11 +1886,11 @@ mod tests {
         assert!(expanded.contains("ExcelReturn :: invoke"));
         assert!(expanded.contains("assert_main_thread_return"));
         assert!(expanded.contains("ReturnContext :: for_call"));
-        assert!(expanded.contains("& __raw_arguments"));
+        assert!(expanded.contains("argument_from_raw_with_arguments"));
         assert!(
-            expanded.find("ExcelReturn :: invoke").unwrap()
-                < expanded.find("argument_from_raw_with_context").unwrap(),
-            "formula revision must be established before handle factory evaluation"
+            expanded.find("argument_from_raw_with_arguments").unwrap()
+                < expanded.find("ReturnContext :: for_call").unwrap(),
+            "semantic input identity must be established before handle factory evaluation"
         );
         assert!(!expanded.contains("ExcelHandleReturn"));
         assert!(!expanded.contains("HandleKey"));

@@ -24,7 +24,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `BoundedVarArgs<T, MAX>` | scalar, row, or column | input only; requires `MAX > 0` and enforces the bound |
 | `OwnedExcelValue` | supported scalar, error, blank, missing, or array | intentionally dynamic, owned representation |
 | a type deriving `ExcelEnum` | string | exact or optional ASCII case-insensitive match |
-| a custom `T: FromExcel<'call>` | defined by the implementation | may borrow only for the generated call lifetime |
+| a custom `T: FromExcel<'call> + ExcelInputIdentity` | defined by the implementation | may borrow only for the generated call lifetime; identity is defined from the converted value |
 
 An Excel error supplied where another type is expected is propagated as that Excel error. Ordinary conversions do not ask Excel to coerce strings, booleans, references, or arrays into unrelated types.
 
@@ -39,7 +39,7 @@ The built-in `ExcelReference<'call>` preserves:
 - zero-based row and column bounds;
 - a lifetime tied to the active Excel call.
 
-Reference parameters require macro-sheet capability and are unavailable to async functions. Copy only bounded metadata out of the borrowed value. Use the main-thread reference APIs to coerce or inspect cells when required.
+Reference parameters require macro-sheet capability and are unavailable to async functions. The built-in `ExcelReference<'call>` also defines identity from its sheet and area metadata; custom reference conversion types must define `ExcelInputIdentity` as well. Copy only bounded metadata out of the borrowed value. Use the main-thread reference APIs to coerce or inspect cells when required.
 
 ## Scalar output conversions
 
@@ -116,13 +116,14 @@ Number | Boolean | Integer | String | Error | Blank | Missing | Matrix
 
 ## Custom conversion checklist
 
-For `FromExcel<'call>`:
+For `FromExcel<'call> + ExcelInputIdentity`:
 
 1. inspect only the active `XlValueRef<'_>`;
 2. copy owned data before returning;
 3. use the supplied static argument name in `XllError::Input`;
 4. reject unsupported coercions and non-finite values explicitly;
 5. bound all allocation from workbook-controlled lengths.
+6. implement `ExcelInputIdentity` from the value's observable semantic state, not from temporary Excel pointers or presentation details.
 
 For `ExcelReturn` and `IntoExcelValue`:
 

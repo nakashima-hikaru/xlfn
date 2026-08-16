@@ -8,7 +8,7 @@ A custom input receives a call-scoped `XlValueRef`, the static argument name, an
 
 ```rust
 use xlfn::{
-    convert::{CallContext, XlValueRef, FromExcel},
+    convert::{CallContext, ExcelInputIdentity, FromExcel, InputIdentityEncoder, XlValueRef},
     error::{InputError, XllError, XllResult},
 };
 
@@ -28,11 +28,20 @@ impl<'call> FromExcel<'call> for PositiveRate {
         Ok(Self(rate))
     }
 }
+
+impl ExcelInputIdentity for PositiveRate {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"example.positive-rate.v1");
+        encoder.f64(self.0);
+    }
+}
 ```
 
 The call lifetime is explicit. Owned conversions work for every `'call`; borrowed framework types such as `XlArrayRef<'call>` preserve that exact lifetime. Generated wrappers create a fresh lifetime per call, so Excel-owned memory cannot escape the exported function.
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
+
+Every type used as an Excel-visible parameter must implement both traits. `ExcelInputIdentity` is deliberately separate from conversion so a custom type can state its semantic equality explicitly. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
 
 ## Custom output with `IntoExcelValue`
 

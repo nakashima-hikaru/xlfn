@@ -1,4 +1,6 @@
-use crate::{InputError, XlValueRef, XllError, XllResult};
+use crate::{
+    ExcelInputIdentity, InputError, InputIdentityEncoder, XlValueRef, XllError, XllResult,
+};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -106,6 +108,26 @@ impl ExcelReference<'_> {
 
     pub(crate) fn raw_pointer(&self) -> NonNull<XLOPER12> {
         NonNull::from(self.raw)
+    }
+}
+
+impl ExcelInputIdentity for ExcelReference<'_> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.excel-reference.v1");
+        match self.sheet_id() {
+            Some(sheet_id) => {
+                encoder.tag(1);
+                encoder.u64(sheet_id.get() as u64);
+            }
+            None => encoder.tag(0),
+        }
+        encoder.u64(self.areas().count() as u64);
+        for area in self.areas() {
+            encoder.u64(u64::from(area.first_row()));
+            encoder.u64(u64::from(area.last_row()));
+            encoder.u64(u64::from(area.first_column()));
+            encoder.u64(u64::from(area.last_column()));
+        }
     }
 }
 

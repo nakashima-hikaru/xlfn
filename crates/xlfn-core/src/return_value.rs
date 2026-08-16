@@ -1,3 +1,4 @@
+use crate::InputFingerprint;
 use crate::host_callback::HostCallbackSession;
 use crate::return_storage::ReturnStorage;
 use crate::{
@@ -359,7 +360,7 @@ impl Drop for ReturnFreeGuard {
 pub struct ReturnContext<'call, 'scope> {
     runtime: Option<&'call dyn crate::value::HandleRuntimeProvider>,
     udf_id: Option<&'static str>,
-    raw_arguments: Option<&'call [*mut XLOPER12]>,
+    inputs: Option<InputFingerprint>,
     callbacks: Option<&'scope HostCallbackSession>,
     lifetime: PhantomData<Rc<()>>,
 }
@@ -371,7 +372,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         Self {
             runtime: None,
             udf_id: None,
-            raw_arguments: None,
+            inputs: None,
             callbacks: None,
             lifetime: PhantomData,
         }
@@ -380,20 +381,16 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     /// Creates return services for one generated synchronous UDF call.
     ///
-    /// # Safety
-    ///
-    /// Every pointer in `raw_arguments` must point to a live Excel-owned
-    /// XLOPER12 for `'call`, including any nested payload selected by its type.
-    pub unsafe fn for_call<S>(
+    pub fn for_call<S>(
         runtime: &'call Runtime<S>,
         udf_id: &'static str,
-        raw_arguments: &'call [*mut XLOPER12],
+        inputs: Option<InputFingerprint>,
         scope: &'scope crate::CallScope<'scope>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
             udf_id: Some(udf_id),
-            raw_arguments: Some(raw_arguments),
+            inputs,
             callbacks: Some(scope.callbacks()),
             lifetime: PhantomData,
         }
@@ -424,15 +421,12 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_5544_4649,
         })?;
-        let raw_arguments = self.raw_arguments.ok_or(crate::XllError::Internal {
+        let inputs = self.inputs.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_4449_4745,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_4342_4b53,
         })?;
-        // SAFETY: for_call's contract keeps every argument and nested payload
-        // live for this context's lifetime.
-        let inputs = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;
         let (object_id, object) = operation()?.into_parts();
@@ -454,15 +448,12 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_5544_4649,
         })?;
-        let raw_arguments = self.raw_arguments.ok_or(crate::XllError::Internal {
+        let inputs = self.inputs.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_4449_4745,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
             diagnostic_id: 0x4841_4e44_4342_4b53,
         })?;
-        // SAFETY: for_call's contract keeps every argument and nested payload
-        // live for this context's lifetime.
-        let inputs = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;
         let observer_handles = Arc::clone(&handles);
@@ -1852,26 +1843,8 @@ mod tests {
     #[test]
     fn scalar_returns_do_not_evaluate_input_fingerprints() {
         let runtime: Runtime<()> = Runtime::new();
-        let mut unsupported = xlfn_sys::XLOPER12 {
-            value: xlfn_sys::XLOPER12Value {
-                sref: xlfn_sys::XLOPER12SRef {
-                    count: 1,
-                    reference: xlfn_sys::XLREF12 {
-                        rw_first: 0,
-                        rw_last: 0,
-                        col_first: 0,
-                        col_last: 0,
-                    },
-                },
-            },
-            xltype: xlfn_sys::XLTYPE_SREF,
-        };
-        let raw_arguments = [&mut unsupported as *mut _];
         crate::with_excel_call_scope(|scope| {
-            // SAFETY: unsupported and its inline reference remain live for the
-            // context lifetime. A handle input fingerprint would reject this type.
-            let mut context =
-                unsafe { ReturnContext::for_call(&runtime, "scalar", &raw_arguments, scope) };
+            let mut context = ReturnContext::for_call(&runtime, "scalar", None, scope);
             let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
             assert_eq!(value, 4.5);
         });

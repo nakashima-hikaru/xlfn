@@ -1,4 +1,6 @@
 use super::*;
+use crate::input_identity::InputFingerprintBuilder;
+use crate::{ExcelInputIdentity, InputFingerprint};
 
 fn format_formula_revision_key(
     caller: FormulaCaller,
@@ -30,6 +32,12 @@ where
     T: ExcelHandleObject,
 {
     crate::with_excel_call_scope(|scope| runtime.lookup(scope, token).map(operation))
+}
+
+fn input_identity<T: ExcelInputIdentity>(value: &T) -> InputFingerprint {
+    let mut builder = InputFingerprintBuilder::new();
+    builder.record(value).unwrap();
+    builder.finish().unwrap()
 }
 
 #[derive(serde::Deserialize)]
@@ -951,6 +959,47 @@ fn alias_pin_survives_source_retirement_and_drops_once() {
     runtime.disconnect(1, 4);
     assert_eq!(runtime.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn aliases_of_one_object_have_one_semantic_input_identity() {
+    let runtime = HandleRuntime::new(8);
+    let source_key = test_topic_key("identity-source");
+    let source_rtd_key = source_key.format_rtd_key();
+    let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(91))).unwrap();
+    runtime.connect(1, 5, &source_rtd_key).unwrap();
+
+    let (object_id, object) = crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        source.alias().into_parts()
+    });
+
+    let alias_key = test_topic_key("identity-alias");
+    let alias_rtd_key = alias_key.format_rtd_key();
+    let (alias_token, _) = runtime
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, object, |_, _| Ok(()))
+        .unwrap();
+    runtime.connect(1, 6, &alias_rtd_key).unwrap();
+
+    let other_key = test_topic_key("identity-other");
+    let other_rtd_key = other_key.format_rtd_key();
+    let (other_token, _) = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap();
+    runtime.connect(1, 7, &other_rtd_key).unwrap();
+
+    crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
+        let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
+        assert_eq!(source.object_id, alias.object_id);
+        assert_eq!(input_identity(&source), input_identity(&alias));
+        assert_ne!(source.object_id, other.object_id);
+        assert_ne!(input_identity(&source), input_identity(&other));
+    });
+
+    runtime.disconnect(1, 5);
+    runtime.disconnect(1, 6);
+    runtime.disconnect(1, 7);
+    assert_eq!(runtime.len(), 0);
 }
 
 #[test]

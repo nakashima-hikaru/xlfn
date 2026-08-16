@@ -1,4 +1,7 @@
 use crate::host_callback::HostCallbackSession;
+use crate::input_identity::{
+    ExcelInputIdentity, InputFingerprint, InputFingerprintBuilder, InputIdentityEncoder,
+};
 use crate::return_storage::ReturnStorage;
 use crate::{
     DomainErrorCode, ExcelError, InputError, IntoXllError, ReturnContext, Shape, XllError,
@@ -377,6 +380,96 @@ impl<'call> FromExcel<'call> for XlArrayRef<'call> {
     }
 }
 
+impl ExcelInputIdentity for XlValueRef<'_> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encode_raw_value(*self, false, encoder);
+    }
+}
+
+impl ExcelInputIdentity for XlArrayRef<'_> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.raw.xloper-array.v1");
+        encoder.u64(self.rows as u64);
+        encoder.u64(self.columns as u64);
+        for cell in self.cells.iter() {
+            // SAFETY: XlArrayRef owns a validated borrow of every cell in its
+            // contiguous Excel array for the duration of this call.
+            match unsafe { XlValueRef::from_raw(cell as *const _ as *mut _) } {
+                Ok(value) => encode_raw_value(value, true, encoder),
+                Err(error) => encoder.fail(error),
+            }
+        }
+    }
+}
+
+fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder<'_>) {
+    encoder.domain(b"xlfn.raw.xloper-value.v1");
+    match value.base_type() {
+        XLTYPE_NUM => {
+            encoder.tag(1);
+            // SAFETY: XLTYPE_NUM selects the number union member.
+            encoder.u64(unsafe { value.raw.value.number }.to_bits());
+        }
+        XLTYPE_BOOL => {
+            encoder.tag(2);
+            // SAFETY: XLTYPE_BOOL selects the boolean union member.
+            encoder.u32(unsafe { value.raw.value.boolean } as u32);
+        }
+        XLTYPE_INT => {
+            encoder.tag(3);
+            // SAFETY: XLTYPE_INT selects the integer union member.
+            encoder.i64(unsafe { value.raw.value.integer } as i64);
+        }
+        XLTYPE_STR => {
+            encoder.tag(4);
+            match value.utf16("input_identity") {
+                Ok(text) => {
+                    encoder.u64(text.len() as u64);
+                    for unit in text {
+                        encoder.u32(u32::from(*unit));
+                    }
+                }
+                Err(error) => encoder.fail(error),
+            }
+        }
+        XLTYPE_ERR => {
+            encoder.tag(5);
+            // SAFETY: XLTYPE_ERR selects the error union member.
+            encoder.i64(unsafe { value.raw.value.error } as i64);
+        }
+        XLTYPE_MISSING => encoder.tag(6),
+        XLTYPE_NIL => encoder.tag(7),
+        XLTYPE_MULTI if !nested => match value.array("input_identity") {
+            Ok(array) => {
+                encoder.tag(8);
+                encoder.u64(array.rows as u64);
+                encoder.u64(array.columns as u64);
+                let elements = (array.rows as usize) * (array.columns as usize);
+                for index in 0..elements {
+                    // SAFETY: XlValueRef::array validated the contiguous
+                    // element range and index is within its dimensions.
+                    match unsafe { XlValueRef::from_raw(array.values.add(index)) } {
+                        Ok(element) => encode_raw_value(element, true, encoder),
+                        Err(error) => encoder.fail(error),
+                    }
+                }
+            }
+            Err(error) => encoder.fail(error),
+        },
+        XLTYPE_MULTI => encoder.fail(XllError::input(
+            "input_identity",
+            InputError::Malformed("nested arrays are not supported"),
+        )),
+        actual => encoder.fail(XllError::input(
+            "input_identity",
+            InputError::WrongType {
+                expected: "worksheet value",
+                actual,
+            },
+        )),
+    }
+}
+
 /// Converts a call-scoped Excel value into owned Rust data.
 ///
 /// The input lifetime is deliberately anonymous: an implementation cannot
@@ -406,13 +499,15 @@ pub trait FromExcel<'call>: Sized {
     ) -> XllResult<Self>;
 }
 
+/// A converted Excel argument whose semantic identity can be recorded for a
+/// formula revision.
+pub trait ExcelParameter<'call>: FromExcel<'call> + ExcelInputIdentity {}
+
+impl<'call, T> ExcelParameter<'call> for T where T: FromExcel<'call> + ExcelInputIdentity {}
+
 pub trait IntoExcelValue {
     fn into_excel_value(self) -> XllResult<OwnedExcelValue>;
 }
-
-pub trait ExcelParameter<'call>: FromExcel<'call> {}
-
-impl<'call, T> ExcelParameter<'call> for T where T: FromExcel<'call> {}
 
 pub(crate) trait HandleRuntimeProvider {
     fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>>;
@@ -467,8 +562,54 @@ impl<'call> CallContext<'call> {
     }
 }
 
+/// Call-scoped argument conversion and semantic identity collection.
+///
+/// Conversion always runs before memoization lookup. The identity builder is
+/// allocated only when the return type can publish a formula-owned revision;
+/// ordinary UDFs therefore pay no semantic fingerprinting cost.
+pub struct ArgumentContext<'call> {
+    call: CallContext<'call>,
+    inputs: Option<InputFingerprintBuilder>,
+}
+
+impl<'call> ArgumentContext<'call> {
+    #[doc(hidden)]
+    pub fn for_return<R, S>(
+        runtime: &'call crate::Runtime<S>,
+        scope: &'call CallScope<'call>,
+    ) -> Self
+    where
+        R: ExcelReturn,
+    {
+        Self {
+            call: CallContext::new(runtime, scope),
+            inputs: R::USES_FORMULA_REVISION.then(InputFingerprintBuilder::new),
+        }
+    }
+
+    pub(crate) fn call_context(&self) -> &CallContext<'call> {
+        &self.call
+    }
+
+    #[doc(hidden)]
+    pub fn record<T: ExcelInputIdentity>(&mut self, value: &T) -> XllResult<()> {
+        if let Some(inputs) = &mut self.inputs {
+            inputs.record(value)?;
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn finish(self) -> XllResult<Option<InputFingerprint>> {
+        self.inputs.map(InputFingerprintBuilder::finish).transpose()
+    }
+}
+
 pub trait ExcelReturn: Sized {
     type Output: IntoExcelValue;
+
+    /// Whether this return path publishes a formula revision.
+    const USES_FORMULA_REVISION: bool = false;
 
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output>;
 
@@ -502,6 +643,7 @@ where
     E: IntoXllError,
 {
     type Output = T::Output;
+    const USES_FORMULA_REVISION: bool = T::USES_FORMULA_REVISION;
 
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
         self.map_err(IntoXllError::into_xll_error)?
@@ -555,6 +697,9 @@ where
 
 #[doc(hidden)]
 pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
+
+#[doc(hidden)]
+pub fn assert_input_identity<T: ExcelInputIdentity>() {}
 
 #[doc(hidden)]
 pub fn assert_async_parameter<T>()
@@ -641,6 +786,29 @@ where
         other => other,
     })?;
     T::from_excel(borrowed, argument, &CallContext::new(runtime, _scope))
+}
+
+#[doc(hidden)]
+/// Converts one raw Excel argument and records it in the generated argument
+/// context.
+///
+/// # Safety
+/// The pointer must satisfy `XlValueRef::from_raw` for the duration of the
+/// conversion.
+pub unsafe fn argument_from_raw_with_arguments<'call, T>(
+    arguments: &ArgumentContext<'call>,
+    argument: &'static str,
+    raw: *mut XLOPER12,
+) -> XllResult<T>
+where
+    T: ExcelParameter<'call>,
+{
+    // SAFETY: The generated wrapper forwards Excel's live call argument.
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
+        XllError::Input { reason, .. } => XllError::Input { argument, reason },
+        other => other,
+    })?;
+    T::from_excel(borrowed, argument, arguments.call_context())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -934,6 +1102,179 @@ pub enum OwnedExcelValue {
     Matrix(Matrix<OwnedExcelValue>),
     #[doc(hidden)]
     ArrayOutput(XlArrayOutput),
+}
+
+impl ExcelInputIdentity for f64 {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.f64.v1");
+        encoder.f64(*self);
+    }
+}
+
+impl ExcelInputIdentity for bool {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.bool.v1");
+        encoder.bool(*self);
+    }
+}
+
+impl ExcelInputIdentity for i32 {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.i32.v1");
+        encoder.i64(i64::from(*self));
+    }
+}
+
+impl ExcelInputIdentity for i64 {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.i64.v1");
+        encoder.i64(*self);
+    }
+}
+
+impl ExcelInputIdentity for String {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.string.v1");
+        encoder.string(self);
+    }
+}
+
+impl ExcelInputIdentity for ExcelErrorValue {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.excel-error.v1");
+        encoder.i64(i64::from(self.0.code()));
+    }
+}
+
+impl ExcelInputIdentity for ExcelSerialDate {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.serial-date.v1");
+        encoder.f64(self.serial);
+        encoder.tag(match self.date_system {
+            ExcelDateSystem::Workbook => 0,
+            ExcelDateSystem::Windows1900 => 1,
+            ExcelDateSystem::Mac1904 => 2,
+        });
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for Matrix<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.matrix.v1");
+        encoder.u64(self.rows as u64);
+        encoder.u64(self.columns as u64);
+        for value in &self.data {
+            value.input_identity(encoder);
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for Row<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.row.v1");
+        encoder.u64(self.0.len() as u64);
+        for value in &self.0 {
+            value.input_identity(encoder);
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for Column<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.column.v1");
+        encoder.u64(self.0.len() as u64);
+        for value in &self.0 {
+            value.input_identity(encoder);
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity, const MAX: usize> ExcelInputIdentity for BoundedVarArgs<T, MAX> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.bounded-varargs.v1");
+        encoder.u64(MAX as u64);
+        encoder.u64(self.0.len() as u64);
+        for value in &self.0 {
+            value.input_identity(encoder);
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for Vec<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.vec.v1");
+        encoder.u64(self.len() as u64);
+        for value in self {
+            value.input_identity(encoder);
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for Option<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.option.v1");
+        match self {
+            None => encoder.tag(0),
+            Some(value) => {
+                encoder.tag(1);
+                value.input_identity(encoder);
+            }
+        }
+    }
+}
+
+impl<T: ExcelInputIdentity> ExcelInputIdentity for OptionalExcelValue<T> {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.optional-excel-value.v1");
+        match self {
+            Self::Missing => encoder.tag(0),
+            Self::Blank => encoder.tag(1),
+            Self::Value(value) => {
+                encoder.tag(2);
+                value.input_identity(encoder);
+            }
+        }
+    }
+}
+
+impl ExcelInputIdentity for OwnedExcelValue {
+    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(b"xlfn.input.owned-excel-value.v1");
+        match self {
+            Self::Number(value) => {
+                encoder.tag(0);
+                value.input_identity(encoder);
+            }
+            Self::Boolean(value) => {
+                encoder.tag(1);
+                value.input_identity(encoder);
+            }
+            Self::Integer(value) => {
+                encoder.tag(2);
+                value.input_identity(encoder);
+            }
+            Self::String(value) => {
+                encoder.tag(3);
+                value.input_identity(encoder);
+            }
+            Self::Error(value) => {
+                encoder.tag(4);
+                value.input_identity(encoder);
+            }
+            Self::Missing => encoder.tag(5),
+            Self::Blank => encoder.tag(6),
+            Self::Matrix(value) => {
+                encoder.tag(7);
+                value.input_identity(encoder);
+            }
+            Self::ArrayOutput(value) => {
+                encoder.tag(8);
+                encoder.u64(value.rows as u64);
+                encoder.u64(value.columns as u64);
+                encoder.u64(value.payload_bytes as u64);
+            }
+        }
+    }
 }
 
 /// An Excel array whose cells are already encoded in their final ABI form.
@@ -1890,6 +2231,12 @@ mod tests {
         with_excel_call_scope(|scope| unsafe { argument_from_raw(scope, "arg", raw) })
     }
 
+    fn identity<T: ExcelInputIdentity>(value: &T) -> crate::InputFingerprint {
+        let mut builder = crate::input_identity::InputFingerprintBuilder::new();
+        builder.record(value).unwrap();
+        builder.finish().unwrap()
+    }
+
     #[test]
     fn integer_conversion_checks_fraction_and_range() {
         let mut fractional = XLOPER12::number(1.5);
@@ -2245,6 +2592,42 @@ mod tests {
             assert_eq!(view.get(0, 1).unwrap().as_f64().unwrap(), 2.0);
             assert!(view.get(1, 0).unwrap().as_bool().unwrap());
             assert!(view.get(1, 1).unwrap().is_blank());
+        });
+    }
+
+    #[test]
+    fn raw_array_views_preserve_raw_numeric_bits() {
+        let mut negative_cell = [XLOPER12::number(-0.0)];
+        let mut positive_cell = [XLOPER12::number(0.0)];
+        let mut negative = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: negative_cell.as_mut_ptr(),
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let mut positive = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: positive_cell.as_mut_ptr(),
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+
+        with_excel_call_scope(|scope| {
+            // SAFETY: both arrays and their cells remain live for this scope.
+            let negative_view: XlArrayRef<'_> =
+                unsafe { argument_from_raw(scope, "negative", &mut negative) }.unwrap();
+            // SAFETY: both arrays and their cells remain live for this scope.
+            let positive_view: XlArrayRef<'_> =
+                unsafe { argument_from_raw(scope, "positive", &mut positive) }.unwrap();
+            assert_ne!(identity(&negative_view), identity(&positive_view));
         });
     }
 

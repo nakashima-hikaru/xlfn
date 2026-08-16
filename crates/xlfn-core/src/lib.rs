@@ -44,11 +44,10 @@ mod diagnostics;
 mod error;
 mod execution;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-mod formula_fingerprint;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod handle;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod host_callback;
+mod input_identity;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod lifecycle;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
@@ -94,6 +93,7 @@ pub use execution::{
     CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
 };
 pub use handle::{ExcelHandleObject, Handle, HandleAlias};
+pub use input_identity::{ExcelInputIdentity, InputFingerprint, InputIdentityEncoder};
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
 pub mod ingress;
 pub use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
@@ -127,18 +127,18 @@ pub use subscription::{
 #[doc(hidden)]
 pub use utf16::utf16_eq_ignore_ascii_case;
 pub use value::{
-    AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column, ExcelDateSystem,
-    ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, FromExcel, IntoExcelValue,
-    MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue, Row,
-    ThreadSafeReturn, VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef,
-    XlValueRef,
+    ArgumentContext, AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column,
+    ExcelDateSystem, ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, FromExcel,
+    IntoExcelValue, MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue,
+    OwnedExcelValue, Row, ThreadSafeReturn, VolatileReturn, XlArrayBuilder, XlArrayOutput,
+    XlArrayRef, XlStrRef, XlValueRef,
 };
 #[doc(hidden)]
 pub use value::{
-    argument_from_raw, argument_from_raw_with_context, assert_async_parameter, assert_async_return,
-    assert_excel_parameter, assert_macro_sheet_return, assert_main_thread_return,
-    assert_thread_safe_return, assert_volatile_return, cell_presence_from_raw,
-    with_excel_call_scope,
+    argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
+    assert_async_parameter, assert_async_return, assert_excel_parameter, assert_input_identity,
+    assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
+    assert_volatile_return, cell_presence_from_raw, with_excel_call_scope,
 };
 
 #[cfg(test)]

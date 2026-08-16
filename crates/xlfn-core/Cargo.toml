@@ -49,7 +49,7 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
-name = "formula_fingerprint"
+name = "input_identity"
 harness = false
 required-features = ["bench-internals"]
 
