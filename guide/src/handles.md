@@ -91,7 +91,7 @@ Changing the caller, producer ID, or input fingerprint creates a new formula bin
 
 A live token never changes the object it identifies.
 
-The input fingerprint is a BLAKE3 fingerprint of the converted Rust arguments, bounded to 16 MiB. Each parameter contributes its semantic identity: for example, a `Handle<'_, T>` contributes its `ObjectId`, an enum contributes its normalized variant, and a defaulted argument contributes the value after default conversion. Raw Excel representation is retained only for raw-view parameters such as `XlValueRef` and `XlArrayRef`. The fingerprint distinguishes input revisions for memoization; it is not itself the ownership identity.
+The input fingerprint is a BLAKE3 fingerprint of the converted Rust arguments, bounded to 16 MiB. Each parameter contributes its semantic identity: for example, a `Handle<'_, T>` contributes its `ObjectId`, an enum contributes its normalized variant, and a defaulted argument contributes the value after default conversion. Raw Excel representation is retained only for raw-view parameters such as `XlValueRef` and `XlArrayRef`. Different tokens that alias the same object therefore have the same semantic input identity. The fingerprint distinguishes input revisions for memoization; it is not itself the ownership identity.
 
 The caller portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new formula revision.
 
@@ -110,7 +110,8 @@ fn market() -> Market {
 // OK: changing snapshot_id changes the input fingerprint and revision, creating a new object.
 fn market(snapshot_id: String) -> Market { .. }
 
-// OK: changing the upstream Handle token changes the downstream input fingerprint.
+// OK: changing the underlying upstream object changes the downstream input fingerprint;
+// aliases of the same object retain the same semantic identity.
 fn model(market: Handle<'_, MarketSnapshot>) -> Model { .. }
 ```
 
@@ -126,11 +127,12 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 ```
 
 `HandleAlias<'call, T>` is the only handle return capability. It is an
-identity-only capability: it carries the identity of the underlying object,
-not a snapshot, `Arc`, or `&T`. Publishing it creates a new formula binding
-and token that shares the same underlying `HandleObject`; it does not clone
-the business object. A plain `Handle` cannot be returned, cloned, or retained
-after the call.
+identity-only object capability: it carries the identity of the underlying
+object and may retain a private lifetime pin so that object remains
+publishable until the alias is consumed. It does not expose a snapshot, `Arc`,
+or `&T`. Publishing it creates a new formula binding and token that shares the
+same underlying `HandleObject`; it does not clone the business object. A plain
+`Handle` cannot be returned, cloned, or retained after the call.
 
 ## Lifetime
 

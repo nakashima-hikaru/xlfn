@@ -1,8 +1,8 @@
 use crate::{DomainErrorCode, InputError, XllError, XllResult};
 
 const MAX_INPUT_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
-const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v2\0";
-const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v2\0";
+const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v3\0";
+const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v3\0";
 
 /// The fixed-size semantic identity of one converted Excel argument list.
 #[repr(transparent)]
@@ -21,11 +21,12 @@ impl InputFingerprint {
 
 /// Encodes the semantic identity of one converted Excel argument.
 ///
-/// Implementations of [`ExcelInputIdentity`] should include a stable type
-/// domain and then encode every value that is observable through the Rust
-/// parameter type. The encoder keeps argument-local framing separate from the
-/// root fingerprint, so independently encoded arguments cannot be confused
-/// with one another.
+/// Implementations of [`ExcelInputIdentity`] encode every value that is
+/// observable through the Rust parameter type. The trait's associated domain
+/// is written by [`InputFingerprintBuilder`], so an implementation cannot
+/// accidentally omit its top-level type separator. The encoder keeps
+/// argument-local framing separate from the root fingerprint, so independently
+/// encoded arguments cannot be confused with one another.
 pub struct InputIdentityEncoder<'a> {
     hasher: &'a mut blake3::Hasher,
     bytes: usize,
@@ -41,7 +42,7 @@ impl<'a> InputIdentityEncoder<'a> {
         }
     }
 
-    /// Adds a stable domain separator for the Rust semantic type.
+    /// Adds a nested stable domain separator for a semantic type.
     pub fn domain(&mut self, domain: &[u8]) {
         self.write(domain);
     }
@@ -137,27 +138,50 @@ impl<'a> InputIdentityEncoder<'a> {
 /// Defines which parts of a converted Rust argument participate in formula
 /// revision identity.
 pub trait ExcelInputIdentity {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>);
+    /// Stable domain separator for this semantic Rust type.
+    const IDENTITY_DOMAIN: &'static [u8];
+
+    /// Encodes the value without writing [`Self::IDENTITY_DOMAIN`]. Containers
+    /// use the associated domain to frame their element stream once.
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>);
 }
 
+/// Builds one input fingerprint without allocating a collection of
+/// per-argument digests. The argument count is known by the generated wrapper,
+/// so the root hash can be initialized with its final framing immediately.
 pub(crate) struct InputFingerprintBuilder {
-    arguments: Vec<[u8; 32]>,
+    root: blake3::Hasher,
+    expected_arguments: usize,
+    recorded_arguments: usize,
     bytes: usize,
 }
 
 impl InputFingerprintBuilder {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(expected_arguments: usize) -> Self {
+        let mut root = blake3::Hasher::new();
+        root.update(ROOT_DOMAIN);
+        root.update(&(expected_arguments as u64).to_le_bytes());
         Self {
-            arguments: Vec::new(),
+            root,
+            expected_arguments,
+            recorded_arguments: 0,
             bytes: 0,
         }
     }
 
     pub(crate) fn record<T: ExcelInputIdentity>(&mut self, value: &T) -> XllResult<()> {
+        if self.recorded_arguments >= self.expected_arguments {
+            return Err(XllError::input(
+                "input_identity",
+                InputError::Malformed("too many arguments recorded"),
+            ));
+        }
+
         let mut hasher = blake3::Hasher::new();
         hasher.update(ARGUMENT_DOMAIN);
+        hasher.update(T::IDENTITY_DOMAIN);
         let mut encoder = InputIdentityEncoder::new(&mut hasher);
-        value.input_identity(&mut encoder);
+        value.encode_identity(&mut encoder);
         let encoded_bytes = encoder.bytes_written();
         let digest = encoder.finish()?;
         let actual = self
@@ -176,21 +200,21 @@ impl InputFingerprintBuilder {
             ));
         }
         self.bytes = actual;
-        self.arguments.push(digest);
+        self.root.update(&digest);
+        self.recorded_arguments += 1;
         Ok(())
     }
 
     pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(ROOT_DOMAIN);
-        let argument_count = u64::try_from(self.arguments.len()).map_err(|_| XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })?;
-        hasher.update(&argument_count.to_le_bytes());
-        for argument in self.arguments {
-            hasher.update(&argument);
+        if self.recorded_arguments != self.expected_arguments {
+            return Err(XllError::input(
+                "input_identity",
+                InputError::Malformed("argument count mismatch"),
+            ));
         }
-        Ok(InputFingerprint::from_bytes(*hasher.finalize().as_bytes()))
+        Ok(InputFingerprint::from_bytes(
+            *self.root.finalize().as_bytes(),
+        ))
     }
 }
 
@@ -203,15 +227,16 @@ mod tests {
     struct Pair(u32, u32);
 
     impl ExcelInputIdentity for Pair {
-        fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-            encoder.domain(b"test.pair.v1");
+        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v3";
+
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
             encoder.u32(self.0);
             encoder.u32(self.1);
         }
     }
 
     fn fingerprint<T: ExcelInputIdentity>(values: &[T]) -> InputFingerprint {
-        let mut builder = InputFingerprintBuilder::new();
+        let mut builder = InputFingerprintBuilder::new(values.len());
         for value in values {
             builder.record(value).unwrap();
         }
@@ -242,13 +267,64 @@ mod tests {
     }
 
     #[test]
+    fn container_element_domain_is_encoded_once() {
+        let values = vec![1.0_f64, 2.0, 3.0];
+        let actual = fingerprint(std::slice::from_ref(&values));
+
+        let mut argument = blake3::Hasher::new();
+        argument.update(ARGUMENT_DOMAIN);
+        argument.update(<Vec<f64> as ExcelInputIdentity>::IDENTITY_DOMAIN);
+        let mut encoder = InputIdentityEncoder::new(&mut argument);
+        encoder.domain(f64::IDENTITY_DOMAIN);
+        encoder.u64(values.len() as u64);
+        for value in &values {
+            value.encode_identity(&mut encoder);
+        }
+        let argument_digest = encoder.finish().unwrap();
+
+        let mut root = blake3::Hasher::new();
+        root.update(ROOT_DOMAIN);
+        root.update(&1_u64.to_le_bytes());
+        root.update(&argument_digest);
+        let expected = InputFingerprint::from_bytes(*root.finalize().as_bytes());
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn too_large_identity_is_rejected() {
-        let mut builder = InputFingerprintBuilder::new();
+        let mut builder = InputFingerprintBuilder::new(1);
         let mut hasher = blake3::Hasher::new();
         hasher.update(ARGUMENT_DOMAIN);
+        hasher.update(Pair::IDENTITY_DOMAIN);
         let mut encoder = InputIdentityEncoder::new(&mut hasher);
         encoder.bytes(&vec![0_u8; MAX_INPUT_IDENTITY_BYTES]);
         assert!(matches!(encoder.finish(), Err(XllError::Input { .. })));
         let _ = builder.record(&Pair(1, 2));
+    }
+
+    #[test]
+    fn finish_rejects_an_incomplete_argument_stream() {
+        let builder = InputFingerprintBuilder::new(1);
+        assert!(matches!(
+            builder.finish(),
+            Err(XllError::Input {
+                reason: InputError::Malformed("argument count mismatch"),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn record_rejects_more_arguments_than_the_wrapper_declared() {
+        let mut builder = InputFingerprintBuilder::new(1);
+        builder.record(&Pair(1, 2)).unwrap();
+        assert!(matches!(
+            builder.record(&Pair(3, 4)),
+            Err(XllError::Input {
+                reason: InputError::Malformed("too many arguments recorded"),
+                ..
+            })
+        ));
     }
 }

@@ -71,8 +71,9 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
 }
 
 impl<T: ExcelHandleObject> ExcelInputIdentity for Handle<'_, T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.handle-object.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.u64(self.object_id.0);
     }
 }

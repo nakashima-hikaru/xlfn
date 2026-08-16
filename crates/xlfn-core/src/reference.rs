@@ -112,8 +112,9 @@ impl ExcelReference<'_> {
 }
 
 impl ExcelInputIdentity for ExcelReference<'_> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.excel-reference.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-reference.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         match self.sheet_id() {
             Some(sheet_id) => {
                 encoder.tag(1);

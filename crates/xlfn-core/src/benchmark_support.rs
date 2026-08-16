@@ -491,7 +491,7 @@ impl PreparedFormulaArguments {
     }
 
     pub fn fingerprint(&self) -> [u8; 32] {
-        let mut builder = crate::input_identity::InputFingerprintBuilder::new();
+        let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder
             .record(&self.value)
             .expect("benchmark semantic argument must fingerprint successfully");

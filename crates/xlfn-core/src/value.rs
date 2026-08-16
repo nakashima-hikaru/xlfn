@@ -381,14 +381,18 @@ impl<'call> FromExcel<'call> for XlArrayRef<'call> {
 }
 
 impl ExcelInputIdentity for XlValueRef<'_> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-value.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encode_raw_value(*self, false, encoder);
     }
 }
 
 impl ExcelInputIdentity for XlArrayRef<'_> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.raw.xloper-array.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-array.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(XlValueRef::IDENTITY_DOMAIN);
         encoder.u64(self.rows as u64);
         encoder.u64(self.columns as u64);
         for cell in self.cells.iter() {
@@ -403,7 +407,6 @@ impl ExcelInputIdentity for XlArrayRef<'_> {
 }
 
 fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder<'_>) {
-    encoder.domain(b"xlfn.raw.xloper-value.v1");
     match value.base_type() {
         XLTYPE_NUM => {
             encoder.tag(1);
@@ -577,13 +580,14 @@ impl<'call> ArgumentContext<'call> {
     pub fn for_return<R, S>(
         runtime: &'call crate::Runtime<S>,
         scope: &'call CallScope<'call>,
+        argument_count: usize,
     ) -> Self
     where
         R: ExcelReturn,
     {
         Self {
             call: CallContext::new(runtime, scope),
-            inputs: R::USES_FORMULA_REVISION.then(InputFingerprintBuilder::new),
+            inputs: R::USES_FORMULA_REVISION.then(|| InputFingerprintBuilder::new(argument_count)),
         }
     }
 
@@ -1105,50 +1109,57 @@ pub enum OwnedExcelValue {
 }
 
 impl ExcelInputIdentity for f64 {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.f64.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.f64.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.f64(*self);
     }
 }
 
 impl ExcelInputIdentity for bool {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.bool.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bool.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.bool(*self);
     }
 }
 
 impl ExcelInputIdentity for i32 {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.i32.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i32.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.i64(i64::from(*self));
     }
 }
 
 impl ExcelInputIdentity for i64 {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.i64.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i64.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.i64(*self);
     }
 }
 
 impl ExcelInputIdentity for String {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.string.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.string.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.string(self);
     }
 }
 
 impl ExcelInputIdentity for ExcelErrorValue {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.excel-error.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-error.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.i64(i64::from(self.0.code()));
     }
 }
 
 impl ExcelInputIdentity for ExcelSerialDate {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.serial-date.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.serial-date.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.f64(self.serial);
         encoder.tag(match self.date_system {
             ExcelDateSystem::Workbook => 0,
@@ -1159,113 +1170,128 @@ impl ExcelInputIdentity for ExcelSerialDate {
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for Matrix<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.matrix.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.matrix.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.rows as u64);
         encoder.u64(self.columns as u64);
         for value in &self.data {
-            value.input_identity(encoder);
+            value.encode_identity(encoder);
         }
     }
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for Row<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.row.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.row.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.0.len() as u64);
         for value in &self.0 {
-            value.input_identity(encoder);
+            value.encode_identity(encoder);
         }
     }
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for Column<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.column.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.column.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.0.len() as u64);
         for value in &self.0 {
-            value.input_identity(encoder);
+            value.encode_identity(encoder);
         }
     }
 }
 
 impl<T: ExcelInputIdentity, const MAX: usize> ExcelInputIdentity for BoundedVarArgs<T, MAX> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.bounded-varargs.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bounded-varargs.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(MAX as u64);
         encoder.u64(self.0.len() as u64);
         for value in &self.0 {
-            value.input_identity(encoder);
+            value.encode_identity(encoder);
         }
     }
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for Vec<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.vec.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.vec.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.len() as u64);
         for value in self {
-            value.input_identity(encoder);
+            value.encode_identity(encoder);
         }
     }
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for Option<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.option.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.option.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         match self {
             None => encoder.tag(0),
             Some(value) => {
                 encoder.tag(1);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
         }
     }
 }
 
 impl<T: ExcelInputIdentity> ExcelInputIdentity for OptionalExcelValue<T> {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.optional-excel-value.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.optional-excel-value.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        encoder.domain(T::IDENTITY_DOMAIN);
         match self {
             Self::Missing => encoder.tag(0),
             Self::Blank => encoder.tag(1),
             Self::Value(value) => {
                 encoder.tag(2);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
         }
     }
 }
 
 impl ExcelInputIdentity for OwnedExcelValue {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.input.owned-excel-value.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.owned-excel-value.v3";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         match self {
             Self::Number(value) => {
                 encoder.tag(0);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::Boolean(value) => {
                 encoder.tag(1);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::Integer(value) => {
                 encoder.tag(2);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::String(value) => {
                 encoder.tag(3);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::Error(value) => {
                 encoder.tag(4);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::Missing => encoder.tag(5),
             Self::Blank => encoder.tag(6),
             Self::Matrix(value) => {
                 encoder.tag(7);
-                value.input_identity(encoder);
+                value.encode_identity(encoder);
             }
             Self::ArrayOutput(value) => {
                 encoder.tag(8);
@@ -2232,7 +2258,7 @@ mod tests {
     }
 
     fn identity<T: ExcelInputIdentity>(value: &T) -> crate::InputFingerprint {
-        let mut builder = crate::input_identity::InputFingerprintBuilder::new();
+        let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder.record(value).unwrap();
         builder.finish().unwrap()
     }

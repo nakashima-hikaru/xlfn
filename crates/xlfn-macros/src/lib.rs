@@ -314,17 +314,18 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         impl #base_impl_generics #krate::convert::ExcelInputIdentity
             for #ident #type_generics #base_where_clause
         {
-            fn input_identity(
-                &self,
-                __encoder: &mut #krate::convert::InputIdentityEncoder<'_>,
-            ) {
-                __encoder.domain(concat!(
+            const IDENTITY_DOMAIN: &'static [u8] = concat!(
                     "xlfn.input.excel-enum.",
                     module_path!(),
                     "::",
                     stringify!(#ident),
-                    ".v1",
-                ).as_bytes());
+                    ".v3",
+                ).as_bytes();
+
+            fn encode_identity(
+                &self,
+                __encoder: &mut #krate::convert::InputIdentityEncoder<'_>,
+            ) {
                 __encoder.u32(match self {
                     #(#identity_variants,)*
                 });
@@ -728,6 +729,7 @@ fn expand_excel_function(
     let converted_names = (0..argument_names.len())
         .map(|index| format_ident!("__argument_{index}"))
         .collect::<Vec<_>>();
+    let argument_count = argument_types.len();
     let argument_name_literals = argument_names
         .iter()
         .zip(&argument_options)
@@ -938,6 +940,7 @@ fn expand_excel_function(
                                     #krate::__private::ArgumentContext::for_return::<#return_type, _>(
                                         &crate::__XLFN_RUNTIME,
                                         __call_scope,
+                                        #argument_count,
                                     );
                                 #context_setup
                                 #(#conversions)*
@@ -965,6 +968,7 @@ fn expand_excel_function(
                             #krate::__private::ArgumentContext::for_return::<#return_type, _>(
                                 &crate::__XLFN_RUNTIME,
                                 __call_scope,
+                                #argument_count,
                             );
                         #(#conversions)*
                         let __inputs = __arguments.finish()?;
@@ -1662,7 +1666,12 @@ mod tests {
         assert!(expanded.contains("eq_ignore_ascii_case"));
         assert!(expanded.contains("FromExcel"));
         assert!(expanded.contains("ExcelInputIdentity"));
+        assert!(expanded.contains("IDENTITY_DOMAIN"));
+        assert!(expanded.contains("encode_identity"));
+        assert!(expanded.contains(".v3"));
         assert!(expanded.contains("xlfn.input.excel-enum"));
+        assert!(expanded.contains("__encoder . u32"));
+        assert!(!expanded.contains("__encoder . domain"));
         assert!(expanded.contains("IntoExcelValue"));
         assert!(expanded.contains("ExcelReturn"));
         assert!(expanded.contains("MainThreadReturn"));
@@ -1894,6 +1903,41 @@ mod tests {
         );
         assert!(!expanded.contains("ExcelHandleReturn"));
         assert!(!expanded.contains("HandleKey"));
+    }
+
+    #[test]
+    fn generated_wrapper_records_defaulted_values_after_conversion() {
+        let expanded = expand_excel_function(
+            quote!(name = "TEST.DEFAULT.IDENTITY"),
+            function(quote! {
+                fn defaulted(
+                    #[excel_arg(default = 1.0, blank = "default", missing = "default")]
+                    value: f64,
+                ) -> f64 {
+                    value
+                }
+            }),
+        )
+        .unwrap()
+        .to_string();
+
+        let blank = expanded
+            .find("CellPresence :: Blank => 1.0")
+            .expect("blank default branch must be generated");
+        let missing = expanded
+            .find("CellPresence :: Missing => 1.0")
+            .expect("missing default branch must be generated");
+        let record = expanded
+            .find("__arguments . record (& __argument_0)")
+            .expect("converted value must be recorded for identity");
+        let argument_count = expanded
+            .find("ArgumentContext :: for_return :: < f64 , _ >")
+            .expect("wrapper must initialize argument identity collection");
+
+        assert!(blank < record);
+        assert!(missing < record);
+        assert!(argument_count < record);
+        assert!(expanded.contains("1usize"));
     }
 
     #[test]

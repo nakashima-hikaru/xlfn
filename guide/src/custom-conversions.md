@@ -30,8 +30,9 @@ impl<'call> FromExcel<'call> for PositiveRate {
 }
 
 impl ExcelInputIdentity for PositiveRate {
-    fn input_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"example.positive-rate.v1");
+    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v1";
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.f64(self.0);
     }
 }
@@ -42,6 +43,8 @@ The call lifetime is explicit. Owned conversions work for every `'call`; borrowe
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 
 Every type used as an Excel-visible parameter must implement both traits. `ExcelInputIdentity` is deliberately separate from conversion so a custom type can state its semantic equality explicitly. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
+
+`IDENTITY_DOMAIN` is the stable domain separator for the type. The framework writes it before calling `encode_identity`, so the method must encode only the value payload and must not write the type's top-level domain itself. Container implementations may write an element type's associated domain once before encoding the element stream.
 
 ## Custom output with `IntoExcelValue`
 

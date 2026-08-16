@@ -35,9 +35,21 @@ where
 }
 
 fn input_identity<T: ExcelInputIdentity>(value: &T) -> InputFingerprint {
-    let mut builder = InputFingerprintBuilder::new();
+    let mut builder = InputFingerprintBuilder::new(1);
     builder.record(value).unwrap();
     builder.finish().unwrap()
+}
+
+fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTopicKey {
+    HandleTopicKey::Formula(FormulaRevisionKey::new(
+        FormulaCaller {
+            sheet_id: 0,
+            row: 20,
+            column: 4,
+        },
+        "TEST.SEMANTIC.HANDLE",
+        input_identity(handle),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -1003,6 +1015,116 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
 }
 
 #[test]
+fn semantic_handle_identity_controls_formula_memoization() {
+    let runtime = HandleRuntime::new(16);
+
+    let source_key = test_topic_key("semantic-memo-source");
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .0;
+    let source_rtd_key = source_key.format_rtd_key();
+    runtime.connect(1, 50, &source_rtd_key).unwrap();
+
+    let (object_id, object) = crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        source.alias().into_parts()
+    });
+
+    let alias_key = test_topic_key("semantic-memo-alias");
+    let alias_token = runtime
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, object, |_, _| Ok(()))
+        .unwrap()
+        .0;
+    let alias_rtd_key = alias_key.format_rtd_key();
+    runtime.connect(1, 51, &alias_rtd_key).unwrap();
+
+    let other_key = test_topic_key("semantic-memo-other");
+    let other_token = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap().0;
+    let other_rtd_key = other_key.format_rtd_key();
+    runtime.connect(1, 52, &other_rtd_key).unwrap();
+
+    let (source_revision, alias_revision, other_revision) = crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
+        let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
+        assert_eq!(source.object_id, alias.object_id);
+        (
+            semantic_handle_key(&source),
+            semantic_handle_key(&alias),
+            semantic_handle_key(&other),
+        )
+    });
+
+    assert_eq!(source_revision, alias_revision);
+    assert_ne!(source_revision, other_revision);
+
+    let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first_calls = Arc::clone(&factory_calls);
+    let (token_a, created_a) = runtime
+        .prepare_observed(
+            source_revision,
+            move || {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(700))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(created_a);
+
+    let second_calls = Arc::clone(&factory_calls);
+    let (token_b, created_b) = runtime
+        .prepare_observed(
+            alias_revision,
+            move || {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(701))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(!created_b);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(token_a, token_b);
+    let object_a =
+        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object_id).unwrap();
+    let object_b =
+        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object_id).unwrap();
+    assert_eq!(object_a, object_b);
+
+    let third_calls = Arc::clone(&factory_calls);
+    let (token_c, created_c) = runtime
+        .prepare_observed(
+            other_revision,
+            move || {
+                third_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(702))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(created_c);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    assert_ne!(token_a, token_c);
+    let object_c =
+        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object_id).unwrap();
+    assert_ne!(object_a, object_c);
+
+    for (topic_id, rtd_key) in [
+        (53, source_revision.format_rtd_key()),
+        (55, other_revision.format_rtd_key()),
+    ] {
+        runtime.connect(1, topic_id, &rtd_key).unwrap();
+    }
+
+    for topic_id in [50, 51, 52, 53, 55] {
+        runtime.disconnect(1, topic_id);
+    }
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn failed_rtd_connection_rolls_back_pending_object() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("pending");
@@ -1713,19 +1835,21 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
 fn handle_dependency_chain_propagates_identity_change() {
     let runtime = HandleRuntime::new(16);
 
-    // Upstream: different input fingerprint → different revision key → different token
+    // Upstream: different semantic input fingerprint → different revision key
+    // → different token.
     let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
     let (upstream_a, created) = runtime
         .prepare(upstream_a_key, || Ok(DataRecord(10)))
         .unwrap();
     assert!(created);
 
-    // Downstream uses upstream token as part of its key, simulating
-    // MODEL.CREATE(Handle<'_, Curve>, params). The raw upstream token becomes
-    // part of the input fingerprint, so a different upstream token yields a
-    // different downstream revision key.
-    let downstream_label_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
-    let downstream_key_a = test_topic_key(&downstream_label_a);
+    // Downstream uses the converted upstream Handle as part of its key,
+    // simulating MODEL.CREATE(Handle<'_, Curve>, params). The ObjectId is the
+    // semantic identity, so a different upstream object yields a different
+    // downstream revision key even when the source values are equal.
+    let downstream_key_a =
+        with_handle::<DataRecord, _>(&runtime, &upstream_a, |handle| semantic_handle_key(&handle))
+            .unwrap();
     let (downstream_a, created) = runtime
         .prepare(downstream_key_a, || Ok(DataRecord(100)))
         .unwrap();
@@ -1739,9 +1863,10 @@ fn handle_dependency_chain_propagates_identity_change() {
     assert!(created);
     assert_ne!(upstream_a, upstream_b);
 
-    // Downstream key also changes because the upstream token changed
-    let downstream_label_b = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_b);
-    let downstream_key_b = test_topic_key(&downstream_label_b);
+    // Downstream key also changes because the upstream ObjectId changed.
+    let downstream_key_b =
+        with_handle::<DataRecord, _>(&runtime, &upstream_b, |handle| semantic_handle_key(&handle))
+            .unwrap();
     let (downstream_b, created) = runtime
         .prepare(downstream_key_b, || Ok(DataRecord(200)))
         .unwrap();
