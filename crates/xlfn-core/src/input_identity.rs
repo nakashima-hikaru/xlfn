@@ -1,8 +1,8 @@
-use crate::{DomainErrorCode, InputError, XllError, XllResult};
+use crate::{DomainErrorCode, ExcelParameter, InputError, XllError, XllResult};
 
 const MAX_INPUT_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
-const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v3\0";
-const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v3\0";
+const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v4\0";
+const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v4\0";
 
 /// The fixed-size semantic identity of one converted Excel argument list.
 #[repr(transparent)]
@@ -21,12 +21,12 @@ impl InputFingerprint {
 
 /// Encodes the semantic identity of one converted Excel argument.
 ///
-/// Implementations of [`ExcelInputIdentity`] encode every value that is
-/// observable through the Rust parameter type. The trait's associated domain
-/// is written by [`InputFingerprintBuilder`], so an implementation cannot
-/// accidentally omit its top-level type separator. The encoder keeps
-/// argument-local framing separate from the root fingerprint, so independently
-/// encoded arguments cannot be confused with one another.
+/// Implementations of [`ExcelParameter`] encode every value that is observable
+/// through the Rust parameter type. The trait's associated domain is written
+/// by [`InputFingerprintBuilder`], so an implementation cannot accidentally
+/// omit its top-level type separator. The encoder keeps argument-local framing
+/// separate from the root fingerprint, so independently encoded arguments
+/// cannot be confused with one another.
 pub struct InputIdentityEncoder<'a> {
     hasher: &'a mut blake3::Hasher,
     bytes: usize,
@@ -42,8 +42,10 @@ impl<'a> InputIdentityEncoder<'a> {
         }
     }
 
-    /// Adds a nested stable domain separator for a semantic type.
+    /// Adds a length-prefixed nested stable domain separator for a semantic
+    /// type.
     pub fn domain(&mut self, domain: &[u8]) {
+        self.u64(domain.len() as u64);
         self.write(domain);
     }
 
@@ -135,17 +137,6 @@ impl<'a> InputIdentityEncoder<'a> {
     }
 }
 
-/// Defines which parts of a converted Rust argument participate in formula
-/// revision identity.
-pub trait ExcelInputIdentity {
-    /// Stable domain separator for this semantic Rust type.
-    const IDENTITY_DOMAIN: &'static [u8];
-
-    /// Encodes the value without writing [`Self::IDENTITY_DOMAIN`]. Containers
-    /// use the associated domain to frame their element stream once.
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>);
-}
-
 /// Builds one input fingerprint without allocating a collection of
 /// per-argument digests. The argument count is known by the generated wrapper,
 /// so the root hash can be initialized with its final framing immediately.
@@ -159,6 +150,7 @@ pub(crate) struct InputFingerprintBuilder {
 impl InputFingerprintBuilder {
     pub(crate) fn new(expected_arguments: usize) -> Self {
         let mut root = blake3::Hasher::new();
+        root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
         root.update(ROOT_DOMAIN);
         root.update(&(expected_arguments as u64).to_le_bytes());
         Self {
@@ -169,7 +161,11 @@ impl InputFingerprintBuilder {
         }
     }
 
-    pub(crate) fn record<T: ExcelInputIdentity>(&mut self, value: &T) -> XllResult<()> {
+    pub(crate) fn with_argument<'call, T, R, F>(&mut self, encode: F) -> XllResult<R>
+    where
+        T: ExcelParameter<'call>,
+        F: FnOnce(&mut InputIdentityEncoder<'_>) -> XllResult<R>,
+    {
         if self.recorded_arguments >= self.expected_arguments {
             return Err(XllError::input(
                 "input_identity",
@@ -178,10 +174,10 @@ impl InputFingerprintBuilder {
         }
 
         let mut hasher = blake3::Hasher::new();
-        hasher.update(ARGUMENT_DOMAIN);
-        hasher.update(T::IDENTITY_DOMAIN);
         let mut encoder = InputIdentityEncoder::new(&mut hasher);
-        value.encode_identity(&mut encoder);
+        encoder.domain(ARGUMENT_DOMAIN);
+        encoder.domain(T::IDENTITY_DOMAIN);
+        let value = encode(&mut encoder)?;
         let encoded_bytes = encoder.bytes_written();
         let digest = encoder.finish()?;
         let actual = self
@@ -202,7 +198,7 @@ impl InputFingerprintBuilder {
         self.bytes = actual;
         self.root.update(&digest);
         self.recorded_arguments += 1;
-        Ok(())
+        Ok(value)
     }
 
     pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
@@ -221,13 +217,24 @@ impl InputFingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Matrix, OptionalExcelValue};
+    use crate::{ExcelParameter, Matrix, OptionalExcelValue};
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);
 
-    impl ExcelInputIdentity for Pair {
-        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v3";
+    impl<'call> ExcelParameter<'call> for Pair {
+        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v4";
+
+        fn from_excel(
+            _value: crate::XlValueRef<'call>,
+            _argument: &'static str,
+            _context: &crate::CallContext<'call>,
+        ) -> XllResult<Self> {
+            Err(XllError::input(
+                "test",
+                InputError::Malformed("test-only parameter"),
+            ))
+        }
 
         fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
             encoder.u32(self.0);
@@ -235,10 +242,18 @@ mod tests {
         }
     }
 
-    fn fingerprint<T: ExcelInputIdentity>(values: &[T]) -> InputFingerprint {
+    fn fingerprint<T>(values: &[T]) -> InputFingerprint
+    where
+        T: for<'call> ExcelParameter<'call>,
+    {
         let mut builder = InputFingerprintBuilder::new(values.len());
         for value in values {
-            builder.record(value).unwrap();
+            builder
+                .with_argument::<T, (), _>(|encoder| {
+                    value.encode_identity(encoder);
+                    Ok(())
+                })
+                .unwrap();
         }
         builder.finish().unwrap()
     }
@@ -272,9 +287,9 @@ mod tests {
         let actual = fingerprint(std::slice::from_ref(&values));
 
         let mut argument = blake3::Hasher::new();
-        argument.update(ARGUMENT_DOMAIN);
-        argument.update(<Vec<f64> as ExcelInputIdentity>::IDENTITY_DOMAIN);
         let mut encoder = InputIdentityEncoder::new(&mut argument);
+        encoder.domain(ARGUMENT_DOMAIN);
+        encoder.domain(<Vec<f64> as ExcelParameter<'_>>::IDENTITY_DOMAIN);
         encoder.domain(f64::IDENTITY_DOMAIN);
         encoder.u64(values.len() as u64);
         for value in &values {
@@ -283,6 +298,7 @@ mod tests {
         let argument_digest = encoder.finish().unwrap();
 
         let mut root = blake3::Hasher::new();
+        root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
         root.update(ROOT_DOMAIN);
         root.update(&1_u64.to_le_bytes());
         root.update(&argument_digest);
@@ -292,15 +308,26 @@ mod tests {
     }
 
     #[test]
+    fn domain_framing_separates_namespace_from_payload() {
+        fn digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+            let mut hasher = blake3::Hasher::new();
+            let mut encoder = InputIdentityEncoder::new(&mut hasher);
+            encoder.domain(domain);
+            encoder.bytes(payload);
+            encoder.finish().unwrap()
+        }
+
+        assert_ne!(digest(b"ab", b"c"), digest(b"a", b"bc"));
+    }
+
+    #[test]
     fn too_large_identity_is_rejected() {
         let mut builder = InputFingerprintBuilder::new(1);
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(ARGUMENT_DOMAIN);
-        hasher.update(Pair::IDENTITY_DOMAIN);
-        let mut encoder = InputIdentityEncoder::new(&mut hasher);
-        encoder.bytes(&vec![0_u8; MAX_INPUT_IDENTITY_BYTES]);
-        assert!(matches!(encoder.finish(), Err(XllError::Input { .. })));
-        let _ = builder.record(&Pair(1, 2));
+        let result = builder.with_argument::<Pair, _, _>(|encoder| {
+            encoder.bytes(&vec![0_u8; MAX_INPUT_IDENTITY_BYTES]);
+            Ok(Pair(1, 2))
+        });
+        assert!(matches!(result, Err(XllError::Input { .. })));
     }
 
     #[test]
@@ -318,9 +345,17 @@ mod tests {
     #[test]
     fn record_rejects_more_arguments_than_the_wrapper_declared() {
         let mut builder = InputFingerprintBuilder::new(1);
-        builder.record(&Pair(1, 2)).unwrap();
+        builder
+            .with_argument::<Pair, _, _>(|encoder| {
+                Pair(1, 2).encode_identity(encoder);
+                Ok(Pair(1, 2))
+            })
+            .unwrap();
         assert!(matches!(
-            builder.record(&Pair(3, 4)),
+            builder.with_argument::<Pair, _, _>(|encoder| {
+                Pair(3, 4).encode_identity(encoder);
+                Ok(Pair(3, 4))
+            }),
             Err(XllError::Input {
                 reason: InputError::Malformed("too many arguments recorded"),
                 ..

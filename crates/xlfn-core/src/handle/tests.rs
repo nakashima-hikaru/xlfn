@@ -1,6 +1,6 @@
 use super::*;
 use crate::input_identity::InputFingerprintBuilder;
-use crate::{ExcelInputIdentity, InputFingerprint};
+use crate::{ExcelParameter, InputFingerprint};
 
 fn format_formula_revision_key(
     caller: FormulaCaller,
@@ -34,9 +34,14 @@ where
     crate::with_excel_call_scope(|scope| runtime.lookup(scope, token).map(operation))
 }
 
-fn input_identity<T: ExcelInputIdentity>(value: &T) -> InputFingerprint {
+fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> InputFingerprint {
     let mut builder = InputFingerprintBuilder::new(1);
-    builder.record(value).unwrap();
+    builder
+        .with_argument::<Handle<'call, T>, _, _>(|encoder| {
+            value.encode_identity(encoder);
+            Ok(())
+        })
+        .unwrap();
     builder.finish().unwrap()
 }
 

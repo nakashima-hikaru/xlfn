@@ -91,7 +91,7 @@ Changing the caller, producer ID, or input fingerprint creates a new formula bin
 
 A live token never changes the object it identifies.
 
-The input fingerprint is a BLAKE3 fingerprint of the converted Rust arguments, bounded to 16 MiB. Each parameter contributes its semantic identity: for example, a `Handle<'_, T>` contributes its `ObjectId`, an enum contributes its normalized variant, and a defaulted argument contributes the value after default conversion. Raw Excel representation is retained only for raw-view parameters such as `XlValueRef` and `XlArrayRef`. Different tokens that alias the same object therefore have the same semantic input identity. The fingerprint distinguishes input revisions for memoization; it is not itself the ownership identity.
+The input fingerprint is a BLAKE3 fingerprint of the converted Rust arguments, bounded to 16 MiB. Each ordinary parameter contributes its semantic identity: for example, a `Handle<'_, T>` contributes its `ObjectId`, an enum contributes its normalized variant, and a defaulted argument contributes the value after default conversion. Raw Excel representation is retained only by explicitly raw-view or reference parameters such as `XlArrayRef`. Different tokens that alias the same object therefore have the same semantic input identity. The fingerprint distinguishes input revisions for memoization; it is not itself the ownership identity.
 
 The caller portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new formula revision.
 

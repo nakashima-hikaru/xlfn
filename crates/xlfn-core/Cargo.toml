@@ -39,7 +39,7 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
-name = "handle_formula"
+name = "formula_revision"
 harness = false
 required-features = ["bench-internals"]
 

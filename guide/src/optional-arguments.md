@@ -104,4 +104,4 @@ Adding a new input value is usually backward-compatible. Renaming or removing on
 3. emit a diagnostic or documentation deprecation notice;
 4. remove it only in a planned breaking release.
 
-The derive intentionally rejects aliases with duplicate text. When aliases are required during migration, implement `FromExcel` manually.
+The derive intentionally rejects aliases with duplicate text. When aliases are required during migration, implement `ExcelParameter` manually.

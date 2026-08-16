@@ -26,6 +26,10 @@ jobs:
   benchmark:
     name: Criterion benchmarks
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
     runs-on: windows-2025
     env:
       BENCHER_TESTBED: github-windows-2025

@@ -7,6 +7,7 @@
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
+use crate::ExcelParameter;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
@@ -418,7 +419,7 @@ impl Drop for HandleWarmBenchmark {
 const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
 
 #[derive(Clone, Copy, Debug)]
-pub enum HandleFormulaBenchCase {
+pub enum FormulaRevisionBenchCase {
     ScalarNumber,
     ShortString,
     Utf16String32KiB,
@@ -426,7 +427,7 @@ pub enum HandleFormulaBenchCase {
     NumericCells100K,
 }
 
-impl HandleFormulaBenchCase {
+impl FormulaRevisionBenchCase {
     pub const ALL: [Self; 5] = [
         Self::ScalarNumber,
         Self::ShortString,
@@ -459,17 +460,17 @@ struct PreparedFormulaArguments {
 }
 
 impl PreparedFormulaArguments {
-    fn new(case: HandleFormulaBenchCase) -> Self {
+    fn new(case: FormulaRevisionBenchCase) -> Self {
         let value = match case {
-            HandleFormulaBenchCase::ScalarNumber => OwnedExcelValue::Number(42.0),
-            HandleFormulaBenchCase::ShortString => OwnedExcelValue::String("short".to_owned()),
-            HandleFormulaBenchCase::Utf16String32KiB => OwnedExcelValue::String(
+            FormulaRevisionBenchCase::ScalarNumber => OwnedExcelValue::Number(42.0),
+            FormulaRevisionBenchCase::ShortString => OwnedExcelValue::String("short".to_owned()),
+            FormulaRevisionBenchCase::Utf16String32KiB => OwnedExcelValue::String(
                 (0..16 * 1024)
                     .map(|index| char::from(b'a' + (index % 26) as u8))
                     .collect(),
             ),
-            HandleFormulaBenchCase::NumericCells10K => Self::numeric_array(10_000),
-            HandleFormulaBenchCase::NumericCells100K => Self::numeric_array(100_000),
+            FormulaRevisionBenchCase::NumericCells10K => Self::numeric_array(10_000),
+            FormulaRevisionBenchCase::NumericCells100K => Self::numeric_array(100_000),
         };
 
         Self { value }
@@ -493,7 +494,10 @@ impl PreparedFormulaArguments {
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder
-            .record(&self.value)
+            .with_argument::<OwnedExcelValue, _, _>(|encoder| {
+                self.value.encode_identity(encoder);
+                Ok(())
+            })
             .expect("benchmark semantic argument must fingerprint successfully");
         builder
             .finish()
@@ -508,7 +512,7 @@ pub struct InputIdentityBenchmark {
 }
 
 impl InputIdentityBenchmark {
-    pub fn new(case: HandleFormulaBenchCase) -> Self {
+    pub fn new(case: FormulaRevisionBenchCase) -> Self {
         Self {
             arguments: PreparedFormulaArguments::new(case),
         }
@@ -519,15 +523,15 @@ impl InputIdentityBenchmark {
     }
 }
 
-pub struct HandleFormulaBenchmark {
+pub struct FormulaRevisionBenchmark {
     runtime: Arc<HandleRuntime>,
     arguments: PreparedFormulaArguments,
     caller: FormulaCaller,
     factory_calls: AtomicUsize,
 }
 
-impl HandleFormulaBenchmark {
-    pub fn new(case: HandleFormulaBenchCase) -> Self {
+impl FormulaRevisionBenchmark {
+    pub fn new(case: FormulaRevisionBenchCase) -> Self {
         let arguments = PreparedFormulaArguments::new(case);
         let caller = FormulaCaller {
             sheet_id: 7,
@@ -596,7 +600,7 @@ fn formula_revision_key(
     ))
 }
 
-impl Drop for HandleFormulaBenchmark {
+impl Drop for FormulaRevisionBenchmark {
     fn drop(&mut self) {
         cleanup_handle_runtime(&self.runtime);
     }

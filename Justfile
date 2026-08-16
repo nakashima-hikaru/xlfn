@@ -93,8 +93,8 @@ bench-handle-prepare:
 bench-handle-lookup:
     cargo bench --package xlfn-core --bench handle_lookup --features bench-internals --locked
 
-bench-handle-formula:
-    cargo bench --package xlfn-core --bench handle_formula --features bench-internals --locked
+bench-formula-revision:
+    cargo bench --package xlfn-core --bench formula_revision --features bench-internals --locked
 
 bench-check:
     cargo clippy --package xlfn-core --benches --features "bench-internals async" --locked -- -D warnings

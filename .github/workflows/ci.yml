@@ -277,6 +277,7 @@ jobs:
                   build: true
                   leanchecker: true
                   use-mathlib-cache: false
+                  use-github-cache: false
 
             - name: Build the shutdown trace checker executable
               working-directory: formal

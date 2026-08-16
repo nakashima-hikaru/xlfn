@@ -80,12 +80,11 @@ pub mod context {
 pub mod convert {
     pub use xlfn_core::{
         AsyncReturn, BoundedVarArgs, CallContext, CellPresence, Column, ExcelDateSystem,
-        ExcelErrorValue, ExcelInputIdentity, ExcelParameter, ExcelReference, ExcelReturn,
-        ExcelSerialDate, FromExcel, FromExcelReference, InputFingerprint, InputIdentityEncoder,
-        IntoExcelValue, MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue,
-        OwnedExcelValue, ReferenceArea, ReferenceAreas, ReturnContext, Row, SheetId,
-        ThreadSafeReturn, VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef,
-        XlValueRef,
+        ExcelErrorValue, ExcelParameter, ExcelReference, ExcelReturn, ExcelSerialDate,
+        FromExcelReference, InputFingerprint, InputIdentityEncoder, IntoExcelValue,
+        MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue,
+        ReferenceArea, ReferenceAreas, ReturnContext, Row, SheetId, ThreadSafeReturn,
+        VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef, XlValueRef,
     };
 }
 
@@ -144,9 +143,9 @@ pub mod prelude {
     pub use crate::context::AsyncContext;
     pub use crate::context::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::convert::{
-        BoundedVarArgs, CellPresence, Column, ExcelDateSystem, ExcelErrorValue, ExcelReference,
-        ExcelSerialDate, Matrix, OptionalExcelValue, Row, XlArrayBuilder, XlArrayOutput,
-        XlArrayRef, XlStrRef,
+        BoundedVarArgs, CellPresence, Column, ExcelDateSystem, ExcelErrorValue, ExcelParameter,
+        ExcelReference, ExcelSerialDate, Matrix, OptionalExcelValue, Row, XlArrayBuilder,
+        XlArrayOutput, XlArrayRef, XlStrRef,
     };
     pub use crate::error::{ExcelError, IntoXllError, Shape, XllError, XllResult};
     pub use crate::handle::{ExcelHandleObject, Handle, HandleAlias};
@@ -184,7 +183,7 @@ pub mod __private {
         FunctionVisibility, InvalidAddinId, RegistrationDescriptor, RegistrationFlags,
         RegistrationSignature, ResultAbi, ReturnContext, ReturnFreeBoundaryGuard, Runtime,
         argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
-        assert_async_parameter, assert_async_return, assert_excel_parameter, assert_input_identity,
+        assert_async_parameter, assert_async_return, assert_excel_parameter,
         assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
         assert_volatile_return, cell_presence_from_raw, close_addin, dll_can_unload_now,
         dll_get_class_object, ffi_boundary, ffi_boundary_void, free_return_boundary,
