@@ -8,7 +8,7 @@ use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 const MAX_TRACE_EVENTS: usize = 16_384;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]

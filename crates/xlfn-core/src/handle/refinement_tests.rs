@@ -212,5 +212,5 @@ fn refinement_trace_uses_input_fingerprint_wire_name() {
     let trace = runtime.refinement_trace_json();
     assert!(trace.contains("\"inputFingerprint\""));
     assert!(!trace.contains("\"argumentDigest\""));
-    assert!(trace.contains("\"schema_version\": 3"));
+    assert!(trace.contains("\"schema_version\": 4"));
 }

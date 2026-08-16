@@ -1,5 +1,5 @@
 use crate::{
-    ExcelCallbackValue, FromExcel, InputError, XlValueRef, XllError, XllResult,
+    ExcelCallbackValue, ExcelParameter, InputError, XlValueRef, XllError, XllResult,
     host_callback::HostCallbackSession, return_value::ExcelCallbackStatus,
 };
 use smallvec::SmallVec;
@@ -411,7 +411,9 @@ struct ModuleName {
     units: Vec<u16>,
 }
 
-impl<'call> FromExcel<'call> for ModuleName {
+impl<'call> ExcelParameter<'call> for ModuleName {
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v4";
+
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -430,6 +432,13 @@ impl<'call> FromExcel<'call> for ModuleName {
                 .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))?,
         );
         Ok(Self { path, units })
+    }
+
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder<'_>) {
+        encoder.u64(self.units.len() as u64);
+        for unit in &self.units {
+            encoder.u32(u32::from(*unit));
+        }
     }
 }
 

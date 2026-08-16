@@ -9,7 +9,7 @@ namespace XlFnFormal.Handle.Refinement
 open Lean
 open XlFnFormal.Handle.Topics.Serialization
 
-private def schemaVersion : Nat := 3
+private def schemaVersion : Nat := 4
 
 private def field {α : Type} [FromJson α] (json : Json) (name : String) :
     Except String α :=

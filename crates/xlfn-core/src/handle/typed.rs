@@ -1,5 +1,4 @@
 use super::*;
-use crate::{ExcelInputIdentity, InputIdentityEncoder};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -67,14 +66,6 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
         // published snapshot guard held in this value. The guard is dropped
         // only after this reference is no longer accessible.
         unsafe { self.value.as_ref() }
-    }
-}
-
-impl<T: ExcelHandleObject> ExcelInputIdentity for Handle<'_, T> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v3";
-
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.u64(self.object_id.0);
     }
 }
 

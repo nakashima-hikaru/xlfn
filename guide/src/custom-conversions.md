@@ -2,20 +2,22 @@
 
 The framework's conversion traits let domain types appear directly in worksheet signatures. Keep conversions strict, owned, bounded, and independent of Excel callbacks.
 
-## Custom input with `FromExcel`
+## Custom input with `ExcelParameter`
 
 A custom input receives a call-scoped `XlValueRef`, the static argument name, and a `CallContext`:
 
 ```rust
 use xlfn::{
-    convert::{CallContext, ExcelInputIdentity, FromExcel, InputIdentityEncoder, XlValueRef},
+    convert::{CallContext, ExcelParameter, InputIdentityEncoder, XlValueRef},
     error::{InputError, XllError, XllResult},
 };
 
 #[derive(Clone, Copy)]
 struct PositiveRate(f64);
 
-impl<'call> FromExcel<'call> for PositiveRate {
+impl<'call> ExcelParameter<'call> for PositiveRate {
+    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v4";
+
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -27,10 +29,6 @@ impl<'call> FromExcel<'call> for PositiveRate {
         }
         Ok(Self(rate))
     }
-}
-
-impl ExcelInputIdentity for PositiveRate {
-    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v1";
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
         encoder.f64(self.0);
@@ -42,9 +40,9 @@ The call lifetime is explicit. Owned conversions work for every `'call`; borrowe
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 
-Every type used as an Excel-visible parameter must implement both traits. `ExcelInputIdentity` is deliberately separate from conversion so a custom type can state its semantic equality explicitly. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
+Every type used as an Excel-visible parameter implements one `ExcelParameter` contract. It owns both conversion and semantic equality, so a custom type cannot accidentally omit or separately define its identity. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
 
-`IDENTITY_DOMAIN` is the stable domain separator for the type. The framework writes it before calling `encode_identity`, so the method must encode only the value payload and must not write the type's top-level domain itself. Container implementations may write an element type's associated domain once before encoding the element stream.
+`IDENTITY_DOMAIN` is the stable, length-prefixed domain separator for the type. The framework writes it before calling `encode_identity`, so the method must encode only the value payload and must not write the type's top-level domain itself. Container implementations may write an element type's associated domain once before encoding the element stream. Types with an expensive conversion may override `from_excel_with_identity` to convert and encode in one pass.
 
 ## Custom output with `IntoExcelValue`
 

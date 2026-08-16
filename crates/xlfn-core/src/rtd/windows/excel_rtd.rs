@@ -3,7 +3,7 @@ use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensur
 use crate::handle::HandleRuntime;
 use crate::host_callback::HostCallbackSession;
 use crate::subscription::SubscriptionRuntime;
-use crate::{ExcelCallbackStatus, FromExcel, OwnedExcelValue, RtdValue, XllError, XllResult};
+use crate::{ExcelCallbackStatus, ExcelParameter, OwnedExcelValue, RtdValue, XllError, XllResult};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

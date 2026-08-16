@@ -2,9 +2,9 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
  --> tests/ui/fail/context_attribute_missing.rs:8:17
   |
 8 | fn bad(context: MainThreadContext<'_, '_, State>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ExcelParameter<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
   |
-  = help: the following other types implement trait `FromExcel<'call>`:
+  = help: the following other types implement trait `ExcelParameter<'call>`:
             BoundedVarArgs<T, MAX>
             Column<T>
             ExcelErrorValue
@@ -14,30 +14,6 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
             OptionalExcelValue<T>
             OwnedExcelValue
           and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `ExcelParameter<'_>`
-note: required by a bound in `xlfn::__private::assert_excel_parameter`
- --> $WORKSPACE/crates/xlfn-core/src/value.rs
-  |
-  | pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
-  |                                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
-
-error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: ExcelParameter<'_>` is not satisfied
- --> tests/ui/fail/context_attribute_missing.rs:8:17
-  |
-8 | fn bad(context: MainThreadContext<'_, '_, State>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ExcelInputIdentity` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
-  |
-  = help: the following other types implement trait `ExcelInputIdentity`:
-            BoundedVarArgs<T, MAX>
-            Column<T>
-            ExcelErrorValue
-            ExcelReference<'_>
-            ExcelSerialDate
-            Handle<'_, T>
-            Option<T>
-            OptionalExcelValue<T>
-          and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `ExcelParameter<'_>`
 note: required by a bound in `xlfn::__private::assert_excel_parameter`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |
@@ -48,9 +24,9 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
  --> tests/ui/fail/context_attribute_missing.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.CONTEXT")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ExcelParameter<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
   |
-  = help: the following other types implement trait `FromExcel<'call>`:
+  = help: the following other types implement trait `ExcelParameter<'call>`:
             BoundedVarArgs<T, MAX>
             Column<T>
             ExcelErrorValue
@@ -60,34 +36,6 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
             OptionalExcelValue<T>
             OwnedExcelValue
           and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `ExcelParameter<'_>`
-note: required by a bound in `xlfn::__private::argument_from_raw_with_arguments`
- --> $WORKSPACE/crates/xlfn-core/src/value.rs
-  |
-  | pub unsafe fn argument_from_raw_with_arguments<'call, T>(
-  |               -------------------------------- required by a bound in this function
-...
-  |     T: ExcelParameter<'call>,
-  |        ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `argument_from_raw_with_arguments`
-  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: ExcelParameter<'_>` is not satisfied
- --> tests/ui/fail/context_attribute_missing.rs:7:1
-  |
-7 | #[excel_function(name = "FAIL.CONTEXT")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ExcelInputIdentity` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
-  |
-  = help: the following other types implement trait `ExcelInputIdentity`:
-            BoundedVarArgs<T, MAX>
-            Column<T>
-            ExcelErrorValue
-            ExcelReference<'_>
-            ExcelSerialDate
-            Handle<'_, T>
-            Option<T>
-            OptionalExcelValue<T>
-          and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `ExcelParameter<'_>`
 note: required by a bound in `xlfn::__private::argument_from_raw_with_arguments`
  --> $WORKSPACE/crates/xlfn-core/src/value.rs
   |

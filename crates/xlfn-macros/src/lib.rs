@@ -274,9 +274,17 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
         .collect::<Vec<_>>();
     Ok(quote! {
-        impl #from_excel_impl_generics #krate::convert::FromExcel<'__xlfn_call>
+        impl #from_excel_impl_generics #krate::convert::ExcelParameter<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
         {
+            const IDENTITY_DOMAIN: &'static [u8] = concat!(
+                "xlfn.input.excel-enum.",
+                module_path!(),
+                "::",
+                stringify!(#ident),
+                ".v4",
+            ).as_bytes();
+
             fn from_excel(
                 __value: #krate::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
@@ -296,6 +304,14 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                     ))
                 }
             }
+            fn encode_identity(
+                &self,
+                __encoder: &mut #krate::convert::InputIdentityEncoder<'_>,
+            ) {
+                __encoder.u32(match self {
+                    #(#identity_variants,)*
+                });
+            }
         }
 
         impl #base_impl_generics #krate::convert::IntoExcelValue
@@ -308,27 +324,6 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                     #(#outputs,)*
                 };
                 <&str as #krate::convert::IntoExcelValue>::into_excel_value(__text)
-            }
-        }
-
-        impl #base_impl_generics #krate::convert::ExcelInputIdentity
-            for #ident #type_generics #base_where_clause
-        {
-            const IDENTITY_DOMAIN: &'static [u8] = concat!(
-                    "xlfn.input.excel-enum.",
-                    module_path!(),
-                    "::",
-                    stringify!(#ident),
-                    ".v3",
-                ).as_bytes();
-
-            fn encode_identity(
-                &self,
-                __encoder: &mut #krate::convert::InputIdentityEncoder<'_>,
-            ) {
-                __encoder.u32(match self {
-                    #(#identity_variants,)*
-                });
             }
         }
 
@@ -870,7 +865,7 @@ fn expand_excel_function(
                         // raw argument slot for this ABI call.
                         unsafe {
                             #krate::__private::argument_from_raw_with_arguments(
-                                &__arguments,
+                                &mut __arguments,
                                 #argument,
                                 #raw,
                             )
@@ -910,14 +905,11 @@ fn expand_excel_function(
                         #missing_arm
                         _ => #conversion?,
                     };
-                    #krate::__private::assert_input_identity::<#ty>();
-                    __arguments.record(&#converted)?;
+                    __arguments.record_value(&#converted)?;
                 }
             } else {
                 quote! {
                     let #converted: #ty = #conversion?;
-                    #krate::__private::assert_input_identity::<#ty>();
-                    __arguments.record(&#converted)?;
                 }
             }
         })
@@ -1664,11 +1656,12 @@ mod tests {
         .unwrap();
         let expanded = expand_excel_enum(input).unwrap().to_string();
         assert!(expanded.contains("eq_ignore_ascii_case"));
-        assert!(expanded.contains("FromExcel"));
-        assert!(expanded.contains("ExcelInputIdentity"));
+        assert!(expanded.contains("ExcelParameter"));
+        assert!(!expanded.contains("FromExcel"));
+        assert!(!expanded.contains("ExcelInputIdentity"));
         assert!(expanded.contains("IDENTITY_DOMAIN"));
         assert!(expanded.contains("encode_identity"));
-        assert!(expanded.contains(".v3"));
+        assert!(expanded.contains(".v4"));
         assert!(expanded.contains("xlfn.input.excel-enum"));
         assert!(expanded.contains("__encoder . u32"));
         assert!(!expanded.contains("__encoder . domain"));
@@ -1928,7 +1921,7 @@ mod tests {
             .find("CellPresence :: Missing => 1.0")
             .expect("missing default branch must be generated");
         let record = expanded
-            .find("__arguments . record (& __argument_0)")
+            .find("__arguments . record_value (& __argument_0)")
             .expect("converted value must be recorded for identity");
         let argument_count = expanded
             .find("ArgumentContext :: for_return :: < f64 , _ >")

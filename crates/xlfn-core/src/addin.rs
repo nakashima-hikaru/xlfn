@@ -1,6 +1,6 @@
 use crate::host_callback::HostCallbackSession;
 use crate::{
-    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, FromExcel,
+    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelParameter, ExcelReference,
     IntoXllError, Matrix, OwnedExcelValue, UdfLayer, XllError, XllResult,
 };
 use std::marker::PhantomData;
@@ -291,7 +291,7 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
-        T: for<'value> FromExcel<'value>,
+        T: for<'value> ExcelParameter<'value>,
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.

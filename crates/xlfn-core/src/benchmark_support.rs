@@ -7,6 +7,7 @@
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
+use crate::ExcelParameter;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
@@ -493,7 +494,10 @@ impl PreparedFormulaArguments {
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder
-            .record(&self.value)
+            .with_argument::<OwnedExcelValue, _, _>(|encoder| {
+                self.value.encode_identity(encoder);
+                Ok(())
+            })
             .expect("benchmark semantic argument must fingerprint successfully");
         builder
             .finish()
