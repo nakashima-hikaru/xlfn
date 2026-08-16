@@ -896,6 +896,63 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
 }
 
 #[test]
+fn alias_pin_survives_source_retirement_and_drops_once() {
+    struct DropTracked {
+        value: u32,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ExcelHandleObject for DropTracked {}
+
+    impl Drop for DropTracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = HandleRuntime::new(8);
+    let source_key = test_topic_key("alias-pin-source");
+    let source_rtd_key = source_key.format_rtd_key();
+    let (source_token, _) = runtime
+        .prepare(source_key, || {
+            Ok(DropTracked {
+                value: 73,
+                drops: Arc::clone(&drops),
+            })
+        })
+        .unwrap();
+    runtime.connect(1, 3, &source_rtd_key).unwrap();
+
+    let (object_id, object) = crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
+        source.alias().into_parts()
+    });
+
+    runtime.disconnect(1, 3);
+    assert!(matches!(
+        with_handle::<DropTracked, _>(&runtime, &source_token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    let alias_key = test_topic_key("alias-pin-target");
+    let alias_rtd_key = alias_key.format_rtd_key();
+    let (alias_token, _) = runtime
+        .prepare_observed_alias::<DropTracked, _>(alias_key, object_id, object, |_, _| Ok(()))
+        .unwrap();
+    runtime.connect(1, 4, &alias_rtd_key).unwrap();
+
+    assert_eq!(
+        with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
+        73
+    );
+    runtime.disconnect(1, 4);
+    assert_eq!(runtime.len(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn failed_rtd_connection_rolls_back_pending_object() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("pending");

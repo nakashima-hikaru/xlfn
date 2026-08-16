@@ -71,6 +71,8 @@ impl HandleCleanupState {
 /// binding without cloning the business value. Destruction is centralized here
 /// so consumer handles do not need ownership or cleanup behavior.
 pub(crate) struct HandleObject {
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
     value: ManuallyDrop<Box<dyn Any + Send + Sync>>,
     cleanup: Arc<HandleCleanupState>,
 }
@@ -82,6 +84,8 @@ impl HandleObject {
     {
         let value: Box<dyn Any + Send + Sync> = Box::new(value);
         Arc::new(Self {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
             value: ManuallyDrop::new(value),
             cleanup,
         })
@@ -128,25 +132,15 @@ impl Drop for HandleObject {
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     pub(crate) object_id: ObjectId,
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
     pub(crate) object: Arc<HandleObject>,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(
-        id: HandleId,
-        object_id: ObjectId,
-        type_id: TypeId,
-        type_name: &'static str,
-        object: Arc<HandleObject>,
-    ) -> Self {
+    fn new(id: HandleId, object_id: ObjectId, object: Arc<HandleObject>) -> Self {
         Self {
             id,
             object_id,
-            type_id,
-            type_name,
             object,
             state: AtomicU8::new(BindingState::Live as u8),
         }
@@ -282,8 +276,6 @@ pub(crate) struct BindingSlot {
 /// cold binding creation and tracks when an object has no live bindings left.
 pub(crate) struct ObjectEntry {
     pub(crate) object: Arc<HandleObject>,
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
     pub(crate) bindings: usize,
 }
 
@@ -487,11 +479,22 @@ impl HandleRegistry {
         }
 
         let object = value.as_ref().expect("pending handle object is armed");
+        if object.type_id != TypeId::of::<T>() {
+            let actual_type = object.type_name;
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                tracing::warn!(
+                    expected_type = type_name::<T>(),
+                    actual_type,
+                    "Excel handle object type mismatch"
+                );
+            }));
+            return Err(XllError::InvalidHandle);
+        }
         let object_id = requested_object_id.unwrap_or(ObjectId(state.next_object_id));
         let new_object_id = requested_object_id.is_none();
         let existing_bindings = if let Some(entry) = state.objects.get(&object_id) {
-            if entry.type_id != TypeId::of::<T>() {
-                let actual_type = entry.type_name;
+            if entry.object.type_id != TypeId::of::<T>() {
+                let actual_type = entry.object.type_name;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
                         expected_type = type_name::<T>(),
@@ -558,21 +561,13 @@ impl HandleRegistry {
                     object_id,
                     ObjectEntry {
                         object: Arc::clone(object),
-                        type_id: TypeId::of::<T>(),
-                        type_name: type_name::<T>(),
                         bindings: 1,
                     },
                 );
             }
         }
         let object = value.take().expect("pending handle object is armed");
-        let record = Arc::new(BindingRecord::new(
-            id,
-            object_id,
-            TypeId::of::<T>(),
-            type_name::<T>(),
-            object,
-        ));
+        let record = Arc::new(BindingRecord::new(id, object_id, object));
         state.slots[index].record = Some(Arc::clone(&record));
         self.published.insert(id, record);
         state.live_bindings += 1;
@@ -602,8 +597,8 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        if record.type_id != TypeId::of::<T>() {
-            let actual_type = record.type_name;
+        if record.object.type_id != TypeId::of::<T>() {
+            let actual_type = record.object.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -643,8 +638,8 @@ impl HandleRegistry {
             if !self.is_open() {
                 return Err(XllError::Closing);
             }
-            if record.type_id != TypeId::of::<T>() {
-                let actual_type = record.type_name;
+            if record.object.type_id != TypeId::of::<T>() {
+                let actual_type = record.object.type_name;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
                         expected_type = type_name::<T>(),
@@ -696,8 +691,8 @@ impl HandleRegistry {
             .get(id.slot)
             .filter(|published| Arc::ptr_eq(published, record))
             .ok_or(XllError::StaleHandle)?;
-        if record.type_id != TypeId::of::<T>() {
-            let actual_type = record.type_name;
+        if record.object.type_id != TypeId::of::<T>() {
+            let actual_type = record.object.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -739,7 +734,7 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        if record.type_id != TypeId::of::<T>() {
+        if record.object.type_id != TypeId::of::<T>() {
             return Err(XllError::InvalidHandle);
         }
         if record.object.get::<T>().is_none() {
@@ -925,7 +920,12 @@ impl HandleRegistry {
         );
     }
 
-    pub(crate) fn close(&self) -> XllResult<()> {
+    /// Complete terminal cleanup after the handle runtime has drained calls.
+    ///
+    /// This is intentionally restricted to the `handle` module. Callers must
+    /// go through `HandleRuntime::close`, which establishes the prepare/topic
+    /// drain ordering before reaching this boundary.
+    pub(super) fn close(&self) -> XllResult<()> {
         let previous = self
             .phase
             .swap(HandleRegistryPhase::Closing as u8, Ordering::AcqRel);
