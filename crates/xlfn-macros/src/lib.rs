@@ -282,7 +282,7 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 module_path!(),
                 "::",
                 stringify!(#ident),
-                ".v4",
+                ".v5",
             ).as_bytes();
 
             fn from_excel(
@@ -1661,7 +1661,7 @@ mod tests {
         assert!(!expanded.contains("ExcelInputIdentity"));
         assert!(expanded.contains("IDENTITY_DOMAIN"));
         assert!(expanded.contains("encode_identity"));
-        assert!(expanded.contains(".v4"));
+        assert!(expanded.contains(".v5"));
         assert!(expanded.contains("xlfn.input.excel-enum"));
         assert!(expanded.contains("__encoder . u32"));
         assert!(!expanded.contains("__encoder . domain"));

@@ -412,7 +412,7 @@ struct ModuleName {
 }
 
 impl<'call> ExcelParameter<'call> for ModuleName {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,

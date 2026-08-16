@@ -19,7 +19,6 @@ async = [
     "dep:futures-util",
 ]
 bench-internals = ["xlfn-sys/abi-probe"]
-bench-input-identity-diagnostic = ["bench-internals"]
 
 [lib]
 bench = false
@@ -53,11 +52,6 @@ required-features = ["bench-internals"]
 name = "input_identity"
 harness = false
 required-features = ["bench-internals"]
-
-[[bench]]
-name = "input_identity_diagnostic"
-harness = false
-required-features = ["bench-input-identity-diagnostic"]
 
 [[bench]]
 name = "formula_caller"

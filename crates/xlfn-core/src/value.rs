@@ -369,7 +369,7 @@ impl<'call> XlArrayRef<'call> {
 }
 
 impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-array.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-array.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -380,7 +380,7 @@ impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
     }
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.raw.xloper-value.v4");
+        encoder.domain(b"xlfn.raw.xloper-value.v5");
         encoder.u64(self.rows as u64);
         encoder.u64(self.columns as u64);
         for cell in self.cells.iter() {
@@ -474,7 +474,7 @@ fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIden
 /// struct Escaped(&'static XLOPER12);
 ///
 /// impl<'call> ExcelParameter<'call> for Escaped {
-///     const IDENTITY_DOMAIN: &'static [u8] = b"example.escaped.v4";
+///     const IDENTITY_DOMAIN: &'static [u8] = b"example.escaped.v5";
 ///
 ///     fn from_excel(
 ///         value: XlValueRef<'call>,
@@ -1464,7 +1464,7 @@ impl IntoExcelValue for XlArrayOutput {
 }
 
 impl<'call> ExcelParameter<'call> for f64 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.f64.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.f64.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1490,7 +1490,7 @@ impl<'call> ExcelParameter<'call> for f64 {
 }
 
 impl<'call> ExcelParameter<'call> for bool {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bool.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bool.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1529,7 +1529,7 @@ fn number_to_integer<T>(
 }
 
 impl<'call> ExcelParameter<'call> for i32 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i32.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i32.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1557,7 +1557,7 @@ impl<'call> ExcelParameter<'call> for i32 {
 }
 
 impl<'call> ExcelParameter<'call> for i64 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i64.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i64.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1586,7 +1586,7 @@ impl<'call> ExcelParameter<'call> for i64 {
 }
 
 impl<'call> ExcelParameter<'call> for String {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.string.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.string.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1606,7 +1606,7 @@ impl<'call, T> ExcelParameter<'call> for crate::Handle<'call, T>
 where
     T: crate::handle::ExcelHandleObject,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1623,7 +1623,7 @@ where
 }
 
 impl<'call> ExcelParameter<'call> for ExcelErrorValue {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-error.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-error.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1649,7 +1649,7 @@ impl<'call, T> ExcelParameter<'call> for OptionalExcelValue<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.optional-excel-value.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.optional-excel-value.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1714,7 +1714,7 @@ impl<'call, T> ExcelParameter<'call> for Option<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.option.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.option.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1767,7 +1767,7 @@ where
 }
 
 impl<'call> ExcelParameter<'call> for ExcelSerialDate {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.serial-date.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.serial-date.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1883,7 +1883,7 @@ impl<'call, T> ExcelParameter<'call> for Matrix<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.matrix.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.matrix.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1916,7 +1916,7 @@ impl<'call, T> ExcelParameter<'call> for Vec<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.vec.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.vec.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1952,7 +1952,7 @@ impl<'call, T, const MAX: usize> ExcelParameter<'call> for BoundedVarArgs<T, MAX
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bounded-varargs.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bounded-varargs.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1996,7 +1996,7 @@ where
 }
 
 impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.row.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.row.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2029,7 +2029,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
 }
 
 impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.column.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.column.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2062,7 +2062,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
 }
 
 impl<'call> ExcelParameter<'call> for OwnedExcelValue {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.owned-excel-value.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.owned-excel-value.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2580,7 +2580,7 @@ mod tests {
     fn bounded_varargs_rejects_oversized_input_before_converting_elements() {
         struct PanicOnConvert;
         impl<'call> ExcelParameter<'call> for PanicOnConvert {
-            const IDENTITY_DOMAIN: &'static [u8] = b"test.panic-on-convert.v4";
+            const IDENTITY_DOMAIN: &'static [u8] = b"test.panic-on-convert.v5";
 
             fn from_excel(
                 _value: XlValueRef<'call>,
@@ -2672,7 +2672,7 @@ mod tests {
         struct FiniteNumber(f64);
 
         impl<'call> ExcelParameter<'call> for FiniteNumber {
-            const IDENTITY_DOMAIN: &'static [u8] = b"test.finite-number.v4";
+            const IDENTITY_DOMAIN: &'static [u8] = b"test.finite-number.v5";
 
             fn from_excel(
                 value: XlValueRef<'call>,

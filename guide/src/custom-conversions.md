@@ -16,7 +16,7 @@ use xlfn::{
 struct PositiveRate(f64);
 
 impl<'call> ExcelParameter<'call> for PositiveRate {
-    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v4";
+    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v5";
 
     fn from_excel(
         value: XlValueRef<'call>,
