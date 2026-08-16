@@ -98,7 +98,7 @@ def hexByte (value : UInt8) : ByteString :=
 def formatDigest (digest : Vector UInt8 32) : ByteString :=
   digest.toList.flatMap hexByte
 
-def formatRtdKey (key : FormulaTopicKeyWire) : ByteString :=
+def formatRtdKey (key : FormulaRevisionKeyWire) : ByteString :=
   decimalNatBytes key.sheetId ++
     [separator] ++
     decimalIntBytes key.row ++
@@ -107,6 +107,6 @@ def formatRtdKey (key : FormulaTopicKeyWire) : ByteString :=
     [separator] ++
     key.udfId ++
     [separator] ++
-    formatDigest key.argumentDigest
+    formatDigest key.inputFingerprint
 
 end XlFnFormal.Handle.Topics.Serialization

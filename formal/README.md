@@ -258,7 +258,7 @@ non-reuse across sequential allocations.
 
 `XlFnFormal/Handle/Topics/Serialization` models the concrete RTD wire identity:
 
-- Formats `(sheetId, row, col, udfId, argDigest)` into canonical decimal/hex fields separated by `0x1f`.
+- Formats `(sheetId, row, col, udfId, inputFingerprint)` into canonical decimal/hex fields separated by `0x1f`.
 - Proves UTF-8 validity preservation, `parse_format_roundtrip`, `parseCanonical_sound`, and `format_injective`.
 - Golden vectors (`fixtures/topics/serialization-golden.json`) are shared directly between Rust and Lean CI checks.
 

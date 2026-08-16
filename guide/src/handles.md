@@ -83,23 +83,23 @@ No `handle` argument attribute is required. Ordinary Rust trait resolution ident
 
 ## Re-evaluation semantics
 
-Handle-producing functions are memoized by formula identity.
+Handle-producing functions are memoized by formula revision.
 
-Recalculation with the same caller, function identity, and arguments reuses the existing formula binding and handle object without invoking the producer again.
+The worksheet cell is the formula owner. A revision is identified by that caller, the stable producer UDF ID, and an input fingerprint. Recalculation with the same revision reuses the existing formula binding and handle object without invoking the producer again.
 
-Changing any part of formula identity creates a new formula binding, object, and token.
+Changing the caller, producer ID, or input fingerprint creates a new formula binding, object, and token.
 
 A live token never changes the object it identifies.
 
-A formula identity includes the caller sheet/cell, stable UDF ID, and a canonical fingerprint of raw arguments. The fingerprint is streamed through BLAKE3 and is bounded to 16 MiB.
+The input fingerprint is a canonical fingerprint of the raw Excel arguments. It is streamed through BLAKE3 and bounded to 16 MiB. It distinguishes input revisions for memoization; it is not itself the ownership identity.
 
-The caller sheet portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new handle identity.
+The caller portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new formula revision.
 
-Changing the caller, function ID, or arguments creates a different formula identity. A producer must be deterministic: its output must depend only on its Excel-visible inputs and stable application state explicitly represented by those inputs.
+Changing the caller, function ID, or arguments creates a different formula revision. A producer must be deterministic: its output must depend only on its Excel-visible inputs and stable application state explicitly represented by those inputs.
 
 ### External state and dependency design
 
-Because the producer runs at most once per formula identity, reading hidden mutable state inside the producer does not produce automatic updates when that state changes. Make varying state an explicit Excel-visible dependency:
+Because the producer runs at most once per formula revision, reading hidden mutable state inside the producer does not produce automatic updates when that state changes. Make varying state an explicit Excel-visible dependency:
 
 ```rust
 // NG: hidden mutable state is read but never triggers re-evaluation.
@@ -107,10 +107,10 @@ fn market() -> Market {
     database.load_latest()
 }
 
-// OK: changing snapshot_id changes formula identity, creating a new object.
+// OK: changing snapshot_id changes the input fingerprint and revision, creating a new object.
 fn market(snapshot_id: String) -> Market { .. }
 
-// OK: changing the upstream Handle token changes the downstream fingerprint.
+// OK: changing the upstream Handle token changes the downstream input fingerprint.
 fn model(market: Handle<'_, MarketSnapshot>) -> Model { .. }
 ```
 

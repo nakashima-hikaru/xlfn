@@ -27,21 +27,21 @@ def IsI32 (value : Int) : Prop :=
 def IsUtf8 (bytes : ByteString) : Prop :=
   ByteArray.validateUTF8 bytes.toByteArray = true
 
-structure FormulaTopicKeyWire where
+structure FormulaRevisionKeyWire where
   sheetId : Nat
   row : Int
   column : Int
   udfId : ByteString
-  argumentDigest : Vector UInt8 32
+  inputFingerprint : Vector UInt8 32
 deriving DecidableEq, Repr
 
-def WellFormed (width : PointerWidth) (key : FormulaTopicKeyWire) : Prop :=
+def WellFormed (width : PointerWidth) (key : FormulaRevisionKeyWire) : Prop :=
   key.sheetId < width.sheetLimit ∧
   IsI32 key.row ∧
   IsI32 key.column ∧
   IsUtf8 key.udfId
 
-instance (width : PointerWidth) (key : FormulaTopicKeyWire) :
+instance (width : PointerWidth) (key : FormulaRevisionKeyWire) :
     Decidable (WellFormed width key) := by
   unfold WellFormed IsI32 IsUtf8
   infer_instance

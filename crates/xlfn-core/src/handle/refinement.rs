@@ -3,22 +3,22 @@
     reason = "H4 handle traces are consumed by the feature-gated Lean checker"
 )]
 
-use super::{FormulaTopicKey, HandleTopicKey, HandleTopicOwner};
+use super::{FormulaRevisionKey, HandleTopicKey, HandleTopicOwner};
 use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
 
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 const MAX_TRACE_EVENTS: usize = 16_384;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TopicKeyWire {
+pub(crate) struct FormulaRevisionKeyWire {
     pub(crate) sheet_id: u64,
     pub(crate) row: i32,
     pub(crate) column: i32,
     pub(crate) udf_id: String,
-    pub(crate) argument_digest: String,
+    pub(crate) input_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -42,29 +42,29 @@ pub(crate) enum Event {
     BeginPrepare,
     EndPrepare,
     BeginInitializer {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
     },
     FinishInitializer {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
     },
     InsertPendingFresh {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
     },
     InsertPendingReuse {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         slot: u64,
         generation: u64,
     },
     PublishAndInstallProvisional {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         token: TokenWire,
@@ -72,33 +72,33 @@ pub(crate) enum Event {
         rtd_key: String,
     },
     CommitAndActivate {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         token: TokenWire,
     },
     WithdrawAndInvalidate {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         token: TokenWire,
     },
     RollbackPendingReuse {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         #[serde(rename = "nextGeneration")]
         next_generation: u64,
     },
     RollbackPendingRetire {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
     },
     BeginWarmRead {
         #[serde(rename = "readerId")]
         reader_id: u64,
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
     },
     FinishWarmRead {
         #[serde(rename = "readerId")]
@@ -113,27 +113,27 @@ pub(crate) enum Event {
         reader_id: u64,
     },
     ClaimServer {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         generation: u64,
     },
     BeginConnection {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         owner: OwnerWire,
     },
     ReuseCommittedConnection {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         owner: OwnerWire,
     },
     CommitConnection {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         owner: OwnerWire,
     },
     RollbackConnection {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         owner: OwnerWire,
     },
     Disconnect {
-        key: TopicKeyWire,
+        key: FormulaRevisionKeyWire,
         owner: OwnerWire,
     },
     DetachGeneration {
@@ -185,7 +185,7 @@ struct Machine {
     next_initializer_id: u64,
     next_reader_id: u64,
     returned_success: bool,
-    initializers: HashMap<TopicKeyWire, u64>,
+    initializers: HashMap<FormulaRevisionKeyWire, u64>,
     #[cfg(test)]
     before_seal_hook: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
@@ -572,18 +572,18 @@ impl HandleRefinementTrace {
     }
 }
 
-fn topic_key(key: &HandleTopicKey) -> TopicKeyWire {
+fn topic_key(key: &HandleTopicKey) -> FormulaRevisionKeyWire {
     match key {
-        HandleTopicKey::Formula(FormulaTopicKey {
+        HandleTopicKey::Formula(FormulaRevisionKey {
             caller,
             udf_id,
-            argument_digest,
-        }) => TopicKeyWire {
+            inputs,
+        }) => FormulaRevisionKeyWire {
             sheet_id: caller.sheet_id as u64,
             row: caller.row,
             column: caller.column,
             udf_id: (*udf_id).to_owned(),
-            argument_digest: encode_digest(argument_digest),
+            input_fingerprint: encode_digest(inputs.as_bytes()),
         },
     }
 }

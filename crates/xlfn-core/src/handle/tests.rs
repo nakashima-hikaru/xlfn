@@ -1,11 +1,12 @@
 use super::*;
 
-fn format_formula_topic_key(
+fn format_formula_revision_key(
     caller: FormulaCaller,
     udf_id: &'static str,
-    argument_digest: &[u8; 32],
+    input_bytes: &[u8; 32],
 ) -> String {
-    FormulaTopicKey::new(caller, udf_id, argument_digest).format_rtd_key()
+    FormulaRevisionKey::new(caller, udf_id, InputFingerprint::from_bytes(*input_bytes))
+        .format_rtd_key()
 }
 
 fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
@@ -82,7 +83,7 @@ fn rtd_key_golden_vectors_match_wire_contract() {
         };
         let udf_id: &'static str = Box::leak(vector.udf_id.into_boxed_str());
         let digest = decode_digest_hex(&vector.digest_hex);
-        let actual = format_formula_topic_key(
+        let actual = format_formula_revision_key(
             FormulaCaller {
                 sheet_id,
                 row: vector.row,
@@ -102,16 +103,16 @@ fn rtd_key_golden_vectors_match_wire_contract() {
 }
 
 #[test]
-fn formula_topic_key_uses_the_stable_sheet_identifier() {
+fn formula_revision_key_uses_the_stable_sheet_identifier() {
     let digest = [0xab_u8; 32];
     let caller = FormulaCaller {
         sheet_id: 17,
         row: 4,
         column: 8,
     };
-    let first = format_formula_topic_key(caller, "TEST.CREATE", &digest);
-    let recalculated = format_formula_topic_key(caller, "TEST.CREATE", &digest);
-    let other_sheet = format_formula_topic_key(
+    let first = format_formula_revision_key(caller, "TEST.CREATE", &digest);
+    let recalculated = format_formula_revision_key(caller, "TEST.CREATE", &digest);
+    let other_sheet = format_formula_revision_key(
         FormulaCaller {
             sheet_id: 18,
             ..caller
@@ -125,18 +126,18 @@ fn formula_topic_key_uses_the_stable_sheet_identifier() {
 }
 
 #[test]
-fn formula_topic_key_changes_with_every_identity_component() {
+fn formula_revision_key_changes_with_every_component() {
     let digest = [0x12_u8; 32];
     let caller = FormulaCaller {
         sheet_id: 17,
         row: 4,
         column: 8,
     };
-    let base = format_formula_topic_key(caller, "TEST.CREATE", &digest);
+    let base = format_formula_revision_key(caller, "TEST.CREATE", &digest);
 
     assert_ne!(
         base,
-        format_formula_topic_key(
+        format_formula_revision_key(
             FormulaCaller {
                 sheet_id: 18,
                 ..caller
@@ -147,11 +148,11 @@ fn formula_topic_key_changes_with_every_identity_component() {
     );
     assert_ne!(
         base,
-        format_formula_topic_key(FormulaCaller { row: 5, ..caller }, "TEST.CREATE", &digest,)
+        format_formula_revision_key(FormulaCaller { row: 5, ..caller }, "TEST.CREATE", &digest,)
     );
     assert_ne!(
         base,
-        format_formula_topic_key(
+        format_formula_revision_key(
             FormulaCaller {
                 column: 9,
                 ..caller
@@ -162,11 +163,11 @@ fn formula_topic_key_changes_with_every_identity_component() {
     );
     assert_ne!(
         base,
-        format_formula_topic_key(caller, "TEST.OTHER", &digest)
+        format_formula_revision_key(caller, "TEST.OTHER", &digest)
     );
     assert_ne!(
         base,
-        format_formula_topic_key(caller, "TEST.CREATE", &[0x13_u8; 32])
+        format_formula_revision_key(caller, "TEST.CREATE", &[0x13_u8; 32])
     );
 
     assert!(base.ends_with("1212121212121212121212121212121212121212121212121212121212121212"));
@@ -667,7 +668,7 @@ fn token_value(token: &str) -> (Vec<u16>, xlfn_sys::XLOPER12) {
 }
 
 #[test]
-fn repeated_formula_identity_runs_factory_exactly_once() {
+fn repeated_formula_revision_runs_factory_exactly_once() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("same");
     let rtd_key = key.format_rtd_key();
@@ -1663,7 +1664,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
 fn handle_dependency_chain_propagates_identity_change() {
     let runtime = HandleRuntime::new(16);
 
-    // Upstream: different argument digest → different key → different token
+    // Upstream: different input fingerprint → different revision key → different token
     let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
     let (upstream_a, created) = runtime
         .prepare(upstream_a_key, || Ok(DataRecord(10)))
@@ -1672,8 +1673,8 @@ fn handle_dependency_chain_propagates_identity_change() {
 
     // Downstream uses upstream token as part of its key, simulating
     // MODEL.CREATE(Handle<'_, Curve>, params). The raw upstream token becomes
-    // part of the argument digest, so a different upstream token yields
-    // a different downstream key.
+    // part of the input fingerprint, so a different upstream token yields a
+    // different downstream revision key.
     let downstream_label_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
     let downstream_key_a = test_topic_key(&downstream_label_a);
     let (downstream_a, created) = runtime

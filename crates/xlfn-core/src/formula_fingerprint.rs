@@ -1,3 +1,4 @@
+use crate::handle::InputFingerprint;
 use crate::{InputError, XlValueRef, XllError, XllResult};
 use smallvec::SmallVec;
 use xlfn_sys::{
@@ -19,15 +20,15 @@ const TAG_MISSING: u8 = 6;
 const TAG_BLANK: u8 = 7;
 const TAG_ARRAY: u8 = 8;
 
-pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<[u8; 32]> {
+pub(crate) unsafe fn fingerprint(arguments: &[*mut XLOPER12]) -> XllResult<InputFingerprint> {
     if arguments_require_buffer(arguments)? {
         let mut encoder = BufferedFingerprintEncoder::new();
         encode_arguments(&mut encoder, arguments)?;
-        Ok(encoder.finish())
+        Ok(InputFingerprint::from_bytes(encoder.finish()))
     } else {
         let mut encoder = FingerprintEncoder::new();
         encode_arguments(&mut encoder, arguments)?;
-        Ok(encoder.finish())
+        Ok(InputFingerprint::from_bytes(encoder.finish()))
     }
 }
 
@@ -126,7 +127,7 @@ trait FingerprintSink: Sized {
             XLTYPE_BOOL => {
                 self.write_tag(TAG_BOOLEAN)?;
                 // Preserve the raw representation so non-canonical values cannot
-                // collide with a valid Excel boolean in formula identity.
+                // collide with a valid Excel boolean in the input revision.
                 // SAFETY: XLTYPE_BOOL selects the boolean union member.
                 let boolean = unsafe { value.raw().value.boolean };
                 self.write_u32(boolean as u32)
@@ -398,7 +399,7 @@ mod tests {
     use super::*;
     use xlfn_sys::{XLOPER12Array, XLOPER12Value};
 
-    fn digest(value: &mut XLOPER12) -> [u8; 32] {
+    fn digest(value: &mut XLOPER12) -> InputFingerprint {
         // SAFETY: the stack-local XLOPER12 remains live for this call.
         unsafe { fingerprint(&[value]) }.unwrap()
     }
@@ -553,7 +554,7 @@ mod tests {
             xltype: XLTYPE_MULTI,
         };
 
-        // Compute actual digest via fingerprint()
+        // Compute the actual input fingerprint.
         let actual_digest = digest(&mut array);
 
         // Manually construct expected bytes without batching
@@ -570,6 +571,9 @@ mod tests {
             expected_encoder.write_value(value, true).unwrap();
         }
 
-        assert_eq!(actual_digest, expected_encoder.finish());
+        assert_eq!(
+            actual_digest,
+            InputFingerprint::from_bytes(expected_encoder.finish())
+        );
     }
 }

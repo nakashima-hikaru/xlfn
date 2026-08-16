@@ -182,7 +182,7 @@ theorem formatDigest_length (digest : Vector UInt8 32) :
   omega
 
 theorem parse_format_roundtrip
-    (key : FormulaTopicKeyWire) :
+    (key : FormulaRevisionKeyWire) :
     parseRtdKey (formatRtdKey key) = some key := by
   have hSheet := decimalNatBytes_no_separator key.sheetId
   have hRow := decimalIntBytes_no_separator key.row
@@ -199,20 +199,20 @@ theorem parse_format_roundtrip
     intro byte hByte hEqual
     apply hColumn
     simpa [hEqual] using hByte
-  have hDigest := formatDigest_length key.argumentDigest
+  have hDigest := formatDigest_length key.inputFingerprint
   have hSplit := splitThree_structured
     (first := decimalNatBytes key.sheetId)
     (second := decimalIntBytes key.row)
     (third := decimalIntBytes key.column)
-    (rest := key.udfId ++ [separator] ++ formatDigest key.argumentDigest)
+    (rest := key.udfId ++ [separator] ++ formatDigest key.inputFingerprint)
     hSheet' hRow' hColumn'
   unfold parseRtdKey formatRtdKey
   rw [show decimalNatBytes key.sheetId ++ [separator] ++
       decimalIntBytes key.row ++ [separator] ++ decimalIntBytes key.column ++
-      [separator] ++ key.udfId ++ [separator] ++ formatDigest key.argumentDigest =
+      [separator] ++ key.udfId ++ [separator] ++ formatDigest key.inputFingerprint =
       decimalNatBytes key.sheetId ++ [separator] ++
         decimalIntBytes key.row ++ [separator] ++ decimalIntBytes key.column ++
-      [separator] ++ (key.udfId ++ [separator] ++ formatDigest key.argumentDigest) by
+      [separator] ++ (key.udfId ++ [separator] ++ formatDigest key.inputFingerprint) by
         simp [List.append_assoc]]
   rw [hSplit]
   simp only
@@ -221,7 +221,7 @@ theorem parse_format_roundtrip
   rw [parseNatBytes_decimalNatBytes, parseIntBytes_decimalIntBytes,
     parseIntBytes_decimalIntBytes, parseDigest_format]
 
-theorem parseCanonical_format (key : FormulaTopicKeyWire) :
+theorem parseCanonical_format (key : FormulaRevisionKeyWire) :
     parseCanonicalRtdKey (formatRtdKey key) = some key := by
   unfold parseCanonicalRtdKey
   rw [parse_format_roundtrip key]
@@ -229,7 +229,7 @@ theorem parseCanonical_format (key : FormulaTopicKeyWire) :
 
 theorem parseCanonical_sound
     {bytes : ByteString}
-    {key : FormulaTopicKeyWire}
+    {key : FormulaRevisionKeyWire}
     (hParsed : parseCanonicalRtdKey bytes = some key) :
     formatRtdKey key = bytes := by
   cases hRaw : parseRtdKey bytes with
@@ -245,7 +245,7 @@ theorem parseCanonical_sound
 theorem parseRtdKeyFor_sound
     {width : PointerWidth}
     {bytes : ByteString}
-    {key : FormulaTopicKeyWire}
+    {key : FormulaRevisionKeyWire}
     (hParsed : parseRtdKeyFor width bytes = some key) :
     WellFormed width key := by
   cases hRaw : parseCanonicalRtdKey bytes with
@@ -260,7 +260,7 @@ theorem parseRtdKeyFor_sound
 
 theorem parse_for_format_roundtrip
     (width : PointerWidth)
-    (key : FormulaTopicKeyWire)
+    (key : FormulaRevisionKeyWire)
     (hWellFormed : WellFormed width key) :
     parseRtdKeyFor width (formatRtdKey key) = some key := by
   unfold parseRtdKeyFor
@@ -270,7 +270,7 @@ theorem parse_for_format_roundtrip
 theorem parseRtdKeyFor_reencode
     {width : PointerWidth}
     {bytes : ByteString}
-    {key : FormulaTopicKeyWire}
+    {key : FormulaRevisionKeyWire}
     (hParsed : parseRtdKeyFor width bytes = some key) :
     formatRtdKey key = bytes := by
   cases hRaw : parseCanonicalRtdKey bytes with
@@ -287,13 +287,13 @@ theorem parseRtdKeyFor_reencode
 theorem parseRtdKeyFor_certificate
     {width : PointerWidth}
     {bytes : ByteString}
-    {key : FormulaTopicKeyWire}
+    {key : FormulaRevisionKeyWire}
     (hParsed : parseRtdKeyFor width bytes = some key) :
     WellFormed width key ∧ formatRtdKey key = bytes := by
   exact ⟨parseRtdKeyFor_sound hParsed, parseRtdKeyFor_reencode hParsed⟩
 
 theorem format_injective
-    {left right : FormulaTopicKeyWire}
+    {left right : FormulaRevisionKeyWire}
     (hFormat : formatRtdKey left = formatRtdKey right) :
     left = right := by
   have hParsed := congrArg parseRtdKey hFormat

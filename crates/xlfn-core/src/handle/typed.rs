@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 ///
-/// A handle-producing UDF is memoized by its formula identity. For one live
-/// formula identity, the producer is evaluated at most once and the resulting
+/// A handle-producing UDF is memoized by its formula revision. For one live
+/// formula revision, the producer is evaluated at most once and the resulting
 /// handle token identifies that object for the token's entire lifetime.
 pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
 

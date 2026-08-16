@@ -38,12 +38,12 @@ private def parseDigestHex (value : String) : Except String (Vector UInt8 32) :=
 
 private def checkVector (vector : GoldenVector) : Except String Unit := do
   let digest ← parseDigestHex vector.digestHex
-  let key : FormulaTopicKeyWire :=
+  let key : FormulaRevisionKeyWire :=
     { sheetId := vector.sheetId
       row := vector.row
       column := vector.column
       udfId := utf8Bytes vector.udfId
-      argumentDigest := digest }
+      inputFingerprint := digest }
   let expected := utf8Bytes vector.rtdKey
   if formatRtdKey key != expected then
     throw s!"Rust/Lean golden formatter mismatch: {vector.name}"

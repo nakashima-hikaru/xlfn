@@ -292,8 +292,8 @@ impl Drop for SyncBoundaryWorkerPool {
 // ---------------------------------------------------------------------------
 
 use crate::handle::{
-    ExcelHandleObject, FormulaCaller, FormulaTopicKey, HandleRuntime, HandleTopicKey,
-    resolve_formula_caller,
+    ExcelHandleObject, FormulaCaller, FormulaRevisionKey, HandleRuntime, HandleTopicKey,
+    InputFingerprint, resolve_formula_caller,
 };
 use crate::host_callback::HostCallbackSession;
 use smallvec::SmallVec;
@@ -304,17 +304,17 @@ struct BenchHandleObject {
 }
 impl ExcelHandleObject for BenchHandleObject {}
 
-fn benchmark_topic_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
-    let mut digest = [0_u8; 32];
-    digest[..8].copy_from_slice(&id.to_le_bytes());
-    HandleTopicKey::Formula(FormulaTopicKey::new(
+fn benchmark_revision_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
+    let mut inputs = [0_u8; 32];
+    inputs[..8].copy_from_slice(&id.to_le_bytes());
+    HandleTopicKey::Formula(FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 1,
             row: 0,
             column: 0,
         },
         udf_id,
-        &digest,
+        InputFingerprint::from_bytes(inputs),
     ))
 }
 
@@ -337,7 +337,7 @@ impl HandleColdBatch {
                     .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..iterations)
-                .map(|i| benchmark_topic_key("BENCH.COLD", i as u64))
+                .map(|i| benchmark_revision_key("BENCH.COLD", i as u64))
                 .collect(),
         }
     }
@@ -376,7 +376,7 @@ impl HandleWarmBenchmark {
             HandleRuntime::try_new_with_ingress(1, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
-        let key = benchmark_topic_key("BENCH.WARM", 0);
+        let key = benchmark_revision_key("BENCH.WARM", 0);
         runtime
             .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
             .expect("warm handle seed publication failed");
@@ -536,6 +536,8 @@ impl PreparedFormulaArguments {
         // which remain live for the lifetime of `PreparedFormulaArguments`.
         unsafe { crate::formula_fingerprint::fingerprint(&self.raw_args) }
             .expect("benchmark XLOPER12 arguments must fingerprint successfully")
+            .as_bytes()
+            .to_owned()
     }
 
     fn scan_only(&self) -> bool {
@@ -611,7 +613,7 @@ impl HandleFormulaBenchmark {
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let factory_calls = AtomicUsize::new(0);
-        let key = formula_topic_key(&arguments, caller);
+        let key = formula_revision_key(&arguments, caller);
 
         runtime
             .prepare_observed(
@@ -634,7 +636,7 @@ impl HandleFormulaBenchmark {
     }
 
     pub fn run(&self) -> (String, bool) {
-        let key = formula_topic_key(&self.arguments, self.caller);
+        let key = formula_revision_key(&self.arguments, self.caller);
         self.runtime
             .prepare_observed(
                 key,
@@ -656,15 +658,19 @@ impl HandleFormulaBenchmark {
     }
 }
 
-fn formula_topic_key(
+fn formula_revision_key(
     arguments: &PreparedFormulaArguments,
     caller: FormulaCaller,
 ) -> HandleTopicKey {
     // SAFETY: the root XLOPER12 and all backing storage were allocated before
     // the benchmark began and remain owned by `arguments` for this call.
-    let digest = unsafe { crate::formula_fingerprint::fingerprint(&arguments.raw_args) }
+    let inputs = unsafe { crate::formula_fingerprint::fingerprint(&arguments.raw_args) }
         .expect("benchmark XLOPER12 arguments must fingerprint successfully");
-    HandleTopicKey::Formula(FormulaTopicKey::new(caller, HANDLE_FORMULA_UDF_ID, &digest))
+    HandleTopicKey::Formula(FormulaRevisionKey::new(
+        caller,
+        HANDLE_FORMULA_UDF_ID,
+        inputs,
+    ))
 }
 
 impl Drop for HandleFormulaBenchmark {
@@ -875,7 +881,7 @@ impl HandleLookupBenchmark {
         );
         let mut tokens = Vec::with_capacity(worker_count);
         for worker in 0..worker_count {
-            let key = benchmark_topic_key("BENCH.LOOKUP", worker as u64);
+            let key = benchmark_revision_key("BENCH.LOOKUP", worker as u64);
             let token = runtime
                 .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
                 .expect("handle lookup warm seed publication failed")
@@ -983,7 +989,7 @@ impl HandleDistinctKeyBenchmark {
         );
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let keys = (0..worker_count)
-            .map(|worker| benchmark_topic_key("BENCH.DISTINCT", worker as u64))
+            .map(|worker| benchmark_revision_key("BENCH.DISTINCT", worker as u64))
             .collect::<Vec<_>>();
 
         for key in &keys {

@@ -82,7 +82,7 @@ def parseDigest (bytes : ByteString) : Option (Vector UInt8 32) :=
         some (vectorOfBytes32 parsed hLength)
       else none
 
-def parseRtdKey (bytes : ByteString) : Option FormulaTopicKeyWire :=
+def parseRtdKey (bytes : ByteString) : Option FormulaRevisionKeyWire :=
   match splitThree bytes with
   | none => none
   | some (sheetBytes, rowBytes, columnBytes, udfAndDigest) =>
@@ -91,18 +91,18 @@ def parseRtdKey (bytes : ByteString) : Option FormulaTopicKeyWire :=
       | some (udfId, digestBytes) =>
           match parseNatBytes sheetBytes, parseIntBytes rowBytes,
               parseIntBytes columnBytes, parseDigest digestBytes with
-          | some sheetId, some row, some column, some argumentDigest =>
-              some { sheetId, row, column, udfId, argumentDigest }
+          | some sheetId, some row, some column, some inputFingerprint =>
+              some { sheetId, row, column, udfId, inputFingerprint }
           | _, _, _, _ => none
 
-def parseCanonicalRtdKey (bytes : ByteString) : Option FormulaTopicKeyWire :=
+def parseCanonicalRtdKey (bytes : ByteString) : Option FormulaRevisionKeyWire :=
   match parseRtdKey bytes with
   | some key =>
       if formatRtdKey key = bytes then some key else none
   | none => none
 
 def parseRtdKeyFor (width : PointerWidth) (bytes : ByteString) :
-    Option FormulaTopicKeyWire := by
+    Option FormulaRevisionKeyWire := by
   exact match parseCanonicalRtdKey bytes with
     | some key => if h : WellFormed width key then some key else none
     | none => none

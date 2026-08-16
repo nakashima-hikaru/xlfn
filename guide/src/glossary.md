@@ -16,7 +16,9 @@
 
 **Cache endpoint** — A typed, named view of a calculation cache. Its endpoint identity prevents unrelated key/value domains from colliding.
 
-**Caller/formula identity** — Framework identity for the worksheet formula currently producing a formula-owned handle. It lets re-evaluation replace the object's value while preserving the formula's stable handle token.
+**Formula owner** — The worksheet cell identified by the caller coordinates. It owns the formula binding, but is distinct from the input revision and the underlying handle object.
+
+**Formula revision** — The computation revision identified by a formula owner, stable producer UDF ID, and canonical input fingerprint. Re-evaluation with the same revision reuses the memoized binding and object; a changed revision creates a new one.
 
 **Cancellation guarantee** — The documented strength of cancellation for an async or application operation, such as guaranteed cancellation before start versus best-effort observation after start.
 

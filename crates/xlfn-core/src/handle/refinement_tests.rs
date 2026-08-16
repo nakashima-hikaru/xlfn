@@ -200,3 +200,17 @@ fn rust_handle_refinement_traces_are_production_path_replays() {
     same_key_aba_trace();
     warm_close_trace();
 }
+
+#[test]
+fn refinement_trace_uses_input_fingerprint_wire_name() {
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("h4-wire-schema");
+    runtime
+        .prepare_observed(key, create_value, |_, _| Ok(()))
+        .expect("wire-schema publication succeeds");
+
+    let trace = runtime.refinement_trace_json();
+    assert!(trace.contains("\"inputFingerprint\""));
+    assert!(!trace.contains("\"argumentDigest\""));
+    assert!(trace.contains("\"schema_version\": 2"));
+}

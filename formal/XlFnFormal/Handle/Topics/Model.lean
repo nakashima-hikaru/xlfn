@@ -10,7 +10,7 @@ structure TopicKey where
   row : Int
   column : Int
   udfId : String
-  argumentDigest : Nat
+  inputFingerprint : Nat
 deriving DecidableEq, Repr
 
 abbrev RtdKey := String

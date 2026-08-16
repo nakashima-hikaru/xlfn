@@ -9,7 +9,7 @@ namespace XlFnFormal.Handle.Refinement
 open Lean
 open XlFnFormal.Handle.Topics.Serialization
 
-private def schemaVersion : Nat := 1
+private def schemaVersion : Nat := 2
 
 private def field {α : Type} [FromJson α] (json : Json) (name : String) :
     Except String α :=
@@ -37,38 +37,38 @@ private def parseOwnerField (json : Json) : Except String Topics.ExcelOwnerId :=
 private def digestNat (digest : Vector UInt8 32) : Nat :=
   digest.toArray.toList.foldl (fun accumulated byte => accumulated * 256 + byte.toNat) 0
 
-private def parseTopicKeyWire
-    (json : Json) : Except String (Topics.TopicKey × FormulaTopicKeyWire) := do
+private def parseFormulaRevisionKeyWire
+    (json : Json) : Except String (Topics.TopicKey × FormulaRevisionKeyWire) := do
   let sheetId : Nat ← field json "sheetId"
   let row : Int ← field json "row"
   let column : Int ← field json "column"
   let udfId : String ← field json "udfId"
-  let digestHex : String ← field json "argumentDigest"
+  let digestHex : String ← field json "inputFingerprint"
   let digest ← match parseDigest (utf8Bytes digestHex) with
     | some value => pure value
     | none => throw "topic key digest must be 32 lower-case hexadecimal bytes"
-  let wire : FormulaTopicKeyWire := {
+  let wire : FormulaRevisionKeyWire := {
     sheetId
     row
     column
     udfId := utf8Bytes udfId
-    argumentDigest := digest
+    inputFingerprint := digest
   }
   return ({
     sheetId
     row
     column
     udfId
-    argumentDigest := digestNat digest
+    inputFingerprint := digestNat digest
   }, wire)
 
 private def parseTopicKeyField (json : Json) : Except String Topics.TopicKey := do
-  let parsed ← parseTopicKeyWire (← json.getObjVal? "key")
+  let parsed ← parseFormulaRevisionKeyWire (← json.getObjVal? "key")
   return parsed.1
 
 private def parsePublishedTopicKey
     (json : Json) (rtdKey : String) : Except String Topics.TopicKey := do
-  let (key, wire) ← parseTopicKeyWire json
+  let (key, wire) ← parseFormulaRevisionKeyWire json
   let encoded := parseCanonicalRtdKey (utf8Bytes rtdKey)
   if encoded != some wire then
     throw "publish event RTD key does not canonically encode its topic key"

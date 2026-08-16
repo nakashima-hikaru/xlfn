@@ -7,23 +7,37 @@ pub(crate) struct FormulaCaller {
     pub(crate) column: i32,
 }
 
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct FormulaTopicKey {
-    pub(crate) caller: FormulaCaller,
-    pub(crate) udf_id: &'static str,
-    pub(crate) argument_digest: [u8; 32],
+pub(crate) struct InputFingerprint([u8; 32]);
+
+impl InputFingerprint {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
-impl FormulaTopicKey {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FormulaRevisionKey {
+    pub(crate) caller: FormulaCaller,
+    pub(crate) udf_id: &'static str,
+    pub(crate) inputs: InputFingerprint,
+}
+
+impl FormulaRevisionKey {
     pub(crate) fn new(
         caller: FormulaCaller,
         udf_id: &'static str,
-        argument_digest: &[u8; 32],
+        inputs: InputFingerprint,
     ) -> Self {
         Self {
             caller,
             udf_id,
-            argument_digest: *argument_digest,
+            inputs,
         }
     }
 
@@ -38,7 +52,7 @@ impl FormulaTopicKey {
         // complete key in one allocation on both supported pointer widths.
         const NUMERIC_KEY_CAPACITY: usize = 20 + 11 + 11 + 4;
         let mut result = String::with_capacity(
-            NUMERIC_KEY_CAPACITY + self.udf_id.len() + self.argument_digest.len() * 2,
+            NUMERIC_KEY_CAPACITY + self.udf_id.len() + self.inputs.as_bytes().len() * 2,
         );
 
         write!(
@@ -48,7 +62,7 @@ impl FormulaTopicKey {
         )
         .expect("writing to String cannot fail");
 
-        for byte in self.argument_digest {
+        for byte in self.inputs.as_bytes() {
             result.push(HEX[(byte >> 4) as usize] as char);
             result.push(HEX[(byte & 0x0f) as usize] as char);
         }
@@ -59,7 +73,7 @@ impl FormulaTopicKey {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum HandleTopicKey {
-    Formula(FormulaTopicKey),
+    Formula(FormulaRevisionKey),
 }
 
 impl HandleTopicKey {
@@ -72,15 +86,15 @@ impl HandleTopicKey {
 
 #[cfg(test)]
 pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
-    let digest = *blake3::hash(label.as_bytes()).as_bytes();
-    HandleTopicKey::Formula(FormulaTopicKey::new(
+    let inputs = InputFingerprint::from_bytes(*blake3::hash(label.as_bytes()).as_bytes());
+    HandleTopicKey::Formula(FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 0,
             row: 0,
             column: 0,
         },
         "TEST.HANDLE",
-        &digest,
+        inputs,
     ))
 }
 
@@ -190,7 +204,8 @@ pub(crate) fn resolve_formula_caller(
     }
     // `xlSheetId` accepts the counted external sheet name returned by
     // `xlSheetNm`. The name is only a lookup input; it must never become part
-    // of formula identity because workbook and worksheet names can change.
+    // of the formula revision key because workbook and worksheet names can
+    // change.
     let sheet_name_argument = [sheet.raw_pointer()?];
     // SAFETY: the counted sheet-name result remains live for this nested
     // callback and the callback session owns its release obligation.
@@ -234,15 +249,13 @@ pub(crate) fn resolve_formula_caller(
     })
 }
 
-pub(crate) fn formula_topic_key(
+pub(crate) fn formula_revision_key(
     callbacks: &crate::host_callback::HostCallbackSession,
     udf_id: &'static str,
-    argument_digest: &[u8; 32],
+    inputs: InputFingerprint,
 ) -> XllResult<HandleTopicKey> {
     let caller = resolve_formula_caller(callbacks)?;
-    Ok(HandleTopicKey::Formula(FormulaTopicKey::new(
-        caller,
-        udf_id,
-        argument_digest,
+    Ok(HandleTopicKey::Formula(FormulaRevisionKey::new(
+        caller, udf_id, inputs,
     )))
 }

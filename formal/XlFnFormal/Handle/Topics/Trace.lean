@@ -38,10 +38,10 @@ theorem replay?_sound
       · contradiction
 
 def fixtureKey : TopicKey :=
-  { sheetId := 0, row := 0, column := 0, udfId := "fixture", argumentDigest := 0 }
+  { sheetId := 0, row := 0, column := 0, udfId := "fixture", inputFingerprint := 0 }
 
 def fixtureKey2 : TopicKey :=
-  { sheetId := 0, row := 1, column := 0, udfId := "fixture-2", argumentDigest := 1 }
+  { sheetId := 0, row := 1, column := 0, udfId := "fixture-2", inputFingerprint := 1 }
 
 def fixtureRtdKey : RtdKey := "fixture-rtd"
 

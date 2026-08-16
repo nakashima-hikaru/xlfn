@@ -80,8 +80,8 @@ result and evidence:
 
 - create and consume a handle;
 - alias an existing handle;
-- recalculate with the same formula identity and confirm object reuse;
-- change an explicit identity input and confirm a new object and token;
+- recalculate with the same formula revision and confirm object reuse;
+- change an explicit revision input and confirm a new object and token;
 - retire the formula and confirm cleanup;
 - reject wrong-type, stale, forged, and previous-session tokens;
 - verify Formula Wizard, VBA/direct calls, and multi-cell caller behavior;
@@ -89,7 +89,7 @@ result and evidence:
 - verify external object destruction on its required application-owned executor.
 
 A stable token does not mean that the producer runs on every recalculation. The
-same formula identity reuses its memoized object; identity changes create a new
+same formula revision reuses its memoized object; revision changes create a new
 object and token. Test observable object behavior or expose an explicit version
 dependency instead of using token text as an application identifier.
 

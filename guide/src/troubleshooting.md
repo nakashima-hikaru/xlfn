@@ -95,10 +95,10 @@ Recalculate the handle-producing formula first. Do not edit or persist token tex
 
 ## A handle does not appear to refresh
 
-The visible token remains stable for the same formula identity by design. A
-same-identity recalculation reuses the memoized object without invoking the
-producer again. Changing an explicit formula identity input creates a new
-object and token; a live token never changes the object it identifies.
+The visible token remains stable for the same formula revision by design. A
+same-revision recalculation reuses the memoized object without invoking the
+producer again. Changing an explicit revision input creates a new object and
+token; a live token never changes the object it identifies.
 
 Test the object's behavior or expose a safe version field rather than using token-string changes as evidence of refresh. Verify that the producer is actually recalculated and is not blocked by Excel calculation settings.
 

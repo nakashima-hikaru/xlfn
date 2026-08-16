@@ -432,8 +432,8 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         })?;
         // SAFETY: for_call's contract keeps every argument and nested payload
         // live for this context's lifetime.
-        let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
-        let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
+        let inputs = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
+        let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;
         let (object_id, object) = operation()?.into_parts();
         let observer_handles = Arc::clone(&handles);
@@ -462,8 +462,8 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         })?;
         // SAFETY: for_call's contract keeps every argument and nested payload
         // live for this context's lifetime.
-        let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
-        let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
+        let inputs = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
+        let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;
         let observer_handles = Arc::clone(&handles);
         let (token, _) = handles.prepare_observed(key, operation, move |key, token| {
@@ -1850,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_returns_do_not_evaluate_formula_fingerprints() {
+    fn scalar_returns_do_not_evaluate_input_fingerprints() {
         let runtime: Runtime<()> = Runtime::new();
         let mut unsupported = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
@@ -1869,7 +1869,7 @@ mod tests {
         let raw_arguments = [&mut unsupported as *mut _];
         crate::with_excel_call_scope(|scope| {
             // SAFETY: unsupported and its inline reference remain live for the
-            // context lifetime. A handle fingerprint would reject this type.
+            // context lifetime. A handle input fingerprint would reject this type.
             let mut context =
                 unsafe { ReturnContext::for_call(&runtime, "scalar", &raw_arguments, scope) };
             let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();

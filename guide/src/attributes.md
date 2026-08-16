@@ -162,8 +162,8 @@ struct Dataset {
 ```
 
 The type must satisfy `Any + Send + Sync + 'static`. Returning the object
-publishes it for the producer formula's identity; a changed formula identity
-publishes a new object while a same-identity recalculation reuses the memoized
+publishes it for the producer formula's revision; a changed formula revision
+publishes a new object while a same-revision recalculation reuses the memoized
 object. Accepting `Handle<'_, Dataset>` resolves and type-checks the token.
 `HandleAlias<'_, Dataset>` is the explicit main-thread return capability for
 republishing an existing object. Borrowed `Handle` values are not return values,

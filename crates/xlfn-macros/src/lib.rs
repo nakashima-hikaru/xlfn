@@ -1856,7 +1856,7 @@ mod tests {
         assert!(
             expanded.find("ExcelReturn :: invoke").unwrap()
                 < expanded.find("argument_from_raw_with_context").unwrap(),
-            "formula identity must be established before handle factory evaluation"
+            "formula revision must be established before handle factory evaluation"
         );
         assert!(!expanded.contains("ExcelHandleReturn"));
         assert!(!expanded.contains("HandleKey"));

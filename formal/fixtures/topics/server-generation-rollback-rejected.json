@@ -1,14 +1,14 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "initial": {"session": 0},
   "events": [
     "beginPrepare",
-    {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
-    {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1}},
-    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
-    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
-    {"rollbackConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
-    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "argumentDigest": 0}, "owner": {"serverGeneration": 2, "topicId": 7}}}
+    {"beginInitializer": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "runtimeId": 1}},
+    {"insertPendingFresh": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "runtimeId": 1}},
+    {"publishVisible": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "runtimeId": 1, "rtdKey": "fixture-rtd"}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
+    {"rollbackConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "owner": {"serverGeneration": 1, "topicId": 7}}},
+    {"beginConnection": {"key": {"sheetId": 0, "row": 0, "column": 0, "udfId": "fixture", "inputFingerprint": 0}, "owner": {"serverGeneration": 2, "topicId": 7}}}
   ],
   "outcome": "rejected",
   "reject_at": "beginConnection"

@@ -6,7 +6,7 @@ set_option linter.unusedVariables false
 namespace XlFnFormal.Handle.Topics
 
 def orphanKey : TopicKey :=
-  { sheetId := 0, row := 0, column := 0, udfId := "orphan", argumentDigest := 0 }
+  { sheetId := 0, row := 0, column := 0, udfId := "orphan", inputFingerprint := 0 }
 
 def orphanRtdKey : RtdKey := "orphan-rtd"
 

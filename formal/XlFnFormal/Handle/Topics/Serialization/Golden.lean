@@ -14,33 +14,33 @@ def ffDigest : Vector UInt8 32 :=
 def sequenceDigest : Vector UInt8 32 :=
   vectorOfBytes32 (List.range 32 |>.map UInt8.ofNat) (by simp)
 
-def zeroEmptyKey : FormulaTopicKeyWire :=
+def zeroEmptyKey : FormulaRevisionKeyWire :=
   { sheetId := 0
     row := 0
     column := 0
     udfId := utf8Bytes ""
-    argumentDigest := zeroDigest }
+    inputFingerprint := zeroDigest }
 
-def i32BoundsKey : FormulaTopicKeyWire :=
+def i32BoundsKey : FormulaRevisionKeyWire :=
   { sheetId := 4294967295
     row := -2147483648
     column := 2147483647
     udfId := utf8Bytes "TEST.HANDLE"
-    argumentDigest := ffDigest }
+    inputFingerprint := ffDigest }
 
-def u64UnicodeKey : FormulaTopicKeyWire :=
+def u64UnicodeKey : FormulaRevisionKeyWire :=
   { sheetId := 18446744073709551615
     row := -1
     column := 0
     udfId := utf8Bytes "Unicode-日本語-😀"
-    argumentDigest := sequenceDigest }
+    inputFingerprint := sequenceDigest }
 
-def embeddedSeparatorKey : FormulaTopicKeyWire :=
+def embeddedSeparatorKey : FormulaRevisionKeyWire :=
   { sheetId := 7
     row := 8
     column := 9
     udfId := utf8Bytes "A\u001fB\u001fC"
-    argumentDigest := sequenceDigest }
+    inputFingerprint := sequenceDigest }
 
 theorem golden_zero_empty :
     formatRtdKey zeroEmptyKey =
