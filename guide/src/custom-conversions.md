@@ -16,7 +16,7 @@ use xlfn::{
 struct PositiveRate(f64);
 
 impl<'call> ExcelParameter<'call> for PositiveRate {
-    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"example.positive-rate.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -30,7 +30,7 @@ impl<'call> ExcelParameter<'call> for PositiveRate {
         Ok(Self(rate))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.f64(self.0);
     }
 }
@@ -42,7 +42,7 @@ Reuse built-in conversions where possible. They already validate malformed point
 
 Every type used as an Excel-visible parameter implements one `ExcelParameter` contract. It owns both conversion and semantic equality, so a custom type cannot accidentally omit or separately define its identity. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
 
-`IDENTITY_DOMAIN` is the stable, length-prefixed domain separator for the type. The framework writes it before calling `encode_identity`, so the method must encode only the value payload and must not write the type's top-level domain itself. Container implementations may write an element type's associated domain once before encoding the element stream. Types with an expensive conversion may override `from_excel_with_identity` to convert and encode in one pass.
+`IDENTITY_DOMAIN` is the stable, length-prefixed domain separator for the type. Its own `.vN` is the semantic encoding version and is independent of the framework's root fingerprint framing version. Bump it only when the type's payload semantics change. The framework writes it before calling `encode_identity`, so the method must encode only the value payload and must not write the type's top-level domain itself. Container implementations may write an element type's associated domain once before encoding the element stream. Types with an expensive conversion may override `from_excel_with_identity` to convert and encode in one pass.
 
 ## Custom output with `IntoExcelValue`
 

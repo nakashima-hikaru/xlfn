@@ -1,10 +1,9 @@
-use std::marker::PhantomData;
-
 use crate::{DomainErrorCode, ExcelParameter, InputError, XllError, XllResult};
 
 const MAX_INPUT_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v5\0";
 pub(crate) const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v5\0";
+// Part of the v5 wire schema. Changing this value requires v6.
 const INLINE_ARGUMENT_BYTES: usize = 128;
 pub(crate) const INLINE_ARGUMENT_MODE: u8 = 0;
 pub(crate) const HASHED_ARGUMENT_MODE: u8 = 1;
@@ -34,14 +33,18 @@ impl InputFingerprint {
 /// large arguments promote to a digest without changing the encoded bytes.
 #[allow(
     clippy::large_enum_variant,
-    reason = "keep the small inline path allocation-free and the large hasher on the stack"
+    reason = "keep the inline path small while retaining a stack hasher and staging buffer for large arguments"
 )]
 enum ArgumentSink {
     Inline {
         bytes: [u8; INLINE_ARGUMENT_BYTES],
         len: usize,
     },
-    Hashed(blake3::Hasher),
+    Hashed {
+        hasher: blake3::Hasher,
+        buffer: [u8; INLINE_ARGUMENT_BYTES],
+        buffered: usize,
+    },
 }
 
 enum ArgumentIdentity {
@@ -52,14 +55,13 @@ enum ArgumentIdentity {
     Hashed([u8; 32]),
 }
 
-pub struct InputIdentityEncoder<'a> {
+pub struct InputIdentityEncoder {
     sink: ArgumentSink,
     bytes: usize,
     error: Option<XllError>,
-    _lifetime: PhantomData<&'a mut ()>,
 }
 
-impl<'a> InputIdentityEncoder<'a> {
+impl InputIdentityEncoder {
     pub(crate) fn new() -> Self {
         Self {
             sink: ArgumentSink::Inline {
@@ -68,7 +70,6 @@ impl<'a> InputIdentityEncoder<'a> {
             },
             bytes: 0,
             error: None,
-            _lifetime: PhantomData,
         }
     }
 
@@ -151,7 +152,7 @@ impl<'a> InputIdentityEncoder<'a> {
             ArgumentSink::Inline { len, .. } => len
                 .checked_add(bytes.len())
                 .is_none_or(|total| total > INLINE_ARGUMENT_BYTES),
-            ArgumentSink::Hashed(_) => false,
+            ArgumentSink::Hashed { .. } => false,
         };
         if needs_promotion {
             self.promote_to_hashed();
@@ -162,21 +163,60 @@ impl<'a> InputIdentityEncoder<'a> {
                 buffer[*len..*len + bytes.len()].copy_from_slice(bytes);
                 *len += bytes.len();
             }
-            ArgumentSink::Hashed(hasher) => {
-                hasher.update(bytes);
-            }
+            ArgumentSink::Hashed {
+                hasher,
+                buffer,
+                buffered,
+            } => Self::write_hashed(hasher, buffer, buffered, bytes),
         }
     }
 
     fn promote_to_hashed(&mut self) {
-        let previous =
-            std::mem::replace(&mut self.sink, ArgumentSink::Hashed(blake3::Hasher::new()));
-        if let ArgumentSink::Inline { bytes, len } = previous {
-            let ArgumentSink::Hashed(hasher) = &mut self.sink else {
-                unreachable!("argument sink promotion must create a hashed sink");
-            };
-            hasher.update(&bytes[..len]);
+        let previous = std::mem::replace(
+            &mut self.sink,
+            ArgumentSink::Hashed {
+                hasher: blake3::Hasher::new(),
+                buffer: [0; INLINE_ARGUMENT_BYTES],
+                buffered: 0,
+            },
+        );
+        let ArgumentSink::Inline { bytes, len } = previous else {
+            unreachable!("identity encoder promotes only from inline mode");
+        };
+        let ArgumentSink::Hashed { hasher, .. } = &mut self.sink else {
+            unreachable!("identity encoder promotion must create a hashed sink");
+        };
+        hasher.update(&bytes[..len]);
+    }
+
+    fn write_hashed(
+        hasher: &mut blake3::Hasher,
+        buffer: &mut [u8; INLINE_ARGUMENT_BYTES],
+        buffered: &mut usize,
+        bytes: &[u8],
+    ) {
+        if bytes.len() >= INLINE_ARGUMENT_BYTES {
+            Self::flush_hashed(hasher, buffer, buffered);
+            hasher.update(bytes);
+            return;
         }
+        if *buffered + bytes.len() > INLINE_ARGUMENT_BYTES {
+            Self::flush_hashed(hasher, buffer, buffered);
+        }
+        buffer[*buffered..*buffered + bytes.len()].copy_from_slice(bytes);
+        *buffered += bytes.len();
+    }
+
+    fn flush_hashed(
+        hasher: &mut blake3::Hasher,
+        buffer: &[u8; INLINE_ARGUMENT_BYTES],
+        buffered: &mut usize,
+    ) {
+        if *buffered == 0 {
+            return;
+        }
+        hasher.update(&buffer[..*buffered]);
+        *buffered = 0;
     }
 
     fn finish(self) -> XllResult<ArgumentIdentity> {
@@ -184,7 +224,12 @@ impl<'a> InputIdentityEncoder<'a> {
             Some(error) => Err(error),
             None => match self.sink {
                 ArgumentSink::Inline { bytes, len } => Ok(ArgumentIdentity::Inline { bytes, len }),
-                ArgumentSink::Hashed(hasher) => {
+                ArgumentSink::Hashed {
+                    mut hasher,
+                    buffer,
+                    mut buffered,
+                } => {
+                    Self::flush_hashed(&mut hasher, &buffer, &mut buffered);
                     Ok(ArgumentIdentity::Hashed(*hasher.finalize().as_bytes()))
                 }
             },
@@ -231,7 +276,7 @@ impl InputFingerprintBuilder {
     pub(crate) fn with_argument<'call, T, R, F>(&mut self, encode: F) -> XllResult<R>
     where
         T: ExcelParameter<'call>,
-        F: FnOnce(&mut InputIdentityEncoder<'_>) -> XllResult<R>,
+        F: FnOnce(&mut InputIdentityEncoder) -> XllResult<R>,
     {
         if self.recorded_arguments >= self.expected_arguments {
             return Err(XllError::input(
@@ -299,7 +344,7 @@ mod tests {
     struct Pair(u32, u32);
 
     impl<'call> ExcelParameter<'call> for Pair {
-        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v5";
+        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v1";
 
         fn from_excel(
             _value: crate::XlValueRef<'call>,
@@ -312,7 +357,7 @@ mod tests {
             ))
         }
 
-        fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
             encoder.u32(self.0);
             encoder.u32(self.1);
         }
@@ -464,6 +509,30 @@ mod tests {
                 bytes.extend_from_slice(&pair.1.to_le_bytes());
             }),
         );
+    }
+
+    #[test]
+    fn v5_inline_argument_boundary_is_128_bytes() {
+        let mut encoder_127 = InputIdentityEncoder::new();
+        encoder_127.write(&[0; 127]);
+        assert!(matches!(
+            encoder_127.finish().unwrap(),
+            ArgumentIdentity::Inline { len: 127, .. }
+        ));
+
+        let mut encoder_128 = InputIdentityEncoder::new();
+        encoder_128.write(&[0; 128]);
+        assert!(matches!(
+            encoder_128.finish().unwrap(),
+            ArgumentIdentity::Inline { len: 128, .. }
+        ));
+
+        let mut encoder_129 = InputIdentityEncoder::new();
+        encoder_129.write(&[0; 129]);
+        assert!(matches!(
+            encoder_129.finish().unwrap(),
+            ArgumentIdentity::Hashed(_)
+        ));
     }
 
     #[test]

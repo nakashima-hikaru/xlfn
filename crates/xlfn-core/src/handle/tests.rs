@@ -51,7 +51,7 @@ fn reference_handle_identity(object_id: u64) -> InputFingerprint {
     let mut argument = Vec::new();
     argument.extend_from_slice(&(ARGUMENT_DOMAIN.len() as u64).to_le_bytes());
     argument.extend_from_slice(ARGUMENT_DOMAIN);
-    let type_domain = b"xlfn.input.handle-object.v5";
+    let type_domain = b"xlfn.input.handle-object.v1";
     argument.extend_from_slice(&(type_domain.len() as u64).to_le_bytes());
     argument.extend_from_slice(type_domain);
     argument.extend_from_slice(&object_id.to_le_bytes());

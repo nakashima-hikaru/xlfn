@@ -369,7 +369,7 @@ impl<'call> XlArrayRef<'call> {
 }
 
 impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-array.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.raw.xloper-array.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -379,8 +379,8 @@ impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
         Self::from_value(value, argument)
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
-        encoder.domain(b"xlfn.raw.xloper-value.v5");
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.domain(b"xlfn.raw.xloper-value.v1");
         encoder.u64(self.rows as u64);
         encoder.u64(self.columns as u64);
         for cell in self.cells.iter() {
@@ -394,7 +394,7 @@ impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
     }
 }
 
-fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder<'_>) {
+fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder) {
     match value.base_type() {
         XLTYPE_NUM => {
             encoder.tag(1);
@@ -474,7 +474,7 @@ fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIden
 /// struct Escaped(&'static XLOPER12);
 ///
 /// impl<'call> ExcelParameter<'call> for Escaped {
-///     const IDENTITY_DOMAIN: &'static [u8] = b"example.escaped.v5";
+///     const IDENTITY_DOMAIN: &'static [u8] = b"example.escaped.v1";
 ///
 ///     fn from_excel(
 ///         value: XlValueRef<'call>,
@@ -486,7 +486,7 @@ fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIden
 ///
 ///     fn encode_identity(
 ///         &self,
-///         _: &mut xlfn_core::InputIdentityEncoder<'_>,
+///         _: &mut xlfn_core::InputIdentityEncoder,
 ///     ) {
 ///     }
 /// }
@@ -502,7 +502,7 @@ pub trait ExcelParameter<'call>: Sized {
     ) -> XllResult<Self>;
 
     /// Encodes the converted value without writing [`Self::IDENTITY_DOMAIN`].
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>);
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder);
 
     /// Converts a value and, when requested, records its semantic identity
     /// while the Excel representation is still available. Implementations
@@ -512,7 +512,7 @@ pub trait ExcelParameter<'call>: Sized {
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
-        identity: Option<&mut InputIdentityEncoder<'_>>,
+        identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
         let result = Self::from_excel(value, argument, context)?;
         if let Some(identity) = identity {
@@ -1464,7 +1464,7 @@ impl IntoExcelValue for XlArrayOutput {
 }
 
 impl<'call> ExcelParameter<'call> for f64 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.f64.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.f64.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1484,13 +1484,13 @@ impl<'call> ExcelParameter<'call> for f64 {
         Ok(number)
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.f64(*self);
     }
 }
 
 impl<'call> ExcelParameter<'call> for bool {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bool.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bool.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1504,7 +1504,7 @@ impl<'call> ExcelParameter<'call> for bool {
         Ok(unsafe { value.raw.value.boolean } != 0)
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.bool(*self);
     }
 }
@@ -1529,7 +1529,7 @@ fn number_to_integer<T>(
 }
 
 impl<'call> ExcelParameter<'call> for i32 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i32.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i32.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1551,13 +1551,13 @@ impl<'call> ExcelParameter<'call> for i32 {
         }
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.i64(i64::from(*self));
     }
 }
 
 impl<'call> ExcelParameter<'call> for i64 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i64.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.i64.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1580,13 +1580,13 @@ impl<'call> ExcelParameter<'call> for i64 {
         }
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.i64(*self);
     }
 }
 
 impl<'call> ExcelParameter<'call> for String {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.string.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.string.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1597,7 +1597,7 @@ impl<'call> ExcelParameter<'call> for String {
             .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.string(self);
     }
 }
@@ -1606,7 +1606,7 @@ impl<'call, T> ExcelParameter<'call> for crate::Handle<'call, T>
 where
     T: crate::handle::ExcelHandleObject,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1617,13 +1617,13 @@ where
         context.resolve_handle(&token)
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.u64(self.object_id.0);
     }
 }
 
 impl<'call> ExcelParameter<'call> for ExcelErrorValue {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-error.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.excel-error.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1640,7 +1640,7 @@ impl<'call> ExcelParameter<'call> for ExcelErrorValue {
             .ok_or_else(|| XllError::input(argument, InputError::Malformed("unknown error code")))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.i64(i64::from(self.0.code()));
     }
 }
@@ -1649,7 +1649,7 @@ impl<'call, T> ExcelParameter<'call> for OptionalExcelValue<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.optional-excel-value.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.optional-excel-value.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1667,7 +1667,7 @@ where
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
-        mut identity: Option<&mut InputIdentityEncoder<'_>>,
+        mut identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING => {
@@ -1697,7 +1697,7 @@ where
         }
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         match self {
             Self::Missing => encoder.tag(0),
@@ -1714,7 +1714,7 @@ impl<'call, T> ExcelParameter<'call> for Option<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.option.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.option.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1731,7 +1731,7 @@ where
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
-        mut identity: Option<&mut InputIdentityEncoder<'_>>,
+        mut identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING | XLTYPE_NIL => {
@@ -1754,7 +1754,7 @@ where
         }
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         match self {
             None => encoder.tag(0),
@@ -1767,7 +1767,7 @@ where
 }
 
 impl<'call> ExcelParameter<'call> for ExcelSerialDate {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.serial-date.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.serial-date.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1784,7 +1784,7 @@ impl<'call> ExcelParameter<'call> for ExcelSerialDate {
         })
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.f64(self.serial);
         encoder.tag(match self.date_system {
             ExcelDateSystem::Workbook => 0,
@@ -1798,7 +1798,7 @@ fn matrix_from_excel_with_identity<'call, T>(
     value: XlValueRef<'call>,
     argument: &'static str,
     context: &CallContext<'call>,
-    mut identity: Option<&mut InputIdentityEncoder<'_>>,
+    mut identity: Option<&mut InputIdentityEncoder>,
 ) -> XllResult<Matrix<T>>
 where
     T: ExcelParameter<'call>,
@@ -1883,7 +1883,7 @@ impl<'call, T> ExcelParameter<'call> for Matrix<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.matrix.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.matrix.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1897,12 +1897,12 @@ where
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
-        identity: Option<&mut InputIdentityEncoder<'_>>,
+        identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
         matrix_from_excel_with_identity(value, argument, context, identity)
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.rows as u64);
         encoder.u64(self.columns as u64);
@@ -1916,7 +1916,7 @@ impl<'call, T> ExcelParameter<'call> for Vec<T>
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.vec.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.vec.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1939,7 +1939,7 @@ where
         Ok(matrix.into_vec())
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.len() as u64);
         for value in self {
@@ -1952,7 +1952,7 @@ impl<'call, T, const MAX: usize> ExcelParameter<'call> for BoundedVarArgs<T, MAX
 where
     T: ExcelParameter<'call>,
 {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bounded-varargs.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.bounded-varargs.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -1985,7 +1985,7 @@ where
         })
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(MAX as u64);
         encoder.u64(self.0.len() as u64);
@@ -1996,7 +1996,7 @@ where
 }
 
 impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.row.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.row.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2019,7 +2019,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
         Ok(Self(matrix.into_vec()))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.0.len() as u64);
         for value in &self.0 {
@@ -2029,7 +2029,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
 }
 
 impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.column.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.column.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2052,7 +2052,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
         Ok(Self(matrix.into_vec()))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.domain(T::IDENTITY_DOMAIN);
         encoder.u64(self.0.len() as u64);
         for value in &self.0 {
@@ -2062,7 +2062,7 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
 }
 
 impl<'call> ExcelParameter<'call> for OwnedExcelValue {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.owned-excel-value.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.owned-excel-value.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -2084,7 +2084,7 @@ impl<'call> ExcelParameter<'call> for OwnedExcelValue {
         }
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         match self {
             Self::Number(value) => {
                 encoder.tag(0);
@@ -2580,7 +2580,7 @@ mod tests {
     fn bounded_varargs_rejects_oversized_input_before_converting_elements() {
         struct PanicOnConvert;
         impl<'call> ExcelParameter<'call> for PanicOnConvert {
-            const IDENTITY_DOMAIN: &'static [u8] = b"test.panic-on-convert.v5";
+            const IDENTITY_DOMAIN: &'static [u8] = b"test.panic-on-convert.v1";
 
             fn from_excel(
                 _value: XlValueRef<'call>,
@@ -2590,7 +2590,7 @@ mod tests {
                 panic!("element conversion should not occur for oversized inputs");
             }
 
-            fn encode_identity(&self, _: &mut InputIdentityEncoder<'_>) {}
+            fn encode_identity(&self, _: &mut InputIdentityEncoder) {}
         }
 
         let mut elements = vec![XLOPER12::number(1.0), XLOPER12::number(2.0)];
@@ -2672,7 +2672,7 @@ mod tests {
         struct FiniteNumber(f64);
 
         impl<'call> ExcelParameter<'call> for FiniteNumber {
-            const IDENTITY_DOMAIN: &'static [u8] = b"test.finite-number.v5";
+            const IDENTITY_DOMAIN: &'static [u8] = b"test.finite-number.v1";
 
             fn from_excel(
                 value: XlValueRef<'call>,
@@ -2682,7 +2682,7 @@ mod tests {
                 f64::from_excel(value, argument, context).map(Self)
             }
 
-            fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+            fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
                 self.0.encode_identity(encoder);
             }
         }

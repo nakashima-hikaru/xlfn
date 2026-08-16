@@ -536,7 +536,7 @@ impl InputIdentityBenchmark {
 struct BenchmarkHandleIdentity(u64);
 
 impl<'call> ExcelParameter<'call> for BenchmarkHandleIdentity {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v1";
 
     fn from_excel(
         _value: crate::XlValueRef<'call>,
@@ -549,7 +549,7 @@ impl<'call> ExcelParameter<'call> for BenchmarkHandleIdentity {
         ))
     }
 
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.u64(self.0);
     }
 }

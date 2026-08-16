@@ -412,7 +412,7 @@ struct ModuleName {
 }
 
 impl<'call> ExcelParameter<'call> for ModuleName {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v5";
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v1";
 
     fn from_excel(
         value: XlValueRef<'call>,
@@ -434,7 +434,7 @@ impl<'call> ExcelParameter<'call> for ModuleName {
         Ok(Self { path, units })
     }
 
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder<'_>) {
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
         encoder.u64(self.units.len() as u64);
         for unit in &self.units {
             encoder.u32(u32::from(*unit));
