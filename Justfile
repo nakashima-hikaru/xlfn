@@ -51,6 +51,7 @@ features:
         --feature-powerset \
         --depth 2 \
         --exclude-features bench-internals \
+        --exclude-features bench-input-identity-diagnostic \
         --no-dev-deps
 
 deny:
@@ -83,6 +84,9 @@ bench-sync:
 
 bench-input-identity:
     cargo bench --package xlfn-core --bench input_identity --features bench-internals --locked
+
+bench-input-identity-diagnostic:
+    cargo bench --package xlfn-core --bench input_identity_diagnostic --features "bench-internals bench-input-identity-diagnostic" --locked
 
 bench-formula-caller:
     cargo bench --package xlfn-core --bench formula_caller --features bench-internals --locked

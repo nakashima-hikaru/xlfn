@@ -1,5 +1,7 @@
 use super::*;
-use crate::input_identity::InputFingerprintBuilder;
+use crate::input_identity::{
+    ARGUMENT_DOMAIN, InputFingerprintBuilder, InputIdentityEncoder, ROOT_DOMAIN,
+};
 use crate::{ExcelParameter, InputFingerprint};
 
 fn format_formula_revision_key(
@@ -43,6 +45,22 @@ fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> Inpu
         })
         .unwrap();
     builder.finish().unwrap()
+}
+
+fn reference_handle_identity(object_id: u64) -> InputFingerprint {
+    let mut argument = blake3::Hasher::new();
+    let mut encoder = InputIdentityEncoder::<0>::new(&mut argument);
+    encoder.domain(ARGUMENT_DOMAIN);
+    encoder.domain(b"xlfn.input.handle-object.v4");
+    encoder.u64(object_id);
+    let argument_digest = encoder.finish().unwrap();
+
+    let mut root = blake3::Hasher::new();
+    root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
+    root.update(ROOT_DOMAIN);
+    root.update(&1_u64.to_le_bytes());
+    root.update(&argument_digest);
+    InputFingerprint::from_bytes(*root.finalize().as_bytes())
 }
 
 fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTopicKey {
@@ -1009,6 +1027,10 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
         assert_eq!(source.object_id, alias.object_id);
         assert_eq!(input_identity(&source), input_identity(&alias));
+        assert_eq!(
+            input_identity(&source),
+            reference_handle_identity(source.object_id.0)
+        );
         assert_ne!(source.object_id, other.object_id);
         assert_ne!(input_identity(&source), input_identity(&other));
     });

@@ -1,8 +1,10 @@
 use crate::{DomainErrorCode, ExcelParameter, InputError, XllError, XllResult};
 
 const MAX_INPUT_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
-const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v4\0";
-const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v4\0";
+pub(crate) const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v4\0";
+pub(crate) const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v4\0";
+const DEFAULT_WRITE_BUFFER: usize = 64;
+pub(crate) const ROOT_PREFIX_BYTES: usize = 8 + ROOT_DOMAIN.len() + 8;
 
 /// The fixed-size semantic identity of one converted Excel argument list.
 #[repr(transparent)]
@@ -27,16 +29,20 @@ impl InputFingerprint {
 /// omit its top-level type separator. The encoder keeps argument-local framing
 /// separate from the root fingerprint, so independently encoded arguments
 /// cannot be confused with one another.
-pub struct InputIdentityEncoder<'a> {
+pub struct InputIdentityEncoder<'a, const WRITE_BUFFER: usize = DEFAULT_WRITE_BUFFER> {
     hasher: &'a mut blake3::Hasher,
+    buffer: [u8; WRITE_BUFFER],
+    buffered: usize,
     bytes: usize,
     error: Option<XllError>,
 }
 
-impl<'a> InputIdentityEncoder<'a> {
+impl<'a, const WRITE_BUFFER: usize> InputIdentityEncoder<'a, WRITE_BUFFER> {
     pub(crate) fn new(hasher: &'a mut blake3::Hasher) -> Self {
         Self {
             hasher,
+            buffer: [0; WRITE_BUFFER],
+            buffered: 0,
             bytes: 0,
             error: None,
         }
@@ -116,10 +122,38 @@ impl<'a> InputIdentityEncoder<'a> {
         }
 
         self.bytes = actual;
-        self.hasher.update(bytes);
+
+        if WRITE_BUFFER == 0 {
+            self.hasher.update(bytes);
+            return;
+        }
+
+        if bytes.len() >= WRITE_BUFFER {
+            self.flush();
+            self.hasher.update(bytes);
+            return;
+        }
+
+        if self.buffered + bytes.len() > WRITE_BUFFER {
+            self.flush();
+        }
+        self.buffer[self.buffered..self.buffered + bytes.len()].copy_from_slice(bytes);
+        self.buffered += bytes.len();
     }
 
-    fn finish(self) -> XllResult<[u8; 32]> {
+    fn flush(&mut self) {
+        if self.buffered == 0 {
+            return;
+        }
+
+        self.hasher.update(&self.buffer[..self.buffered]);
+        self.buffered = 0;
+    }
+
+    pub(crate) fn finish(mut self) -> XllResult<[u8; 32]> {
+        if self.error.is_none() {
+            self.flush();
+        }
         match self.error {
             Some(error) => Err(error),
             None => Ok(*self.hasher.finalize().as_bytes()),
@@ -150,9 +184,11 @@ pub(crate) struct InputFingerprintBuilder {
 impl InputFingerprintBuilder {
     pub(crate) fn new(expected_arguments: usize) -> Self {
         let mut root = blake3::Hasher::new();
-        root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
-        root.update(ROOT_DOMAIN);
-        root.update(&(expected_arguments as u64).to_le_bytes());
+        let mut prefix = [0_u8; ROOT_PREFIX_BYTES];
+        prefix[..8].copy_from_slice(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
+        prefix[8..8 + ROOT_DOMAIN.len()].copy_from_slice(ROOT_DOMAIN);
+        prefix[8 + ROOT_DOMAIN.len()..].copy_from_slice(&(expected_arguments as u64).to_le_bytes());
+        root.update(&prefix);
         Self {
             root,
             expected_arguments,
@@ -174,7 +210,7 @@ impl InputFingerprintBuilder {
         }
 
         let mut hasher = blake3::Hasher::new();
-        let mut encoder = InputIdentityEncoder::new(&mut hasher);
+        let mut encoder = InputIdentityEncoder::<DEFAULT_WRITE_BUFFER>::new(&mut hasher);
         encoder.domain(ARGUMENT_DOMAIN);
         encoder.domain(T::IDENTITY_DOMAIN);
         let value = encode(&mut encoder)?;
@@ -217,7 +253,7 @@ impl InputFingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExcelParameter, Matrix, OptionalExcelValue};
+    use crate::{ExcelParameter, Matrix, OptionalExcelValue, OwnedExcelValue};
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);
@@ -258,6 +294,106 @@ mod tests {
         builder.finish().unwrap()
     }
 
+    fn reference_fingerprint<F>(domain: &[u8], encode: F) -> InputFingerprint
+    where
+        F: FnOnce(&mut InputIdentityEncoder<'_, 0>),
+    {
+        let mut argument = blake3::Hasher::new();
+        let mut encoder = InputIdentityEncoder::<0>::new(&mut argument);
+        encoder.domain(ARGUMENT_DOMAIN);
+        encoder.domain(domain);
+        encode(&mut encoder);
+        let argument_digest = encoder.finish().unwrap();
+
+        let mut root = blake3::Hasher::new();
+        root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
+        root.update(ROOT_DOMAIN);
+        root.update(&1_u64.to_le_bytes());
+        root.update(&argument_digest);
+        InputFingerprint::from_bytes(*root.finalize().as_bytes())
+    }
+
+    #[test]
+    fn write_batching_preserves_the_v4_fingerprint_for_builtin_values() {
+        let number = 42.0_f64;
+        assert_eq!(
+            fingerprint(&[number]),
+            reference_fingerprint(f64::IDENTITY_DOMAIN, |encoder| encoder.f64(number)),
+        );
+
+        let string = String::from("short");
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&string)),
+            reference_fingerprint(String::IDENTITY_DOMAIN, |encoder| encoder.string(&string)),
+        );
+
+        let optional = Some(42.0_f64);
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&optional)),
+            reference_fingerprint(<Option<f64>>::IDENTITY_DOMAIN, |encoder| {
+                encoder.domain(f64::IDENTITY_DOMAIN);
+                encoder.tag(1);
+                encoder.f64(number);
+            }),
+        );
+
+        let optional_excel = OptionalExcelValue::Value(number);
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&optional_excel)),
+            reference_fingerprint(<OptionalExcelValue<f64>>::IDENTITY_DOMAIN, |encoder| {
+                encoder.domain(f64::IDENTITY_DOMAIN);
+                encoder.tag(2);
+                encoder.f64(number);
+            }),
+        );
+
+        let values = vec![number, 7.0];
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&values)),
+            reference_fingerprint(<Vec<f64>>::IDENTITY_DOMAIN, |encoder| {
+                encoder.domain(f64::IDENTITY_DOMAIN);
+                encoder.u64(values.len() as u64);
+                for value in &values {
+                    encoder.f64(*value);
+                }
+            }),
+        );
+
+        let matrix = Matrix::new(1, 2, values.clone()).unwrap();
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&matrix)),
+            reference_fingerprint(<Matrix<f64>>::IDENTITY_DOMAIN, |encoder| {
+                encoder.domain(f64::IDENTITY_DOMAIN);
+                encoder.u64(matrix.rows() as u64);
+                encoder.u64(matrix.columns() as u64);
+                for value in matrix.as_slice() {
+                    encoder.f64(*value);
+                }
+            }),
+        );
+
+        let owned = OwnedExcelValue::Number(number);
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&owned)),
+            reference_fingerprint(OwnedExcelValue::IDENTITY_DOMAIN, |encoder| {
+                encoder.tag(0);
+                encoder.f64(number);
+            }),
+        );
+    }
+
+    #[test]
+    fn write_batching_preserves_the_v4_fingerprint_for_custom_parameters() {
+        let pair = Pair(7, 11);
+        assert_eq!(
+            fingerprint(std::slice::from_ref(&pair)),
+            reference_fingerprint(Pair::IDENTITY_DOMAIN, |encoder| {
+                encoder.u32(pair.0);
+                encoder.u32(pair.1);
+            }),
+        );
+    }
+
     #[test]
     fn argument_boundaries_are_part_of_the_root_fingerprint() {
         let pair = Pair(1, 2);
@@ -287,7 +423,7 @@ mod tests {
         let actual = fingerprint(std::slice::from_ref(&values));
 
         let mut argument = blake3::Hasher::new();
-        let mut encoder = InputIdentityEncoder::new(&mut argument);
+        let mut encoder = InputIdentityEncoder::<DEFAULT_WRITE_BUFFER>::new(&mut argument);
         encoder.domain(ARGUMENT_DOMAIN);
         encoder.domain(<Vec<f64> as ExcelParameter<'_>>::IDENTITY_DOMAIN);
         encoder.domain(f64::IDENTITY_DOMAIN);
@@ -311,7 +447,7 @@ mod tests {
     fn domain_framing_separates_namespace_from_payload() {
         fn digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
             let mut hasher = blake3::Hasher::new();
-            let mut encoder = InputIdentityEncoder::new(&mut hasher);
+            let mut encoder = InputIdentityEncoder::<0>::new(&mut hasher);
             encoder.domain(domain);
             encoder.bytes(payload);
             encoder.finish().unwrap()
