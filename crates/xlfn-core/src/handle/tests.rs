@@ -410,15 +410,15 @@ fn published_handle_snapshot_owns_object_until_reader_release() {
     let drops = Arc::new(AtomicUsize::new(0));
     let registry = HandleRegistry::new(2);
     let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops)))).unwrap();
-    let parsed = registry.parse_token(&token).unwrap();
-    let snapshot = registry.published.load(parsed.slot);
+    let parsed = registry.parse_token(HandleToken::new(&token)).unwrap();
+    let snapshot = registry.published.load(parsed.id.slot);
     let publication = snapshot
-        .get(&parsed.slot)
+        .get(parsed.id.slot)
         .expect("inserted handle must be published");
-    assert_eq!(publication.state(), PublishedHandleState::Live);
+    assert_eq!(publication.state(), HandleRecordState::Live);
 
     let removed = registry.remove::<Counted>(&token).unwrap();
-    assert_eq!(publication.state(), PublishedHandleState::Stale);
+    assert_eq!(publication.state(), HandleRecordState::Retired);
     drop(removed);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
@@ -433,16 +433,16 @@ fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
 
     let registry = HandleRegistry::new(2);
     let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
-    let parsed1 = registry.parse_token(&token1).unwrap();
+    let parsed1 = registry.parse_token(HandleToken::new(&token1)).unwrap();
 
     crate::with_excel_call_scope(|scope| {
         let old = registry.lookup_handle::<TestObj>(scope, &token1).unwrap();
         registry.remove::<TestObj>(&token1).unwrap();
 
         let token2 = insert_production(&registry, Arc::new(TestObj("second"))).unwrap();
-        let parsed2 = registry.parse_token(&token2).unwrap();
-        assert_eq!(parsed1.slot, parsed2.slot);
-        assert_ne!(parsed1.generation, parsed2.generation);
+        let parsed2 = registry.parse_token(HandleToken::new(&token2)).unwrap();
+        assert_eq!(parsed1.id.slot, parsed2.id.slot);
+        assert_ne!(parsed1.id.generation, parsed2.id.generation);
         assert_eq!(old.0, "first");
 
         assert!(matches!(
@@ -478,14 +478,22 @@ fn close_rejects_new_borrows_but_retires_after_existing_snapshot_release() {
 #[test]
 fn exhausted_generation_retires_the_slot_permanently() {
     let registry = HandleRegistry::new(2);
-    insert_production(&registry, Arc::new(1_u32)).unwrap();
-    registry.state.write().slots[0].generation = u64::MAX;
-    let final_token = registry.format_token(0, u64::MAX);
+    let first = insert_production(&registry, Arc::new(1_u32)).unwrap();
+    registry.remove::<u32>(&first).unwrap();
+    registry.state.write().slots[0].next_generation = u64::MAX;
+    let final_token = insert_production(&registry, Arc::new(1_u32)).unwrap();
     assert_eq!(*registry.remove::<u32>(&final_token).unwrap(), 1);
     assert!(registry.state.read().free.is_empty());
 
     let replacement = insert_production(&registry, Arc::new(2_u32)).unwrap();
-    assert_eq!(registry.parse_token(&replacement).unwrap().slot, 1);
+    assert_eq!(
+        registry
+            .parse_token(HandleToken::new(&replacement))
+            .unwrap()
+            .id
+            .slot,
+        1
+    );
     assert!(matches!(
         registry.lookup::<u32>(&final_token),
         Err(XllError::StaleHandle)
@@ -844,17 +852,43 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         .unwrap();
     runtime.connect(1, 1, &source_rtd_key).unwrap();
 
-    let object = crate::with_excel_call_scope(|scope| {
+    let object_id = crate::with_excel_call_scope(|scope| {
         let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        resolved.alias().into_object()
+        resolved.alias().into_object_id()
     });
     let alias_key = test_topic_key("alias");
     let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, _) = runtime
-        .prepare_observed_object::<DataRecord, _>(alias_key, || Ok(object), |_, _| Ok(()))
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, |_, _| Ok(()))
         .unwrap();
     runtime.connect(1, 2, &alias_rtd_key).unwrap();
     assert_ne!(source_token, alias_token);
+    let source_binding = runtime
+        .registry
+        .parse_token(HandleToken::new(&source_token))
+        .unwrap()
+        .id;
+    let alias_binding = runtime
+        .registry
+        .parse_token(HandleToken::new(&alias_token))
+        .unwrap()
+        .id;
+    let state = runtime.registry.state.read();
+    let source_object_id = state.slots[source_binding.slot as usize]
+        .record
+        .as_ref()
+        .unwrap()
+        .object_id;
+    let alias_object_id = state.slots[alias_binding.slot as usize]
+        .record
+        .as_ref()
+        .unwrap()
+        .object_id;
+    assert_eq!(
+        source_object_id, alias_object_id,
+        "source={source_binding:?} source_object={source_object_id:?} alias={alias_binding:?} alias_object={alias_object_id:?}"
+    );
+    drop(state);
 
     runtime.disconnect(1, 1);
     assert!(matches!(
@@ -1809,7 +1843,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     //
     // close has started, but registry must remain alive while observe executes.
     //
-    assert!(!runtime.registry.state.read().closed);
+    assert_eq!(runtime.registry.phase(), HandleRegistryPhase::Closing);
 
     assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
 
@@ -1824,5 +1858,5 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
 
     closer.join().unwrap();
 
-    assert!(runtime.registry.state.read().closed);
+    assert_eq!(runtime.registry.phase(), HandleRegistryPhase::Closed);
 }

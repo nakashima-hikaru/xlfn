@@ -38,7 +38,10 @@ Set `panic = "unwind"` for release profiles that depend on containment. Do not r
 
 ## Handle tokens
 
-Handle tokens are authenticated, typed, session-scoped capabilities. The runtime verifies a keyed MAC, session/generation data, slot generation, and requested Rust type.
+Handle tokens are authenticated, session-scoped capabilities. The runtime
+verifies a keyed MAC, session/generation data, and slot generation first, then
+checks the requested Rust type against the canonical record. Type identity is
+not duplicated in the wire token.
 
 They prevent accidental or textual fabrication of a valid live handle. They do not provide:
 

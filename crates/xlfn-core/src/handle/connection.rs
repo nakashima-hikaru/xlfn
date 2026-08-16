@@ -1,11 +1,19 @@
-use super::PublishedTopic;
 #[cfg(any(target_os = "windows", test))]
 use super::*;
+use super::{HandleId, ObjectId, PublishedTopic};
 use std::sync::Arc;
 #[cfg(any(target_os = "windows", test))]
 use std::sync::Weak;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FormulaBinding {
+    pub(crate) id: HandleId,
+    pub(crate) object_id: ObjectId,
+}
+
 pub(crate) struct Topic {
+    /// The object identity and token identity owned by this formula binding.
+    pub(crate) binding: FormulaBinding,
     pub(crate) token: String,
     pub(crate) rtd_key: Arc<str>,
     pub(crate) publication: Arc<PublishedTopic>,

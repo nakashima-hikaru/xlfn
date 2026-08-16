@@ -229,13 +229,13 @@ refinement layer over the canonical topic state:
 
 ### Published-handle snapshots
 
-`XlFnFormal/Handle/Registry/Snapshot` formalizes the `PublishedHandle`
+`XlFnFormal/Handle/Registry/Snapshot` formalizes the `HandleRecord`
 fast-lookup architecture as an RCU layer over canonical registry semantics:
 
 - **Model & Invariants** (`Model.lean`): Tracks published objects, the current
   immutable snapshot, and active call-scoped `Borrow` records. A publication
   remains rooted after it becomes `stale` or `closing` until no borrow refers to
-  it, matching the strong `Arc<PublishedHandle> → Arc<HandleObject>` chain.
+  it, matching the strong `Arc<HandleRecord> → Arc<HandleObject>` chain.
 - **Transitions & Checker** (`Transition.lean`, `Checker.lean`):
   `observeBorrow` performs the snapshot lookup, generation/authentication and
   `Live` check at the borrow linearization point. `releaseBorrow` ends the call
@@ -309,7 +309,7 @@ The formal model covers the framework-owned concurrency and lifecycle
 protocols whose violations can produce stale handles, escaped resources,
 or unsafe shutdown.
 
-The formalization ends at the PublishedHandle protocol. Rust memory safety,
+The formalization ends at the HandleRecord publication protocol. Rust memory safety,
 ArcSwap internals, atomic implementation semantics, scheduler fairness,
 Excel internals, COM implementation correctness, and arbitrary user code
 are outside the Lean model.

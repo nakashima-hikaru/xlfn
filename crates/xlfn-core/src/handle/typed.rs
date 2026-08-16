@@ -2,7 +2,6 @@ use super::*;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 ///
@@ -17,22 +16,22 @@ pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
 /// this value. The lifetime parameter is tied to the generated Excel call
 /// scope, so a borrowed handle cannot escape the invocation that resolved it.
 pub struct Handle<'call, T: ExcelHandleObject> {
-    pub(crate) snapshot: PublishedHandleSnapshot,
-    pub(crate) slot: u32,
+    pub(crate) _snapshot: HandleRecordSnapshot,
+    pub(crate) object_id: ObjectId,
     pub(crate) value: NonNull<T>,
     pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
     pub(crate) fn new(
-        snapshot: PublishedHandleSnapshot,
-        slot: u32,
+        snapshot: HandleRecordSnapshot,
+        object_id: ObjectId,
         value: NonNull<T>,
         _scope: &'call crate::CallScope<'call>,
     ) -> Self {
         Self {
-            snapshot,
-            slot,
+            _snapshot: snapshot,
+            object_id,
             value,
             _call: PhantomData,
         }
@@ -41,7 +40,11 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
     /// Converts this borrowed capability into an explicit republish
     /// capability. A handle itself is never an Excel return value.
     pub fn alias(self) -> HandleAlias<'call, T> {
-        HandleAlias { handle: self }
+        HandleAlias {
+            object_id: self.object_id,
+            _call: PhantomData,
+            _type: PhantomData,
+        }
     }
 }
 
@@ -56,20 +59,17 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
-/// A call-scoped capability that republishes an existing formula-owned
-/// object under the current formula identity.
+/// A call-scoped capability that creates a formula binding to an existing
+/// object identity.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
-    handle: Handle<'call, T>,
+    pub(crate) object_id: ObjectId,
+    pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
+    pub(crate) _type: PhantomData<fn() -> T>,
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_object(self) -> Arc<HandleObject> {
-        let handle = self.handle;
-        let publication = handle
-            .snapshot
-            .get(&handle.slot)
-            .expect("a live handle alias retains its publication");
-        Arc::clone(&publication.object)
+    pub(crate) fn into_object_id(self) -> ObjectId {
+        self.object_id
     }
 }
 

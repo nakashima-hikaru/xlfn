@@ -435,13 +435,12 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
         let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
         let handles = runtime.handle_runtime()?;
-        let object = operation()?.into_object();
+        let object_id = operation()?.into_object_id();
         let observer_handles = Arc::clone(&handles);
-        let (token, _) = handles.prepare_observed_object::<T, _>(
-            key,
-            || Ok(object),
-            move |key, token| crate::rtd::observe(observer_handles, key, token, callbacks),
-        )?;
+        let (token, _) =
+            handles.prepare_observed_alias::<T, _>(key, object_id, move |key, token| {
+                crate::rtd::observe(observer_handles, key, token, callbacks)
+            })?;
         Ok(token)
     }
 

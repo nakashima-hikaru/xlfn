@@ -32,7 +32,7 @@
 
 **Excel-visible argument** — A parameter supplied by a worksheet formula. Injected contexts are not Excel-visible and do not consume Function Wizard arguments.
 
-**Formula-owned handle** — An authenticated opaque string whose object lifetime follows the producing formula. Re-evaluation can replace the object while retaining the token for dependent formulas.
+**Formula-owned handle** — An authenticated opaque string representing one formula-to-object ownership edge. Re-evaluation can reuse the binding, while an explicit alias can create another edge to the same underlying object.
 
 **Function Wizard** — Excel's UI for discovering functions and displaying category, description, help topic, and argument metadata.
 

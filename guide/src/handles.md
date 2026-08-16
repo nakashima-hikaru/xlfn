@@ -1,6 +1,6 @@
 # Formula-owned handles
 
-Handles let a worksheet formula own a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts a call-scoped `Handle<'_, T>`. xlfn owns the formula token, published object, and Rust value lifetime; any resource managed inside `T` remains part of `T`'s application-level contract.
+Handles let a worksheet formula own an ownership edge to a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts a call-scoped `Handle<'_, T>`. xlfn owns the formula binding, the published object identity, and the Rust value lifetime; multiple formula bindings may refer to the same object through an explicit alias. Any resource managed inside `T` remains part of `T`'s application-level contract.
 
 ## Define a handle object
 
@@ -85,9 +85,9 @@ No `handle` argument attribute is required. Ordinary Rust trait resolution ident
 
 Handle-producing functions are memoized by formula identity.
 
-Recalculation with the same caller, function identity, and arguments reuses the existing handle object without invoking the producer again.
+Recalculation with the same caller, function identity, and arguments reuses the existing formula binding and handle object without invoking the producer again.
 
-Changing any part of formula identity creates a new object and token.
+Changing any part of formula identity creates a new formula binding, object, and token.
 
 A live token never changes the object it identifies.
 
@@ -125,14 +125,18 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 }
 ```
 
-`HandleAlias<'call, T>` is the only handle return capability. It is created from
-the borrowed input and republishes the same published object under the alias
-formula's ownership; it does not clone the business object. A plain `Handle`
-cannot be returned, cloned, or retained after the call.
+`HandleAlias<'call, T>` is the only handle return capability. It is an
+identity-only capability: it carries the identity of the underlying object,
+not a snapshot, `Arc`, or `&T`. Publishing it creates a new formula binding
+and token that shares the same underlying `HandleObject`; it does not clone
+the business object. A plain `Handle` cannot be returned, cloned, or retained
+after the call.
 
 ## Lifetime
 
-The worksheet formula owns the runtime topic. The object is released when Excel removes or changes the owning formula, closes the relevant workbook dependency, terminates the RTD topic, or unloads the add-in.
+Each worksheet formula owns one runtime binding edge. The shared object is
+released after the last binding is removed, or when the registry closes after
+the relevant workbook dependency, RTD topic, or add-in terminates.
 
 Destructors must obey the same shutdown rules as any in-process code:
 
@@ -181,7 +185,12 @@ Document this behavior for users who expose handle producers in automation-heavy
 
 ## Token security model
 
-A token contains runtime/session identity, type identity, slot/generation data, and a keyed BLAKE3 MAC. Tokens from another process generation, tokens of the wrong type, stale slot generations, and modified tokens are rejected.
+A token contains runtime/session identity, slot/generation data, and a keyed
+BLAKE3 MAC. Rust type identity is intentionally not part of the wire format:
+after authentication and slot/generation validation, the registry checks the
+requested `T` against the canonical `HandleRecord`. Tokens from another
+process generation, tokens of the wrong type, stale slot generations, and
+modified tokens are rejected.
 
 The token is a bearer capability inside the Excel process. It is not an authorization system, workbook ACL, encryption scheme, or durable serialization format. Do not parse it, persist it as an application identifier, or accept it outside the add-in's worksheet boundary.
 

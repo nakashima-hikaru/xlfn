@@ -49,10 +49,58 @@ pub(crate) const fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ParsedToken {
+/// The authenticated identity of one formula-owned handle binding.
+///
+/// The wire token is only one representation of this identity. Keeping the
+/// slot and generation together prevents callers from accidentally mixing a
+/// slot from one token with the generation from another token.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct HandleId {
     pub(crate) slot: u32,
     pub(crate) generation: u64,
+}
+
+/// Runtime-local identity of the shared object behind one or more formula
+/// bindings. It is deliberately not encoded in an Excel token.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ObjectId(pub(crate) u64);
+
+/// A raw token received at an Excel/runtime boundary.
+///
+/// Keeping the borrowed string wrapped prevents syntax parsing, MAC
+/// verification, and registry liveness checks from being conflated in APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandleToken<'a> {
+    raw: &'a str,
+}
+
+impl<'a> HandleToken<'a> {
+    pub(crate) const fn new(raw: &'a str) -> Self {
+        Self { raw }
+    }
+
+    pub(crate) const fn as_str(self) -> &'a str {
+        self.raw
+    }
+}
+
+/// A syntactically valid token whose fields have been decoded but not yet
+/// authenticated against this registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ParsedHandleToken {
+    pub(crate) session: u64,
+    pub(crate) id: HandleId,
+    pub(crate) tag: [u8; 16],
+}
+
+/// A token that passed syntax, session, and MAC verification.
+///
+/// It is intentionally distinct from the raw Excel string and from a live
+/// registry lookup. A verified token can still be stale or have the wrong
+/// Rust type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VerifiedHandleToken {
+    pub(crate) id: HandleId,
 }
 
 pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
@@ -64,7 +112,7 @@ struct VerifiedTokenCacheEntry {
     session: u64,
     secret: [u8; 32],
     token: [u8; HANDLE_TOKEN_LENGTH],
-    parsed: ParsedToken,
+    id: HandleId,
 }
 
 thread_local! {
@@ -92,7 +140,7 @@ pub(crate) fn verified_token_cache_lookup(
     session: u64,
     secret: &[u8; 32],
     token: &str,
-) -> Option<ParsedToken> {
+) -> Option<HandleId> {
     let bytes = token.as_bytes();
     let index = verified_token_cache_index(bytes)?;
     VERIFIED_TOKEN_CACHE.with(|cache| {
@@ -102,7 +150,7 @@ pub(crate) fn verified_token_cache_lookup(
                 && entry.session == session
                 && entry.secret == *secret
                 && entry.token.as_slice() == bytes)
-                .then_some(entry.parsed)
+                .then_some(entry.id)
         })
     })
 }
@@ -112,7 +160,7 @@ pub(crate) fn verified_token_cache_store(
     session: u64,
     secret: &[u8; 32],
     token: &str,
-    parsed: ParsedToken,
+    id: HandleId,
 ) {
     let bytes = token.as_bytes();
     let Some(index) = verified_token_cache_index(bytes) else {
@@ -126,7 +174,7 @@ pub(crate) fn verified_token_cache_store(
             session,
             secret: *secret,
             token: token_bytes,
-            parsed,
+            id,
         });
     });
 }

@@ -28,14 +28,16 @@ impl PublishedTopicState {
 }
 
 pub(crate) struct PublishedTopic {
+    pub(crate) binding: FormulaBinding,
     pub(crate) token: String,
     pub(crate) rtd_key: Arc<str>,
     pub(crate) state: AtomicU8,
 }
 
 impl PublishedTopic {
-    fn new(token: String, rtd_key: Arc<str>) -> Self {
+    fn new(binding: FormulaBinding, token: String, rtd_key: Arc<str>) -> Self {
         Self {
+            binding,
             token,
             rtd_key,
             state: AtomicU8::new(PublishedTopicState::Provisional as u8),
@@ -245,12 +247,12 @@ impl HandleRuntime {
     fn refinement_token(&self, token: &str) -> TokenWire {
         let parsed = self
             .registry
-            .parse_token(token)
+            .parse_token(HandleToken::new(token))
             .expect("H4 trace token must be authenticated");
         TokenWire {
             session: self.registry.session,
-            slot: u64::from(parsed.slot),
-            generation: parsed.generation,
+            slot: u64::from(parsed.id.slot),
+            generation: parsed.id.generation,
         }
     }
 
@@ -346,7 +348,9 @@ impl HandleRuntime {
         }
 
         let valid_topic = topics.by_key.get(&key).is_some_and(|topic| {
-            topic.token == publication.token && Arc::ptr_eq(&topic.publication, publication)
+            topic.binding == publication.binding
+                && topic.token == publication.token
+                && Arc::ptr_eq(&topic.publication, publication)
         });
         if !valid_topic {
             return Err(XllError::StaleHandle);
@@ -395,6 +399,23 @@ impl HandleRuntime {
         self.prepare_observed_object::<T, K>(
             key,
             || create().map(|value| HandleObject::new(value, Arc::clone(&self.registry.cleanup))),
+            observe,
+        )
+    }
+
+    pub(crate) fn prepare_observed_alias<T, K>(
+        &self,
+        key: K,
+        object_id: ObjectId,
+        observe: impl FnOnce(&str, &str) -> XllResult<()>,
+    ) -> XllResult<(String, bool)>
+    where
+        T: ExcelHandleObject,
+        K: Into<HandleTopicKey>,
+    {
+        self.prepare_observed_object::<T, K>(
+            key,
+            || self.registry.clone_object_for_binding::<T>(object_id),
             observe,
         )
     }
@@ -618,9 +639,13 @@ impl HandleRuntime {
         let mut value =
             PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
 
-        let (token, reused) = self
+        let (token, binding_id, object_id, reused) = self
             .registry
             .insert_pending_object_with_kind::<T>(value.slot())?;
+        let binding = FormulaBinding {
+            id: binding_id,
+            object_id,
+        };
         #[cfg(not(any(test, feature = "handle-refinement-trace")))]
         let _ = reused;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -708,10 +733,15 @@ impl HandleRuntime {
                 diagnostic_id: HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID,
             });
         }
-        let publication = Arc::new(PublishedTopic::new(token.clone(), Arc::clone(&rtd_key)));
+        let publication = Arc::new(PublishedTopic::new(
+            binding,
+            token.clone(),
+            Arc::clone(&rtd_key),
+        ));
         topics.by_key.insert(
             key,
             Topic {
+                binding,
                 token: token.clone(),
                 rtd_key: Arc::clone(&rtd_key),
                 publication: Arc::clone(&publication),
@@ -1060,6 +1090,7 @@ impl HandleRuntime {
     }
 
     pub fn close(&self) -> XllResult<()> {
+        self.registry.begin_close();
         let initializations = {
             let mut topics = self.topics.write();
             #[cfg(any(test, feature = "handle-refinement-trace"))]
