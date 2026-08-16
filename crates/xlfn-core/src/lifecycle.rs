@@ -1558,7 +1558,7 @@ mod tests {
         let handles = runtime.handles().unwrap();
         handles
             .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
-                Ok(std::sync::Arc::new(TraceHandle))
+                Ok(TraceHandle)
             })
             .unwrap();
 
@@ -2200,9 +2200,9 @@ mod tests {
             .handles()
             .unwrap()
             .prepare(crate::handle::test_topic_key("ordered"), || {
-                Ok(std::sync::Arc::new(OrderedHandle {
+                Ok(OrderedHandle {
                     events: std::sync::Arc::clone(&events),
-                }))
+                })
             })
             .unwrap();
         let subscriptions = runtime.subscriptions();

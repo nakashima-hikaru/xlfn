@@ -1519,9 +1519,7 @@ pub(crate) mod tests {
         assert_eq!(runtime.enter().unwrap().state(), &1);
         let old_handles = runtime.handles().unwrap();
         let (old_token, _) = old_handles
-            .prepare(crate::handle::test_topic_key("old"), || {
-                Ok(Arc::new(TestHandle(1)))
-            })
+            .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
             .unwrap();
 
         let close_attempt = runtime.begin_final_close().unwrap();
@@ -1536,9 +1534,7 @@ pub(crate) mod tests {
         assert_eq!(runtime.enter().unwrap().state(), &2);
         let new_handles = runtime.handles().unwrap();
         let (new_token, _) = new_handles
-            .prepare(crate::handle::test_topic_key("new"), || {
-                Ok(Arc::new(TestHandle(2)))
-            })
+            .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
             .unwrap();
         assert_eq!(
             crate::with_excel_call_scope(|scope| {

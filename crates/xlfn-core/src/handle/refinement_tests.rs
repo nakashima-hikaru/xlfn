@@ -7,8 +7,8 @@ struct TraceValue;
 
 impl ExcelHandleObject for TraceValue {}
 
-fn create_value() -> XllResult<Arc<TraceValue>> {
-    Ok(Arc::new(TraceValue))
+fn create_value() -> XllResult<TraceValue> {
+    Ok(TraceValue)
 }
 
 fn write_trace(runtime: &HandleRuntime, name: &str) {

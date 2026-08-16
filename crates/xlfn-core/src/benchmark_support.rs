@@ -349,7 +349,7 @@ impl HandleColdBatch {
                 .runtime
                 .prepare_observed(
                     key,
-                    || Ok(Arc::new(BenchHandleObject { _payload: i as u64 })),
+                    || Ok(BenchHandleObject { _payload: i as u64 }),
                     |_, _| Ok(()),
                 )
                 .expect("cold handle publication failed");
@@ -378,11 +378,7 @@ impl HandleWarmBenchmark {
         );
         let key = benchmark_topic_key("BENCH.WARM", 0);
         runtime
-            .prepare_observed(
-                key,
-                || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
-                |_, _| Ok(()),
-            )
+            .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
             .expect("warm handle seed publication failed");
         Self { runtime, key }
     }
@@ -393,7 +389,7 @@ impl HandleWarmBenchmark {
                 .runtime
                 .prepare_observed(
                     self.key,
-                    || -> crate::XllResult<Arc<BenchHandleObject>> {
+                    || -> crate::XllResult<BenchHandleObject> {
                         unreachable!("warm factory must not run")
                     },
                     |_, _| Ok(()),
@@ -622,7 +618,7 @@ impl HandleFormulaBenchmark {
                 key,
                 || {
                     factory_calls.fetch_add(1, Ordering::Relaxed);
-                    Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                    Ok(BenchHandleObject { _payload: 0 })
                 },
                 |_, _| Ok(()),
             )
@@ -642,7 +638,7 @@ impl HandleFormulaBenchmark {
         self.runtime
             .prepare_observed(
                 key,
-                || -> crate::XllResult<Arc<BenchHandleObject>> {
+                || -> crate::XllResult<BenchHandleObject> {
                     self.factory_calls.fetch_add(1, Ordering::Relaxed);
                     panic!("formula handle warm-hit factory must not run");
                 },
@@ -881,11 +877,7 @@ impl HandleLookupBenchmark {
         for worker in 0..worker_count {
             let key = benchmark_topic_key("BENCH.LOOKUP", worker as u64);
             let token = runtime
-                .prepare_observed(
-                    key,
-                    || Ok(Arc::new(BenchHandleObject { _payload: 0 })),
-                    |_, _| Ok(()),
-                )
+                .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
                 .expect("handle lookup warm seed publication failed")
                 .0;
             tokens.push(Arc::<str>::from(token));
@@ -1001,7 +993,7 @@ impl HandleDistinctKeyBenchmark {
                     *key,
                     move || {
                         factory_calls.fetch_add(1, Ordering::Relaxed);
-                        Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                        Ok(BenchHandleObject { _payload: 0 })
                     },
                     |_, _| Ok(()),
                 )
@@ -1026,7 +1018,7 @@ impl HandleDistinctKeyBenchmark {
                                 key,
                                 || {
                                     worker_factory_calls.fetch_add(1, Ordering::Relaxed);
-                                    Ok(Arc::new(BenchHandleObject { _payload: 0 }))
+                                    Ok(BenchHandleObject { _payload: 0 })
                                 },
                                 |_, _| Ok(()),
                             )

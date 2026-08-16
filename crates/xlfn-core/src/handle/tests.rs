@@ -12,7 +12,11 @@ fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<S
 where
     T: Any + Send + Sync + 'static,
 {
-    let mut value = Some(value);
+    let mut value = Some(
+        Arc::try_unwrap(value)
+            .ok()
+            .expect("test value is uniquely owned"),
+    );
     registry.insert_pending(&mut value)
 }
 
@@ -179,7 +183,7 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     let (token, created) = runtime
         .prepare_observed(
             key,
-            || Ok(Arc::new(DataRecord(7))),
+            || Ok(DataRecord(7)),
             move |rtd_key, observed_token| {
                 assert!(!observed_token.is_empty());
                 *observed_for_callback.lock() = Some(rtd_key.to_owned());
@@ -240,7 +244,7 @@ fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
     runtime
         .prepare_observed(
             key,
-            || Ok(Arc::new(DataRecord(1))),
+            || Ok(DataRecord(1)),
             |_, _| {
                 let published = runtime.published.load(&key);
                 assert!(published.get(&key).is_none());
@@ -261,9 +265,7 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     let second_rtd_key = second_key.format_rtd_key();
     assert_ne!(first_rtd_key, second_rtd_key);
 
-    let (first_token, created) = runtime
-        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
+    let (first_token, created) = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
     assert!(created);
 
     // Force the state that a formatter collision would present at the
@@ -281,7 +283,7 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
             .insert(Arc::from(second_rtd_key.as_str()), first_key);
     }
 
-    let result = runtime.prepare(second_key, || Ok(Arc::new(DataRecord(2))));
+    let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
     assert!(matches!(
         result,
         Err(XllError::Internal {
@@ -368,6 +370,7 @@ fn sref_caller_keeps_sheet_lookup_fallback() {
 
 #[test]
 fn generation_prevents_aba_and_lookup_keeps_value_alive() {
+    #[derive(Clone)]
     struct TestObj(&'static str);
     impl ExcelHandleObject for TestObj {}
 
@@ -378,9 +381,7 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
         let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
         assert_eq!(borrowed.0, "first");
 
-        let removed = registry.remove::<TestObj>(&token).unwrap();
-        assert_eq!(removed.0, "first");
-        drop(removed);
+        registry.remove::<TestObj>(&token).unwrap();
         assert!(matches!(
             registry.lookup::<TestObj>(&token),
             Err(XllError::StaleHandle)
@@ -415,11 +416,10 @@ fn published_handle_snapshot_owns_object_until_reader_release() {
     let publication = snapshot
         .get(parsed.id.slot)
         .expect("inserted handle must be published");
-    assert_eq!(publication.state(), HandleRecordState::Live);
+    assert_eq!(publication.state(), BindingState::Live);
 
-    let removed = registry.remove::<Counted>(&token).unwrap();
-    assert_eq!(publication.state(), HandleRecordState::Retired);
-    drop(removed);
+    registry.remove::<Counted>(&token).unwrap();
+    assert_eq!(publication.state(), BindingState::Retired);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(snapshot);
@@ -428,6 +428,7 @@ fn published_handle_snapshot_owns_object_until_reader_release() {
 
 #[test]
 fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
+    #[derive(Clone)]
     struct TestObj(&'static str);
     impl ExcelHandleObject for TestObj {}
 
@@ -458,6 +459,7 @@ fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
 
 #[test]
 fn close_rejects_new_borrows_but_retires_after_existing_snapshot_release() {
+    #[derive(Clone)]
     struct TestObj(&'static str);
     impl ExcelHandleObject for TestObj {}
 
@@ -482,7 +484,7 @@ fn exhausted_generation_retires_the_slot_permanently() {
     registry.remove::<u32>(&first).unwrap();
     registry.state.write().slots[0].next_generation = u64::MAX;
     let final_token = insert_production(&registry, Arc::new(1_u32)).unwrap();
-    assert_eq!(*registry.remove::<u32>(&final_token).unwrap(), 1);
+    registry.remove::<u32>(&final_token).unwrap();
     assert!(registry.state.read().free.is_empty());
 
     let replacement = insert_production(&registry, Arc::new(2_u32)).unwrap();
@@ -543,7 +545,7 @@ fn close_invalidates_tokens_but_existing_arcs_survive() {
     let value = registry.lookup::<u32>(&token).unwrap();
     registry.close().unwrap();
     assert!(registry.lookup::<u32>(&token).is_err());
-    assert_eq!(*value, 42);
+    assert_eq!(value, 42);
     assert!(matches!(
         insert_production(&registry, Arc::new(7_u32)),
         Err(XllError::Closing)
@@ -588,7 +590,7 @@ fn wrong_remove_type_does_not_consume_handle() {
         registry.remove::<String>(&token),
         Err(XllError::InvalidHandle)
     ));
-    assert_eq!(*registry.lookup::<u32>(&token).unwrap(), 42);
+    assert_eq!(registry.lookup::<u32>(&token).unwrap(), 42);
 }
 
 #[test]
@@ -674,7 +676,7 @@ fn repeated_formula_identity_runs_factory_exactly_once() {
     let (first, created) = runtime
         .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Arc::new(DataRecord(1)))
+            Ok(DataRecord(1))
         })
         .unwrap();
     assert!(created);
@@ -682,7 +684,7 @@ fn repeated_formula_identity_runs_factory_exactly_once() {
     let (second, created) = runtime
         .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Arc::new(DataRecord(2)))
+            Ok(DataRecord(2))
         })
         .unwrap();
     assert!(!created);
@@ -708,7 +710,7 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
     let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
     let handles = runtime.handles().unwrap();
     let (token, _) = handles
-        .prepare(test_topic_key("argument"), || Ok(Arc::new(DataRecord(19))))
+        .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
         .unwrap();
     let (_encoded, mut raw) = token_value(&token);
 
@@ -727,9 +729,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     let handles = runtime.handles().unwrap();
     let key = test_topic_key("argument-errors");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = handles
-        .prepare(key, || Ok(Arc::new(DataRecord(23))))
-        .unwrap();
+    let (token, _) = handles.prepare(key, || Ok(DataRecord(23))).unwrap();
     handles.connect(1, 91, &rtd_key).unwrap();
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
@@ -844,22 +844,20 @@ fn optional_handle_conversion_preserves_blank_and_missing_policy() {
 #[test]
 fn existing_handle_publication_creates_an_independent_formula_owner() {
     let runtime = HandleRuntime::new(8);
-    let shared = Arc::new(DataRecord(31));
     let source_key = test_topic_key("source");
     let source_rtd_key = source_key.format_rtd_key();
-    let (source_token, _) = runtime
-        .prepare(source_key, || Ok(Arc::clone(&shared)))
-        .unwrap();
+    let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(31))).unwrap();
     runtime.connect(1, 1, &source_rtd_key).unwrap();
 
-    let object_id = crate::with_excel_call_scope(|scope| {
+    let (object_id, object) = crate::with_excel_call_scope(|scope| {
         let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        resolved.alias().into_object_id()
+        resolved.alias().into_parts()
     });
+    runtime.disconnect(1, 1);
     let alias_key = test_topic_key("alias");
     let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, _) = runtime
-        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, |_, _| Ok(()))
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, object, |_, _| Ok(()))
         .unwrap();
     runtime.connect(1, 2, &alias_rtd_key).unwrap();
     assert_ne!(source_token, alias_token);
@@ -874,20 +872,13 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         .unwrap()
         .id;
     let state = runtime.registry.state.read();
-    let source_object_id = state.slots[source_binding.slot as usize]
-        .record
-        .as_ref()
-        .unwrap()
-        .object_id;
     let alias_object_id = state.slots[alias_binding.slot as usize]
         .record
         .as_ref()
         .unwrap()
         .object_id;
-    assert_eq!(
-        source_object_id, alias_object_id,
-        "source={source_binding:?} source_object={source_object_id:?} alias={alias_binding:?} alias_object={alias_object_id:?}"
-    );
+    assert_ne!(source_binding, alias_binding);
+    assert_eq!(alias_object_id, object_id);
     drop(state);
 
     runtime.disconnect(1, 1);
@@ -909,9 +900,7 @@ fn failed_rtd_connection_rolls_back_pending_object() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("pending");
     let rtd_key = key.format_rtd_key();
-    runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
     runtime.rollback(&rtd_key);
     assert_eq!(runtime.len(), 0);
 }
@@ -921,9 +910,7 @@ fn server_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
     let runtime = Arc::new(HandleRuntime::new(8));
     let key = test_topic_key("server-generation");
     let rtd_key = key.format_rtd_key();
-    runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
 
     runtime.claim_server(&rtd_key, 1).unwrap();
     assert!(matches!(
@@ -952,9 +939,7 @@ fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("uncalculated");
     let rtd_key = key.format_rtd_key();
-    runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
     runtime.connect(1, 9, &rtd_key).unwrap();
     runtime.rollback(&rtd_key);
     assert_eq!(runtime.len(), 0);
@@ -967,9 +952,7 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(HandleRuntime::new(8));
     let key = test_topic_key("transactional");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
+    let (token, _) = runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
 
     let connection = runtime.connect_transaction(1, 10, &rtd_key).unwrap();
     assert_eq!(connection.token(), token);
@@ -993,9 +976,7 @@ fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
     let runtime = Arc::new(HandleRuntime::new(8));
     let key = test_topic_key("concurrent-transaction");
     let rtd_key = key.format_rtd_key();
-    runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(3))))
-        .unwrap();
+    runtime.prepare(key, || Ok(DataRecord(3))).unwrap();
 
     let connection = runtime.connect_transaction(1, 12, &rtd_key).unwrap();
     assert!(matches!(
@@ -1015,9 +996,7 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let runtime = Arc::new(HandleRuntime::new(8));
     let key = test_topic_key("existing-transaction");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = runtime
-        .prepare(key, || Ok(Arc::new(DataRecord(2))))
-        .unwrap();
+    let (token, _) = runtime.prepare(key, || Ok(DataRecord(2))).unwrap();
     runtime.connect(1, 11, &rtd_key).unwrap();
 
     let connection = runtime.connect_transaction(1, 11, &rtd_key).unwrap();
@@ -1039,12 +1018,8 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     let first_rtd_key = first_key.format_rtd_key();
     let second_key = test_topic_key("second");
     let second_rtd_key = second_key.format_rtd_key();
-    runtime
-        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
-    runtime
-        .prepare(second_key, || Ok(Arc::new(DataRecord(2))))
-        .unwrap();
+    runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    runtime.prepare(second_key, || Ok(DataRecord(2))).unwrap();
     runtime.connect(1, 9, &first_rtd_key).unwrap();
     assert!(matches!(
         runtime.connect(1, 9, &second_rtd_key),
@@ -1070,15 +1045,9 @@ fn different_formula_keys_create_distinct_handles() {
     let first_key = test_topic_key("sheet:A1:rate=1");
     let second_key = test_topic_key("sheet:A2:rate=1");
     let changed_key = test_topic_key("sheet:A1:rate=2");
-    let (first, _) = runtime
-        .prepare(first_key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
-    let (second, _) = runtime
-        .prepare(second_key, || Ok(Arc::new(DataRecord(1))))
-        .unwrap();
-    let (changed, _) = runtime
-        .prepare(changed_key, || Ok(Arc::new(DataRecord(2))))
-        .unwrap();
+    let (first, _) = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    let (second, _) = runtime.prepare(second_key, || Ok(DataRecord(1))).unwrap();
+    let (changed, _) = runtime.prepare(changed_key, || Ok(DataRecord(2))).unwrap();
     assert_ne!(first, second);
     assert_ne!(first, changed);
 }
@@ -1090,7 +1059,7 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
     let key = test_topic_key("sheet:A1");
     let rtd_key = key.format_rtd_key();
     let (token, _) = runtime
-        .prepare(key, || Ok(Arc::new(CountedDataRecord(Arc::clone(&drops)))))
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
     runtime.connect(1, 7, &rtd_key).unwrap();
     crate::with_excel_call_scope(|scope| {
@@ -1113,7 +1082,7 @@ fn terminate_and_close_release_every_remaining_topic_once() {
         let key = test_topic_key(label);
         let rtd_key = key.format_rtd_key();
         runtime
-            .prepare(key, || Ok(Arc::new(CountedDataRecord(Arc::clone(&drops)))))
+            .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
             .unwrap();
         runtime.claim_server(&rtd_key, 1).unwrap();
     }
@@ -1140,9 +1109,9 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let key = test_topic_key("factory-reentry");
     let (token, created) = runtime
         .prepare(key, || {
-            let nested = runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
+            let nested = runtime.prepare(key, || Ok(DataRecord(2)));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
-            Ok(Arc::new(DataRecord(1)))
+            Ok(DataRecord(1))
         })
         .unwrap();
     assert!(created);
@@ -1159,9 +1128,9 @@ fn different_key_factory_reentry_returns_an_error_without_waiting() {
     let inner_key = test_topic_key("inner-factory");
     let (token, created) = runtime
         .prepare(outer_key, || {
-            let nested = runtime.prepare(inner_key, || Ok(Arc::new(DataRecord(2))));
+            let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
-            Ok(Arc::new(DataRecord(1)))
+            Ok(DataRecord(1))
         })
         .unwrap();
     assert!(created);
@@ -1179,9 +1148,9 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
     let (token, created) = runtime
         .prepare_observed(
             key,
-            || Ok(Arc::new(DataRecord(1))),
+            || Ok(DataRecord(1)),
             |_, _| {
-                let nested = runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
+                let nested = runtime.prepare(key, || Ok(DataRecord(2)));
                 assert!(matches!(nested, Err(XllError::ReentrantCall)));
                 Ok(())
             },
@@ -1202,9 +1171,9 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
     let (token, created) = runtime
         .prepare_observed(
             outer_key,
-            || Ok(Arc::new(DataRecord(1))),
+            || Ok(DataRecord(1)),
             |_, _| {
-                let nested = runtime.prepare(inner_key, || Ok(Arc::new(DataRecord(2))));
+                let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
                 assert!(matches!(nested, Err(XllError::ReentrantCall)));
                 Ok(())
             },
@@ -1224,7 +1193,7 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
     let key = test_topic_key("observed");
     let first = runtime.prepare_observed(
         key,
-        || Ok(Arc::new(DataRecord(1))),
+        || Ok(DataRecord(1)),
         |_, _| {
             Err(XllError::ExcelApi {
                 function: "xlfRtd",
@@ -1236,7 +1205,7 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
     assert_eq!(runtime.len(), 0);
 
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(2))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(2)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
     assert_eq!(
@@ -1250,7 +1219,7 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("observed-memoized");
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
@@ -1259,7 +1228,7 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
         key,
         || {
             calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Arc::new(DataRecord(2)))
+            Ok(DataRecord(2))
         },
         |_, _| {
             Err(XllError::ExcelApi {
@@ -1286,14 +1255,14 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("observe-retry");
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(10))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(10)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
     // Observation failure on warm hit
     let result = runtime.prepare_observed(
         key,
-        || Ok(Arc::new(DataRecord(20))),
+        || Ok(DataRecord(20)),
         |_, _| {
             Err(XllError::ExcelApi {
                 function: "xlfRtd",
@@ -1305,7 +1274,7 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
 
     // Retry with successful observation still reuses the same object
     let (retry_token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(30))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(30)), |_, _| Ok(()))
         .unwrap();
     assert!(!created);
     assert_eq!(retry_token, token);
@@ -1320,7 +1289,7 @@ fn observation_cannot_commit_a_topic_removed_reentrantly() {
     let runtime = HandleRuntime::new(8);
     let result = runtime.prepare_observed(
         test_topic_key("removed-during-observation"),
-        || Ok(Arc::new(DataRecord(1))),
+        || Ok(DataRecord(1)),
         |key, _| {
             runtime.rollback(key);
             Ok(())
@@ -1335,13 +1304,13 @@ fn published_warm_observation_rejects_topic_removed_reentrantly() {
     let runtime = HandleRuntime::new(8);
     let key = test_topic_key("published-removed-during-observation");
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
-        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
         |rtd_key, observed_token| {
             assert_eq!(observed_token, token);
             runtime.rollback(rtd_key);
@@ -1359,7 +1328,7 @@ fn warm_observation_rejects_generation_terminated_topic() {
     let key = test_topic_key("warm-generation-terminated");
     let rtd_key = key.format_rtd_key();
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
@@ -1368,7 +1337,7 @@ fn warm_observation_rejects_generation_terminated_topic() {
     let observed_runtime = Arc::clone(&runtime);
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
-        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
         move |observed_rtd_key, observed_token| {
             assert_eq!(observed_rtd_key, rtd_key);
             assert_eq!(observed_token, token);
@@ -1387,7 +1356,7 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let key = test_topic_key("warm-same-key-aba");
     let rtd_key = key.format_rtd_key();
     let (old_token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
     assert!(created);
 
@@ -1400,7 +1369,7 @@ fn warm_observation_does_not_follow_recreated_same_key() {
         observation_started_rx.recv().unwrap();
         replacement_runtime.rollback(&replacement_rtd_key);
         let (new_token, created) = replacement_runtime
-            .prepare(key, || Ok(Arc::new(DataRecord(2))))
+            .prepare(key, || Ok(DataRecord(2)))
             .unwrap();
         assert!(created);
         assert_ne!(new_token, replacement_old_token);
@@ -1410,7 +1379,7 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let observed_runtime = Arc::clone(&runtime);
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
-        || -> XllResult<Arc<DataRecord>> { panic!("warm factory must not run") },
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
         move |observed_rtd_key, observed_token| {
             assert_eq!(observed_rtd_key, rtd_key);
             assert_eq!(observed_token, old_token);
@@ -1438,7 +1407,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
 
     let result = runtime.prepare_observed(
         key,
-        || Ok(Arc::new(DataRecord(1))),
+        || Ok(DataRecord(1)),
         move |rtd_key, token| {
             let connection = observed_runtime
                 .connect_transaction(1, 17, rtd_key)
@@ -1483,7 +1452,7 @@ fn disconnect_rejects_provisional_excel_commit_without_resurrection() {
 
     let result = runtime.prepare_observed(
         key,
-        || Ok(Arc::new(DataRecord(1))),
+        || Ok(DataRecord(1)),
         move |rtd_key, token| {
             let connection = observed_runtime
                 .connect_transaction(1, 17, rtd_key)
@@ -1522,7 +1491,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
     let first = std::thread::spawn(move || {
         first_runtime.prepare_observed(
             key,
-            || Ok(Arc::new(DataRecord(1))),
+            || Ok(DataRecord(1)),
             |_, _| {
                 observing_tx.send(()).unwrap();
                 finish_rx.recv().unwrap();
@@ -1539,7 +1508,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
     let second_runtime = Arc::clone(&runtime);
     let second = std::thread::spawn(move || {
         waiting_tx.send(()).unwrap();
-        second_runtime.prepare_observed(key, || Ok(Arc::new(DataRecord(2))), |_, _| Ok(()))
+        second_runtime.prepare_observed(key, || Ok(DataRecord(2)), |_, _| Ok(()))
     });
     waiting_rx.recv().unwrap();
 
@@ -1597,7 +1566,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
                 factory_calls1.fetch_add(1, Ordering::SeqCst);
                 in_factory_tx.send(()).unwrap();
                 barrier1.wait();
-                Ok(Arc::new(DataRecord(100)))
+                Ok(DataRecord(100))
             })
             .unwrap()
     });
@@ -1610,7 +1579,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
         runtime2
             .prepare(key, || {
                 factory_calls2.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(DataRecord(200)))
+                Ok(DataRecord(200))
             })
             .unwrap()
     });
@@ -1640,7 +1609,7 @@ fn handle_dependency_chain_propagates_identity_change() {
     // Upstream: different argument digest → different key → different token
     let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
     let (upstream_a, created) = runtime
-        .prepare(upstream_a_key, || Ok(Arc::new(DataRecord(10))))
+        .prepare(upstream_a_key, || Ok(DataRecord(10)))
         .unwrap();
     assert!(created);
 
@@ -1651,14 +1620,14 @@ fn handle_dependency_chain_propagates_identity_change() {
     let downstream_label_a = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_a);
     let downstream_key_a = test_topic_key(&downstream_label_a);
     let (downstream_a, created) = runtime
-        .prepare(downstream_key_a, || Ok(Arc::new(DataRecord(100))))
+        .prepare(downstream_key_a, || Ok(DataRecord(100)))
         .unwrap();
     assert!(created);
 
     // Upstream changes (different arguments → different key)
     let upstream_b_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_b");
     let (upstream_b, created) = runtime
-        .prepare(upstream_b_key, || Ok(Arc::new(DataRecord(20))))
+        .prepare(upstream_b_key, || Ok(DataRecord(20)))
         .unwrap();
     assert!(created);
     assert_ne!(upstream_a, upstream_b);
@@ -1667,7 +1636,7 @@ fn handle_dependency_chain_propagates_identity_change() {
     let downstream_label_b = format!("sheet:B1:MODEL.CREATE:{}:params", upstream_b);
     let downstream_key_b = test_topic_key(&downstream_label_b);
     let (downstream_b, created) = runtime
-        .prepare(downstream_key_b, || Ok(Arc::new(DataRecord(200))))
+        .prepare(downstream_key_b, || Ok(DataRecord(200)))
         .unwrap();
     assert!(created);
     assert_ne!(downstream_a, downstream_b);
@@ -1702,7 +1671,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
             || {
                 factory_started_tx.send(()).unwrap();
                 release_factory_rx.recv().unwrap();
-                Ok(Arc::new(DataRecord(1)))
+                Ok(DataRecord(1))
             },
             |_, _| {
                 creator_observed.store(true, Ordering::Release);
@@ -1715,7 +1684,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     let waiter_runtime = Arc::clone(&runtime);
     let (waiter_done_tx, waiter_done_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let result = waiter_runtime.prepare(key, || Ok(Arc::new(DataRecord(2))));
+        let result = waiter_runtime.prepare(key, || Ok(DataRecord(2)));
         waiter_done_tx.send(result).unwrap();
     });
 
@@ -1762,7 +1731,7 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
     let key = test_topic_key("warm-fast");
 
     let (token, created) = runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
 
     assert!(created);
@@ -1774,7 +1743,7 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
             key,
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Ok(Arc::new(DataRecord(2)))
+                Ok(DataRecord(2))
             },
             |key, _| {
                 let topics = runtime.topics.read();
@@ -1808,7 +1777,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     let key = test_topic_key("warm-close");
 
     runtime
-        .prepare_observed(key, || Ok(Arc::new(DataRecord(1))), |_, _| Ok(()))
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
 
     let (entered_tx, entered_rx) = mpsc::channel();

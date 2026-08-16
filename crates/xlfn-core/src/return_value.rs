@@ -407,7 +407,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        self.publish_handle_arc(|| operation().map(Arc::new))
+        self.publish_handle(operation)
     }
 
     #[doc(hidden)]
@@ -435,19 +435,16 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         let argument_digest = unsafe { crate::formula_fingerprint::fingerprint(raw_arguments) }?;
         let key = crate::handle::formula_topic_key(callbacks, udf_id, &argument_digest)?;
         let handles = runtime.handle_runtime()?;
-        let object_id = operation()?.into_object_id();
+        let (object_id, object) = operation()?.into_parts();
         let observer_handles = Arc::clone(&handles);
         let (token, _) =
-            handles.prepare_observed_alias::<T, _>(key, object_id, move |key, token| {
+            handles.prepare_observed_alias::<T, _>(key, object_id, object, move |key, token| {
                 crate::rtd::observe(observer_handles, key, token, callbacks)
             })?;
         Ok(token)
     }
 
-    fn publish_handle_arc<T>(
-        &mut self,
-        operation: impl FnOnce() -> XllResult<Arc<T>>,
-    ) -> XllResult<String>
+    fn publish_handle<T>(&mut self, operation: impl FnOnce() -> XllResult<T>) -> XllResult<String>
     where
         T: crate::handle::ExcelHandleObject,
     {

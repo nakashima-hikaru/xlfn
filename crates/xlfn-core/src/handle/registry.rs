@@ -4,12 +4,12 @@ use std::ptr::NonNull;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HandleRecordState {
+pub(crate) enum BindingState {
     Live = 0,
     Retired = 1,
 }
 
-impl HandleRecordState {
+impl BindingState {
     fn from_raw(raw: u8) -> Self {
         match raw {
             value if value == Self::Live as u8 => Self::Live,
@@ -71,37 +71,20 @@ impl HandleCleanupState {
 /// binding without cloning the business value. Destruction is centralized here
 /// so consumer handles do not need ownership or cleanup behavior.
 pub(crate) struct HandleObject {
-    object_id: AtomicU64,
-    value: ManuallyDrop<Arc<dyn Any + Send + Sync>>,
+    value: ManuallyDrop<Box<dyn Any + Send + Sync>>,
     cleanup: Arc<HandleCleanupState>,
 }
 
 impl HandleObject {
-    pub(crate) fn new<T>(value: Arc<T>, cleanup: Arc<HandleCleanupState>) -> Arc<Self>
+    pub(crate) fn new<T>(value: T, cleanup: Arc<HandleCleanupState>) -> Arc<Self>
     where
         T: Any + Send + Sync + 'static,
     {
-        let value: Arc<dyn Any + Send + Sync> = value;
+        let value: Box<dyn Any + Send + Sync> = Box::new(value);
         Arc::new(Self {
-            object_id: AtomicU64::new(0),
             value: ManuallyDrop::new(value),
             cleanup,
         })
-    }
-
-    fn ensure_object_id(&self, candidate: ObjectId) -> ObjectId {
-        let result =
-            self.object_id
-                .compare_exchange(0, candidate.0, Ordering::AcqRel, Ordering::Acquire);
-        ObjectId(result.map_or_else(|existing| existing, |_| candidate.0))
-    }
-
-    fn object_id(&self) -> Option<ObjectId> {
-        let value = self.object_id.load(Ordering::Acquire);
-        match value {
-            0 => None,
-            value => Some(ObjectId(value)),
-        }
     }
 
     pub(crate) fn get<T>(&self) -> Option<&T>
@@ -112,11 +95,11 @@ impl HandleObject {
     }
 
     #[cfg(test)]
-    fn clone_typed<T>(&self) -> Option<Arc<T>>
+    fn clone_typed<T>(&self) -> Option<T>
     where
-        T: Any + Send + Sync + 'static,
+        T: Any + Send + Sync + Clone + 'static,
     {
-        Arc::downcast(Arc::clone(&*self.value)).ok()
+        self.get::<T>().cloned()
     }
 }
 
@@ -142,7 +125,7 @@ impl Drop for HandleObject {
 /// publication only makes it unavailable to new readers; an old snapshot
 /// keeps both the publication and its object alive until the reader releases
 /// the guard.
-pub(crate) struct HandleRecord {
+pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     pub(crate) object_id: ObjectId,
     pub(crate) type_id: TypeId,
@@ -151,7 +134,7 @@ pub(crate) struct HandleRecord {
     pub(crate) state: AtomicU8,
 }
 
-impl HandleRecord {
+impl BindingRecord {
     fn new(
         id: HandleId,
         object_id: ObjectId,
@@ -165,26 +148,26 @@ impl HandleRecord {
             type_id,
             type_name,
             object,
-            state: AtomicU8::new(HandleRecordState::Live as u8),
+            state: AtomicU8::new(BindingState::Live as u8),
         }
     }
 
-    pub(crate) fn state(&self) -> HandleRecordState {
-        HandleRecordState::from_raw(self.state.load(Ordering::Acquire))
+    pub(crate) fn state(&self) -> BindingState {
+        BindingState::from_raw(self.state.load(Ordering::Acquire))
     }
 }
 
-const HANDLE_RECORD_CHUNK_SIZE: usize = 64;
+const BINDING_CHUNK_SIZE: usize = 64;
 
 #[derive(Clone)]
-struct HandleRecordChunk {
-    entries: Box<[Option<Arc<HandleRecord>>]>,
+struct BindingChunk {
+    entries: Box<[Option<Arc<BindingRecord>>]>,
 }
 
-impl HandleRecordChunk {
+impl BindingChunk {
     fn empty() -> Self {
         Self {
-            entries: (0..HANDLE_RECORD_CHUNK_SIZE)
+            entries: (0..BINDING_CHUNK_SIZE)
                 .map(|_| None)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -192,13 +175,13 @@ impl HandleRecordChunk {
     }
 }
 
-pub(crate) struct HandleRecordSnapshot {
-    guard: arc_swap::Guard<Arc<HandleRecordChunk>>,
+pub(crate) struct BindingSnapshot {
+    guard: arc_swap::Guard<Arc<BindingChunk>>,
 }
 
-impl HandleRecordSnapshot {
-    pub(crate) fn get(&self, slot: u32) -> Option<&Arc<HandleRecord>> {
-        self.guard.entries[slot as usize & (HANDLE_RECORD_CHUNK_SIZE - 1)].as_ref()
+impl BindingSnapshot {
+    pub(crate) fn get(&self, slot: u32) -> Option<&Arc<BindingRecord>> {
+        self.guard.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)].as_ref()
     }
 }
 
@@ -208,24 +191,24 @@ impl HandleRecordSnapshot {
 /// and probing without adding lookup information. Copy-on-write is limited to
 /// one 64-entry chunk on insert/remove; readers perform only chunk selection
 /// and indexed access.
-pub(crate) struct PublishedHandles {
-    chunks: Box<[ArcSwap<HandleRecordChunk>]>,
-    empty: ArcSwap<HandleRecordChunk>,
+pub(crate) struct PublishedBindings {
+    chunks: Box<[ArcSwap<BindingChunk>]>,
+    empty: ArcSwap<BindingChunk>,
 }
 
-impl PublishedHandles {
-    pub(crate) fn new(maximum_handles: usize) -> Self {
-        let chunk_count = maximum_handles.div_ceil(HANDLE_RECORD_CHUNK_SIZE).max(1);
+impl PublishedBindings {
+    pub(crate) fn new(maximum_bindings: usize) -> Self {
+        let chunk_count = maximum_bindings.div_ceil(BINDING_CHUNK_SIZE).max(1);
         Self {
             chunks: (0..chunk_count)
-                .map(|_| ArcSwap::from_pointee(HandleRecordChunk::empty()))
+                .map(|_| ArcSwap::from_pointee(BindingChunk::empty()))
                 .collect(),
-            empty: ArcSwap::from_pointee(HandleRecordChunk::empty()),
+            empty: ArcSwap::from_pointee(BindingChunk::empty()),
         }
     }
 
     fn chunk_index(slot: u32) -> usize {
-        slot as usize / HANDLE_RECORD_CHUNK_SIZE
+        slot as usize / BINDING_CHUNK_SIZE
     }
 
     /// Load the chunk containing one publication.
@@ -233,18 +216,18 @@ impl PublishedHandles {
     /// The guard must remain alive while the caller validates and uses the
     /// borrowed publication. This avoids cloning the publication's `Arc` on
     /// every warm lookup while still keeping the immutable snapshot alive.
-    pub(crate) fn load(&self, slot: u32) -> HandleRecordSnapshot {
+    pub(crate) fn load(&self, slot: u32) -> BindingSnapshot {
         let chunk = self
             .chunks
             .get(Self::chunk_index(slot))
             .unwrap_or(&self.empty);
-        HandleRecordSnapshot {
+        BindingSnapshot {
             guard: chunk.load(),
         }
     }
 
     /// Update the snapshot while the canonical registry write lock is held.
-    fn insert(&self, id: HandleId, record: Arc<HandleRecord>) {
+    fn insert(&self, id: HandleId, record: Arc<BindingRecord>) {
         let slot = id.slot;
         let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
             debug_assert!(false, "handle slot exceeds the publication table");
@@ -252,7 +235,7 @@ impl PublishedHandles {
         };
         let current = chunk.load_full();
         let mut next = current.as_ref().clone();
-        next.entries[slot as usize & (HANDLE_RECORD_CHUNK_SIZE - 1)] = Some(record);
+        next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = Some(record);
         chunk.store(Arc::new(next));
     }
 
@@ -260,20 +243,20 @@ impl PublishedHandles {
     /// removed. The identity check keeps a future slot reuse from removing a
     /// newer generation if this helper is ever called outside the current
     /// write-lock discipline.
-    fn remove(&self, id: HandleId, expected: &Arc<HandleRecord>) {
+    fn remove(&self, id: HandleId, expected: &Arc<BindingRecord>) {
         let slot = id.slot;
         let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
             return;
         };
         let current = chunk.load_full();
-        if !current.entries[slot as usize & (HANDLE_RECORD_CHUNK_SIZE - 1)]
+        if !current.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)]
             .as_ref()
             .is_some_and(|record| Arc::ptr_eq(record, expected))
         {
             return;
         }
         let mut next = current.as_ref().clone();
-        next.entries[slot as usize & (HANDLE_RECORD_CHUNK_SIZE - 1)] = None;
+        next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = None;
         chunk.store(Arc::new(next));
     }
 
@@ -281,44 +264,58 @@ impl PublishedHandles {
     /// closed.
     fn clear(&self) {
         for chunk in &self.chunks {
-            chunk.store(Arc::new(HandleRecordChunk::empty()));
+            chunk.store(Arc::new(BindingChunk::empty()));
         }
-    }
-
-    /// Find a live record for an object identity. This is intentionally a
-    /// cold-path operation used only when publishing an explicit alias.
-    fn find_object(&self, object_id: ObjectId) -> Option<Arc<HandleRecord>> {
-        for chunk in &self.chunks {
-            let snapshot = chunk.load();
-            if let Some(record) = snapshot.entries.iter().flatten().find(|record| {
-                record.object_id == object_id && record.state() == HandleRecordState::Live
-            }) {
-                return Some(Arc::clone(record));
-            }
-        }
-        None
     }
 }
 
-pub(crate) struct Slot {
+pub(crate) struct BindingSlot {
     pub(crate) next_generation: u64,
-    pub(crate) record: Option<Arc<HandleRecord>>,
+    pub(crate) record: Option<Arc<BindingRecord>>,
+}
+
+/// Canonical ownership and type metadata for one shared handle object.
+///
+/// Binding records retain their own `Arc<HandleObject>` so immutable
+/// publication snapshots can keep a borrowed lookup alive without consulting
+/// the registry lock. This table is the authoritative identity index used by
+/// cold binding creation and tracks when an object has no live bindings left.
+pub(crate) struct ObjectEntry {
+    pub(crate) object: Arc<HandleObject>,
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    pub(crate) bindings: usize,
 }
 
 pub(crate) struct RegistryState {
-    pub(crate) slots: Vec<Slot>,
+    pub(crate) slots: Vec<BindingSlot>,
     pub(crate) free: Vec<usize>,
-    pub(crate) live: usize,
+    pub(crate) live_bindings: usize,
+    pub(crate) objects: FxHashMap<ObjectId, ObjectEntry>,
     pub(crate) next_object_id: u64,
+}
+
+fn release_object_binding(state: &mut RegistryState, object_id: ObjectId) {
+    let remove = if let Some(entry) = state.objects.get_mut(&object_id) {
+        debug_assert!(entry.bindings > 0);
+        entry.bindings -= 1;
+        entry.bindings == 0
+    } else {
+        debug_assert!(false, "binding references a missing object entry");
+        false
+    };
+    if remove {
+        state.objects.remove(&object_id);
+    }
 }
 
 pub(crate) struct HandleRegistry {
     pub(crate) session: u64,
     pub(crate) secret: [u8; 32],
-    pub(crate) maximum_handles: usize,
+    pub(crate) maximum_bindings: usize,
     pub(crate) phase: AtomicU8,
     pub(crate) state: RwLock<RegistryState>,
-    pub(crate) published: PublishedHandles,
+    pub(crate) published: PublishedBindings,
     pub(crate) cleanup: Arc<HandleCleanupState>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
@@ -360,12 +357,12 @@ impl Drop for PendingHandleValue<'_> {
 pub(crate) const HANDLE_ENTROPY_DIAGNOSTIC_ID: u64 = 0x4841_4e44_524e_4746;
 
 impl HandleRegistry {
-    pub fn try_new(maximum_handles: usize) -> XllResult<Self> {
-        Self::try_new_with(maximum_handles, |entropy| getrandom::fill(entropy), true)
+    pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+        Self::try_new_with(maximum_bindings, |entropy| getrandom::fill(entropy), true)
     }
 
     pub(crate) fn try_new_with<E>(
-        maximum_handles: usize,
+        maximum_bindings: usize,
         fill: impl FnOnce(&mut [u8; 40]) -> Result<(), E>,
         report_failure: bool,
     ) -> XllResult<Self>
@@ -389,10 +386,10 @@ impl HandleRegistry {
             }
             return Err(error);
         }
-        Ok(Self::from_entropy(maximum_handles, entropy))
+        Ok(Self::from_entropy(maximum_bindings, entropy))
     }
 
-    pub(crate) fn from_entropy(maximum_handles: usize, entropy: [u8; 40]) -> Self {
+    pub(crate) fn from_entropy(maximum_bindings: usize, entropy: [u8; 40]) -> Self {
         let session = u64::from_le_bytes(
             entropy[..8]
                 .try_into()
@@ -404,15 +401,16 @@ impl HandleRegistry {
         Self {
             session,
             secret,
-            maximum_handles,
+            maximum_bindings,
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             state: RwLock::new(RegistryState {
                 slots: Vec::new(),
                 free: Vec::new(),
-                live: 0,
+                live_bindings: 0,
+                objects: FxHashMap::default(),
                 next_object_id: 1,
             }),
-            published: PublishedHandles::new(maximum_handles),
+            published: PublishedBindings::new(maximum_bindings),
             cleanup: Arc::new(HandleCleanupState::new()),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
@@ -438,14 +436,14 @@ impl HandleRegistry {
 
     #[cfg(test)]
     #[must_use]
-    pub fn new(maximum_handles: usize) -> Self {
-        Self::try_new(maximum_handles).expect("test host provides an OS CSPRNG")
+    pub fn new(maximum_bindings: usize) -> Self {
+        Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.read().live
+        self.state.read().live_bindings
     }
 
     pub(crate) fn phase(&self) -> HandleRegistryPhase {
@@ -457,7 +455,7 @@ impl HandleRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn insert_pending<T>(&self, value: &mut Option<Arc<T>>) -> XllResult<String>
+    pub(crate) fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
     where
         T: Any + Send + Sync + 'static,
     {
@@ -466,13 +464,14 @@ impl HandleRegistry {
             Arc::clone(&self.cleanup),
         );
         let mut object = Some(object);
-        self.insert_pending_object_with_kind::<T>(&mut object)
+        self.insert_pending_object_with_kind::<T>(&mut object, None)
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
         value: &mut Option<Arc<HandleObject>>,
+        requested_object_id: Option<ObjectId>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Any + Send + Sync + 'static,
@@ -481,10 +480,43 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        if state.live >= self.maximum_handles {
+        if state.live_bindings >= self.maximum_bindings {
             return Err(XllError::Domain {
                 code: DomainErrorCode::Overflow,
             });
+        }
+
+        let object = value.as_ref().expect("pending handle object is armed");
+        let object_id = requested_object_id.unwrap_or(ObjectId(state.next_object_id));
+        let new_object_id = requested_object_id.is_none();
+        let existing_bindings = if let Some(entry) = state.objects.get(&object_id) {
+            if entry.type_id != TypeId::of::<T>() {
+                let actual_type = entry.type_name;
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    tracing::warn!(
+                        expected_type = type_name::<T>(),
+                        actual_type,
+                        "Excel handle alias type mismatch"
+                    );
+                }));
+                return Err(XllError::InvalidHandle);
+            }
+            if !Arc::ptr_eq(&entry.object, object) {
+                return Err(XllError::StaleHandle);
+            }
+            Some(entry.bindings.checked_add(1).ok_or(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })?)
+        } else {
+            None
+        };
+        if new_object_id {
+            state
+                .next_object_id
+                .checked_add(1)
+                .ok_or(XllError::Domain {
+                    code: DomainErrorCode::Overflow,
+                })?;
         }
 
         let (index, slot, reused) = match state.free.pop() {
@@ -499,7 +531,7 @@ impl HandleRegistry {
                 let slot = u32::try_from(index).map_err(|_| XllError::Domain {
                     code: DomainErrorCode::Overflow,
                 })?;
-                state.slots.push(Slot {
+                state.slots.push(BindingSlot {
                     next_generation: 1,
                     record: None,
                 });
@@ -510,25 +542,31 @@ impl HandleRegistry {
             slot,
             generation: state.slots[index].next_generation.max(1),
         };
-        let object_id = if let Some(object_id) =
-            value.as_ref().and_then(|object| object.object_id())
-        {
-            object_id
-        } else {
-            let candidate_object_id = ObjectId(state.next_object_id);
-            state.next_object_id = state
-                .next_object_id
-                .checked_add(1)
-                .ok_or(XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
-            value
-                .as_ref()
-                .expect("pending handle object is armed")
-                .ensure_object_id(candidate_object_id)
-        };
+        if new_object_id {
+            state.next_object_id += 1;
+        }
+        match existing_bindings {
+            Some(bindings) => {
+                state
+                    .objects
+                    .get_mut(&object_id)
+                    .expect("validated object entry must remain present")
+                    .bindings = bindings;
+            }
+            None => {
+                state.objects.insert(
+                    object_id,
+                    ObjectEntry {
+                        object: Arc::clone(object),
+                        type_id: TypeId::of::<T>(),
+                        type_name: type_name::<T>(),
+                        bindings: 1,
+                    },
+                );
+            }
+        }
         let object = value.take().expect("pending handle object is armed");
-        let record = Arc::new(HandleRecord::new(
+        let record = Arc::new(BindingRecord::new(
             id,
             object_id,
             TypeId::of::<T>(),
@@ -537,45 +575,17 @@ impl HandleRegistry {
         ));
         state.slots[index].record = Some(Arc::clone(&record));
         self.published.insert(id, record);
-        state.live += 1;
+        state.live_bindings += 1;
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.format_token(id), id, object_id, reused))
     }
 
-    /// Returns the shared object for an explicit alias operation.
-    ///
-    /// This is a cold-path ownership operation. The alias capability carries
-    /// only the object identity; it never retains an `Arc` or a snapshot of
-    /// its own. The object index is consulted only on this cold path.
-    pub(crate) fn clone_object_for_binding<T>(
-        &self,
-        object_id: ObjectId,
-    ) -> XllResult<Arc<HandleObject>>
-    where
-        T: ExcelHandleObject,
-    {
-        if !self.is_open() {
-            return Err(XllError::Closing);
-        }
-        let record = self
-            .published
-            .find_object(object_id)
-            .ok_or(XllError::StaleHandle)?;
-        if record.type_id != TypeId::of::<T>() {
-            return Err(XllError::InvalidHandle);
-        }
-        if record.state() != HandleRecordState::Live {
-            return Err(XllError::StaleHandle);
-        }
-        Ok(Arc::clone(&record.object))
-    }
-
     #[cfg(test)]
-    pub fn lookup<T>(&self, token: &str) -> XllResult<Arc<T>>
+    pub fn lookup<T>(&self, token: &str) -> XllResult<T>
     where
-        T: Any + Send + Sync + 'static,
+        T: Any + Send + Sync + Clone + 'static,
     {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
@@ -646,14 +656,14 @@ impl HandleRegistry {
             }
 
             match record.state() {
-                HandleRecordState::Live => {}
-                HandleRecordState::Retired => return Err(XllError::StaleHandle),
+                BindingState::Live => {}
+                BindingState::Retired => return Err(XllError::StaleHandle),
             }
 
             let value = record.object.get::<T>().ok_or(XllError::InvalidHandle)?;
             let value = NonNull::from(value);
             let object_id = record.object_id;
-            return Ok(Handle::new(published_snapshot, object_id, value, scope));
+            return Ok(Handle::new(published_snapshot, id, object_id, value, scope));
         }
         drop(published_snapshot);
 
@@ -699,18 +709,18 @@ impl HandleRegistry {
             return Err(XllError::InvalidHandle);
         }
 
-        if record.state() != HandleRecordState::Live {
+        if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
         let value = record.object.get::<T>().ok_or(XllError::InvalidHandle)?;
         let value = NonNull::from(value);
         let object_id = record.object_id;
         drop(state);
-        Ok(Handle::new(published_snapshot, object_id, value, scope))
+        Ok(Handle::new(published_snapshot, id, object_id, value, scope))
     }
 
     #[cfg(test)]
-    pub(crate) fn remove<T>(&self, token: &str) -> XllResult<Arc<T>>
+    pub(crate) fn remove<T>(&self, token: &str) -> XllResult<()>
     where
         T: Any + Send + Sync + 'static,
     {
@@ -736,9 +746,10 @@ impl HandleRegistry {
             return Err(XllError::InvalidHandle);
         }
         let record = Arc::clone(record);
+        let object_id = record.object_id;
         record
             .state
-            .store(HandleRecordState::Retired as u8, Ordering::Release);
+            .store(BindingState::Retired as u8, Ordering::Release);
         self.published.remove(id, &record);
         drop(slot.record.take().expect("record was checked above"));
         let reusable = if let Some(next) = slot.next_generation.checked_add(1) {
@@ -747,17 +758,15 @@ impl HandleRegistry {
         } else {
             false
         };
-        state.live -= 1;
+        release_object_binding(&mut state, object_id);
+        state.live_bindings -= 1;
         if reusable {
             state.free.push(id.slot as usize);
         }
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        record
-            .object
-            .clone_typed::<T>()
-            .ok_or(XllError::InvalidHandle)
+        Ok(())
     }
 
     #[allow(
@@ -797,9 +806,10 @@ impl HandleRegistry {
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
         let record = Arc::clone(record);
+        let object_id = record.object_id;
         record
             .state
-            .store(HandleRecordState::Retired as u8, Ordering::Release);
+            .store(BindingState::Retired as u8, Ordering::Release);
         self.published.remove(id, &record);
         drop(slot.record.take().expect("record was checked above"));
         let reusable = if let Some(next) = slot.next_generation.checked_add(1) {
@@ -808,7 +818,8 @@ impl HandleRegistry {
         } else {
             false
         };
-        state.live -= 1;
+        release_object_binding(&mut state, object_id);
+        state.live_bindings -= 1;
         if reusable {
             state.free.push(id.slot as usize);
         }
@@ -876,8 +887,8 @@ impl HandleRegistry {
 
     pub(crate) fn take_values_for_close(&self) -> Vec<Arc<HandleObject>> {
         let mut state = self.state.write();
-        let live = state.live;
-        let mut values = Vec::with_capacity(live);
+        let live_bindings = state.live_bindings;
+        let mut values = Vec::with_capacity(live_bindings);
         state.free.clear();
         self.published.clear();
         for index in 0..state.slots.len() {
@@ -885,7 +896,7 @@ impl HandleRegistry {
             if let Some(record) = slot.record.take() {
                 record
                     .state
-                    .store(HandleRecordState::Retired as u8, Ordering::Release);
+                    .store(BindingState::Retired as u8, Ordering::Release);
                 values.push(Arc::clone(&record.object));
             }
             if let Some(next) = slot.next_generation.checked_add(1) {
@@ -893,10 +904,11 @@ impl HandleRegistry {
                 state.free.push(index);
             }
         }
-        state.live = 0;
+        state.objects.clear();
+        state.live_bindings = 0;
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        for _ in 0..live {
+        for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }
         values

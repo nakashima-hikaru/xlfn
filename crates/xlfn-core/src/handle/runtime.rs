@@ -216,15 +216,15 @@ pub(crate) struct HandleRuntime {
 
 impl HandleRuntime {
     #[cfg(test)]
-    pub fn try_new(maximum_handles: usize) -> XllResult<Self> {
-        Self::try_new_with_ingress(maximum_handles, None)
+    pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+        Self::try_new_with_ingress(maximum_bindings, None)
     }
 
     pub(crate) fn try_new_with_ingress(
-        maximum_handles: usize,
+        maximum_bindings: usize,
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> XllResult<Self> {
-        let registry = HandleRegistry::try_new(maximum_handles)?;
+        let registry = HandleRegistry::try_new(maximum_bindings)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let registry_session = registry.session;
         Ok(Self {
@@ -290,15 +290,15 @@ impl HandleRuntime {
 
     #[cfg(test)]
     #[must_use]
-    pub fn new(maximum_handles: usize) -> Self {
-        Self::try_new(maximum_handles).expect("test host provides an OS CSPRNG")
+    pub fn new(maximum_bindings: usize) -> Self {
+        Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 
     #[cfg(test)]
     pub fn prepare<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<Arc<T>>,
+        create: impl FnOnce() -> XllResult<T>,
     ) -> XllResult<(String, bool)>
     where
         T: ExcelHandleObject,
@@ -389,7 +389,7 @@ impl HandleRuntime {
     pub(crate) fn prepare_observed<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<Arc<T>>,
+        create: impl FnOnce() -> XllResult<T>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -398,7 +398,14 @@ impl HandleRuntime {
     {
         self.prepare_observed_object::<T, K>(
             key,
-            || create().map(|value| HandleObject::new(value, Arc::clone(&self.registry.cleanup))),
+            || {
+                create().map(|value| {
+                    (
+                        None,
+                        HandleObject::new(value, Arc::clone(&self.registry.cleanup)),
+                    )
+                })
+            },
             observe,
         )
     }
@@ -407,23 +414,20 @@ impl HandleRuntime {
         &self,
         key: K,
         object_id: ObjectId,
+        object: Arc<HandleObject>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
     {
-        self.prepare_observed_object::<T, K>(
-            key,
-            || self.registry.clone_object_for_binding::<T>(object_id),
-            observe,
-        )
+        self.prepare_observed_object::<T, K>(key, || Ok((Some(object_id), object)), observe)
     }
 
     pub(crate) fn prepare_observed_object<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<Arc<HandleObject>>,
+        create: impl FnOnce() -> XllResult<(Option<ObjectId>, Arc<HandleObject>)>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -630,18 +634,18 @@ impl HandleRuntime {
         //
         // Cold path: no existing topic, invoke the factory.
         //
-        let value = match create() {
+        let (object_id, object) = match create() {
             Ok(value) => value,
             Err(error) => {
                 return Err(error);
             }
         };
         let mut value =
-            PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
+            PendingHandleValue::new(&self.registry, object, "unpublished handle formula value");
 
         let (token, binding_id, object_id, reused) = self
             .registry
-            .insert_pending_object_with_kind::<T>(value.slot())?;
+            .insert_pending_object_with_kind::<T>(value.slot(), object_id)?;
         let binding = FormulaBinding {
             id: binding_id,
             object_id,

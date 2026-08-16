@@ -188,7 +188,7 @@ Document this behavior for users who expose handle producers in automation-heavy
 A token contains runtime/session identity, slot/generation data, and a keyed
 BLAKE3 MAC. Rust type identity is intentionally not part of the wire format:
 after authentication and slot/generation validation, the registry checks the
-requested `T` against the canonical `HandleRecord`. Tokens from another
+requested `T` against the canonical `BindingRecord`. Tokens from another
 process generation, tokens of the wrong type, stale slot generations, and
 modified tokens are rejected.
 
