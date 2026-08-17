@@ -13,7 +13,7 @@ pub fn add(left: f64, right: f64) -> f64 {
 }
 ```
 
-The attribute generates the Excel ABI wrapper and registration descriptor. Arguments are converted through `ExcelParameter`; results are selected through `ExcelReturn` and converted through `IntoExcelValue`. Conversion behavior follows Rust trait resolution, so aliases and re-exports do not require macro-specific type-name recognition.
+The attribute generates the Excel ABI wrapper and registration descriptor. Arguments use `FromExcel`; ordinary scalar results and matrix cells use `IntoExcel`. Runtime dispatch and return ownership remain behind the framework boundary. Conversion behavior follows Rust trait resolution, so aliases and re-exports do not require macro-specific type-name recognition.
 
 ## What the framework provides
 

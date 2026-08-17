@@ -85,18 +85,21 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
 }
 
 impl<'call, T: ExcelHandleObject> crate::ExcelReturn for HandleAlias<'call, T> {
-    type Output = String;
     const USES_FORMULA_REVISION: bool = true;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-        context.publish_existing_alias(|| Ok(self))
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<crate::ExcelOutput> {
+        context
+            .publish_existing_alias(|| Ok(self))
+            .map(|token| crate::ExcelOutput::Scalar(crate::ExcelCellOutput::String(token)))
     }
 
     fn invoke(
         context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<Self::Output> {
-        context.publish_existing_alias(operation)
+    ) -> XllResult<crate::ExcelOutput> {
+        context
+            .publish_existing_alias(operation)
+            .map(|token| crate::ExcelOutput::Scalar(crate::ExcelCellOutput::String(token)))
     }
 }
 

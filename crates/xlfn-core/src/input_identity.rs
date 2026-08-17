@@ -278,7 +278,7 @@ impl InputFingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExcelParameter, Matrix, OptionalExcelValue, OwnedExcelValue};
+    use crate::{ExcelCellValue, ExcelParameter, ExcelValue, Matrix, OptionalExcelValue};
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);
@@ -402,8 +402,8 @@ mod tests {
             reference_fingerprint(&[matrix_payload.as_slice()]),
         );
 
-        let owned = OwnedExcelValue::Number(number);
-        let mut owned_payload = vec![0];
+        let owned = ExcelValue::Scalar(ExcelCellValue::Number(number));
+        let mut owned_payload = vec![1, 1];
         append_u64(&mut owned_payload, number.to_bits());
         assert_eq!(
             fingerprint(std::slice::from_ref(&owned)),
@@ -485,10 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn owned_excel_value_variants_remain_distinct() {
+    fn excel_value_presence_variants_remain_distinct() {
         assert_ne!(
-            fingerprint(&[OwnedExcelValue::Number(1.0)]),
-            fingerprint(&[OwnedExcelValue::Integer(1)]),
+            fingerprint(&[ExcelValue::Scalar(ExcelCellValue::Number(1.0))]),
+            fingerprint(&[ExcelValue::Missing]),
         );
     }
 }

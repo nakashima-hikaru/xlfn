@@ -4,8 +4,8 @@
 use crate::cancellation::CancellationSource;
 use crate::return_value::AsyncReturnPointer;
 use crate::{
-    CallId, CallMetadata, CallOutcome, CancellationGuarantee, CancellationToken, IntoExcelValue,
-    Runtime, UdfResultKind, XllError, XllResult,
+    CallId, CallMetadata, CallOutcome, CancellationGuarantee, CancellationToken, ExcelReturn,
+    ReturnContext, Runtime, UdfResultKind, XllError, XllResult,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_channel::{Receiver, Sender};

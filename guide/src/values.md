@@ -13,7 +13,7 @@ xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to coe
 | `String` | string | decoded as valid UTF-16 |
 | `ExcelErrorValue` | Excel error | preserves the worksheet error |
 | `ExcelSerialDate` | finite number | initially marked with `ExcelDateSystem::Workbook` |
-| `OwnedExcelValue` | supported scalar, error, blank, missing, or array | use for intentionally dynamic input |
+| `ExcelValue` | supported scalar, error, blank, missing, or array | use for intentionally dynamic input |
 
 An Excel error passed to a parameter that expects another type is propagated as that Excel error rather than disguised as a generic type error.
 
@@ -24,7 +24,7 @@ The same scalar families can be returned. Important restrictions are:
 - `f64` must be finite;
 - `i64` must be exactly representable by an Excel number;
 - strings must fit Excel's counted UTF-16 representation;
-- `OwnedExcelValue::Missing` and `OwnedExcelValue::Blank` are input states, not valid worksheet results, and are returned as `#N/A`;
+- `ExcelValue::Missing` and blank `ExcelCellValue` are input states, not valid worksheet results; use `ExcelErrorValue(ExcelError::NotAvailable)` for an explicit `#N/A` result;
 - `()` is not a normal worksheet scalar result, although it is useful as an RTD value and in internal APIs.
 
 Use `ExcelErrorValue(ExcelError::NotAvailable)` when an Excel error is the intended successful result. Use `Err(...)` when the function itself failed. That distinction improves diagnostics and instrumentation.
@@ -42,12 +42,12 @@ fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
 }
 ```
 
-For large numeric outputs, write directly into an `XlArrayBuilder` and return its `XlArrayOutput`. The finished cell allocation is adopted by `ReturnBlock` without copying:
+For large numeric outputs, explicitly import `xlfn::advanced::output::{XlArrayBuilder, XlArrayOutput}` and write directly into an `XlArrayBuilder`. The finished cell allocation is adopted by `ReturnBlock` without copying:
 
 ```rust
 fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
     let (rows, columns) = values.shape();
-    let mut output = XlArrayBuilder::numbers(rows, columns)?;
+    let mut output = XlArrayBuilder::new(rows, columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? * 2.0)?;
     }
@@ -173,4 +173,4 @@ An ordinary worksheet argument does not, by itself, reveal whether the workbook 
 
 ## Dynamic values
 
-`OwnedExcelValue` is useful for pass-through, inspection, and adapters whose type is intentionally dynamic. Prefer concrete Rust types in normal functions: they produce better Function Wizard signatures, clearer errors, and less downstream branching.
+`ExcelValue` is useful for pass-through, inspection, and adapters whose type is intentionally dynamic. Prefer concrete Rust types in normal functions: they produce better Function Wizard signatures, clearer errors, and less downstream branching. Its array form contains only `ExcelCellValue`, so nested arrays and missing cells cannot be represented.

@@ -1,7 +1,7 @@
 use crate::host_callback::HostCallbackSession;
 use crate::{
-    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelParameter, ExcelReference,
-    IntoXllError, Matrix, OwnedExcelValue, UdfLayer, XllError, XllResult,
+    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, ExcelValue,
+    FromExcel, IntoXllError, Matrix, UdfLayer, XllError, XllResult,
 };
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -104,6 +104,7 @@ pub trait Addin: Send + Sync + 'static {
 }
 
 /// Static metadata and lifecycle configuration supplied by `#[excel_addin]`.
+#[doc(hidden)]
 pub trait AddinMetadata {
     const ID: &'static str;
     const DISPLAY_NAME: &'static str;
@@ -263,7 +264,7 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
         self.state
     }
 
-    pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<OwnedExcelValue> {
+    pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
         let (status, mut result) = unsafe {
@@ -280,18 +281,14 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
                 code: status.raw_code(),
             }));
         }
-        let converted = OwnedExcelValue::from_excel(
-            result.borrow()?,
-            "reference",
-            &crate::CallContext::without_runtime(),
-        );
+        let converted = <ExcelValue as crate::FromExcel>::from_excel(result.borrow()?, "reference");
         result.try_release()?;
         converted
     }
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
-        T: for<'value> ExcelParameter<'value>,
+        T: for<'value> FromExcel<'value>,
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
@@ -309,11 +306,7 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
                 code: status.raw_code(),
             }));
         }
-        let converted = Matrix::<T>::from_excel(
-            result.borrow()?,
-            "reference",
-            &crate::CallContext::without_runtime(),
-        );
+        let converted = <Matrix<T> as FromExcel>::from_excel(result.borrow()?, "reference");
         result.try_release()?;
         converted
     }
@@ -335,11 +328,7 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
                 code: status.raw_code(),
             }));
         }
-        let converted = String::from_excel(
-            result.borrow()?,
-            "reference",
-            &crate::CallContext::without_runtime(),
-        );
+        let converted = <String as FromExcel>::from_excel(result.borrow()?, "reference");
         result.try_release()?;
         converted
     }

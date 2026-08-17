@@ -17,7 +17,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     S: Send + Sync + 'static,
     Start: FnOnce(Arc<S>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: IntoExcelValue + Send + 'static,
+    T: ExcelReturn + Send + 'static,
 {
     let (_export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -65,7 +65,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
     S: Send + Sync + 'static,
     Start: FnOnce(Arc<S>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: IntoExcelValue + Send + 'static,
+    T: ExcelReturn + Send + 'static,
 {
     let call_id = runtime.next_call_id();
     let timer = crate::execution::CallTimer::start();
@@ -132,7 +132,8 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
 
                 let result = match evaluated {
                     Ok(Ok(value)) => catch_unwind(AssertUnwindSafe(|| {
-                        let value = value.into_excel_value()?;
+                        let mut return_context = ReturnContext::new();
+                        let value = T::invoke(&mut return_context, || Ok(value))?;
                         AsyncReturnPointer::from_value(value)
                     }))
                     .unwrap_or(Err(XllError::Panic)),

@@ -12,7 +12,9 @@ Define worksheet functions as typed Rust functions while xlfn handles the Excel 
 
 xlfn supports both 32-bit and 64-bit Excel and does **not** require a .NET runtime.
 
-Documentation: [User guide](https://nakashima-hikaru.github.io/xlfn/) | [API docs](https://docs.rs/xlfn) | [crates.io](https://crates.io/crates/xlfn)
+Documentation: [API docs](https://docs.rs/xlfn) | [crates.io](https://crates.io/crates/xlfn)
+
+To learn more, read the [User Guide](https://nakashima-hikaru.github.io/xlfn/).
 
 > [!NOTE]
 > xlfn is pre-1.0. Public APIs may change between minor releases.

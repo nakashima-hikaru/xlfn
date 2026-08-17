@@ -63,9 +63,7 @@ macro_rules! __xlfn_async_exports {
 
 /// Add-in lifecycle types.
 pub mod addin {
-    pub use xlfn_core::{
-        Addin, AddinMetadata, BuildInfo, CleanupIssueKind, CleanupReporter, OpenContext,
-    };
+    pub use xlfn_core::{Addin, BuildInfo, CleanupIssueKind, CleanupReporter, OpenContext};
 }
 
 /// Capabilities supplied to exported functions by the generated Excel boundary.
@@ -76,15 +74,19 @@ pub mod context {
     pub use xlfn_core::{AsyncContext, CancellationGuarantee, CancellationToken, Cancelled};
 }
 
-/// Conversions between Excel values and Rust types.
-pub mod convert {
+/// Worksheet values and conversion extension points.
+pub mod value {
     pub use xlfn_core::{
-        AsyncReturn, BoundedVarArgs, CallContext, CellPresence, Column, ExcelDateSystem,
-        ExcelErrorValue, ExcelParameter, ExcelReference, ExcelReturn, ExcelSerialDate,
-        FromExcelReference, InputIdentityEncoder, IntoExcelValue, MacroSheetReturn,
-        MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue, ReferenceArea,
-        ReferenceAreas, ReturnContext, Row, SheetId, ThreadSafeReturn, VolatileReturn,
-        XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef, XlValueRef,
+        BoundedVarArgs, Column, ExcelCellOutput, ExcelCellValue, ExcelDateSystem, ExcelErrorValue,
+        ExcelSerialDate, ExcelValue, FromExcel, IntoExcel, Matrix, OptionalExcelValue, Row,
+        XlArrayRef, XlStrRef, XlValueRef,
+    };
+}
+
+/// Excel reference values and their checked areas.
+pub mod reference {
+    pub use xlfn_core::{
+        ExcelReference, FromExcelReference, ReferenceArea, ReferenceAreas, SheetId,
     };
 }
 
@@ -133,6 +135,11 @@ pub mod advanced {
             UdfResultKind,
         };
     }
+
+    /// Explicit low-level array output construction.
+    pub mod output {
+        pub use xlfn_core::{XlArrayBuilder, XlArrayOutput};
+    }
 }
 
 pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
@@ -143,15 +150,10 @@ pub mod prelude {
     #[cfg(feature = "async")]
     pub use crate::context::AsyncContext;
     pub use crate::context::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
-    pub use crate::convert::{
-        BoundedVarArgs, CellPresence, Column, ExcelDateSystem, ExcelErrorValue, ExcelParameter,
-        ExcelReference, ExcelSerialDate, Matrix, OptionalExcelValue, Row, XlArrayBuilder,
-        XlArrayOutput, XlArrayRef, XlStrRef,
-    };
-    pub use crate::error::{ExcelError, IntoXllError, Shape, XllError, XllResult};
-    pub use crate::handle::{ExcelHandleObject, Handle, HandleAlias};
-    pub use crate::rtd::{
-        IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue,
+    pub use crate::error::{ExcelError, XllError, XllResult};
+    pub use crate::handle::{Handle, HandleAlias};
+    pub use crate::value::{
+        Column, ExcelErrorValue, ExcelSerialDate, Matrix, OptionalExcelValue, Row,
     };
     pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
 }
@@ -180,16 +182,18 @@ pub mod __private {
 
     pub use inventory;
     pub use xlfn_core::{
-        AddinId, ArgumentAbi, ArgumentContext, ArgumentDescriptor, ExportCallGuard, ExportIngress,
-        FunctionVisibility, InvalidAddinId, RegistrationDescriptor, RegistrationFlags,
-        RegistrationSignature, ResultAbi, ReturnContext, ReturnFreeBoundaryGuard, Runtime,
-        argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
-        assert_async_parameter, assert_async_return, assert_excel_parameter,
-        assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
-        assert_volatile_return, cell_presence_from_raw, close_addin, dll_can_unload_now,
-        dll_get_class_object, ffi_boundary, ffi_boundary_void, free_return_boundary,
-        global_ingress, open_addin, reference_from_raw, udf_boundary_named,
-        utf16_eq_ignore_ascii_case, with_excel_call_scope,
+        AddinId, AddinMetadata, ArgumentAbi, ArgumentContext, ArgumentDescriptor, AsyncReturn,
+        CallContext, CallScope, CellPresence, ExcelCellOutput, ExcelOutput, ExcelParameter,
+        ExcelReturn, ExportCallGuard, ExportIngress, FunctionVisibility, InputIdentityEncoder,
+        InvalidAddinId, MacroSheetReturn, MainThreadReturn, RegistrationDescriptor,
+        RegistrationFlags, RegistrationSignature, ResultAbi, ReturnContext,
+        ReturnFreeBoundaryGuard, Runtime, ThreadSafeReturn, VolatileReturn, argument_from_raw,
+        argument_from_raw_with_arguments, argument_from_raw_with_context, assert_async_parameter,
+        assert_async_return, assert_excel_parameter, assert_macro_sheet_return,
+        assert_main_thread_return, assert_thread_safe_return, assert_volatile_return,
+        cell_presence_from_raw, close_addin, dll_can_unload_now, dll_get_class_object,
+        ffi_boundary, ffi_boundary_void, free_return_boundary, global_ingress, open_addin,
+        reference_from_raw, udf_boundary_named, utf16_eq_ignore_ascii_case, with_excel_call_scope,
     };
     #[cfg(feature = "async")]
     pub use xlfn_core::{

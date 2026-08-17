@@ -89,7 +89,7 @@ Typical causes:
 - add-in or worker is closing;
 - overloaded/reentrant operation;
 - an intentionally unavailable result;
-- `OwnedExcelValue::Blank` or `Missing` used as a worksheet return.
+- an input-only `ExcelValue::Missing` or blank `ExcelCellValue` being treated as a worksheet return. Use `ExcelErrorValue(ExcelError::NotAvailable)` for an explicit `#N/A` result.
 
 Recalculate the handle-producing formula first. Do not edit or persist token text as an application identifier.
 

@@ -25,19 +25,19 @@ error[E0277]: `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be share
 25 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be shared between threads safely
    |
-   = help: within `xlfn_core::value::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn_core::host_callback::HostCallbackShared>`
+   = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn_core::host_callback::HostCallbackShared>`
 note: required because it appears within the type `xlfn_core::host_callback::HostCallbackSession`
   --> $WORKSPACE/crates/xlfn-core/src/host_callback.rs
    |
    | pub(crate) struct HostCallbackSession {
    |                   ^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn_core::value::CallScope<'_>`
+note: required because it appears within the type `xlfn::__private::CallScope<'_>`
   --> $WORKSPACE/crates/xlfn-core/src/value.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn_core::value::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn_core::value::CallScope<'_>>`
+   = note: required for `&xlfn::__private::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::__private::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;

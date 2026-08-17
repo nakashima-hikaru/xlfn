@@ -1,6 +1,6 @@
 use crate::host_callback::HostCallbackSession;
 use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
-use crate::return_storage::ReturnStorage;
+use crate::return_array::{XlArrayBuilder, XlArrayOutput};
 use crate::{
     DomainErrorCode, ExcelError, InputError, IntoXllError, ReturnContext, Shape, XllError,
     XllResult,
@@ -22,9 +22,9 @@ const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
 #[cfg(not(target_pointer_width = "32"))]
 const MAX_ARRAY_ELEMENTS: usize = 4_000_000;
 #[cfg(target_pointer_width = "32")]
-const MAX_ARRAY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_ARRAY_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "32"))]
-const MAX_ARRAY_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_ARRAY_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub struct XlValueRef<'call> {
@@ -118,13 +118,13 @@ impl<'call> XlValueRef<'call> {
     /// Returns this value as a finite Excel number without allocating.
     #[inline]
     pub fn as_f64(self) -> XllResult<f64> {
-        f64::from_excel(self, "<array cell>", &CallContext::without_runtime())
+        <f64 as FromExcel>::from_excel(self, "<array cell>")
     }
 
     /// Returns this value as an Excel boolean without allocating.
     #[inline]
     pub fn as_bool(self) -> XllResult<bool> {
-        bool::from_excel(self, "<array cell>", &CallContext::without_runtime())
+        <bool as FromExcel>::from_excel(self, "<array cell>")
     }
 
     /// Borrows the UTF-16 payload of an Excel string without decoding it.
@@ -368,12 +368,8 @@ impl<'call> XlArrayRef<'call> {
     }
 }
 
-impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for XlArrayRef<'call> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         Self::from_value(value, argument)
     }
 
@@ -395,12 +391,11 @@ impl<'call> ExcelParameter<'call> for XlArrayRef<'call> {
 enum RawValueKind {
     Number = 1,
     Boolean = 2,
-    Integer = 3,
-    String = 4,
-    Error = 5,
-    Missing = 6,
-    Blank = 7,
-    Array = 8,
+    String = 3,
+    Error = 4,
+    Missing = 5,
+    Blank = 6,
+    Array = 7,
 }
 
 fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder) {
@@ -416,9 +411,9 @@ fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIden
             encoder.u32(unsafe { value.raw.value.boolean } as u32);
         }
         XLTYPE_INT => {
-            encoder.tag(RawValueKind::Integer as u8);
+            encoder.tag(RawValueKind::Number as u8);
             // SAFETY: XLTYPE_INT selects the integer union member.
-            encoder.i64(unsafe { value.raw.value.integer } as i64);
+            encoder.f64(unsafe { value.raw.value.integer } as f64);
         }
         XLTYPE_STR => {
             encoder.tag(RawValueKind::String as u8);
@@ -466,34 +461,68 @@ fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIden
     }
 }
 
-/// Converts a call-scoped Excel value into owned Rust data and defines its
-/// semantic formula identity.
+/// Converts a call-scoped Excel value into owned Rust data.
 ///
 /// The input lifetime is deliberately anonymous: an implementation cannot
 /// choose it or store a reference to Excel-owned memory in `Self`.
 ///
 /// ```compile_fail
-/// use xlfn_core::{ExcelParameter, XlValueRef, XllResult};
+/// use xlfn_core::{FromExcel, XlValueRef, XllResult};
 /// use xlfn_sys::XLOPER12;
 ///
 /// struct Escaped(&'static XLOPER12);
 ///
-/// impl<'call> ExcelParameter<'call> for Escaped {
+/// impl<'call> FromExcel<'call> for Escaped {
 ///     fn from_excel(
 ///         value: XlValueRef<'call>,
 ///         _: &'static str,
-///         _: &xlfn_core::CallContext,
 ///     ) -> XllResult<Self> {
 ///         Ok(Self(value.raw()))
 ///     }
-///
-///     fn encode_identity(
-///         &self,
-///         _: &mut xlfn_core::InputIdentityEncoder,
-///     ) {
-///     }
 /// }
 /// ```
+pub trait FromExcel<'call>: Sized {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
+
+    /// Internal context-aware hook used only for framework-owned special
+    /// values such as handles.
+    #[doc(hidden)]
+    fn from_excel_with_context(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        _context: &CallContext<'call>,
+    ) -> XllResult<Self> {
+        Self::from_excel(value, argument)
+    }
+
+    /// Internal identity hook for framework-owned formula revisions.
+    #[doc(hidden)]
+    fn encode_identity(&self, _encoder: &mut InputIdentityEncoder) {}
+
+    /// Internal single-pass conversion hook. Ordinary custom conversions use
+    /// the raw Excel representation as their fallback identity; framework
+    /// types override this to preserve semantic identities.
+    #[doc(hidden)]
+    fn from_excel_with_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        let result = Self::from_excel_with_context(value, argument, context)?;
+        if let Some(identity) = identity {
+            encode_raw_value(value, false, identity);
+        }
+        Ok(result)
+    }
+}
+
+/// Framework-side argument dispatch.
+///
+/// This bridge is public only because generated proc-macro code is compiled
+/// in the add-in crate. It is re-exported by `xlfn::__private`, not by the
+/// normal `xlfn` value API.
+#[doc(hidden)]
 pub trait ExcelParameter<'call>: Sized {
     fn from_excel(
         value: XlValueRef<'call>,
@@ -501,14 +530,8 @@ pub trait ExcelParameter<'call>: Sized {
         context: &CallContext<'call>,
     ) -> XllResult<Self>;
 
-    /// Encodes exactly the semantic state observable through the converted
-    /// Rust value.
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder);
 
-    /// Converts a value and, when requested, records its semantic identity
-    /// while the Excel representation is still available. Implementations
-    /// with a single-pass conversion may override this method; ordinary
-    /// parameters use the safe default.
     fn from_excel_with_identity(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -523,8 +546,27 @@ pub trait ExcelParameter<'call>: Sized {
     }
 }
 
-pub trait IntoExcelValue {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue>;
+impl<'call, T: FromExcel<'call>> ExcelParameter<'call> for T {
+    fn from_excel(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+    ) -> XllResult<Self> {
+        T::from_excel_with_identity(value, argument, context, None)
+    }
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+        T::encode_identity(self, encoder);
+    }
+
+    fn from_excel_with_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        T::from_excel_with_identity(value, argument, context, identity)
+    }
 }
 
 pub(crate) trait HandleRuntimeProvider {
@@ -541,6 +583,7 @@ impl<S> HandleRuntimeProvider for crate::Runtime<S> {
 ///
 /// The handle runtime is acquired lazily so ordinary scalar conversions do not
 /// initialize handle registry state.
+#[doc(hidden)]
 pub struct CallContext<'call> {
     runtime: Option<&'call dyn HandleRuntimeProvider>,
     scope: Option<&'call CallScope<'call>>,
@@ -585,6 +628,7 @@ impl<'call> CallContext<'call> {
 /// Conversion always runs before memoization lookup. The identity builder is
 /// allocated only when the return type can publish a formula-owned revision;
 /// ordinary UDFs therefore pay no semantic fingerprinting cost.
+#[doc(hidden)]
 pub struct ArgumentContext<'call> {
     call: CallContext<'call>,
     inputs: Option<InputFingerprintBuilder>,
@@ -626,47 +670,76 @@ impl<'call> ArgumentContext<'call> {
     }
 }
 
-pub trait ExcelReturn: Sized {
-    type Output: IntoExcelValue;
+/// Converts an ordinary Rust value into a semantic Excel cell.
+///
+/// This is the public conversion extension point for scalar worksheet
+/// outputs and for cells written through [`crate::XlArrayBuilder`]. Runtime
+/// ownership, handle publication, and array allocation remain internal to the
+/// return dispatcher.
+pub trait IntoExcel {
+    fn into_excel(self) -> XllResult<ExcelCellOutput>;
+}
 
+/// Framework-side return dispatch.
+///
+/// This bridge is public only for generated proc-macro code and is exposed by
+/// `xlfn::__private`, not by the normal `xlfn` value API.
+#[doc(hidden)]
+pub trait ExcelReturn: Sized {
     /// Whether this return path publishes a formula revision.
     const USES_FORMULA_REVISION: bool = false;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output>;
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput>;
 
     #[doc(hidden)]
     fn invoke(
         context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<Self::Output> {
+    ) -> XllResult<ExcelOutput> {
         operation()?.into_excel(context)
     }
 }
 
 /// Return values supported by ordinary main-thread worksheet functions.
+#[doc(hidden)]
 pub trait MainThreadReturn: ExcelReturn {}
 
 /// Return values supported by Excel multi-threaded recalculation.
+#[doc(hidden)]
 pub trait ThreadSafeReturn: ExcelReturn {}
 
 /// Return values supported by macro-sheet functions.
+#[doc(hidden)]
 pub trait MacroSheetReturn: ExcelReturn {}
 
 /// Return values supported by native asynchronous functions.
+#[doc(hidden)]
 pub trait AsyncReturn: ExcelReturn {}
 
 /// Return values supported by volatile functions.
+#[doc(hidden)]
 pub trait VolatileReturn: ExcelReturn {}
+
+impl<T: IntoExcel> ExcelReturn for T {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+        IntoExcel::into_excel(self).map(ExcelOutput::Scalar)
+    }
+}
+
+impl<T: IntoExcel> MainThreadReturn for T {}
+impl<T: IntoExcel> ThreadSafeReturn for T {}
+impl<T: IntoExcel> MacroSheetReturn for T {}
+impl<T: IntoExcel> AsyncReturn for T {}
+impl<T: IntoExcel> VolatileReturn for T {}
 
 impl<T, E> ExcelReturn for Result<T, E>
 where
     T: ExcelReturn,
     E: IntoXllError,
 {
-    type Output = T::Output;
     const USES_FORMULA_REVISION: bool = T::USES_FORMULA_REVISION;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
+    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
         self.map_err(IntoXllError::into_xll_error)?
             .into_excel(context)
     }
@@ -674,7 +747,7 @@ where
     fn invoke(
         context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<Self::Output> {
+    ) -> XllResult<ExcelOutput> {
         T::invoke(context, || {
             operation()?.map_err(IntoXllError::into_xll_error)
         })
@@ -838,6 +911,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
 pub enum CellPresence {
     Value,
     Blank,
@@ -870,6 +944,61 @@ pub unsafe fn cell_presence_from_raw(
 pub struct ExcelErrorValue(pub ExcelError);
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum ExcelCellValue {
+    Number(f64),
+    Boolean(bool),
+    String(String),
+    Error(ExcelError),
+    Blank,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExcelValue {
+    Scalar(ExcelCellValue),
+    Missing,
+    Array(Matrix<ExcelCellValue>),
+}
+
+#[repr(u8)]
+enum ExcelCellValueKind {
+    Number = 1,
+    Boolean = 2,
+    String = 3,
+    Error = 4,
+    Blank = 5,
+}
+
+#[repr(u8)]
+enum ExcelValueKind {
+    Scalar = 1,
+    Missing = 2,
+    Array = 3,
+}
+
+/// A single worksheet cell in the final semantic return representation.
+///
+/// Unlike [`ExcelCellValue`], this type cannot represent an omitted or blank
+/// cell. Use an explicit empty string or [`ExcelError::NotAvailable`] when that
+/// is the intended worksheet result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExcelCellOutput {
+    Number(f64),
+    Boolean(bool),
+    String(String),
+    Error(ExcelError),
+}
+
+/// The complete semantic representation of a worksheet return value.
+///
+/// Array returns contain an already encoded [`XlArrayOutput`] buffer; input
+/// values and ABI transport forms never appear as variants here.
+#[doc(hidden)]
+pub enum ExcelOutput {
+    Scalar(ExcelCellOutput),
+    Array(XlArrayOutput),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Matrix<T> {
     rows: usize,
     columns: usize,
@@ -887,7 +1016,11 @@ impl<T> Matrix<T> {
     }
 }
 
-fn validate_matrix_dimensions(rows: usize, columns: usize, actual: usize) -> XllResult<()> {
+pub(crate) fn validate_matrix_dimensions(
+    rows: usize,
+    columns: usize,
+    actual: usize,
+) -> XllResult<()> {
     if rows == 0 || columns == 0 {
         return Err(XllError::input(
             "<matrix>",
@@ -1133,376 +1266,8 @@ impl ExcelSerialDate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum OwnedExcelValue {
-    Number(f64),
-    Boolean(bool),
-    Integer(i32),
-    String(String),
-    Error(ExcelErrorValue),
-    Missing,
-    Blank,
-    Matrix(Matrix<OwnedExcelValue>),
-    #[doc(hidden)]
-    ArrayOutput(XlArrayOutput),
-}
-
-#[repr(u8)]
-enum OwnedValueKind {
-    Number = 0,
-    Boolean = 1,
-    Integer = 2,
-    String = 3,
-    Error = 4,
-    Missing = 5,
-    Blank = 6,
-    Matrix = 7,
-    ArrayOutput = 8,
-}
-
-/// An Excel array whose cells are already encoded in their final ABI form.
-///
-/// Equality compares shape and semantic values for the supported scalar cell
-/// types. The numeric builder rejects NaN and infinities, so numeric equality
-/// is well-defined.
-///
-/// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
-/// adopts the cell allocation instead of materializing an intermediate
-/// `Vec<OwnedExcelValue>` and encoding it into another array.
-/// An Excel array whose cells are already encoded in their final ABI form.
-///
-/// Equality compares shape and semantic values for the supported scalar cell
-/// types. The numeric builder rejects NaN and infinities, so numeric equality
-/// is well-defined.
-///
-/// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
-/// adopts the cell allocation instead of materializing an intermediate
-/// `Vec<OwnedExcelValue>` and encoding it into another array.
-#[doc(hidden)]
-pub struct XlArrayOutput {
-    pub(crate) rows: usize,
-    pub(crate) columns: usize,
-    pub(crate) cells: Box<[XLOPER12]>,
-    pub(crate) storage: Option<ReturnStorage>,
-    pub(crate) payload_bytes: usize,
-}
-
-impl Clone for XlArrayOutput {
-    fn clone(&self) -> Self {
-        let mut builder = XlArrayBuilder::for_matrix(self.rows, self.columns)
-            .expect("validated XlArrayOutput shape");
-
-        for cell in self.cells.iter() {
-            builder
-                .push_cloned_cell(cell)
-                .expect("validated XlArrayOutput cell");
-        }
-
-        builder
-            .finish()
-            .expect("cloning a valid XlArrayOutput must succeed")
-    }
-}
-
-impl std::fmt::Debug for XlArrayOutput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("XlArrayOutput")
-            .field("rows", &self.rows)
-            .field("columns", &self.columns)
-            .field("cells", &self.cells.len())
-            .finish()
-    }
-}
-
-fn equal_xloper_cells(left: &XLOPER12, right: &XLOPER12) -> bool {
-    let left_type = left.base_type();
-    if left_type != right.base_type() {
-        return false;
-    }
-
-    match left_type {
-        XLTYPE_NUM => {
-            // SAFETY: XLTYPE_NUM selects the number member.
-            unsafe { left.value.number == right.value.number }
-        }
-        XLTYPE_INT => {
-            // SAFETY: XLTYPE_INT selects the integer member.
-            unsafe { left.value.integer == right.value.integer }
-        }
-        XLTYPE_BOOL => {
-            // SAFETY: XLTYPE_BOOL selects the boolean member.
-            unsafe { left.value.boolean == right.value.boolean }
-        }
-        XLTYPE_ERR => {
-            // SAFETY: XLTYPE_ERR selects the error member.
-            unsafe { left.value.error == right.value.error }
-        }
-        XLTYPE_STR => {
-            // SAFETY: XLTYPE_STR selects the counted UTF-16 string member.
-            unsafe {
-                let left_string = left.value.string;
-                let right_string = right.value.string;
-                if left_string.is_null() || right_string.is_null() {
-                    return left_string.is_null() && right_string.is_null();
-                }
-                let left_len = *left_string as usize;
-                let right_len = *right_string as usize;
-                std::slice::from_raw_parts(left_string.add(1), left_len)
-                    == std::slice::from_raw_parts(right_string.add(1), right_len)
-            }
-        }
-        XLTYPE_NIL | XLTYPE_MISSING => true,
-        // Nested arrays and unknown cell types are outside the output contract.
-        _ => false,
-    }
-}
-
-impl PartialEq for XlArrayOutput {
-    fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
-            && self.columns == other.columns
-            && self.cells.len() == other.cells.len()
-            && self
-                .cells
-                .iter()
-                .zip(other.cells.iter())
-                .all(|(left, right)| equal_xloper_cells(left, right))
-    }
-}
-
-/// Builds a numeric Excel array directly in its final `XLOPER12` cell buffer.
-///
-/// This is the low-allocation output path for large calculated arrays. The
-/// builder owns exactly one cell buffer; returning the finished value transfers
-/// that buffer to the DLL-owned return block without copying its cells.
-pub struct XlArrayBuilder {
-    rows: usize,
-    columns: usize,
-    cells: Box<[std::mem::MaybeUninit<XLOPER12>]>,
-    initialized: usize,
-    storage: Option<ReturnStorage>,
-    payload_bytes: usize,
-}
-
-impl XlArrayBuilder {
-    fn for_matrix(rows: usize, columns: usize) -> XllResult<Self> {
-        let len = rows.checked_mul(columns).ok_or(XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })?;
-
-        validate_matrix_dimensions(rows, columns, len)?;
-
-        let cell_bytes =
-            len.checked_mul(std::mem::size_of::<XLOPER12>())
-                .ok_or(XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
-
-        if cell_bytes > MAX_ARRAY_BYTES {
-            return Err(XllError::input(
-                "<array output>",
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_BYTES,
-                    actual: cell_bytes,
-                },
-            ));
-        }
-
-        Ok(Self {
-            rows,
-            columns,
-            cells: Box::<[XLOPER12]>::new_uninit_slice(len),
-            initialized: 0,
-            storage: None,
-            payload_bytes: cell_bytes,
-        })
-    }
-
-    pub fn numbers(rows: usize, columns: usize) -> XllResult<Self> {
-        Self::for_matrix(rows, columns)
-    }
-
-    fn push_oper(&mut self, oper: XLOPER12) -> XllResult<()> {
-        if self.initialized == self.cells.len() {
-            return Err(XllError::input(
-                "<array output>",
-                InputError::Malformed("too many array cells"),
-            ));
-        }
-
-        self.cells[self.initialized].write(oper);
-        self.initialized += 1;
-
-        Ok(())
-    }
-
-    pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
-        if !value.is_finite() {
-            return Err(XllError::input("<array output>", InputError::NonFinite));
-        }
-        self.push_oper(XLOPER12::number(value))
-    }
-
-    fn push_string(&mut self, text: String) -> XllResult<()> {
-        let utf16_length = crate::utf16::checked_utf16_len(
-            &text,
-            "<array output>",
-            crate::utf16::EXCEL_STRING_LIMIT,
-        )?;
-        let string_bytes = utf16_length
-            .checked_add(1)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?
-            .checked_mul(std::mem::size_of::<u16>())
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
-
-        let additional = string_bytes;
-
-        let next_bytes = self
-            .payload_bytes
-            .checked_add(additional)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
-
-        if next_bytes > MAX_ARRAY_BYTES {
-            return Err(XllError::input(
-                "<array output>",
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_BYTES,
-                    actual: next_bytes,
-                },
-            ));
-        }
-
-        let storage = self.storage.get_or_insert_with(ReturnStorage::new);
-        let pointer = storage.alloc_counted_utf16_with_length(
-            &text,
-            "<array output>",
-            crate::utf16::EXCEL_STRING_LIMIT,
-            utf16_length,
-        )?;
-        self.push_oper(XLOPER12 {
-            value: xlfn_sys::XLOPER12Value { string: pointer },
-            xltype: XLTYPE_STR,
-        })?;
-
-        self.payload_bytes = next_bytes;
-        Ok(())
-    }
-
-    fn push_cloned_cell(&mut self, cell: &XLOPER12) -> XllResult<()> {
-        let cell_type = cell.base_type();
-        match cell_type {
-            XLTYPE_NUM => {
-                // SAFETY: XLTYPE_NUM selects the number member.
-                unsafe { self.push_oper(XLOPER12::number(cell.value.number)) }
-            }
-            XLTYPE_INT => {
-                // SAFETY: XLTYPE_INT selects the integer member.
-                unsafe { self.push_oper(XLOPER12::integer(cell.value.integer)) }
-            }
-            XLTYPE_BOOL => {
-                // SAFETY: XLTYPE_BOOL selects the boolean member.
-                unsafe { self.push_oper(XLOPER12::boolean(cell.value.boolean != 0)) }
-            }
-            XLTYPE_ERR => {
-                // SAFETY: XLTYPE_ERR selects the error member.
-                unsafe { self.push_oper(XLOPER12::error(cell.value.error)) }
-            }
-            XLTYPE_NIL => self.push_oper(XLOPER12::nil()),
-            XLTYPE_MISSING => self.push_oper(XLOPER12::missing()),
-            XLTYPE_STR => {
-                // SAFETY: XLTYPE_STR selects string.
-                unsafe {
-                    let ptr = cell.value.string;
-                    if ptr.is_null() {
-                        self.push_oper(XLOPER12 {
-                            value: xlfn_sys::XLOPER12Value {
-                                string: std::ptr::null_mut(),
-                            },
-                            xltype: XLTYPE_STR,
-                        })
-                    } else {
-                        let len = *ptr as usize;
-                        let slice = std::slice::from_raw_parts(ptr.add(1), len);
-                        let text = String::from_utf16(slice).map_err(|_| {
-                            XllError::input("<array cell>", InputError::InvalidUtf16)
-                        })?;
-                        self.push_string(text)
-                    }
-                }
-            }
-            _ => Err(XllError::input(
-                "<array cell>",
-                InputError::Malformed("unsupported cell type"),
-            )),
-        }
-    }
-
-    fn push_owned(&mut self, value: OwnedExcelValue) -> XllResult<()> {
-        match value {
-            OwnedExcelValue::Number(value) if value.is_finite() => {
-                self.push_oper(XLOPER12::number(value))
-            }
-            OwnedExcelValue::Number(_) => Err(XllError::input("<return>", InputError::NonFinite)),
-            OwnedExcelValue::Boolean(value) => self.push_oper(XLOPER12::boolean(value)),
-            OwnedExcelValue::Integer(value) => self.push_oper(XLOPER12::integer(value)),
-            OwnedExcelValue::Error(ExcelErrorValue(error)) => {
-                self.push_oper(XLOPER12::error(error.code()))
-            }
-            OwnedExcelValue::Missing | OwnedExcelValue::Blank => {
-                self.push_oper(XLOPER12::error(ExcelError::NotAvailable.code()))
-            }
-            OwnedExcelValue::String(value) => self.push_string(value),
-            OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
-                "<return>",
-                InputError::Malformed("nested return arrays are not supported"),
-            )),
-        }
-    }
-
-    pub fn finish(self) -> XllResult<XlArrayOutput> {
-        let expected = self.rows * self.columns;
-
-        if self.initialized != expected {
-            return Err(XllError::ElementCountMismatch {
-                rows: self.rows,
-                columns: self.columns,
-                expected,
-                actual: self.initialized,
-            });
-        }
-
-        // SAFETY: initialized == cells.len() so every element is written.
-        let cells = unsafe { self.cells.assume_init() };
-
-        Ok(XlArrayOutput {
-            rows: self.rows,
-            columns: self.columns,
-            cells,
-            storage: self.storage,
-            payload_bytes: self.payload_bytes,
-        })
-    }
-}
-
-impl IntoExcelValue for XlArrayOutput {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::ArrayOutput(self))
-    }
-}
-
-impl<'call> ExcelParameter<'call> for f64 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for f64 {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let number = match value.base_type() {
             // SAFETY: The root type selects the corresponding union member.
             XLTYPE_NUM => unsafe { value.raw.value.number },
@@ -1521,12 +1286,8 @@ impl<'call> ExcelParameter<'call> for f64 {
     }
 }
 
-impl<'call> ExcelParameter<'call> for bool {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for bool {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() != XLTYPE_BOOL {
             return Err(value.wrong_type(argument, "boolean"));
         }
@@ -1558,12 +1319,8 @@ fn number_to_integer<T>(
     Ok(convert(number))
 }
 
-impl<'call> ExcelParameter<'call> for i32 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for i32 {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
             XLTYPE_INT => Ok(unsafe { value.raw.value.integer }),
@@ -1584,12 +1341,8 @@ impl<'call> ExcelParameter<'call> for i32 {
     }
 }
 
-impl<'call> ExcelParameter<'call> for i64 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for i64 {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
             XLTYPE_INT => Ok((unsafe { value.raw.value.integer }) as i64),
@@ -1611,12 +1364,8 @@ impl<'call> ExcelParameter<'call> for i64 {
     }
 }
 
-impl<'call> ExcelParameter<'call> for String {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for String {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         String::from_utf16(value.utf16(argument)?)
             .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))
     }
@@ -1626,16 +1375,22 @@ impl<'call> ExcelParameter<'call> for String {
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for crate::Handle<'call, T>
+impl<'call, T> FromExcel<'call> for crate::Handle<'call, T>
 where
     T: crate::handle::ExcelHandleObject,
 {
-    fn from_excel(
+    fn from_excel(_value: XlValueRef<'call>, _argument: &'static str) -> XllResult<Self> {
+        Err(XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::HANDLE_NO_CONTEXT,
+        })
+    }
+
+    fn from_excel_with_context(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
     ) -> XllResult<Self> {
-        let token = String::from_excel(value, argument, context)?;
+        let token = <String as FromExcel>::from_excel(value, argument)?;
         context.resolve_handle(&token)
     }
 
@@ -1644,12 +1399,8 @@ where
     }
 }
 
-impl<'call> ExcelParameter<'call> for ExcelErrorValue {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for ExcelErrorValue {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() != XLTYPE_ERR {
             return Err(value.wrong_type(argument, "Excel error"));
         }
@@ -1665,19 +1416,15 @@ impl<'call> ExcelParameter<'call> for ExcelErrorValue {
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for OptionalExcelValue<T>
+impl<'call, T> FromExcel<'call> for OptionalExcelValue<T>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING => Ok(Self::Missing),
             XLTYPE_NIL => Ok(Self::Blank),
-            _ => T::from_excel(value, argument, context).map(Self::Value),
+            _ => T::from_excel(value, argument).map(Self::Value),
         }
     }
 
@@ -1724,18 +1471,14 @@ where
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for Option<T>
+impl<'call, T> FromExcel<'call> for Option<T>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING | XLTYPE_NIL => Ok(None),
-            _ => T::from_excel(value, argument, context).map(Some),
+            _ => T::from_excel(value, argument).map(Some),
         }
     }
 
@@ -1775,14 +1518,10 @@ where
     }
 }
 
-impl<'call> ExcelParameter<'call> for ExcelSerialDate {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for ExcelSerialDate {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         Self::new(
-            f64::from_excel(value, argument, context)?,
+            <f64 as FromExcel>::from_excel(value, argument)?,
             ExcelDateSystem::Workbook,
         )
         .map_err(|error| match error {
@@ -1804,7 +1543,7 @@ fn matrix_from_excel_with_identity<'call, T>(
     mut identity: Option<&mut InputIdentityEncoder>,
 ) -> XllResult<Matrix<T>>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
     let grid = GridView::from_value(value, argument)?;
     let (rows, columns) = grid.shape();
@@ -1881,16 +1620,12 @@ where
     Matrix::new(rows, columns, data)
 }
 
-impl<'call, T> ExcelParameter<'call> for Matrix<T>
+impl<'call, T> FromExcel<'call> for Matrix<T>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
-        matrix_from_excel_with_identity(value, argument, context, None)
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        matrix_from_excel_with_identity(value, argument, &CallContext::without_runtime(), None)
     }
 
     fn from_excel_with_identity(
@@ -1911,16 +1646,12 @@ where
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for Vec<T>
+impl<'call, T> FromExcel<'call> for Vec<T>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
-        let matrix = Matrix::<T>::from_excel(value, argument, context)?;
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let matrix = <Matrix<T> as FromExcel>::from_excel(value, argument)?;
         if matrix.rows() != 1 && matrix.columns() != 1 {
             return Err(XllError::Shape {
                 expected: Shape {
@@ -1944,15 +1675,11 @@ where
     }
 }
 
-impl<'call, T, const MAX: usize> ExcelParameter<'call> for BoundedVarArgs<T, MAX>
+impl<'call, T, const MAX: usize> FromExcel<'call> for BoundedVarArgs<T, MAX>
 where
-    T: ExcelParameter<'call>,
+    T: FromExcel<'call>,
 {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if MAX == 0 {
             return Err(XllError::input(
                 argument,
@@ -1973,10 +1700,12 @@ where
                 ));
             }
         }
-        Self::new(Vec::<T>::from_excel(value, argument, context)?).map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::Input { argument, reason },
-            other => other,
-        })
+        Self::new(<Vec<T> as FromExcel>::from_excel(value, argument)?).map_err(
+            |error| match error {
+                XllError::Input { reason, .. } => XllError::Input { argument, reason },
+                other => other,
+            },
+        )
     }
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
@@ -1987,13 +1716,9 @@ where
     }
 }
 
-impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
-        let matrix = Matrix::<T>::from_excel(value, argument, context)?;
+impl<'call, T: FromExcel<'call>> FromExcel<'call> for Row<T> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let matrix = <Matrix<T> as FromExcel>::from_excel(value, argument)?;
         if matrix.rows() != 1 {
             return Err(XllError::Shape {
                 expected: Shape {
@@ -2017,13 +1742,9 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Row<T> {
     }
 }
 
-impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
-        let matrix = Matrix::<T>::from_excel(value, argument, context)?;
+impl<'call, T: FromExcel<'call>> FromExcel<'call> for Column<T> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let matrix = <Matrix<T> as FromExcel>::from_excel(value, argument)?;
         if matrix.columns() != 1 {
             return Err(XllError::Shape {
                 expected: Shape {
@@ -2047,23 +1768,21 @@ impl<'call, T: ExcelParameter<'call>> ExcelParameter<'call> for Column<T> {
     }
 }
 
-impl<'call> ExcelParameter<'call> for OwnedExcelValue {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-    ) -> XllResult<Self> {
+impl<'call> FromExcel<'call> for ExcelCellValue {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
-            XLTYPE_NUM => f64::from_excel(value, argument, context).map(Self::Number),
-            XLTYPE_BOOL => bool::from_excel(value, argument, context).map(Self::Boolean),
-            XLTYPE_INT => i32::from_excel(value, argument, context).map(Self::Integer),
-            XLTYPE_STR => String::from_excel(value, argument, context).map(Self::String),
-            XLTYPE_ERR => ExcelErrorValue::from_excel(value, argument, context).map(Self::Error),
-            XLTYPE_MISSING => Ok(Self::Missing),
-            XLTYPE_NIL => Ok(Self::Blank),
-            XLTYPE_MULTI => {
-                Matrix::<OwnedExcelValue>::from_excel(value, argument, context).map(Self::Matrix)
+            XLTYPE_NUM => <f64 as FromExcel>::from_excel(value, argument).map(Self::Number),
+            XLTYPE_INT => {
+                // `xltypeInt` is a transport representation; worksheet
+                // semantics use the canonical numeric cell representation.
+                // SAFETY: XLTYPE_INT selects the integer union member.
+                Ok(Self::Number(unsafe { value.raw.value.integer } as f64))
             }
+            XLTYPE_BOOL => <bool as FromExcel>::from_excel(value, argument).map(Self::Boolean),
+            XLTYPE_STR => <String as FromExcel>::from_excel(value, argument).map(Self::String),
+            XLTYPE_ERR => <ExcelErrorValue as FromExcel>::from_excel(value, argument)
+                .map(|ExcelErrorValue(error)| Self::Error(error)),
+            XLTYPE_NIL => Ok(Self::Blank),
             _ => Err(value.wrong_type(argument, "worksheet value")),
         }
     }
@@ -2071,62 +1790,67 @@ impl<'call> ExcelParameter<'call> for OwnedExcelValue {
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         match self {
             Self::Number(value) => {
-                encoder.tag(OwnedValueKind::Number as u8);
-                value.encode_identity(encoder);
+                encoder.tag(ExcelCellValueKind::Number as u8);
+                FromExcel::encode_identity(value, encoder);
             }
             Self::Boolean(value) => {
-                encoder.tag(OwnedValueKind::Boolean as u8);
-                value.encode_identity(encoder);
-            }
-            Self::Integer(value) => {
-                encoder.tag(OwnedValueKind::Integer as u8);
-                value.encode_identity(encoder);
+                encoder.tag(ExcelCellValueKind::Boolean as u8);
+                FromExcel::encode_identity(value, encoder);
             }
             Self::String(value) => {
-                encoder.tag(OwnedValueKind::String as u8);
-                value.encode_identity(encoder);
+                encoder.tag(ExcelCellValueKind::String as u8);
+                FromExcel::encode_identity(value, encoder);
             }
             Self::Error(value) => {
-                encoder.tag(OwnedValueKind::Error as u8);
-                value.encode_identity(encoder);
+                encoder.tag(ExcelCellValueKind::Error as u8);
+                encoder.i64(i64::from(value.code()));
             }
-            Self::Missing => encoder.tag(OwnedValueKind::Missing as u8),
-            Self::Blank => encoder.tag(OwnedValueKind::Blank as u8),
-            Self::Matrix(value) => {
-                encoder.tag(OwnedValueKind::Matrix as u8);
-                value.encode_identity(encoder);
-            }
-            Self::ArrayOutput(value) => {
-                encoder.tag(OwnedValueKind::ArrayOutput as u8);
-                encoder.u64(value.rows as u64);
-                encoder.u64(value.columns as u64);
-                encoder.u64(value.payload_bytes as u64);
-            }
+            Self::Blank => encoder.tag(ExcelCellValueKind::Blank as u8),
         }
     }
 }
 
-impl IntoExcelValue for OwnedExcelValue {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+impl<'call> FromExcel<'call> for ExcelValue {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        match value.base_type() {
+            XLTYPE_MISSING => Ok(Self::Missing),
+            XLTYPE_MULTI => {
+                <Matrix<ExcelCellValue> as FromExcel>::from_excel(value, argument).map(Self::Array)
+            }
+            _ => <ExcelCellValue as FromExcel>::from_excel(value, argument).map(Self::Scalar),
+        }
+    }
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
         match self {
-            Self::Missing | Self::Blank => Err(XllError::ExcelValue(ExcelError::NotAvailable)),
-            Self::Matrix(matrix)
-                if matrix
-                    .as_slice()
-                    .iter()
-                    .any(|value| matches!(value, Self::Missing | Self::Blank)) =>
-            {
-                Err(XllError::ExcelValue(ExcelError::NotAvailable))
+            Self::Scalar(value) => {
+                encoder.tag(ExcelValueKind::Scalar as u8);
+                FromExcel::encode_identity(value, encoder);
             }
-            value => Ok(value),
+            Self::Missing => encoder.tag(ExcelValueKind::Missing as u8),
+            Self::Array(value) => {
+                encoder.tag(ExcelValueKind::Array as u8);
+                FromExcel::encode_identity(value, encoder);
+            }
         }
     }
 }
 
-impl IntoExcelValue for f64 {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+impl IntoExcel for ExcelCellOutput {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        if matches!(self, Self::Number(value) if !value.is_finite()) {
+            return Err(XllError::Domain {
+                code: DomainErrorCode::InvalidInput,
+            });
+        }
+        Ok(self)
+    }
+}
+
+impl IntoExcel for f64 {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
         if self.is_finite() {
-            Ok(OwnedExcelValue::Number(self))
+            Ok(ExcelCellOutput::Number(self))
         } else {
             Err(XllError::Domain {
                 code: DomainErrorCode::InvalidInput,
@@ -2135,23 +1859,23 @@ impl IntoExcelValue for f64 {
     }
 }
 
-impl IntoExcelValue for bool {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::Boolean(self))
+impl IntoExcel for bool {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::Boolean(self))
     }
 }
 
-impl IntoExcelValue for i32 {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::Integer(self))
+impl IntoExcel for i32 {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::Number(self as f64))
     }
 }
 
-impl IntoExcelValue for i64 {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+impl IntoExcel for i64 {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
         const EXACT_LIMIT: i64 = 1_i64 << 53;
         if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
-            Ok(OwnedExcelValue::Number(self as f64))
+            Ok(ExcelCellOutput::Number(self as f64))
         } else {
             Err(XllError::Domain {
                 code: DomainErrorCode::Overflow,
@@ -2160,153 +1884,89 @@ impl IntoExcelValue for i64 {
     }
 }
 
-impl IntoExcelValue for ExcelSerialDate {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        self.serial.into_excel_value()
+impl IntoExcel for ExcelSerialDate {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        IntoExcel::into_excel(self.serial)
     }
 }
 
-impl IntoExcelValue for String {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::String(self))
+impl IntoExcel for String {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::String(self))
     }
 }
 
-impl IntoExcelValue for &str {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::String(self.to_owned()))
+impl IntoExcel for &str {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::String(self.to_owned()))
     }
 }
 
-macro_rules! direct_excel_returns {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            impl ExcelReturn for $ty {
-                type Output = Self;
-
-                fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-                    Ok(self)
-                }
-            }
-
-            impl MainThreadReturn for $ty {}
-            impl ThreadSafeReturn for $ty {}
-            impl MacroSheetReturn for $ty {}
-            impl AsyncReturn for $ty {}
-            impl VolatileReturn for $ty {}
-        )+
-    };
+impl IntoExcel for ExcelErrorValue {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::Error(self.0))
+    }
 }
 
-direct_excel_returns!(
-    f64,
-    bool,
-    i32,
-    i64,
-    String,
-    ExcelErrorValue,
-    OwnedExcelValue,
-    XlArrayOutput,
-    ExcelSerialDate,
-);
-
-impl ExcelReturn for &str {
-    type Output = Self;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
+impl ExcelReturn for ExcelOutput {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
         Ok(self)
     }
 }
 
-impl MainThreadReturn for &str {}
-impl ThreadSafeReturn for &str {}
-impl MacroSheetReturn for &str {}
-impl AsyncReturn for &str {}
-impl VolatileReturn for &str {}
+impl MainThreadReturn for ExcelOutput {}
+impl ThreadSafeReturn for ExcelOutput {}
+impl MacroSheetReturn for ExcelOutput {}
+impl AsyncReturn for ExcelOutput {}
+impl VolatileReturn for ExcelOutput {}
 
-impl<T: IntoExcelValue> ExcelReturn for Matrix<T> {
-    type Output = Self;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-        Ok(self)
-    }
-}
-
-impl<T: IntoExcelValue> MainThreadReturn for Matrix<T> {}
-impl<T: IntoExcelValue> ThreadSafeReturn for Matrix<T> {}
-impl<T: IntoExcelValue> MacroSheetReturn for Matrix<T> {}
-impl<T: IntoExcelValue> AsyncReturn for Matrix<T> {}
-impl<T: IntoExcelValue> VolatileReturn for Matrix<T> {}
-
-impl<T: IntoExcelValue> ExcelReturn for Row<T> {
-    type Output = Self;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-        Ok(self)
-    }
-}
-
-impl<T: IntoExcelValue> MainThreadReturn for Row<T> {}
-impl<T: IntoExcelValue> ThreadSafeReturn for Row<T> {}
-impl<T: IntoExcelValue> MacroSheetReturn for Row<T> {}
-impl<T: IntoExcelValue> AsyncReturn for Row<T> {}
-impl<T: IntoExcelValue> VolatileReturn for Row<T> {}
-
-impl<T: IntoExcelValue> ExcelReturn for Column<T> {
-    type Output = Self;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-        Ok(self)
-    }
-}
-
-impl<T: IntoExcelValue> MainThreadReturn for Column<T> {}
-impl<T: IntoExcelValue> ThreadSafeReturn for Column<T> {}
-impl<T: IntoExcelValue> MacroSheetReturn for Column<T> {}
-impl<T: IntoExcelValue> AsyncReturn for Column<T> {}
-impl<T: IntoExcelValue> VolatileReturn for Column<T> {}
-
-impl MainThreadReturn for crate::RtdValue {}
-impl ThreadSafeReturn for crate::RtdValue {}
-impl MacroSheetReturn for crate::RtdValue {}
-impl AsyncReturn for crate::RtdValue {}
-impl VolatileReturn for crate::RtdValue {}
-
-impl IntoExcelValue for ExcelErrorValue {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Ok(OwnedExcelValue::Error(self))
-    }
-}
-
-impl<T> IntoExcelValue for Matrix<T>
-where
-    T: IntoExcelValue,
-{
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        let rows = self.rows;
-        let columns = self.columns;
-        let mut builder = XlArrayBuilder::for_matrix(rows, columns)?;
-
+impl<T: IntoExcel> ExcelReturn for Matrix<T> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+        let mut builder = XlArrayBuilder::new(self.rows, self.columns)?;
         for value in self.data {
-            let value = value.into_excel_value()?;
-            builder.push_owned(value)?;
+            builder.push(value)?;
         }
-
-        Ok(OwnedExcelValue::ArrayOutput(builder.finish()?))
+        builder.finish().map(ExcelOutput::Array)
     }
 }
 
-impl<T: IntoExcelValue> IntoExcelValue for Row<T> {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Matrix::new(1, self.0.len(), self.0)?.into_excel_value()
+impl<T: IntoExcel> MainThreadReturn for Matrix<T> {}
+impl<T: IntoExcel> ThreadSafeReturn for Matrix<T> {}
+impl<T: IntoExcel> MacroSheetReturn for Matrix<T> {}
+impl<T: IntoExcel> AsyncReturn for Matrix<T> {}
+impl<T: IntoExcel> VolatileReturn for Matrix<T> {}
+
+impl<T: IntoExcel> ExcelReturn for Row<T> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+        let mut builder = XlArrayBuilder::new(1, self.0.len())?;
+        for value in self.0 {
+            builder.push(value)?;
+        }
+        builder.finish().map(ExcelOutput::Array)
     }
 }
 
-impl<T: IntoExcelValue> IntoExcelValue for Column<T> {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        Matrix::new(self.0.len(), 1, self.0)?.into_excel_value()
+impl<T: IntoExcel> MainThreadReturn for Row<T> {}
+impl<T: IntoExcel> ThreadSafeReturn for Row<T> {}
+impl<T: IntoExcel> MacroSheetReturn for Row<T> {}
+impl<T: IntoExcel> AsyncReturn for Row<T> {}
+impl<T: IntoExcel> VolatileReturn for Row<T> {}
+
+impl<T: IntoExcel> ExcelReturn for Column<T> {
+    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+        let mut builder = XlArrayBuilder::new(self.0.len(), 1)?;
+        for value in self.0 {
+            builder.push(value)?;
+        }
+        builder.finish().map(ExcelOutput::Array)
     }
 }
+
+impl<T: IntoExcel> MainThreadReturn for Column<T> {}
+impl<T: IntoExcel> ThreadSafeReturn for Column<T> {}
+impl<T: IntoExcel> MacroSheetReturn for Column<T> {}
+impl<T: IntoExcel> AsyncReturn for Column<T> {}
+impl<T: IntoExcel> VolatileReturn for Column<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -2315,9 +1975,7 @@ mod tests {
     use static_assertions::assert_impl_all;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value};
 
-    assert_impl_all!(
-        OwnedExcelValue: std::panic::UnwindSafe, std::panic::RefUnwindSafe
-    );
+    assert_impl_all!(ExcelValue: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
     assert_impl_all!(
         XlArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
     );
@@ -2393,7 +2051,10 @@ mod tests {
         let value =
             <AliasedReturn as ExcelReturn>::into_excel(Ok::<_, XllError>(4.5), &mut context)
                 .unwrap();
-        assert_eq!(value, 4.5);
+        assert!(matches!(
+            value,
+            ExcelOutput::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
+        ));
     }
 
     #[test]
@@ -2565,12 +2226,8 @@ mod tests {
     #[test]
     fn bounded_varargs_rejects_oversized_input_before_converting_elements() {
         struct PanicOnConvert;
-        impl<'call> ExcelParameter<'call> for PanicOnConvert {
-            fn from_excel(
-                _value: XlValueRef<'call>,
-                _argument: &'static str,
-                _context: &CallContext<'call>,
-            ) -> XllResult<Self> {
+        impl<'call> FromExcel<'call> for PanicOnConvert {
+            fn from_excel(_value: XlValueRef<'call>, _argument: &'static str) -> XllResult<Self> {
                 panic!("element conversion should not occur for oversized inputs");
             }
 
@@ -2615,11 +2272,55 @@ mod tests {
             },
             xltype: XLTYPE_MULTI,
         };
-        let values = convert::<Matrix<OwnedExcelValue>>(&mut raw).unwrap();
-        assert_eq!(values.as_slice()[0], OwnedExcelValue::Blank);
+        let values = convert::<Matrix<ExcelCellValue>>(&mut raw).unwrap();
+        assert_eq!(values.as_slice()[0], ExcelCellValue::Blank);
         assert_eq!(
             values.as_slice()[1],
-            OwnedExcelValue::Error(ExcelErrorValue(ExcelError::NotAvailable))
+            ExcelCellValue::Error(ExcelError::NotAvailable)
+        );
+    }
+
+    #[test]
+    fn dynamic_values_separate_missing_from_blank_and_canonicalize_integers() {
+        let mut missing = XLOPER12::missing();
+        assert_eq!(
+            convert::<ExcelValue>(&mut missing).unwrap(),
+            ExcelValue::Missing
+        );
+
+        let mut blank = XLOPER12::nil();
+        assert_eq!(
+            convert::<ExcelValue>(&mut blank).unwrap(),
+            ExcelValue::Scalar(ExcelCellValue::Blank)
+        );
+
+        let mut integer = XLOPER12::integer(7);
+        assert_eq!(
+            convert::<ExcelValue>(&mut integer).unwrap(),
+            ExcelValue::Scalar(ExcelCellValue::Number(7.0))
+        );
+
+        let mut cells = [XLOPER12::nil(), XLOPER12::integer(8)];
+        let mut array = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: 1,
+                    columns: 2,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        assert_eq!(
+            convert::<ExcelValue>(&mut array).unwrap(),
+            ExcelValue::Array(
+                Matrix::new(
+                    1,
+                    2,
+                    vec![ExcelCellValue::Blank, ExcelCellValue::Number(8.0)],
+                )
+                .unwrap(),
+            )
         );
     }
 
@@ -2627,7 +2328,7 @@ mod tests {
     fn non_finite_values_are_rejected_both_directions() {
         let mut raw = XLOPER12::number(f64::NAN);
         assert!(convert::<f64>(&mut raw).is_err());
-        assert!(f64::INFINITY.into_excel_value().is_err());
+        assert!(IntoExcel::into_excel(f64::INFINITY).is_err());
     }
 
     #[test]
@@ -2655,17 +2356,13 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct FiniteNumber(f64);
 
-        impl<'call> ExcelParameter<'call> for FiniteNumber {
-            fn from_excel(
-                value: XlValueRef<'call>,
-                argument: &'static str,
-                context: &CallContext<'call>,
-            ) -> XllResult<Self> {
-                f64::from_excel(value, argument, context).map(Self)
+        impl<'call> FromExcel<'call> for FiniteNumber {
+            fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+                <f64 as FromExcel>::from_excel(value, argument).map(Self)
             }
 
             fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-                self.0.encode_identity(encoder);
+                FromExcel::encode_identity(&self.0, encoder);
             }
         }
 
@@ -2772,7 +2469,7 @@ mod tests {
 
     #[test]
     fn array_builder_encodes_directly_into_its_finished_cell_buffer() {
-        let mut builder = XlArrayBuilder::numbers(2, 2).unwrap();
+        let mut builder = XlArrayBuilder::new(2, 2).unwrap();
         for value in [1.0, 2.0, 3.0, 4.0] {
             builder.push_f64(value).unwrap();
         }
@@ -2784,51 +2481,6 @@ mod tests {
             // SAFETY: XLTYPE_NUM selects the number member.
             assert_eq!(unsafe { cell.value.number }, expected);
         }
-    }
-
-    #[test]
-    fn array_output_equality_uses_the_semantics_of_supported_scalar_cells() {
-        let mut left_text = vec![2_u16, b'o' as u16, b'k' as u16];
-        let mut right_text = vec![2_u16, b'o' as u16, b'k' as u16];
-        let left = XlArrayOutput {
-            rows: 1,
-            columns: 5,
-            cells: vec![
-                XLOPER12::number(1.0),
-                XLOPER12::integer(2),
-                XLOPER12::boolean(true),
-                XLOPER12::nil(),
-                XLOPER12 {
-                    value: XLOPER12Value {
-                        string: left_text.as_mut_ptr(),
-                    },
-                    xltype: XLTYPE_STR,
-                },
-            ]
-            .into_boxed_slice(),
-            storage: None,
-            payload_bytes: 0,
-        };
-        let right = XlArrayOutput {
-            rows: 1,
-            columns: 5,
-            cells: vec![
-                XLOPER12::number(1.0),
-                XLOPER12::integer(2),
-                XLOPER12::boolean(true),
-                XLOPER12::nil(),
-                XLOPER12 {
-                    value: XLOPER12Value {
-                        string: right_text.as_mut_ptr(),
-                    },
-                    xltype: XLTYPE_STR,
-                },
-            ]
-            .into_boxed_slice(),
-            storage: None,
-            payload_bytes: 0,
-        };
-        assert_eq!(left, right);
     }
 
     #[test]
@@ -2882,8 +2534,9 @@ mod tests {
     #[test]
     fn matrix_number_return_uses_encoded_array_output() {
         let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
-        let value = matrix.into_excel_value().unwrap();
-        assert!(matches!(value, OwnedExcelValue::ArrayOutput(_)));
+        let value =
+            <Matrix<f64> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
+        assert!(matches!(value, ExcelOutput::Array(_)));
     }
 
     #[test]
@@ -2895,10 +2548,10 @@ mod tests {
             value: f64,
         }
 
-        impl IntoExcelValue for CountedCell<'_> {
-            fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+        impl IntoExcel for CountedCell<'_> {
+            fn into_excel(self) -> XllResult<ExcelCellOutput> {
                 self.conversions.fetch_add(1, Ordering::Relaxed);
-                self.value.into_excel_value()
+                IntoExcel::into_excel(self.value)
             }
         }
 
@@ -2910,7 +2563,9 @@ mod tests {
             })
             .collect();
         let matrix = Matrix::new(10, 100, data).unwrap();
-        let _value = matrix.into_excel_value().unwrap();
+        let _value =
+            <Matrix<CountedCell<'_>> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
+                .unwrap();
         assert_eq!(conversions.load(Ordering::Relaxed), 1000);
     }
 
@@ -2918,24 +2573,7 @@ mod tests {
     fn partial_failure_during_matrix_conversion_cleans_up_safely() {
         let data = vec![1.0, 2.0, f64::NAN, 4.0];
         let matrix = Matrix::new(2, 2, data).unwrap();
-        let result = matrix.into_excel_value();
+        let result = <Matrix<f64> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn array_output_clone_rebases_string_pointers() {
-        let mut builder = XlArrayBuilder::for_matrix(1, 1).unwrap();
-        builder.push_string("test".to_string()).unwrap();
-        let original = builder.finish().unwrap();
-
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-
-        // SAFETY: both original and cloned cells are valid non-null strings.
-        unsafe {
-            let orig_ptr = original.cells[0].value.string;
-            let clone_ptr = cloned.cells[0].value.string;
-            assert_ne!(orig_ptr, clone_ptr);
-        }
     }
 }

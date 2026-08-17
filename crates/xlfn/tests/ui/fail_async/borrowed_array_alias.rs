@@ -1,4 +1,5 @@
 use xlfn::prelude::*;
+use xlfn::value::XlArrayRef;
 
 type BorrowedArray<'call> = XlArrayRef<'call>;
 

@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::__private::MainThreadReturn` is not satisfied
+ --> tests/ui/fail/nested_return_array.rs:6:13
+  |
+6 | fn bad() -> Matrix<Matrix<f64>> {
+  |             ^^^^^^^^^^^^^^^^^^^ the trait `xlfn::__private::MainThreadReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
+  |
+help: the trait `xlfn::__private::MainThreadReturn` is implemented for `xlfn::value::Matrix<T>`
+ --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  |
+  | impl<T: IntoExcel> MainThreadReturn for Matrix<T> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_main_thread_return`
+ --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  |
+  | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
+  |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`
+
+error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::__private::ExcelReturn` is not satisfied
+ --> tests/ui/fail/nested_return_array.rs:5:1
+  |
+5 | #[excel_function(name = "FAIL.NESTED.ARRAY")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::__private::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
+  |
+help: the trait `xlfn::__private::ExcelReturn` is implemented for `xlfn::value::Matrix<T>`
+ --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  |
+  | impl<T: IntoExcel> ExcelReturn for Matrix<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
