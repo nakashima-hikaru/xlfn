@@ -7,17 +7,13 @@
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
-use crate::ExcelParameter;
+#[cfg(feature = "async")]
+use crate::CancellationGuarantee;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationSource;
-#[cfg(feature = "bench-input-identity-diagnostic")]
-use crate::input_identity::{
-    ARGUMENT_DOMAIN, InputIdentityEncoder, ROOT_DOMAIN, ROOT_PREFIX_BYTES,
-};
-#[cfg(feature = "async")]
-use crate::{CancellationGuarantee, XllError};
+use crate::{ExcelParameter, InputError, InputIdentityEncoder, Matrix, XllError, XllResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -296,8 +292,6 @@ impl Drop for SyncBoundaryWorkerPool {
 // Handle prepare benchmarks
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "bench-input-identity-diagnostic")]
-use crate::Matrix;
 use crate::handle::{
     ExcelHandleObject, FormulaCaller, FormulaRevisionKey, HandleRuntime, HandleTopicKey,
     resolve_formula_caller,
@@ -529,181 +523,116 @@ impl InputIdentityBenchmark {
     }
 }
 
-#[cfg(feature = "bench-input-identity-diagnostic")]
-pub struct InputIdentityDiagnosticBenchmark {
-    owned_number: OwnedExcelValue,
-    short_string: OwnedExcelValue,
+// ---------------------------------------------------------------------------
+// Typed semantic identity benchmarks
+// ---------------------------------------------------------------------------
+
+/// A benchmark-only stand-in for the payload encoded by a typed handle.
+///
+/// The production `Handle<'call, T>` carries the same object identity in its
+/// `ExcelParameter` implementation. Keeping the fixture as a small owned
+/// value lets this benchmark measure identity encoding alone, without adding
+/// call-scope or registry work to the result.
+struct BenchmarkHandleIdentity(u64);
+
+impl<'call> ExcelParameter<'call> for BenchmarkHandleIdentity {
+    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v1";
+
+    fn from_excel(
+        _value: crate::XlValueRef<'call>,
+        _argument: &'static str,
+        _context: &crate::CallContext<'call>,
+    ) -> XllResult<Self> {
+        Err(XllError::input(
+            "benchmark",
+            InputError::Malformed("benchmark-only parameter"),
+        ))
+    }
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.u64(self.0);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TypedInputIdentityBenchCase {
+    F64,
+    StringShort,
+    Handle,
+    MatrixF64_100K,
+}
+
+impl TypedInputIdentityBenchCase {
+    pub const ALL: [Self; 4] = [
+        Self::F64,
+        Self::StringShort,
+        Self::Handle,
+        Self::MatrixF64_100K,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::F64 => "f64",
+            Self::StringShort => "string_short",
+            Self::Handle => "handle",
+            Self::MatrixF64_100K => "matrix_f64_100k",
+        }
+    }
+}
+
+pub struct TypedInputIdentityBenchmark {
+    f64_value: f64,
+    short_string: String,
+    handle: BenchmarkHandleIdentity,
     matrix_f64_100k: Matrix<f64>,
-    f64_argument_digest: [u8; 32],
 }
 
-#[cfg(feature = "bench-input-identity-diagnostic")]
-impl InputIdentityDiagnosticBenchmark {
-    pub fn new() -> Self {
-        let f64 = 42.0_f64;
-        let matrix_f64_100k =
-            Matrix::new(10_000, 10, (0..100_000).map(|index| index as f64).collect())
-                .expect("diagnostic matrix dimensions must be valid");
-        let benchmark = Self {
-            owned_number: OwnedExcelValue::Number(f64),
-            short_string: OwnedExcelValue::String("short".to_owned()),
-            matrix_f64_100k,
-            f64_argument_digest: Self::argument_digest::<0, _>(b"xlfn.input.f64.v4", |encoder| {
-                encoder.f64(f64)
-            }),
-        };
-        assert_eq!(
-            benchmark.f64_full_current(),
-            benchmark.f64_batched_64(),
-            "identity batching changed the v4 f64 byte stream"
-        );
-        assert_eq!(
-            benchmark.matrix_f64_100k_batched_64(),
-            benchmark.matrix_f64_100k_batched_256(),
-            "identity batching changed the v4 matrix byte stream"
-        );
-        assert_eq!(
-            benchmark.matrix_f64_100k_batched_64(),
-            benchmark.matrix_f64_100k_batched_1024(),
-            "identity batching changed the v4 matrix byte stream"
-        );
-        benchmark
-    }
-
-    pub fn f64_full_current(&self) -> [u8; 32] {
-        Self::fingerprint::<0, false, _>(b"xlfn.input.f64.v4", |encoder| encoder.f64(42.0))
-    }
-
-    pub fn f64_argument_only(&self) -> [u8; 32] {
-        Self::argument_digest::<0, _>(b"xlfn.input.f64.v4", |encoder| encoder.f64(42.0))
-    }
-
-    pub fn f64_root_only(&self) -> [u8; 32] {
-        Self::root_digest(&self.f64_argument_digest)
-    }
-
-    pub fn blake3_streaming_8b(&self) -> [u8; 32] {
-        let bytes = [0_u8; 8];
-        let mut hasher = blake3::Hasher::new();
-        for byte in bytes {
-            hasher.update(std::slice::from_ref(&byte));
-        }
-        *hasher.finalize().as_bytes()
-    }
-
-    pub fn blake3_one_shot_8b(&self) -> [u8; 32] {
-        *blake3::hash(&[0_u8; 8]).as_bytes()
-    }
-
-    pub fn owned_number_full_current(&self) -> [u8; 32] {
-        let value = match &self.owned_number {
-            OwnedExcelValue::Number(value) => *value,
-            _ => unreachable!("diagnostic fixture must be a number"),
-        };
-        Self::fingerprint::<0, false, _>(b"xlfn.input.owned-excel-value.v4", |encoder| {
-            encoder.tag(0);
-            encoder.f64(value);
-        })
-    }
-
-    pub fn string_short_full_current(&self) -> [u8; 32] {
-        let value = match &self.short_string {
-            OwnedExcelValue::String(value) => value.as_str(),
-            _ => unreachable!("diagnostic fixture must be a string"),
-        };
-        Self::fingerprint::<0, false, _>(b"xlfn.input.owned-excel-value.v4", |encoder| {
-            encoder.tag(3);
-            encoder.string(value);
-        })
-    }
-
-    pub fn f64_batched_64(&self) -> [u8; 32] {
-        Self::fingerprint::<64, true, _>(b"xlfn.input.f64.v4", |encoder| encoder.f64(42.0))
-    }
-
-    pub fn f64_batched_256(&self) -> [u8; 32] {
-        Self::fingerprint::<256, true, _>(b"xlfn.input.f64.v4", |encoder| encoder.f64(42.0))
-    }
-
-    pub fn f64_batched_1024(&self) -> [u8; 32] {
-        Self::fingerprint::<1024, true, _>(b"xlfn.input.f64.v4", |encoder| encoder.f64(42.0))
-    }
-
-    pub fn matrix_f64_100k_batched_64(&self) -> [u8; 32] {
-        self.matrix_f64_100k_fingerprint::<64>()
-    }
-
-    pub fn matrix_f64_100k_batched_256(&self) -> [u8; 32] {
-        self.matrix_f64_100k_fingerprint::<256>()
-    }
-
-    pub fn matrix_f64_100k_batched_1024(&self) -> [u8; 32] {
-        self.matrix_f64_100k_fingerprint::<1024>()
-    }
-
-    fn matrix_f64_100k_fingerprint<const WRITE_BUFFER: usize>(&self) -> [u8; 32] {
-        let matrix = &self.matrix_f64_100k;
-        Self::fingerprint::<WRITE_BUFFER, true, _>(b"xlfn.input.matrix.v4", |encoder| {
-            encoder.domain(b"xlfn.input.f64.v4");
-            encoder.u64(matrix.rows() as u64);
-            encoder.u64(matrix.columns() as u64);
-            for value in matrix.as_slice() {
-                encoder.f64(*value);
-            }
-        })
-    }
-
-    fn fingerprint<const WRITE_BUFFER: usize, const BATCH_ROOT: bool, F>(
-        argument_domain: &[u8],
-        encode: F,
-    ) -> [u8; 32]
-    where
-        F: FnOnce(&mut InputIdentityEncoder<'_, WRITE_BUFFER>),
-    {
-        let argument_digest = Self::argument_digest::<WRITE_BUFFER, _>(argument_domain, encode);
-        Self::root_digest_with_mode(&argument_digest, BATCH_ROOT)
-    }
-
-    fn argument_digest<const WRITE_BUFFER: usize, F>(argument_domain: &[u8], encode: F) -> [u8; 32]
-    where
-        F: FnOnce(&mut InputIdentityEncoder<'_, WRITE_BUFFER>),
-    {
-        let mut hasher = blake3::Hasher::new();
-        let mut encoder = InputIdentityEncoder::<WRITE_BUFFER>::new(&mut hasher);
-        encoder.domain(ARGUMENT_DOMAIN);
-        encoder.domain(argument_domain);
-        encode(&mut encoder);
-        encoder
-            .finish()
-            .expect("diagnostic argument identity must finish")
-    }
-
-    fn root_digest(argument_digest: &[u8; 32]) -> [u8; 32] {
-        Self::root_digest_with_mode(argument_digest, false)
-    }
-
-    fn root_digest_with_mode(argument_digest: &[u8; 32], batched: bool) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        if batched {
-            let mut prefix = [0_u8; ROOT_PREFIX_BYTES];
-            prefix[..8].copy_from_slice(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
-            prefix[8..8 + ROOT_DOMAIN.len()].copy_from_slice(ROOT_DOMAIN);
-            prefix[8 + ROOT_DOMAIN.len()..].copy_from_slice(&1_u64.to_le_bytes());
-            hasher.update(&prefix);
-        } else {
-            hasher.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
-            hasher.update(ROOT_DOMAIN);
-            hasher.update(&1_u64.to_le_bytes());
-        }
-        hasher.update(argument_digest);
-        *hasher.finalize().as_bytes()
-    }
-}
-
-#[cfg(feature = "bench-input-identity-diagnostic")]
-impl Default for InputIdentityDiagnosticBenchmark {
+impl Default for TypedInputIdentityBenchmark {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl TypedInputIdentityBenchmark {
+    pub fn new() -> Self {
+        Self {
+            f64_value: 42.0,
+            short_string: "short".to_owned(),
+            handle: BenchmarkHandleIdentity(42),
+            matrix_f64_100k: Matrix::new(
+                10,
+                10_000,
+                (0..100_000).map(|index| index as f64).collect(),
+            )
+            .expect("typed identity benchmark matrix dimensions must be valid"),
+        }
+    }
+
+    fn fingerprint<T>(&self, value: &T) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call>,
+    {
+        let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
+        builder
+            .with_argument::<T, _, _>(|encoder| {
+                value.encode_identity(encoder);
+                Ok(())
+            })
+            .expect("typed semantic argument must fingerprint successfully");
+        builder
+            .finish()
+            .expect("typed semantic argument fingerprint must finish")
+            .as_bytes()
+            .to_owned()
+    }
+
+    pub fn run(&self, case: TypedInputIdentityBenchCase) -> [u8; 32] {
+        match case {
+            TypedInputIdentityBenchCase::F64 => self.fingerprint(&self.f64_value),
+            TypedInputIdentityBenchCase::StringShort => self.fingerprint(&self.short_string),
+            TypedInputIdentityBenchCase::Handle => self.fingerprint(&self.handle),
+            TypedInputIdentityBenchCase::MatrixF64_100K => self.fingerprint(&self.matrix_f64_100k),
+        }
     }
 }
 

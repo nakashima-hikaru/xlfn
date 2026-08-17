@@ -1,6 +1,6 @@
 use super::*;
 use crate::input_identity::{
-    ARGUMENT_DOMAIN, InputFingerprintBuilder, InputIdentityEncoder, ROOT_DOMAIN,
+    ARGUMENT_DOMAIN, INLINE_ARGUMENT_MODE, InputFingerprintBuilder, ROOT_DOMAIN,
 };
 use crate::{ExcelParameter, InputFingerprint};
 
@@ -48,18 +48,21 @@ fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> Inpu
 }
 
 fn reference_handle_identity(object_id: u64) -> InputFingerprint {
-    let mut argument = blake3::Hasher::new();
-    let mut encoder = InputIdentityEncoder::<0>::new(&mut argument);
-    encoder.domain(ARGUMENT_DOMAIN);
-    encoder.domain(b"xlfn.input.handle-object.v4");
-    encoder.u64(object_id);
-    let argument_digest = encoder.finish().unwrap();
+    let mut argument = Vec::new();
+    argument.extend_from_slice(&(ARGUMENT_DOMAIN.len() as u64).to_le_bytes());
+    argument.extend_from_slice(ARGUMENT_DOMAIN);
+    let type_domain = b"xlfn.input.handle-object.v1";
+    argument.extend_from_slice(&(type_domain.len() as u64).to_le_bytes());
+    argument.extend_from_slice(type_domain);
+    argument.extend_from_slice(&object_id.to_le_bytes());
 
     let mut root = blake3::Hasher::new();
     root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
     root.update(ROOT_DOMAIN);
     root.update(&1_u64.to_le_bytes());
-    root.update(&argument_digest);
+    root.update(&[INLINE_ARGUMENT_MODE]);
+    root.update(&(argument.len() as u64).to_le_bytes());
+    root.update(&argument);
     InputFingerprint::from_bytes(*root.finalize().as_bytes())
 }
 
