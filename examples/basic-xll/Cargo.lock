@@ -620,6 +620,7 @@ dependencies = [
  "blake3",
  "bumpalo",
  "constant_time_eq 0.5.0",
+ "crossbeam-utils",
  "getrandom",
  "inventory",
  "moka",

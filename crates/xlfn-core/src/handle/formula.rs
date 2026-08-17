@@ -11,6 +11,7 @@ pub(crate) struct FormulaCaller {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaRevisionKey {
     pub(crate) caller: FormulaCaller,
+    /// Scopes the semantic input encoding to one fixed Rust parameter schema.
     pub(crate) udf_id: &'static str,
     pub(crate) inputs: InputFingerprint,
 }

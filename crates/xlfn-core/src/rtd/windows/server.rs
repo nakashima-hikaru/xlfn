@@ -43,8 +43,6 @@ pub(super) const SERVER_NOT_STARTED: u8 = 0;
 pub(super) const SERVER_STARTING: u8 = 1;
 pub(super) const SERVER_STARTED: u8 = 2;
 pub(super) const SERVER_START_FAILED: u8 = 3;
-const SERVER_GENERATION_EXHAUSTED_DIAGNOSTIC_ID: u64 = 0x5352_5647_454e_4558;
-
 #[derive(Clone)]
 pub(super) struct ActiveServer {
     pub(super) class_id: GUID,
@@ -569,7 +567,7 @@ pub(super) fn ensure_server(
                 Some(active) if Arc::ptr_eq(active, &handles) => {}
                 Some(_) => {
                     return Err(XllError::Internal {
-                        diagnostic_id: 0x5254_444d_554c_5449,
+                        diagnostic_id: crate::DiagnosticId::RTD_MULTI,
                     });
                 }
                 None => backends.handles = Some(handles),
@@ -584,7 +582,7 @@ pub(super) fn ensure_server(
                     }
                     Some(_) => {
                         return Err(XllError::Internal {
-                            diagnostic_id: 0x5254_444d_554c_5449,
+                            diagnostic_id: crate::DiagnosticId::RTD_MULTI,
                         });
                     }
                     None => {
@@ -635,7 +633,7 @@ pub(super) fn ensure_server(
 
     let generation =
         allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
-            diagnostic_id: SERVER_GENERATION_EXHAUSTED_DIAGNOSTIC_ID,
+            diagnostic_id: crate::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
         })?;
     let operations = ServerOperationBarrier::new().map_err(|error| XllError::ExcelApi {
         function: error.operation,
@@ -1268,9 +1266,9 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
                     &XllError::Internal {
                         diagnostic_id: match error {
                             ServerCloseError::WaitFailed(status) => {
-                                0x5254_4457_0000_0000 | u64::from(status as u32)
+                                crate::DiagnosticId::RTD_WINDOW_STATUS.with_low_u32(status as u32)
                             }
-                            _ => 0x5254_4457_4641_494c,
+                            _ => crate::DiagnosticId::RTD_WINDOW_FAILURE,
                         },
                     },
                 );

@@ -69,7 +69,7 @@ impl RtdFixture {
             ));
         }
         let sinks = self.sinks.lock().map_err(|_| XllError::Internal {
-            diagnostic_id: 0x5254_4446_4958_4c4b,
+            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
         })?;
         let batch = (1..=topic_count)
             .map(|topic_id| sinks.get(&format!("topic-{topic_id}")).cloned())
@@ -89,7 +89,7 @@ impl RtdFixture {
             .sinks
             .lock()
             .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x5254_4446_4958_4c4b,
+            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
             })?
             .len();
         i32::try_from(count).map_err(|_| XllError::Domain {
@@ -114,7 +114,7 @@ impl RtdSource for RtdFixture {
         self.sinks
             .lock()
             .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x5254_4446_4958_4c4b,
+            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
             })?
             .insert(key.clone(), sink);
         Ok(Box::new(RtdFixtureSubscription {
@@ -138,7 +138,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
         self.sinks
             .lock()
             .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x5254_4446_4958_4c4b,
+            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
             })?
             .remove(&self.key);
         Ok(())

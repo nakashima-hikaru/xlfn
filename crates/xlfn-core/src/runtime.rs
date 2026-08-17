@@ -191,7 +191,7 @@ impl<S> Runtime<S> {
             || self.close_attempt_active.load(Ordering::Acquire)
         {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4f50_454e_5048_4153,
+                diagnostic_id: crate::DiagnosticId::OPEN_PHASE,
             });
         }
 
@@ -228,12 +228,12 @@ impl<S> Runtime<S> {
             let attempt_id = self.next_lifecycle_attempt.load(Ordering::Relaxed);
             let Some(next) = attempt_id.checked_add(1) else {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x4154_544d_4f56_464c,
+                    diagnostic_id: crate::DiagnosticId::ATTEMPT_OVERFLOW,
                 });
             };
             if attempt_id == 0 {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x4154_544d_5a45_524f,
+                    diagnostic_id: crate::DiagnosticId::ATTEMPT_ZERO,
                 });
             }
             match self.next_lifecycle_attempt.compare_exchange_weak(
@@ -329,7 +329,7 @@ impl<S> Runtime<S> {
                             ghost
                                 .begin_generation(attempt.attempt_id, resources.clone())
                                 .map_err(|_| XllError::Internal {
-                                    diagnostic_id: 0x4748_4f53_5447_454e,
+                                    diagnostic_id: crate::DiagnosticId::GHOST_GENERATION,
                                 })?;
                             self.phase
                                 .store(LifecyclePhase::Open as u8, Ordering::Release);
@@ -485,7 +485,7 @@ impl<S> Runtime<S> {
             let state = self.state.load();
             if state.is_none() {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x4d49_5353_5354_4154,
+                    diagnostic_id: crate::DiagnosticId::MISSING_STATE,
                 });
             }
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -782,14 +782,14 @@ impl<S> Runtime<S> {
             || self.phase() != LifecyclePhase::Closed
         {
             return Err(XllError::Internal {
-                diagnostic_id: 0x434c_4f53_5754_4e4f,
+                diagnostic_id: crate::DiagnosticId::CLOSE_WAIT,
             });
         }
         if self.ghost_handle().active() {
             self.ghost_handle()
                 .record_returned_success()
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x434c_4f53_5452_5355,
+                    diagnostic_id: crate::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
                 })?;
             debug_assert!(!self.ghost_handle().active());
             self.record_composition_event(
@@ -1008,7 +1008,7 @@ impl<S> Runtime<S> {
 
         if !certified {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4f50_5242_4345_5254,
+                diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
             });
         }
 
@@ -1037,7 +1037,7 @@ impl<S> Runtime<S> {
     ) -> XllResult<()> {
         if certificate.runtime_address != std::ptr::from_ref(self).addr() {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4f50_5242_4345_5255,
+                diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_CERT_UNKNOWN,
             });
         }
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1050,7 +1050,7 @@ impl<S> Runtime<S> {
             LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
         ) {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4f50_5242_5048_4153,
+                diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_PHASE,
             });
         }
         crate::callback_gate::close_from_runtime();
@@ -1097,7 +1097,7 @@ impl<S> Runtime<S> {
 
         if !certified {
             return Err(XllError::Internal {
-                diagnostic_id: 0x434c_4f53_4543_4552,
+                diagnostic_id: crate::DiagnosticId::CLOSE_CERTIFICATE,
             });
         }
 
@@ -1123,12 +1123,12 @@ impl<S> Runtime<S> {
     pub(crate) fn finish_close(&self, certificate: CloseCertificate) -> XllResult<ClosedWitness> {
         if certificate.runtime_address != std::ptr::from_ref(self).addr() {
             return Err(XllError::Internal {
-                diagnostic_id: 0x434c_4f53_4552_554e,
+                diagnostic_id: crate::DiagnosticId::CLOSE_RUNTIME,
             });
         }
         if certificate.generation != self.generation() {
             return Err(XllError::Internal {
-                diagnostic_id: 0x434c_4c4f_5345_4745,
+                diagnostic_id: crate::DiagnosticId::CLOSE_LEASE_GATE,
             });
         }
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1143,7 +1143,7 @@ impl<S> Runtime<S> {
             self.ghost_handle()
                 .apply(event.clone())
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x434c_4f53_5447_484f,
+                    diagnostic_id: crate::DiagnosticId::CLOSE_GHOST,
                 })?;
             self.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,

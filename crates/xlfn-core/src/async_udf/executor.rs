@@ -101,7 +101,7 @@ impl Executor {
                 Err(_) => {
                     inner.live_workers.fetch_sub(1, Ordering::AcqRel);
                     return Err(XllError::Internal {
-                        diagnostic_id: 0x4153_594e_4353_504e,
+                        diagnostic_id: crate::DiagnosticId::ASYNC_SPAWN,
                     });
                 }
             };

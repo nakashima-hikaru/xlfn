@@ -22,7 +22,7 @@ targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"]
 
 Host-side tests that do not link an XLL may run on other operating systems. Packaging and release qualification still require Windows MSVC artifacts and real Excel.
 
-> **Source-snapshot installation:** this repository currently sets `publish = false` for the workspace. Until an official crates.io release is published, install `cargo-xlfn` from an audited Git revision or local checkout and replace generated `version = "0.2"` dependencies with the same Git revision or a local `path`. The version-based dependency examples in this guide show the intended form for a published release.
+> **Source-snapshot installation:** the workspace is configured with publishable crates, but an official crates.io release may not yet be available. Until it is published, install `cargo-xlfn` from an audited Git revision or local checkout and replace generated `version = "0.2"` dependencies with the same Git revision or a local `path`. The version-based dependency examples in this guide show the intended form for a published release.
 
 ## Excel bitness
 

@@ -123,8 +123,7 @@ For `ExcelParameter<'call>`:
 3. use the supplied static argument name in `XllError::Input`;
 4. reject unsupported coercions and non-finite values explicitly;
 5. bound all allocation from workbook-controlled lengths.
-6. implement `encode_identity` from the value's observable semantic state, not from temporary Excel pointers or presentation details;
-7. give the type a stable `IDENTITY_DOMAIN` and encode only its payload in `encode_identity` (the framework writes the length-prefixed top-level domain).
+6. implement `encode_identity` from the value's observable semantic state, not from temporary Excel pointers or presentation details; equal semantic values must encode equally and distinguishable values must encode differently.
 
 For `ExcelReturn` and `IntoExcelValue`:
 

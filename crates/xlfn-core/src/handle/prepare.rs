@@ -1,4 +1,5 @@
 use super::*;
+use crossbeam_utils::CachePadded;
 use std::cell::Cell;
 use std::time::Duration;
 
@@ -25,42 +26,8 @@ fn current_handle_prepare_stripe() -> usize {
     })
 }
 
-#[derive(Debug)]
-#[repr(C, align(128))]
-struct HandlePrepareStripe {
-    active: AtomicUsize,
-}
-
-impl HandlePrepareStripe {
-    const fn new() -> Self {
-        Self {
-            active: AtomicUsize::new(0),
-        }
-    }
-
-    fn enter(&self) {
-        self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_add(1)
-            })
-            .expect("handle prepare count cannot overflow");
-    }
-
-    fn leave(&self) {
-        self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_sub(1)
-            })
-            .expect("handle prepare count remains balanced");
-    }
-
-    fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
-    }
-}
-
 pub(crate) struct HandlePrepareState {
-    stripes: [HandlePrepareStripe; HANDLE_PREPARE_STRIPE_COUNT],
+    stripes: [CachePadded<AtomicUsize>; HANDLE_PREPARE_STRIPE_COUNT],
     pub(crate) waiters: AtomicUsize,
     pub(crate) wait_lock: Mutex<()>,
     pub(crate) idle: Condvar,
@@ -69,7 +36,7 @@ pub(crate) struct HandlePrepareState {
 impl HandlePrepareState {
     pub(crate) const fn new() -> Self {
         Self {
-            stripes: [const { HandlePrepareStripe::new() }; HANDLE_PREPARE_STRIPE_COUNT],
+            stripes: [const { CachePadded::new(AtomicUsize::new(0)) }; HANDLE_PREPARE_STRIPE_COUNT],
             waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
@@ -78,7 +45,11 @@ impl HandlePrepareState {
 
     pub(crate) fn enter(&self) -> HandlePrepareGuard<'_> {
         let stripe_index = current_handle_prepare_stripe();
-        self.stripes[stripe_index].enter();
+        self.stripes[stripe_index]
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .expect("handle prepare count cannot overflow");
 
         HandlePrepareGuard {
             state: self,
@@ -100,7 +71,10 @@ impl HandlePrepareState {
     }
 
     fn active(&self) -> usize {
-        self.stripes.iter().map(HandlePrepareStripe::active).sum()
+        self.stripes
+            .iter()
+            .map(|stripe| stripe.load(Ordering::Acquire))
+            .sum()
     }
 }
 
@@ -111,7 +85,11 @@ pub(crate) struct HandlePrepareGuard<'a> {
 
 impl Drop for HandlePrepareGuard<'_> {
     fn drop(&mut self) {
-        self.state.stripes[self.stripe_index].leave();
+        self.state.stripes[self.stripe_index]
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_sub(1)
+            })
+            .expect("handle prepare count remains balanced");
 
         if self.state.waiters.load(Ordering::Acquire) == 0 || self.state.active() != 0 {
             return;

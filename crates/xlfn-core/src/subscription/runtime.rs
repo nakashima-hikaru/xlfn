@@ -138,7 +138,7 @@ impl SubscriptionRuntime {
         let mut servers = self.servers.lock();
         if servers.contains_key(&generation) {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5254_4453_5256_4455,
+                diagnostic_id: crate::DiagnosticId::RTD_SERVER_DUE,
             });
         }
         servers.insert(generation, Arc::clone(&server));
@@ -190,7 +190,7 @@ impl SubscriptionRuntime {
                         .live_reservations
                         .checked_add(1)
                         .ok_or(XllError::Internal {
-                            diagnostic_id: 0x5245_5356_4f56_464c,
+                            diagnostic_id: crate::DiagnosticId::RESERVATION_OVERFLOW,
                         })?;
 
                 return Ok(PreparedSubscription {
@@ -202,7 +202,7 @@ impl SubscriptionRuntime {
             }
 
             return Err(XllError::Internal {
-                diagnostic_id: 0x5254_4449_4458_4f52,
+                diagnostic_id: crate::DiagnosticId::RTD_INDEX_ORPHAN,
             });
         }
 
@@ -285,7 +285,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: 0x5041_4e49_4353_5243,
+                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }
@@ -302,7 +302,7 @@ impl SubscriptionRuntime {
         if let Some(existing_gen) = pending.server_generation {
             if existing_gen != generation {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x5352_5647_454e_4d49,
+                    diagnostic_id: crate::DiagnosticId::SERVER_GENERATION_MISMATCH,
                 });
             }
         } else {
@@ -354,7 +354,7 @@ impl SubscriptionRuntime {
 
             if catalog.active_keys.contains_key(key) {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x4143_5456_4b45_5944,
+                    diagnostic_id: crate::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
 
@@ -364,7 +364,7 @@ impl SubscriptionRuntime {
                 if let Some(existing_gen) = pending.server_generation {
                     if existing_gen != server_handle.inner.generation {
                         return Err(XllError::Internal {
-                            diagnostic_id: 0x5352_5647_454e_4d49,
+                            diagnostic_id: crate::DiagnosticId::SERVER_GENERATION_MISMATCH,
                         });
                     }
                 } else {
@@ -373,7 +373,7 @@ impl SubscriptionRuntime {
 
                 if pending.connecting_generation.is_some() {
                     return Err(XllError::Internal {
-                        diagnostic_id: 0x434f_4e4e_494e_464c,
+                        diagnostic_id: crate::DiagnosticId::CONNECTION_INFLIGHT,
                     });
                 }
                 pending.connecting_generation = Some(conn_gen);
@@ -445,7 +445,7 @@ impl SubscriptionRuntime {
             Err(panic_payload) => {
                 let _ = self.rollback_connection(server_handle, topic_id, conn_gen, key);
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: 0x5041_4e49_4353_5542,
+                    diagnostic_id: crate::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
                 std::panic::resume_unwind(panic_payload);
             }
@@ -603,7 +603,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: 0x5041_4e49_4353_5243,
+                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }
@@ -717,7 +717,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 let err = XllError::Internal {
-                    diagnostic_id: 0x5041_4e49_4353_5243,
+                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
                 };
                 self.record_cleanup_result(Err(err.clone()));
             }
@@ -765,7 +765,7 @@ impl SubscriptionRuntime {
             && first_error.is_none()
         {
             first_error = Some(XllError::Internal {
-                diagnostic_id: 0x5041_4e49_4353_5243,
+                diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
             });
         }
 
@@ -861,7 +861,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: 0x5041_4e49_4353_5243,
+                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }

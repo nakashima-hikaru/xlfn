@@ -33,7 +33,7 @@ impl SubscriptionCatalog {
     pub(crate) fn allocate_transport_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
         let id = self.next_subscription_id;
         self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5254_4453_5542_4f56,
+            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
         Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
     }

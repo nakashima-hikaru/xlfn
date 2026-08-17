@@ -30,7 +30,7 @@ where
                     crate::shutdown::UnloadHazard::OpenRollbackFailed,
                     "xlAutoOpen pending rollback",
                     &XllError::Internal {
-                        diagnostic_id: 0x4f50_5242_5045_4e44,
+                        diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_PENDING,
                     },
                 );
             }
@@ -166,7 +166,7 @@ where
         #[cfg(not(feature = "async"))]
         {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4153_594e_4645_4154,
+                diagnostic_id: crate::DiagnosticId::ASYNC_FEATURE,
             });
         }
     }
@@ -196,7 +196,7 @@ fn rollback_active_open<A>(
                 crate::shutdown::UnloadHazard::OpenRollbackFailed,
                 "xlAutoOpen rollback",
                 &XllError::Internal {
-                    diagnostic_id: 0x4f50_5242_4641_494c,
+                    diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_FAILURE,
                 },
             ),
             Err(_) => fatal_unload_hazard(
@@ -218,7 +218,7 @@ where
     // the outer boundary can now roll the state back through quiesce and cleanup.
     runtime.publish_state(state);
     let state = runtime.opening_state().ok_or(XllError::Internal {
-        diagnostic_id: 0x4f50_454e_5354_4154,
+        diagnostic_id: crate::DiagnosticId::OPEN_STATE,
     })?;
     let layers = A::udf_layers(&state);
     drop(state);
@@ -232,7 +232,7 @@ where
     A: Addin,
 {
     let state = runtime.opening_state().ok_or(XllError::Internal {
-        diagnostic_id: 0x4f50_454e_5354_4154,
+        diagnostic_id: crate::DiagnosticId::OPEN_STATE,
     })?;
     Ok(A::async_worker_count(&state))
 }
@@ -413,7 +413,7 @@ where
             Err(state) => {
                 runtime.restore_state_arc(state);
                 let error = XllError::Internal {
-                    diagnostic_id: 0x5354_4154_4553_4341,
+                    diagnostic_id: crate::DiagnosticId::STATE_SCAN,
                 };
                 report_boundary_error("xlAutoOpen rollback state escaped", &error);
                 local_quiescent = false;
@@ -441,7 +441,7 @@ where
             Ok(certificate) => Some(certificate),
             Err(_) => {
                 let error = XllError::Internal {
-                    diagnostic_id: 0x5254_445f_4749_5451,
+                    diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
                 };
                 report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
                 local_quiescent = false;
@@ -481,7 +481,7 @@ where
     }
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {
-            diagnostic_id: 0x5245_4753_554e_4b4e,
+            diagnostic_id: crate::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
     }
@@ -651,7 +651,7 @@ fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession
             hazard,
             "xlAutoClose emergency RTD GIT quiescence",
             &XllError::Internal {
-                diagnostic_id: 0x5254_445f_4749_5451,
+                diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
             },
         );
     }
@@ -784,7 +784,7 @@ where
     }
     if runtime.registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {
-            diagnostic_id: 0x5245_4753_554e_4b4e,
+            diagnostic_id: crate::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoClose registration state unknown", &error);
         unload_failure = Some((
@@ -894,7 +894,7 @@ where
             }
             Err(state) => {
                 let error = XllError::Internal {
-                    diagnostic_id: 0x5354_4154_4553_4341,
+                    diagnostic_id: crate::DiagnosticId::STATE_SCAN,
                 };
                 report_boundary_error("xlAutoClose state escaped", &error);
                 let _ = std::sync::Arc::into_raw(state);
@@ -999,7 +999,7 @@ where
             hazard,
             "xlAutoClose RTD GIT quiescence",
             &XllError::Internal {
-                diagnostic_id: 0x5254_445f_4749_5451,
+                diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
             },
         )
     });
@@ -1315,7 +1315,7 @@ mod tests {
                 "test cleanup",
                 crate::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: 0x5445_5354_5254_5259,
+                    diagnostic_id: crate::DiagnosticId::TEST_RETRY,
                 },
             );
         }
@@ -1391,7 +1391,7 @@ mod tests {
 
         fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
             Err(XllError::Internal {
-                diagnostic_id: 0x5155_4945_5343_4546,
+                diagnostic_id: crate::DiagnosticId::QUIESCENCE_FAILURE,
             })
         }
     }
@@ -1462,7 +1462,7 @@ mod tests {
                 "Lean checker cleanup trace",
                 crate::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: 0x4c45_414e_5452_4345,
+                    diagnostic_id: crate::DiagnosticId::LEAN_TRACE,
                 },
             );
         }
@@ -1987,7 +1987,7 @@ mod tests {
                 "always fail cleanup",
                 crate::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: 0x4641_494c,
+                    diagnostic_id: crate::DiagnosticId::FAILURE,
                 },
             );
         }

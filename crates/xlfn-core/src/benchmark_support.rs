@@ -9,13 +9,13 @@
 
 #[cfg(feature = "async")]
 use crate::CancellationGuarantee;
+use crate::ExcelParameter;
 #[cfg(feature = "async")]
 use crate::XllError;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationSource;
-use crate::{ExcelParameter, Matrix};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -420,139 +420,49 @@ impl Drop for HandleWarmBenchmark {
 
 const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
 
-#[derive(Clone, Copy, Debug)]
-pub enum FormulaRevisionBenchCase {
-    ScalarNumber,
-    ShortString,
-    NumericCells100K,
-}
-
-impl FormulaRevisionBenchCase {
-    pub const ALL: [Self; 3] = [
-        Self::ScalarNumber,
-        Self::ShortString,
-        Self::NumericCells100K,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::ScalarNumber => "scalar_number",
-            Self::ShortString => "short_string",
-            Self::NumericCells100K => "numeric_cells_100k",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum InputIdentityBenchCase {
-    F64,
-    StringShort,
-    MatrixF64_100K,
-}
-
-impl InputIdentityBenchCase {
-    pub const ALL: [Self; 3] = [Self::F64, Self::StringShort, Self::MatrixF64_100K];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::F64 => "f64",
-            Self::StringShort => "string_short",
-            Self::MatrixF64_100K => "matrix_f64_100k",
-        }
-    }
-}
-
-/// Prepared typed semantic arguments shared by identity and formula-revision
-/// benchmarks.
-enum PreparedFormulaArguments {
-    F64(f64),
-    String(String),
-    MatrixF64(Matrix<f64>),
-}
-
-impl PreparedFormulaArguments {
-    fn for_formula_revision(case: FormulaRevisionBenchCase) -> Self {
-        match case {
-            FormulaRevisionBenchCase::ScalarNumber => Self::F64(42.0),
-            FormulaRevisionBenchCase::ShortString => Self::String("short".to_owned()),
-            FormulaRevisionBenchCase::NumericCells100K => Self::matrix_f64(100_000),
-        }
-    }
-
-    fn for_input_identity(case: InputIdentityBenchCase) -> Self {
-        match case {
-            InputIdentityBenchCase::F64 => Self::F64(42.0),
-            InputIdentityBenchCase::StringShort => Self::String("short".to_owned()),
-            InputIdentityBenchCase::MatrixF64_100K => Self::matrix_f64(100_000),
-        }
-    }
-
-    fn matrix_f64(cells: usize) -> Self {
-        let columns = cells.min(10_000);
-        let rows = cells.div_ceil(columns);
-        Self::MatrixF64(
-            Matrix::new(
-                rows,
-                columns,
-                (0..cells).map(|index| index as f64).collect(),
-            )
-            .expect("benchmark matrix dimensions must be valid"),
-        )
-    }
-
-    fn fingerprint(&self) -> [u8; 32] {
-        match self {
-            Self::F64(value) => fingerprint_argument(value),
-            Self::String(value) => fingerprint_argument(value),
-            Self::MatrixF64(value) => fingerprint_argument(value),
-        }
-    }
-}
-
 fn fingerprint_argument<T>(value: &T) -> [u8; 32]
 where
     T: for<'call> ExcelParameter<'call>,
 {
-    let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
+    let mut builder = crate::input_identity::InputFingerprintBuilder::new();
     builder
-        .with_argument::<T, _, _>(|encoder| {
+        .with_argument("benchmark", |encoder| {
             value.encode_identity(encoder);
             Ok(())
         })
         .expect("benchmark semantic argument must fingerprint successfully");
-    builder
-        .finish()
-        .expect("benchmark semantic argument fingerprint must finish")
-        .as_bytes()
-        .to_owned()
+    *builder.finish().as_bytes()
 }
 
-pub struct InputIdentityBenchmark {
-    arguments: PreparedFormulaArguments,
+pub struct SemanticIdentityBenchmark<T> {
+    value: T,
 }
 
-impl InputIdentityBenchmark {
-    pub fn new(case: InputIdentityBenchCase) -> Self {
-        Self {
-            arguments: PreparedFormulaArguments::for_input_identity(case),
-        }
+impl<T> SemanticIdentityBenchmark<T> {
+    pub fn new(value: T) -> Self {
+        Self { value }
     }
 
-    pub fn run(&self) -> [u8; 32] {
-        self.arguments.fingerprint()
+    pub fn run(&self) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call>,
+    {
+        fingerprint_argument(&self.value)
     }
 }
 
-pub struct FormulaRevisionBenchmark {
+pub struct FormulaRevisionBenchmark<T> {
     runtime: Arc<HandleRuntime>,
-    arguments: PreparedFormulaArguments,
+    argument: T,
     caller: FormulaCaller,
     factory_calls: AtomicUsize,
 }
 
-impl FormulaRevisionBenchmark {
-    pub fn new(case: FormulaRevisionBenchCase) -> Self {
-        let arguments = PreparedFormulaArguments::for_formula_revision(case);
+impl<T> FormulaRevisionBenchmark<T>
+where
+    T: for<'call> ExcelParameter<'call>,
+{
+    pub fn new(argument: T) -> Self {
         let caller = FormulaCaller {
             sheet_id: 7,
             row: 42,
@@ -563,7 +473,7 @@ impl FormulaRevisionBenchmark {
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let factory_calls = AtomicUsize::new(0);
-        let key = formula_revision_key(&arguments, caller);
+        let key = formula_revision_key(&argument, caller);
 
         runtime
             .prepare_observed(
@@ -579,14 +489,14 @@ impl FormulaRevisionBenchmark {
 
         Self {
             runtime,
-            arguments,
+            argument,
             caller,
             factory_calls,
         }
     }
 
     pub fn run(&self) -> (String, bool) {
-        let key = formula_revision_key(&self.arguments, self.caller);
+        let key = formula_revision_key(&self.argument, self.caller);
         self.runtime
             .prepare_observed(
                 key,
@@ -608,11 +518,11 @@ impl FormulaRevisionBenchmark {
     }
 }
 
-fn formula_revision_key(
-    arguments: &PreparedFormulaArguments,
-    caller: FormulaCaller,
-) -> HandleTopicKey {
-    let inputs = arguments.fingerprint();
+fn formula_revision_key<T>(arguments: &T, caller: FormulaCaller) -> HandleTopicKey
+where
+    T: for<'call> ExcelParameter<'call>,
+{
+    let inputs = fingerprint_argument(arguments);
     HandleTopicKey::Formula(FormulaRevisionKey::new(
         caller,
         HANDLE_FORMULA_UDF_ID,
@@ -620,7 +530,7 @@ fn formula_revision_key(
     ))
 }
 
-impl Drop for FormulaRevisionBenchmark {
+impl<T> Drop for FormulaRevisionBenchmark<T> {
     fn drop(&mut self) {
         cleanup_handle_runtime(&self.runtime);
     }

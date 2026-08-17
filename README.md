@@ -12,7 +12,7 @@ Define worksheet functions as typed Rust functions while xlfn handles the Excel 
 
 xlfn supports both 32-bit and 64-bit Excel and does **not** require a .NET runtime.
 
-**[User Guide](https://nakashima-hikaru.github.io/xlfn/)**
+Documentation: [User guide](https://nakashima-hikaru.github.io/xlfn/) | [API docs](https://docs.rs/xlfn) | [crates.io](https://crates.io/crates/xlfn)
 
 > [!NOTE]
 > xlfn is pre-1.0. Public APIs may change between minor releases.
@@ -104,7 +104,7 @@ Load the appropriate `.xll` in Excel using:
 
 **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**
 
-See the [User Guide](https://nakashima-hikaru.github.io/xlfn/) for project setup, deployment, compatibility, and troubleshooting.
+To learn more, read the [User guide](https://nakashima-hikaru.github.io/xlfn/) for project setup, deployment, compatibility, and troubleshooting.
 
 ## Example
 
@@ -180,14 +180,6 @@ CI builds the Lean project and checks generated runtime traces against the execu
 The formalization proves properties of the abstract models and their stated refinement boundaries. It is **not** a proof of the complete Rust implementation or of arbitrary application code running inside an add-in.
 
 See [`formal/README.md`](formal/README.md) for the models, proved properties, assumptions, and remaining refinement obligations.
-
-## Security
-
-See [SECURITY.md](SECURITY.md) for supported versions and vulnerability reporting.
-
-XLLs and bundled DLLs are executable code. Release artifacts should be controlled and code-signed as appropriate.
-
-The detailed runtime and deployment trust model is documented in the [User Guide](https://nakashima-hikaru.github.io/xlfn/security.html).
 
 ## License
 

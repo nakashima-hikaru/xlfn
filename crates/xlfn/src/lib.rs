@@ -103,7 +103,8 @@ pub mod rtd {
 /// Errors surfaced by add-in lifecycle, conversion, and exported functions.
 pub mod error {
     pub use xlfn_core::{
-        DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError, XllResult,
+        DiagnosticId, DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError,
+        XllResult,
     };
 }
 

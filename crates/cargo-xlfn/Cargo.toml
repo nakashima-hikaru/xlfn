@@ -7,6 +7,7 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Single-crate project, diagnostics, and packaging CLI for xlfn"
+readme = "README.md"
 
 [[bin]]
 name = "cargo-xlfn"

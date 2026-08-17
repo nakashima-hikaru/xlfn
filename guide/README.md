@@ -12,7 +12,7 @@ The source is **mdBook-compatible Markdown**. This format was selected because i
 
 A single README would become difficult to navigate and would mix onboarding, concepts, operations, and reference material. A binary format such as PDF or DOCX would be less suitable as the canonical OSS source because it is harder to review in pull requests and keep synchronized with code. Generated HTML or PDF may be published from this source for releases.
 
-> **Source snapshot:** the workspace currently sets `publish = false`. Use a repository checkout, `path` dependencies, or an audited Git revision as described in the guide. Commands using a crate version show the intended workflow after a release is published.
+> **Source snapshot:** the workspace is configured with publishable crates, but version-based dependencies assume that an official crates.io release has already been published. Until then, use a repository checkout, `path` dependencies, or an audited Git revision as described in the guide.
 
 ## Read on GitHub
 

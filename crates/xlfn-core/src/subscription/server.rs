@@ -62,12 +62,12 @@ impl RtdServerHandle {
             let mut refresh = self.inner.refresh.lock();
             if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
                 return Err(XllError::Internal {
-                    diagnostic_id: 0x4f56_4c50_5245_4652,
+                    diagnostic_id: crate::DiagnosticId::OVERLAPPED_REFERENCE,
                 });
             }
             let refresh_id = refresh.next_refresh_id;
             refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: 0x5245_464f_5646_4c57,
+                diagnostic_id: crate::DiagnosticId::REFERENCE_OVERFLOW,
             })?;
 
             self.inner.publish_epoch.fetch_add(1, Ordering::AcqRel);
@@ -387,7 +387,7 @@ impl ServerRuntime {
                 Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
                 Err(panic_payload) => {
                     let err = XllError::Internal {
-                        diagnostic_id: 0x5041_4e49_434e_4f54,
+                        diagnostic_id: crate::DiagnosticId::PANIC_NOTIFY,
                     };
                     if let Some(parent) = self.parent.upgrade() {
                         parent.record_cleanup_result(Err(err.clone()));
@@ -474,13 +474,13 @@ impl ServerRuntime {
         } = refresh.phase
         else {
             return Err(XllError::Internal {
-                diagnostic_id: 0x4e4f_5245_4652_4143,
+                diagnostic_id: crate::DiagnosticId::NO_REFERENCE,
             });
         };
 
         if active_id != refresh_id {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5245_4652_4944_4d49,
+                diagnostic_id: crate::DiagnosticId::REFERENCE_ID_MISMATCH,
             });
         }
 
@@ -930,7 +930,7 @@ pub(crate) fn disconnect_one_no_unwind(subscription: Box<dyn RtdSubscription>) -
     match catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
         Ok(result) => result,
         Err(_) => Err(XllError::Internal {
-            diagnostic_id: 0x5041_4e49_4344_4953,
+            diagnostic_id: crate::DiagnosticId::PANIC_DISCONNECT,
         }),
     }
 }
@@ -1006,10 +1006,10 @@ impl ServerReservationFailure {
     pub(crate) fn into_xll_error(self) -> XllError {
         match self {
             ServerReservationFailure::DuplicateTopicId => XllError::Internal {
-                diagnostic_id: 0x544f_5049_4349_4444,
+                diagnostic_id: crate::DiagnosticId::TOPIC_ID_DUPLICATE,
             },
             ServerReservationFailure::DuplicateKey => XllError::Internal {
-                diagnostic_id: 0x544f_5049_434b_4559,
+                diagnostic_id: crate::DiagnosticId::TOPIC_KEY_DUPLICATE,
             },
             ServerReservationFailure::Overloaded(err) => err,
         }

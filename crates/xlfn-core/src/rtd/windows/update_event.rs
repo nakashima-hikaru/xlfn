@@ -161,7 +161,7 @@ impl RetainedUpdateCallback {
         // validates the GIT output before returning its owned reference.
         unsafe {
             let git = get_git().map_err(|_| XllError::Internal {
-                diagnostic_id: 0x4749_545f_4e55_4c4c,
+                diagnostic_id: crate::DiagnosticId::GIT_NULL,
             })?;
             let proxy = git
                 .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)

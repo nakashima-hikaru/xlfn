@@ -87,7 +87,7 @@ pub use diagnostics::{
     install_file_diagnostic_sink, set_diagnostic_sink,
 };
 pub use error::{
-    DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError, XllResult,
+    DiagnosticId, DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError, XllResult,
 };
 pub use execution::{
     CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,

@@ -277,14 +277,6 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         impl #from_excel_impl_generics #krate::convert::ExcelParameter<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
         {
-            const IDENTITY_DOMAIN: &'static [u8] = concat!(
-                "xlfn.input.excel-enum.",
-                module_path!(),
-                "::",
-                stringify!(#ident),
-                ".v1",
-            ).as_bytes();
-
             fn from_excel(
                 __value: #krate::convert::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
@@ -724,7 +716,6 @@ fn expand_excel_function(
     let converted_names = (0..argument_names.len())
         .map(|index| format_ident!("__argument_{index}"))
         .collect::<Vec<_>>();
-    let argument_count = argument_types.len();
     let argument_name_literals = argument_names
         .iter()
         .zip(&argument_options)
@@ -905,7 +896,7 @@ fn expand_excel_function(
                         #missing_arm
                         _ => #conversion?,
                     };
-                    __arguments.record_value(&#converted)?;
+                    __arguments.record_value(#argument, &#converted)?;
                 }
             } else {
                 quote! {
@@ -932,11 +923,10 @@ fn expand_excel_function(
                                     #krate::__private::ArgumentContext::for_return::<#return_type, _>(
                                         &crate::__XLFN_RUNTIME,
                                         __call_scope,
-                                        #argument_count,
                                     );
                                 #context_setup
                                 #(#conversions)*
-                                let _ = __arguments.finish()?;
+                                let _ = __arguments.finish();
                                 ::core::result::Result::Ok(async move {
                                     #return_assertion
                                     #async_result_expression
@@ -960,10 +950,9 @@ fn expand_excel_function(
                             #krate::__private::ArgumentContext::for_return::<#return_type, _>(
                                 &crate::__XLFN_RUNTIME,
                                 __call_scope,
-                                #argument_count,
                             );
                         #(#conversions)*
-                        let __inputs = __arguments.finish()?;
+                        let __inputs = __arguments.finish();
                         let mut __return_context =
                             #krate::__private::ReturnContext::for_call(
                                 &crate::__XLFN_RUNTIME,
@@ -1659,10 +1648,7 @@ mod tests {
         assert!(expanded.contains("ExcelParameter"));
         assert!(!expanded.contains("FromExcel"));
         assert!(!expanded.contains("ExcelInputIdentity"));
-        assert!(expanded.contains("IDENTITY_DOMAIN"));
         assert!(expanded.contains("encode_identity"));
-        assert!(expanded.contains(".v1"));
-        assert!(expanded.contains("xlfn.input.excel-enum"));
         assert!(expanded.contains("__encoder . u32"));
         assert!(!expanded.contains("__encoder . domain"));
         assert!(expanded.contains("IntoExcelValue"));
@@ -1921,16 +1907,16 @@ mod tests {
             .find("CellPresence :: Missing => 1.0")
             .expect("missing default branch must be generated");
         let record = expanded
-            .find("__arguments . record_value (& __argument_0)")
+            .find("__arguments . record_value (\"value\" , & __argument_0)")
             .expect("converted value must be recorded for identity");
-        let argument_count = expanded
+        let arguments = expanded
             .find("ArgumentContext :: for_return :: < f64 , _ >")
             .expect("wrapper must initialize argument identity collection");
 
         assert!(blank < record);
         assert!(missing < record);
-        assert!(argument_count < record);
-        assert!(expanded.contains("1usize"));
+        assert!(arguments < record);
+        assert!(!expanded.contains("1usize"));
     }
 
     #[test]

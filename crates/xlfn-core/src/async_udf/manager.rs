@@ -343,7 +343,7 @@ impl AsyncManager {
         if !executor.wait_for_idle_timeout(timeout) {
             self.restore_closing_executor(executor);
             return Err(XllError::Internal {
-                diagnostic_id: 0x4153_594e_5449_4d45,
+                diagnostic_id: crate::DiagnosticId::ASYNC_TIME,
             });
         }
         let issues = executor.finish_close();

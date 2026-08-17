@@ -7,6 +7,7 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Raw Excel 12 XLL ABI definitions and callback trampoline"
+readme = "README.md"
 
 [features]
 abi-probe = []
