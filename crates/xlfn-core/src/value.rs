@@ -665,8 +665,8 @@ impl<'call> ArgumentContext<'call> {
     }
 
     #[doc(hidden)]
-    pub fn finish(self) -> Option<[u8; 32]> {
-        self.inputs.map(|inputs| *inputs.finish().as_bytes())
+    pub fn finish(&mut self) -> Option<[u8; 32]> {
+        self.inputs.take().map(|inputs| *inputs.finish().as_bytes())
     }
 }
 
@@ -1873,10 +1873,7 @@ where
         if actual > MAX {
             return Err(XllError::input(
                 argument,
-                InputError::TooLarge {
-                    limit: MAX,
-                    actual,
-                },
+                InputError::TooLarge { limit: MAX, actual },
             ));
         }
         if let Some(identity) = identity.as_deref_mut() {
@@ -1917,10 +1914,7 @@ impl<'call, T: FromExcel<'call>> FromExcel<'call> for Row<T> {
         let (rows, columns) = grid.shape();
         if rows != 1 {
             return Err(XllError::Shape {
-                expected: Shape {
-                    rows: 1,
-                    columns,
-                },
+                expected: Shape { rows: 1, columns },
                 actual: Shape { rows, columns },
             });
         }
@@ -1958,10 +1952,7 @@ impl<'call, T: FromExcel<'call>> FromExcel<'call> for Column<T> {
         let (rows, columns) = grid.shape();
         if columns != 1 {
             return Err(XllError::Shape {
-                expected: Shape {
-                    rows,
-                    columns: 1,
-                },
+                expected: Shape { rows, columns: 1 },
                 actual: Shape { rows, columns },
             });
         }
@@ -3069,10 +3060,7 @@ mod tests {
         ));
 
         let (token_a, _) = handle_rt
-            .prepare::<SemanticHandleTestObj, _>(
-                topic_a,
-                || Ok(SemanticHandleTestObj { data: 99 }),
-            )
+            .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))
             .unwrap();
 
         let (object_id, object) = crate::with_excel_call_scope(|scope| {

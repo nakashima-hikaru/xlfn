@@ -358,22 +358,17 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
                 __operation: impl ::core::ops::FnOnce()
                     -> #krate::error::XllResult<Self>,
             ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
-                __context
-                    .publish_new_handle(__operation)
-                    .map(|__token| #krate::__private::ExcelOutput::Scalar(
-                        #krate::__private::ExcelCellOutput::String(__token)
-                    ))
+                #krate::__private::publish_new_handle(__context, __operation)
             }
 
             fn into_excel(
                 self,
                 __context: &mut #krate::__private::ReturnContext<'_, '_>,
             ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
-                __context
-                    .publish_new_handle(|| ::core::result::Result::Ok(self))
-                    .map(|__token| #krate::__private::ExcelOutput::Scalar(
-                        #krate::__private::ExcelCellOutput::String(__token)
-                    ))
+                #krate::__private::publish_new_handle(
+                    __context,
+                    || ::core::result::Result::Ok(self),
+                )
             }
         }
 
@@ -432,11 +427,7 @@ fn expand_excel_function(
         .description
         .unwrap_or_else(|| doc_comment(&function.attrs));
     let help_topic = options.help_topic.unwrap_or_default();
-    let visibility = if options.hidden {
-        quote!(#krate::__private::FunctionVisibility::Hidden)
-    } else {
-        quote!(#krate::__private::FunctionVisibility::Public)
-    };
+    let hidden = options.hidden;
     let export_ident = format_ident!("xll_{}", udf_id);
     let descriptor_ident = format_ident!("__XLFN_DESCRIPTOR_{}", udf_id);
     let export_manifest_entry_ident = format_ident!("__XLFN_EXP_{}", udf_id);
@@ -728,21 +719,18 @@ fn expand_excel_function(
         .collect::<Vec<_>>();
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
-            quote!(#krate::context::ThreadSafeContext::new(__state))
+            quote!(#krate::__private::thread_safe_context(__state))
         }
-        ContextKind::MainThread => quote!(#krate::context::MainThreadContext::new(
+        ContextKind::MainThread => quote!(#krate::__private::main_thread_context(
+            __frame,
             __state,
             &crate::__XLFN_RUNTIME,
-            __call_scope,
         )),
         ContextKind::MacroSheet => {
-            quote!(#krate::context::MacroSheetContext::new(
-                __state,
-                __call_scope
-            ))
+            quote!(#krate::__private::macro_sheet_context(__frame, __state))
         }
         ContextKind::Async => {
-            quote!(#krate::context::AsyncContext::new(__state, __cancellation))
+            quote!(#krate::__private::async_context(__state, __cancellation))
         }
     });
     let macro_sheet = options.macro_sheet || matches!(context, Some(ContextKind::MacroSheet));
@@ -778,13 +766,6 @@ fn expand_excel_function(
             let __context: #ty = __generated_context;
         }
     });
-    let argument_abis = reference_arguments.iter().map(|reference| {
-        if *reference {
-            quote!(#krate::__private::ArgumentAbi::RawReference)
-        } else {
-            quote!(#krate::__private::ArgumentAbi::CoercedValue)
-        }
-    });
     let volatile = options.volatile;
     let mode_assertion = if is_async {
         quote!(#krate::__private::assert_async_return::<#return_type>();)
@@ -810,10 +791,9 @@ fn expand_excel_function(
         .map(|((((converted, ty), argument), raw), options)| {
             let conversion = if options.reference {
                 quote! {
-                    // SAFETY: Excel supplies the live reference pointer and
-                    // raw argument slot for this ABI call.
+                    // SAFETY: Excel supplies the live reference pointer for this ABI call.
                     unsafe {
-                        #krate::__private::reference_from_raw(#argument, #raw)
+                        #krate::__private::convert_reference(__frame, #argument, #raw)
                     }
                 }
             } else {
@@ -823,12 +803,11 @@ fn expand_excel_function(
                 quote! {
                     {
                         #async_assertion
-                        #krate::__private::assert_excel_parameter::<#ty>(__call_scope);
-                        // SAFETY: Excel supplies the live XLOPER12 pointer and
-                        // raw argument slot for this ABI call.
+                        #krate::__private::assert_excel_parameter::<#ty>(__frame);
+                        // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                         unsafe {
-                            #krate::__private::argument_from_raw_with_arguments(
-                                &mut __arguments,
+                            #krate::__private::convert_argument::<#ty>(
+                                __frame,
                                 #argument,
                                 #raw,
                             )
@@ -862,13 +841,13 @@ fn expand_excel_function(
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
                     let #converted: #ty = match unsafe {
-                        #krate::__private::cell_presence_from_raw(#argument, #raw)
+                        #krate::__private::argument_presence(__frame, #argument, #raw)
                     }? {
                         #blank_arm
                         #missing_arm
                         _ => #conversion?,
                     };
-                    __arguments.record_value(#argument, &#converted)?;
+                    __frame.record_value(#argument, &#converted)?;
                 }
             } else {
                 quote! {
@@ -884,25 +863,17 @@ fn expand_excel_function(
                 // SAFETY: `__async_handle` is provided by Excel via the extern "system"
                 // entry point generated by this macro and points to a valid async handle.
                 unsafe {
-                    #krate::__private::async_udf_boundary_named(
+                    #krate::__private::async_udf::<_, #return_type, _, _>(
                         &crate::__XLFN_RUNTIME,
                         #udf_id,
                         #excel_name,
                         __async_handle,
-                        |__state, __cancellation| {
-                            #krate::__private::with_excel_call_scope(|__call_scope| {
-                                let mut __arguments =
-                                    #krate::__private::ArgumentContext::for_return::<#return_type, _>(
-                                        &crate::__XLFN_RUNTIME,
-                                        __call_scope,
-                                    );
-                                #context_setup
-                                #(#conversions)*
-                                let _ = __arguments.finish();
-                                ::core::result::Result::Ok(async move {
-                                    #return_assertion
-                                    #async_result_expression
-                                })
+                        |__state, __cancellation, __frame| {
+                            #context_setup
+                            #(#conversions)*
+                            ::core::result::Result::Ok(async move {
+                                #return_assertion
+                                #async_result_expression
                             })
                         },
                     )
@@ -911,33 +882,20 @@ fn expand_excel_function(
         }
     } else {
         quote! {
-            #krate::__private::udf_boundary_named(
+            #krate::__private::sync_udf::<_, #return_type, _>(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
-                |__state| {
+                |__state, __frame| {
                     #return_assertion
-                    #krate::__private::with_excel_call_scope(|__call_scope| {
-                        let mut __arguments =
-                            #krate::__private::ArgumentContext::for_return::<#return_type, _>(
-                                &crate::__XLFN_RUNTIME,
-                                __call_scope,
-                            );
-                        #(#conversions)*
-                        let __inputs = __arguments.finish();
-                        let mut __return_context =
-                            #krate::__private::ReturnContext::for_call(
-                                &crate::__XLFN_RUNTIME,
-                                #udf_id,
-                                __inputs,
-                                __call_scope,
-                            );
-                        #context_setup
-                        #krate::__private::ExcelReturn::invoke(
-                            &mut __return_context,
-                            || ::core::result::Result::Ok(#invocation),
-                        )
-                    })
+                    #context_setup
+                    #(#conversions)*
+                    let mut __return_context =
+                        __frame.return_context(&crate::__XLFN_RUNTIME, #udf_id);
+                    #krate::__private::ExcelReturn::invoke(
+                        &mut __return_context,
+                        || ::core::result::Result::Ok(#invocation),
+                    )
                 },
             )
         }
@@ -979,39 +937,25 @@ fn expand_excel_function(
         #gating
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
-        static #descriptor_ident: #krate::__private::RegistrationDescriptor =
-            #krate::__private::RegistrationDescriptor {
-                export_name: stringify!(#export_ident),
-                excel_name: #excel_name,
-                signature: #krate::__private::RegistrationSignature {
-                    result: if #is_async {
-                        #krate::__private::ResultAbi::AsyncVoid
-                    } else {
-                        #krate::__private::ResultAbi::Xloper
-                    },
-                    arguments: &[#(#argument_abis),*],
-                    flags: #krate::__private::RegistrationFlags {
-                        thread_safe: #thread_safe,
-                        macro_sheet: #macro_sheet,
-                        volatile: #volatile,
-                    },
-                },
-                category: #category,
-                description: #description,
-                help_topic: #help_topic,
-                visibility: #visibility,
-                arguments: &[
-                    #(
-                        #krate::__private::ArgumentDescriptor {
-                            name: #argument_name_literals,
-                            description: #argument_descriptions,
-                        }
-                    ),*
-                ],
-            };
+        static #descriptor_ident: #krate::__private::FunctionRegistration =
+            #krate::__private::FunctionRegistration::new(
+                stringify!(#export_ident),
+                #excel_name,
+                #category,
+                #description,
+                #help_topic,
+                &[#(#argument_name_literals),*],
+                &[#(#argument_descriptions),*],
+                &[#(#reference_arguments),*],
+                #is_async,
+                #thread_safe,
+                #macro_sheet,
+                #volatile,
+                #hidden,
+            );
 
         #gating
-        #krate::__private::inventory::submit! {
+        #krate::__private::submit_registration! {
             #descriptor_ident
         }
 
@@ -1052,26 +996,10 @@ fn expand_excel_addin(
         #item
 
         #gating
-        impl #krate::__private::AddinMetadata for #ident {
-            const ID: &'static str = #id;
-            const DISPLAY_NAME: &'static str = #display_name;
-            const DEFAULT_CATEGORY: &'static str = #category;
-        }
-
-        #gating
         #[doc(hidden)]
-        static __XLFN_RUNTIME: #krate::__private::Runtime<
+        static __XLFN_RUNTIME: #krate::__private::MacroRuntime<
             <#ident as #krate::addin::Addin>::State,
-        > = #krate::__private::Runtime::new();
-
-        #gating
-        #[doc(hidden)]
-        static __XLFN_ADDIN_ID: ::std::sync::OnceLock<
-            ::core::result::Result<
-                #krate::__private::AddinId,
-                #krate::__private::InvalidAddinId,
-            >
-        > = ::std::sync::OnceLock::new();
+        > = #krate::__private::MacroRuntime::new();
 
         #gating
         #[used]
@@ -1086,41 +1014,20 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
-            let __addin_id = match crate::__XLFN_ADDIN_ID.get_or_init(|| {
-                #krate::__private::AddinId::parse(
-                    <#ident as #krate::__private::AddinMetadata>::ID,
-                )
-            }) {
-                Ok(__addin_id) => __addin_id,
-                Err(_) => return 0,
-            };
-            let mut __descriptors =
-                #krate::__private::inventory::iter::<
-                    #krate::__private::RegistrationDescriptor
-                >
-                .into_iter()
-                .copied()
-                .collect::<::std::vec::Vec<_>>();
-            for __descriptor in &mut __descriptors {
-                if __descriptor.category.is_empty() {
-                    __descriptor.category =
-                        <#ident as #krate::__private::AddinMetadata>::DEFAULT_CATEGORY;
-                }
-            }
-            __descriptors.sort_unstable_by_key(|__descriptor| __descriptor.excel_name);
-            #krate::__private::open_addin::<#ident>(
+            #krate::__private::open_generated_addin::<#ident>(
                 &crate::__XLFN_RUNTIME,
-                __addin_id,
+                #id,
+                #display_name,
+                #category,
                 env!("CARGO_PKG_VERSION"),
                 #krate::__private::BUILD_TARGET,
-                &__descriptors,
             )
         }
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
-            #krate::__private::close_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -1133,9 +1040,7 @@ fn expand_excel_addin(
             __pointer: *mut #krate::__private::XLOPER12,
         ) {
             // SAFETY: Excel passes the live return pointer produced by this XLL.
-            let __free_operation =
-                unsafe { #krate::__private::free_return_boundary(__pointer) };
-            ::core::mem::drop(__free_operation);
+            unsafe { #krate::__private::free_generated_return(__pointer) };
         }
 
         /// Supplies Add-in metadata to Excel's Add-in Manager.
@@ -1147,32 +1052,14 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAddInManagerInfo12(
             __action: *mut #krate::__private::XLOPER12,
         ) -> *mut #krate::__private::XLOPER12 {
-            #krate::__private::ffi_boundary(
-                &crate::__XLFN_RUNTIME,
-                || {
-                    #krate::__private::with_excel_call_scope(|__call_scope| {
-                        // SAFETY: Excel supplies `__action` as a live XLOPER12
-                        // for this ABI call.
-                        let __action: f64 = unsafe {
-                            #krate::__private::argument_from_raw(
-                                __call_scope,
-                                "action",
-                                __action,
-                            )?
-                        };
-                        if __action == 1.0 {
-                            ::core::result::Result::Ok(
-                                <#ident as #krate::__private::AddinMetadata>::DISPLAY_NAME.to_owned(),
-                            )
-                        } else {
-                            ::core::result::Result::Err(#krate::error::XllError::input(
-                                "action",
-                                #krate::error::InputError::OutOfRange,
-                            ))
-                        }
-                    })
-                },
-            )
+            // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
+            unsafe {
+                #krate::__private::addin_manager_info(
+                    &crate::__XLFN_RUNTIME,
+                    #display_name,
+                    __action,
+                )
+            }
         }
 
         #gating
@@ -1473,10 +1360,9 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("volatile : true"));
-        assert!(expanded.contains("ExcelReturn :: invoke"));
-        assert!(expanded.contains("argument_from_raw_with_arguments"));
-        assert!(expanded.contains("ReturnContext :: for_call"));
+        assert!(expanded.contains("FunctionRegistration :: new"));
+        assert!(expanded.contains("sync_udf"));
+        assert!(expanded.contains("convert_argument"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
     }
@@ -1506,11 +1392,11 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("help_topic : \"https://example.test/help\""));
-        assert!(expanded.contains("FunctionVisibility :: Hidden"));
+        assert!(expanded.contains("https://example.test/help"));
+        assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("CellPresence :: Blank"));
         assert!(expanded.contains("CellPresence :: Missing"));
-        assert!(expanded.contains("name : \"Factor\""));
+        assert!(expanded.contains("\"Factor\""));
     }
 
     #[test]
@@ -1667,9 +1553,10 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("thread_safe : true"));
+        assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("Function Wizard help."));
-        assert!(expanded.contains("ExcelReturn :: invoke"));
+        assert!(expanded.contains("sync_udf"));
+        assert!(expanded.contains("thread_safe_context"));
         assert!(expanded.contains("let __context : ThreadSafeContext"));
         assert!(!expanded.contains("& __generated_context"));
     }
@@ -1687,7 +1574,7 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(expanded.contains("let __context : MainContext"));
-        assert!(expanded.contains("MainThreadContext :: new"));
+        assert!(expanded.contains("main_thread_context"));
     }
 
     #[test]
@@ -1705,11 +1592,11 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("async_udf_boundary_named"));
+        assert!(expanded.contains("async_udf"));
+        assert!(expanded.contains("async_context"));
         assert!(!expanded.contains("ffi_boundary_void"));
-        assert!(expanded.contains("ResultAbi :: AsyncVoid"));
         assert!(expanded.contains("__async_handle"));
-        assert!(expanded.contains("thread_safe : true"));
+        assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("__xlfn_async_only !"));
         assert!(!expanded.contains("AsyncFeature"));
         assert!(expanded.contains("assert_async_return"));
@@ -1761,9 +1648,9 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("macro_sheet : true"));
+        assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("assert_macro_sheet_return"));
-        assert!(expanded.contains("reference_from_raw"));
+        assert!(expanded.contains("convert_reference"));
     }
 
     #[test]
@@ -1827,7 +1714,7 @@ mod tests {
         })
         .unwrap();
         let expanded = expand_excel_addin(quote!(), item).unwrap().to_string();
-        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 9);
+        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 8);
     }
 
     #[test]
@@ -1844,15 +1731,9 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("ExcelReturn :: invoke"));
+        assert!(expanded.contains("sync_udf"));
         assert!(expanded.contains("assert_main_thread_return"));
-        assert!(expanded.contains("ReturnContext :: for_call"));
-        assert!(expanded.contains("argument_from_raw_with_arguments"));
-        assert!(
-            expanded.find("argument_from_raw_with_arguments").unwrap()
-                < expanded.find("ReturnContext :: for_call").unwrap(),
-            "semantic input identity must be established before handle factory evaluation"
-        );
+        assert!(expanded.contains("convert_argument"));
         assert!(!expanded.contains("ExcelHandleReturn"));
         assert!(!expanded.contains("HandleKey"));
     }
@@ -1880,15 +1761,15 @@ mod tests {
             .find("CellPresence :: Missing => 1.0")
             .expect("missing default branch must be generated");
         let record = expanded
-            .find("__arguments . record_value (\"value\" , & __argument_0)")
+            .find("__frame . record_value (\"value\" , & __argument_0)")
             .expect("converted value must be recorded for identity");
-        let arguments = expanded
-            .find("ArgumentContext :: for_return :: < f64 , _ >")
-            .expect("wrapper must initialize argument identity collection");
+        let wrapper = expanded
+            .find("sync_udf")
+            .expect("wrapper must use sync_udf boundary");
 
         assert!(blank < record);
         assert!(missing < record);
-        assert!(arguments < record);
+        assert!(wrapper < record);
         assert!(!expanded.contains("1usize"));
     }
 
@@ -1940,12 +1821,13 @@ mod tests {
         .to_string();
         assert!(expanded.contains("static __XLFN_RUNTIME"));
         assert!(expanded.contains("fn xlAutoOpen"));
+        assert!(expanded.contains("open_generated_addin"));
         assert!(expanded.contains("fn xlAutoClose"));
+        assert!(expanded.contains("close_generated_addin"));
         assert!(expanded.contains("fn xlAutoFree12"));
-        assert!(expanded.contains("let __free_operation"));
-        assert!(expanded.contains("free_return_boundary"));
+        assert!(expanded.contains("free_generated_return"));
         assert!(expanded.contains("fn xlAddInManagerInfo12"));
-        assert!(expanded.contains("ffi_boundary"));
+        assert!(expanded.contains("addin_manager_info"));
         assert!(expanded.contains("fn DllGetClassObject"));
         assert!(expanded.contains("fn DllCanUnloadNow"));
         assert!(expanded.contains("__XLFN_FRAMEWORK_EXPORTS"));
@@ -1993,7 +1875,7 @@ mod tests {
         let addin_expanded = expand_excel_addin(quote!(crate = my_custom_xlfn), addin_item)
             .unwrap()
             .to_string();
-        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: AddinMetadata"));
-        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: Runtime"));
+        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: open_generated_addin"));
+        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: MacroRuntime"));
     }
 }

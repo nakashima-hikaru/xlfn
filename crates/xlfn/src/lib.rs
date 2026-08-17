@@ -39,17 +39,13 @@ macro_rules! __xlfn_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::__private::ffi_boundary_void($runtime, || {
-                $crate::__private::cancel_async_calculation($runtime);
-            });
+            $crate::__private::cancel_async_calculation($runtime);
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::ffi_boundary_void($runtime, || {
-                $crate::__private::end_async_calculation($runtime);
-            });
+            $crate::__private::end_async_calculation($runtime);
         }
     };
 }
@@ -180,24 +176,19 @@ pub mod __private {
         "unsupported-target"
     };
 
-    pub use inventory;
-    pub use xlfn_core::{
-        AddinId, AddinMetadata, ArgumentAbi, ArgumentContext, ArgumentDescriptor, AsyncReturn,
-        CallContext, CallScope, CellPresence, ExcelCellOutput, ExcelOutput, ExcelParameter,
-        ExcelReturn, ExportCallGuard, ExportIngress, FunctionVisibility, InputIdentityEncoder,
-        InvalidAddinId, MacroSheetReturn, MainThreadReturn, RegistrationDescriptor,
-        RegistrationFlags, RegistrationSignature, ResultAbi, ReturnContext,
-        ReturnFreeBoundaryGuard, Runtime, ThreadSafeReturn, VolatileReturn, argument_from_raw,
-        argument_from_raw_with_arguments, argument_from_raw_with_context, assert_async_parameter,
-        assert_async_return, assert_excel_parameter, assert_macro_sheet_return,
-        assert_main_thread_return, assert_thread_safe_return, assert_volatile_return,
-        cell_presence_from_raw, close_addin, dll_can_unload_now, dll_get_class_object,
-        ffi_boundary, ffi_boundary_void, free_return_boundary, global_ingress, open_addin,
-        reference_from_raw, udf_boundary_named, utf16_eq_ignore_ascii_case, with_excel_call_scope,
+    pub use xlfn_core::macro_support::{
+        CallFrame, CellPresence, ExcelOutput, ExcelReturn, FunctionRegistration,
+        InputIdentityEncoder, MacroRuntime, MainThreadReturn, ReturnContext, addin_manager_info,
+        argument_presence, assert_async_parameter, assert_async_return, assert_excel_parameter,
+        assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
+        assert_volatile_return, close_generated_addin, convert_argument, convert_reference,
+        dll_can_unload_now, dll_get_class_object, free_generated_return, macro_sheet_context,
+        main_thread_context, open_generated_addin, publish_new_handle, submit_registration,
+        sync_udf, thread_safe_context, utf16_eq_ignore_ascii_case,
     };
     #[cfg(feature = "async")]
-    pub use xlfn_core::{
-        async_udf_boundary_named, cancel_async_calculation, end_async_calculation,
+    pub use xlfn_core::macro_support::{
+        async_context, async_udf, cancel_async_calculation, end_async_calculation,
     };
     pub use xlfn_sys::XLOPER12;
 }

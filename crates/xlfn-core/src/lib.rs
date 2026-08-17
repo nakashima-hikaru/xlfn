@@ -50,6 +50,8 @@ mod host_callback;
 mod input_identity;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod lifecycle;
+#[doc(hidden)]
+pub mod macro_support;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod reference;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]

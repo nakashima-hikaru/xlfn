@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Handle: xlfn::__private::MainThreadReturn` is not satisfied
+error[E0277]: the trait bound `Handle: xlfn::__private::ExcelReturn` is not satisfied
  --> tests/ui/fail/lookalike_handle.rs:8:13
   |
 8 | fn bad() -> Handle {
@@ -19,12 +19,12 @@ help: the trait `IntoExcel` is not implemented for `Handle`
             i32
             i64
             std::string::String
-  = note: required for `Handle` to implement `xlfn::__private::MainThreadReturn`
-note: required by a bound in `xlfn::__private::assert_main_thread_return`
- --> $WORKSPACE/crates/xlfn-core/src/value.rs
+  = note: required for `Handle` to implement `xlfn::__private::ExcelReturn`
+note: required by a bound in `xlfn::__private::sync_udf`
+ --> $WORKSPACE/crates/xlfn-core/src/macro_support.rs
   |
-  | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
-  |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`
+  | pub fn sync_udf<S: 'static, R: ExcelReturn, F>(
+  |                                ^^^^^^^^^^^ required by this bound in `sync_udf`
 
 error[E0277]: the trait bound `Handle: xlfn::__private::ExcelReturn` is not satisfied
  --> tests/ui/fail/lookalike_handle.rs:7:1

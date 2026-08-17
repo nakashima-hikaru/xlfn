@@ -2,8 +2,8 @@ use xlfn::prelude::*;
 
 struct State;
 
-static __XLFN_RUNTIME: xlfn::__private::Runtime<State> =
-    xlfn::__private::Runtime::new();
+static __XLFN_RUNTIME: xlfn::__private::MacroRuntime<State> =
+    xlfn::__private::MacroRuntime::new();
 
 #[excel_function(name = "FAIL.CONTEXT.REFERENCE")]
 fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, '_, State>) -> f64 {
