@@ -81,10 +81,10 @@ pub mod convert {
     pub use xlfn_core::{
         AsyncReturn, BoundedVarArgs, CallContext, CellPresence, Column, ExcelDateSystem,
         ExcelErrorValue, ExcelParameter, ExcelReference, ExcelReturn, ExcelSerialDate,
-        FromExcelReference, InputFingerprint, InputIdentityEncoder, IntoExcelValue,
-        MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue,
-        ReferenceArea, ReferenceAreas, ReturnContext, Row, SheetId, ThreadSafeReturn,
-        VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef, XlValueRef,
+        FromExcelReference, InputIdentityEncoder, IntoExcelValue, MacroSheetReturn,
+        MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue, ReferenceArea,
+        ReferenceAreas, ReturnContext, Row, SheetId, ThreadSafeReturn, VolatileReturn,
+        XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef, XlValueRef,
     };
 }
 

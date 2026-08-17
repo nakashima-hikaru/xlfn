@@ -12,14 +12,14 @@ const ROOT_PREFIX_BYTES: usize = 8 + ROOT_DOMAIN.len() + 8;
 /// The fixed-size semantic identity of one converted Excel argument list.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct InputFingerprint([u8; 32]);
+pub(crate) struct InputFingerprint([u8; 32]);
 
 impl InputFingerprint {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
