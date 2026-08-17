@@ -1,4 +1,7 @@
 use super::*;
+use arc_swap::ArcSwapAny;
+use smallbox::SmallBox;
+use smallbox::space::S4;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
@@ -73,17 +76,17 @@ impl HandleCleanupState {
 pub(crate) struct HandleObject {
     pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
-    value: ManuallyDrop<Box<dyn Any + Send + Sync>>,
+    value: ManuallyDrop<SmallBox<dyn Any + Send + Sync, S4>>,
     cleanup: Arc<HandleCleanupState>,
 }
 
 impl HandleObject {
-    pub(crate) fn new<T>(value: T, cleanup: Arc<HandleCleanupState>) -> Arc<Self>
+    pub(crate) fn new<T>(value: T, cleanup: Arc<HandleCleanupState>) -> triomphe::Arc<Self>
     where
         T: Any + Send + Sync + 'static,
     {
-        let value: Box<dyn Any + Send + Sync> = Box::new(value);
-        Arc::new(Self {
+        let value: SmallBox<dyn Any + Send + Sync, S4> = smallbox::smallbox!(value);
+        triomphe::Arc::new(Self {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
             value: ManuallyDrop::new(value),
@@ -95,7 +98,7 @@ impl HandleObject {
     where
         T: Any + Send + Sync + 'static,
     {
-        (*self.value).as_ref().downcast_ref::<T>()
+        self.value.downcast_ref::<T>()
     }
 
     #[cfg(test)]
@@ -132,12 +135,12 @@ impl Drop for HandleObject {
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     pub(crate) object_id: ObjectId,
-    pub(crate) object: Arc<HandleObject>,
+    pub(crate) object: triomphe::Arc<HandleObject>,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object_id: ObjectId, object: Arc<HandleObject>) -> Self {
+    fn new(id: HandleId, object_id: ObjectId, object: triomphe::Arc<HandleObject>) -> Self {
         Self {
             id,
             object_id,
@@ -155,26 +158,23 @@ const BINDING_CHUNK_SIZE: usize = 64;
 
 #[derive(Clone)]
 struct BindingChunk {
-    entries: Box<[Option<Arc<BindingRecord>>]>,
+    entries: [Option<triomphe::Arc<BindingRecord>>; BINDING_CHUNK_SIZE],
 }
 
 impl BindingChunk {
     fn empty() -> Self {
         Self {
-            entries: (0..BINDING_CHUNK_SIZE)
-                .map(|_| None)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            entries: [const { None }; BINDING_CHUNK_SIZE],
         }
     }
 }
 
 pub(crate) struct BindingSnapshot {
-    guard: arc_swap::Guard<Arc<BindingChunk>>,
+    guard: arc_swap::Guard<triomphe::Arc<BindingChunk>>,
 }
 
 impl BindingSnapshot {
-    pub(crate) fn get(&self, slot: u32) -> Option<&Arc<BindingRecord>> {
+    pub(crate) fn get(&self, slot: u32) -> Option<&triomphe::Arc<BindingRecord>> {
         self.guard.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)].as_ref()
     }
 }
@@ -186,18 +186,19 @@ impl BindingSnapshot {
 /// one 64-entry chunk on insert/remove; readers perform only chunk selection
 /// and indexed access.
 pub(crate) struct PublishedBindings {
-    chunks: Box<[ArcSwap<BindingChunk>]>,
-    empty: ArcSwap<BindingChunk>,
+    chunks: Box<[ArcSwapAny<triomphe::Arc<BindingChunk>>]>,
+    empty: ArcSwapAny<triomphe::Arc<BindingChunk>>,
 }
 
 impl PublishedBindings {
     pub(crate) fn new(maximum_bindings: usize) -> Self {
         let chunk_count = maximum_bindings.div_ceil(BINDING_CHUNK_SIZE).max(1);
+        let empty_chunk = triomphe::Arc::new(BindingChunk::empty());
         Self {
             chunks: (0..chunk_count)
-                .map(|_| ArcSwap::from_pointee(BindingChunk::empty()))
+                .map(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_chunk)))
                 .collect(),
-            empty: ArcSwap::from_pointee(BindingChunk::empty()),
+            empty: ArcSwapAny::new(empty_chunk),
         }
     }
 
@@ -221,7 +222,7 @@ impl PublishedBindings {
     }
 
     /// Update the snapshot while the canonical registry write lock is held.
-    fn insert(&self, id: HandleId, record: Arc<BindingRecord>) {
+    fn insert(&self, id: HandleId, record: triomphe::Arc<BindingRecord>) {
         let slot = id.slot;
         let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
             debug_assert!(false, "handle slot exceeds the publication table");
@@ -230,14 +231,14 @@ impl PublishedBindings {
         let current = chunk.load_full();
         let mut next = current.as_ref().clone();
         next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = Some(record);
-        chunk.store(Arc::new(next));
+        chunk.store(triomphe::Arc::new(next));
     }
 
     /// Remove only the publication that belongs to the canonical entry being
     /// removed. The identity check keeps a future slot reuse from removing a
     /// newer generation if this helper is ever called outside the current
     /// write-lock discipline.
-    fn remove(&self, id: HandleId, expected: &Arc<BindingRecord>) {
+    fn remove(&self, id: HandleId, expected: &triomphe::Arc<BindingRecord>) {
         let slot = id.slot;
         let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
             return;
@@ -245,27 +246,28 @@ impl PublishedBindings {
         let current = chunk.load_full();
         if !current.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)]
             .as_ref()
-            .is_some_and(|record| Arc::ptr_eq(record, expected))
+            .is_some_and(|record| triomphe::Arc::ptr_eq(record, expected))
         {
             return;
         }
         let mut next = current.as_ref().clone();
         next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = None;
-        chunk.store(Arc::new(next));
+        chunk.store(triomphe::Arc::new(next));
     }
 
     /// Clear all publication snapshots while the canonical registry is being
     /// closed.
     fn clear(&self) {
+        let empty_chunk = triomphe::Arc::new(BindingChunk::empty());
         for chunk in &self.chunks {
-            chunk.store(Arc::new(BindingChunk::empty()));
+            chunk.store(triomphe::Arc::clone(&empty_chunk));
         }
     }
 }
 
 pub(crate) struct BindingSlot {
     pub(crate) next_generation: u64,
-    pub(crate) record: Option<Arc<BindingRecord>>,
+    pub(crate) record: Option<triomphe::Arc<BindingRecord>>,
 }
 
 /// Canonical ownership and type metadata for one shared handle object.
@@ -275,7 +277,7 @@ pub(crate) struct BindingSlot {
 /// the registry lock. This table is the authoritative identity index used by
 /// cold binding creation and tracks when an object has no live bindings left.
 pub(crate) struct ObjectEntry {
-    pub(crate) object: Arc<HandleObject>,
+    pub(crate) object: triomphe::Arc<HandleObject>,
     pub(crate) bindings: usize,
 }
 
@@ -315,14 +317,14 @@ pub(crate) struct HandleRegistry {
 
 pub(crate) struct PendingHandleValue<'a> {
     registry: &'a HandleRegistry,
-    value: Option<Arc<HandleObject>>,
+    value: Option<triomphe::Arc<HandleObject>>,
     operation: &'static str,
 }
 
 impl<'a> PendingHandleValue<'a> {
     pub(crate) fn new(
         registry: &'a HandleRegistry,
-        value: Arc<HandleObject>,
+        value: triomphe::Arc<HandleObject>,
         operation: &'static str,
     ) -> Self {
         Self {
@@ -332,7 +334,7 @@ impl<'a> PendingHandleValue<'a> {
         }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<Arc<HandleObject>> {
+    pub(crate) fn slot(&mut self) -> &mut Option<triomphe::Arc<HandleObject>> {
         &mut self.value
     }
 }
@@ -460,7 +462,7 @@ impl HandleRegistry {
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<Arc<HandleObject>>,
+        value: &mut Option<triomphe::Arc<HandleObject>>,
         requested_object_id: Option<ObjectId>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
@@ -502,7 +504,7 @@ impl HandleRegistry {
                 }));
                 return Err(XllError::InvalidHandle);
             }
-            if !Arc::ptr_eq(&entry.object, object) {
+            if !triomphe::Arc::ptr_eq(&entry.object, object) {
                 return Err(XllError::StaleHandle);
             }
             Some(entry.bindings.checked_add(1).ok_or(XllError::Domain {
@@ -558,15 +560,15 @@ impl HandleRegistry {
                 state.objects.insert(
                     object_id,
                     ObjectEntry {
-                        object: Arc::clone(object),
+                        object: triomphe::Arc::clone(object),
                         bindings: 1,
                     },
                 );
             }
         }
         let object = value.take().expect("pending handle object is armed");
-        let record = Arc::new(BindingRecord::new(id, object_id, object));
-        state.slots[index].record = Some(Arc::clone(&record));
+        let record = triomphe::Arc::new(BindingRecord::new(id, object_id, object));
+        state.slots[index].record = Some(triomphe::Arc::clone(&record));
         self.published.insert(id, record);
         state.live_bindings += 1;
         drop(state);
@@ -687,7 +689,7 @@ impl HandleRegistry {
         let published_snapshot = self.published.load(id.slot);
         let record = published_snapshot
             .get(id.slot)
-            .filter(|published| Arc::ptr_eq(published, record))
+            .filter(|published| triomphe::Arc::ptr_eq(published, record))
             .ok_or(XllError::StaleHandle)?;
         if record.object.type_id != TypeId::of::<T>() {
             let actual_type = record.object.type_name;
@@ -738,7 +740,7 @@ impl HandleRegistry {
         if record.object.get::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
-        let record = Arc::clone(record);
+        let record = triomphe::Arc::clone(record);
         let object_id = record.object_id;
         record
             .state
@@ -766,7 +768,7 @@ impl HandleRegistry {
         dead_code,
         reason = "The kind-reporting wrapper is used by lifecycle trace production"
     )]
-    pub(crate) fn remove_any(&self, token: &str) -> XllResult<Arc<HandleObject>> {
+    pub(crate) fn remove_any(&self, token: &str) -> XllResult<triomphe::Arc<HandleObject>> {
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let result = self
             .remove_any_with_kind(token, |_| {})
@@ -782,7 +784,7 @@ impl HandleRegistry {
         &self,
         token: &str,
         #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
-    ) -> XllResult<(Arc<HandleObject>, bool)> {
+    ) -> XllResult<(triomphe::Arc<HandleObject>, bool)> {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
         let mut state = self.state.write();
@@ -798,7 +800,7 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        let record = Arc::clone(record);
+        let record = triomphe::Arc::clone(record);
         let object_id = record.object_id;
         record
             .state
@@ -821,7 +823,7 @@ impl HandleRegistry {
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Ok((Arc::clone(&record.object), reusable))
+        Ok((triomphe::Arc::clone(&record.object), reusable))
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
@@ -836,7 +838,7 @@ impl HandleRegistry {
 
     pub(crate) fn drop_values(
         &self,
-        values: impl IntoIterator<Item = Arc<HandleObject>>,
+        values: impl IntoIterator<Item = triomphe::Arc<HandleObject>>,
         operation: &'static str,
     ) {
         self.record_cleanup_result(drop_handle_objects(values, operation));
@@ -878,7 +880,7 @@ impl HandleRegistry {
         }
     }
 
-    pub(crate) fn take_values_for_close(&self) -> Vec<Arc<HandleObject>> {
+    pub(crate) fn take_values_for_close(&self) -> Vec<triomphe::Arc<HandleObject>> {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
         let mut values = Vec::with_capacity(live_bindings);
@@ -890,7 +892,7 @@ impl HandleRegistry {
                 record
                     .state
                     .store(BindingState::Retired as u8, Ordering::Release);
-                values.push(Arc::clone(&record.object));
+                values.push(triomphe::Arc::clone(&record.object));
             }
             if let Some(next) = slot.next_generation.checked_add(1) {
                 slot.next_generation = next;

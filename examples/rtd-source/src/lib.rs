@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use xlfn::prelude::*;
+use xlfn::rtd::{RtdTopic, RtdValue};
 
 mod metric_source;
 mod metric_subscription;

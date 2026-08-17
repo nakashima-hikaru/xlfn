@@ -1,5 +1,4 @@
 use crate::{DomainErrorCode, ExcelCallbackStatus, ReturnContext, XllError, XllResult};
-use arc_swap::ArcSwap;
 use parking_lot::{Condvar, Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};

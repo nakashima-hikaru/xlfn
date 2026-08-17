@@ -5,6 +5,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use xlfn::prelude::*;
+use xlfn::rtd::RtdSubscription;
 
 pub(crate) struct MetricSubscription {
     pub(crate) cancelled: Arc<AtomicBool>,

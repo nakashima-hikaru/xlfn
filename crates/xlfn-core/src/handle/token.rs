@@ -2,7 +2,7 @@ use super::*;
 use std::cell::RefCell;
 
 pub(crate) fn drop_handle_objects(
-    values: impl IntoIterator<Item = Arc<HandleObject>>,
+    values: impl IntoIterator<Item = triomphe::Arc<HandleObject>>,
     operation: &'static str,
 ) -> XllResult<()> {
     let mut failure = None;

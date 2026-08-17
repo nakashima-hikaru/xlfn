@@ -412,7 +412,7 @@ impl HandleRuntime {
         &self,
         key: K,
         object_id: ObjectId,
-        object: Arc<HandleObject>,
+        object: triomphe::Arc<HandleObject>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -425,7 +425,7 @@ impl HandleRuntime {
     pub(crate) fn prepare_observed_object<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<(Option<ObjectId>, Arc<HandleObject>)>,
+        create: impl FnOnce() -> XllResult<(Option<ObjectId>, triomphe::Arc<HandleObject>)>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where

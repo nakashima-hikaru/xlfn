@@ -2,7 +2,6 @@ use super::*;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 ///
@@ -51,7 +50,7 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         debug_assert_eq!(record.id, self.binding_id);
         HandleAlias {
             object_id: self.object_id,
-            object: Arc::clone(&record.object),
+            object: triomphe::Arc::clone(&record.object),
             _call: PhantomData,
             _type: PhantomData,
         }
@@ -73,13 +72,13 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
 /// object identity.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
     pub(crate) object_id: ObjectId,
-    pub(crate) object: Arc<HandleObject>,
+    pub(crate) object: triomphe::Arc<HandleObject>,
     pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
     pub(crate) _type: PhantomData<fn() -> T>,
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_parts(self) -> (ObjectId, Arc<HandleObject>) {
+    pub(crate) fn into_parts(self) -> (ObjectId, triomphe::Arc<HandleObject>) {
         (self.object_id, self.object)
     }
 }

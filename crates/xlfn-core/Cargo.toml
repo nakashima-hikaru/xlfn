@@ -77,9 +77,11 @@ scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustc-hash.workspace = true
+smallbox.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+triomphe.workspace = true
 xlfn-common.workspace = true
 
 [dev-dependencies]
