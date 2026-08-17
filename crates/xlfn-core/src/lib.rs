@@ -54,6 +54,8 @@ mod lifecycle;
 mod reference;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod registration;
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+mod return_array;
 mod return_storage;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod return_value;
@@ -93,6 +95,7 @@ pub use execution::{
     CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
 };
 pub use handle::{ExcelHandleObject, Handle, HandleAlias};
+#[doc(hidden)]
 pub use input_identity::InputIdentityEncoder;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
 pub mod ingress;
@@ -119,6 +122,7 @@ pub use rtd::{dll_can_unload_now, dll_get_class_object};
 
 inventory::collect!(RegistrationDescriptor);
 
+pub use return_array::{XlArrayBuilder, XlArrayOutput};
 #[doc(hidden)]
 pub use runtime::{CallGuard, LifecyclePhase, Runtime};
 pub use subscription::{
@@ -128,10 +132,10 @@ pub use subscription::{
 pub use utf16::utf16_eq_ignore_ascii_case;
 pub use value::{
     ArgumentContext, AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column,
-    ExcelDateSystem, ExcelErrorValue, ExcelParameter, ExcelReturn, ExcelSerialDate, IntoExcelValue,
-    MacroSheetReturn, MainThreadReturn, Matrix, OptionalExcelValue, OwnedExcelValue, Row,
-    ThreadSafeReturn, VolatileReturn, XlArrayBuilder, XlArrayOutput, XlArrayRef, XlStrRef,
-    XlValueRef,
+    ExcelCellOutput, ExcelCellValue, ExcelDateSystem, ExcelErrorValue, ExcelOutput, ExcelParameter,
+    ExcelReturn, ExcelSerialDate, ExcelValue, FromExcel, IntoExcel, MacroSheetReturn,
+    MainThreadReturn, Matrix, OptionalExcelValue, Row, ThreadSafeReturn, VolatileReturn,
+    XlArrayRef, XlStrRef, XlValueRef,
 };
 #[doc(hidden)]
 pub use value::{

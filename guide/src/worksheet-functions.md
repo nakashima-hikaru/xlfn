@@ -13,7 +13,7 @@ The function may be synchronous or, with the `async` feature, an `async fn`. The
 
 ## Inputs and results are trait-driven
 
-An ordinary input type implements `ExcelParameter`. This single contract converts the Excel representation into a Rust value and defines which converted value participates in formula revision identity. An ordinary output type participates in `ExcelReturn` and usually implements `IntoExcelValue`. The framework validates the selected execution mode at compile time through marker traits.
+An ordinary input type implements `FromExcel`. An ordinary scalar output or matrix cell implements `IntoExcel`; the framework keeps runtime return dispatch, ownership, and execution-mode checks internal.
 
 Application errors use `Result<T, E>` where `E: IntoXllError`:
 

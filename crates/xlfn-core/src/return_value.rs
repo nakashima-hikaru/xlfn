@@ -1,9 +1,10 @@
 use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
+use crate::return_array::XlArrayOutput;
 use crate::return_storage::ReturnStorage;
 use crate::{
-    CallId, CallMetadata, CallOutcome, ExcelErrorValue, IntoExcelValue, OwnedExcelValue, Runtime,
-    UdfResultKind, XlArrayOutput, XllError, XllResult,
+    CallId, CallMetadata, CallOutcome, ExcelCellOutput, ExcelOutput, ExcelReturn, Runtime,
+    UdfResultKind, XllError, XllResult,
 };
 use parking_lot::{Condvar, Mutex};
 use std::cell::{Cell, UnsafeCell};
@@ -569,10 +570,19 @@ struct PreparedReturn {
 }
 
 impl PreparedReturn {
-    fn encode(value: OwnedExcelValue) -> XllResult<Self> {
+    fn encode(value: ExcelOutput) -> XllResult<Self> {
         match value {
-            OwnedExcelValue::ArrayOutput(encoded) => Self::from_array_output(encoded),
-            other => Self::encode_dynamic(other),
+            ExcelOutput::Array(encoded) => Self::from_array_output(encoded),
+            ExcelOutput::Scalar(cell) => {
+                let mut storage = None;
+                let mut allocation_bytes = base_allocation_payload_bytes(0)?;
+                let oper = encode_scalar(cell, &mut storage, &mut allocation_bytes)?;
+                Ok(Self {
+                    oper,
+                    storage,
+                    array: None,
+                })
+            }
         }
     }
 
@@ -611,54 +621,6 @@ impl PreparedReturn {
             },
             storage,
             array: Some(cells),
-        })
-    }
-
-    fn encode_dynamic(value: OwnedExcelValue) -> XllResult<Self> {
-        let mut storage = None;
-        let (oper, array) = match value {
-            OwnedExcelValue::Matrix(matrix) => {
-                let rows = i32::try_from(matrix.rows()).map_err(|_| XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
-                })?;
-                let columns = i32::try_from(matrix.columns()).map_err(|_| XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
-                })?;
-                let values = matrix.into_vec();
-                let mut allocation_bytes = base_allocation_payload_bytes(values.len())?;
-                let mut cells = values
-                    .into_iter()
-                    .map(|cell| encode_scalar(cell, &mut storage, &mut allocation_bytes))
-                    .collect::<XllResult<Vec<_>>>()?
-                    .into_boxed_slice();
-                let pointer = cells.as_mut_ptr();
-                (
-                    XLOPER12 {
-                        value: XLOPER12Value {
-                            array: XLOPER12Array {
-                                values: pointer,
-                                rows,
-                                columns,
-                            },
-                        },
-                        xltype: XLTYPE_MULTI,
-                    },
-                    Some(cells),
-                )
-            }
-            OwnedExcelValue::ArrayOutput(encoded) => {
-                return Self::from_array_output(encoded);
-            }
-            scalar => {
-                let mut allocation_bytes = base_allocation_payload_bytes(0)?;
-                let oper = encode_scalar(scalar, &mut storage, &mut allocation_bytes)?;
-                (oper, None)
-            }
-        };
-        Ok(Self {
-            oper,
-            storage,
-            array,
         })
     }
 
@@ -759,25 +721,18 @@ impl Drop for ReturnBlock {
 }
 
 fn encode_scalar(
-    value: OwnedExcelValue,
+    value: ExcelCellOutput,
     storage: &mut Option<ReturnStorage>,
     allocation_bytes: &mut usize,
 ) -> XllResult<XLOPER12> {
     match value {
-        OwnedExcelValue::Number(number) if number.is_finite() => Ok(XLOPER12::number(number)),
-        OwnedExcelValue::Number(_) => {
+        ExcelCellOutput::Number(number) if number.is_finite() => Ok(XLOPER12::number(number)),
+        ExcelCellOutput::Number(_) => {
             Err(XllError::input("<return>", crate::InputError::NonFinite))
         }
-        OwnedExcelValue::Boolean(boolean) => Ok(XLOPER12::boolean(boolean)),
-        OwnedExcelValue::Integer(integer) => Ok(XLOPER12::integer(integer)),
-        OwnedExcelValue::Error(ExcelErrorValue(error)) => Ok(XLOPER12::error(error.code())),
-        // xltypeMissing/xltypeNil are argument concepts. Excel displays them
-        // as numeric zero when returned from a UDF, so encode an explicit
-        // absence error instead.
-        OwnedExcelValue::Missing | OwnedExcelValue::Blank => {
-            Ok(XLOPER12::error(crate::ExcelError::NotAvailable.code()))
-        }
-        OwnedExcelValue::String(text) => {
+        ExcelCellOutput::Boolean(boolean) => Ok(XLOPER12::boolean(boolean)),
+        ExcelCellOutput::Error(error) => Ok(XLOPER12::error(error.code())),
+        ExcelCellOutput::String(text) => {
             let utf16_length = crate::utf16::checked_utf16_len(
                 &text,
                 "<return>",
@@ -812,10 +767,6 @@ fn encode_scalar(
                 xltype: XLTYPE_STR,
             })
         }
-        OwnedExcelValue::Matrix(_) | OwnedExcelValue::ArrayOutput(_) => Err(XllError::input(
-            "<return>",
-            crate::InputError::Malformed("nested return arrays are not supported"),
-        )),
     }
 }
 
@@ -834,7 +785,7 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 }
 
 fn allocate_excel_owned(
-    value: OwnedExcelValue,
+    value: ExcelOutput,
     producer: &mut ReturnProducerGuard,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
@@ -842,7 +793,7 @@ fn allocate_excel_owned(
 }
 
 #[cfg(any(feature = "async", test))]
-pub(crate) fn allocate_local_async_return(value: OwnedExcelValue) -> XllResult<NonNull<XLOPER12>> {
+pub(crate) fn allocate_local_async_return(value: ExcelOutput) -> XllResult<NonNull<XLOPER12>> {
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
 
@@ -870,8 +821,10 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
 pub(crate) fn allocate_local_async_error(error: &XllError) -> NonNull<XLOPER12> {
     // Encoding a scalar Excel error cannot fail except for process-wide OOM,
     // which Rust defines as aborting.
-    allocate_local_async_return(OwnedExcelValue::Error(ExcelErrorValue(error.excel_error())))
-        .expect("scalar Excel error return allocation is infallible")
+    allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Error(
+        error.excel_error(),
+    )))
+    .expect("scalar Excel error return allocation is infallible")
 }
 
 #[cfg(feature = "async")]
@@ -881,7 +834,7 @@ pub(crate) struct AsyncReturnPointer {
 
 #[cfg(feature = "async")]
 impl AsyncReturnPointer {
-    pub(crate) fn from_value(value: OwnedExcelValue) -> XllResult<Self> {
+    pub(crate) fn from_value(value: ExcelOutput) -> XllResult<Self> {
         allocate_local_async_return(value).map(|pointer| Self { pointer })
     }
 
@@ -912,7 +865,7 @@ impl Drop for AsyncReturnPointer {
 pub fn ffi_boundary<S, F, T>(runtime: &Runtime<S>, operation: F) -> *mut XLOPER12
 where
     F: FnOnce() -> XllResult<T>,
-    T: IntoExcelValue,
+    T: ExcelReturn,
 {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -935,8 +888,8 @@ where
         return closing_error_pointer();
     };
     let result = match catch_unwind(AssertUnwindSafe(|| {
-        let value = operation()?;
-        let value = value.into_excel_value()?;
+        let mut context = ReturnContext::new();
+        let value = T::invoke(&mut context, operation)?;
         allocate_excel_owned(value, &mut producer)
     })) {
         Ok(Ok(pointer)) => pointer,
@@ -990,7 +943,7 @@ pub fn udf_boundary_named<S, F, T>(
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
-    T: IntoExcelValue,
+    T: ExcelReturn,
 {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1040,7 +993,7 @@ fn udf_boundary_named_inner<S, F, T>(
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
-    T: IntoExcelValue,
+    T: ExcelReturn,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_runtime(runtime);
 
@@ -1073,11 +1026,11 @@ fn udf_boundary_uninstrumented<S, F, T>(
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
-    T: IntoExcelValue,
+    T: ExcelReturn,
 {
     let prepared = catch_unwind(AssertUnwindSafe(|| {
-        let value = operation(guard.state())?;
-        let value = value.into_excel_value()?;
+        let mut context = ReturnContext::new();
+        let value = T::invoke(&mut context, || operation(guard.state()))?;
         PreparedReturn::encode(value)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -1107,7 +1060,7 @@ fn udf_boundary_instrumented<S, F, T>(
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
-    T: IntoExcelValue,
+    T: ExcelReturn,
 {
     let InstrumentedUdfContext {
         instrumentation,
@@ -1151,8 +1104,8 @@ where
     };
 
     let prepared = catch_unwind(AssertUnwindSafe(|| {
-        let value = operation(guard.state())?;
-        let value = value.into_excel_value()?;
+        let mut return_context = ReturnContext::new();
+        let value = T::invoke(&mut return_context, || operation(guard.state()))?;
         PreparedReturn::encode(value)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -1381,7 +1334,7 @@ mod tests {
         runtime
     }
 
-    fn allocate_local_for_test(value: OwnedExcelValue) -> XllResult<*mut XLOPER12> {
+    fn allocate_local_for_test(value: ExcelOutput) -> XllResult<*mut XLOPER12> {
         PreparedReturn::encode(value).map(|prep| prep.publish_local().as_ptr())
     }
 
@@ -1541,8 +1494,10 @@ mod tests {
     #[test]
     fn strings_use_counted_utf16_owned_by_block() {
         let _test = test_lock();
-        let pointer =
-            allocate_local_for_test(OwnedExcelValue::String("日本語".to_owned())).unwrap();
+        let pointer = allocate_local_for_test(ExcelOutput::Scalar(ExcelCellOutput::String(
+            "日本語".to_owned(),
+        )))
+        .unwrap();
         // SAFETY: pointer is live and the type selects the string member.
         let text = unsafe { (*pointer).value.string };
         // SAFETY: the return block owns a prefix and three UTF-16 units.
@@ -1556,13 +1511,9 @@ mod tests {
     #[test]
     fn arrays_hold_independent_cells() {
         let _test = test_lock();
-        let matrix = Matrix::new(
-            1,
-            2,
-            vec![OwnedExcelValue::Number(1.0), OwnedExcelValue::Number(2.0)],
-        )
-        .unwrap();
-        let pointer = allocate_local_for_test(OwnedExcelValue::Matrix(matrix)).unwrap();
+        let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
+        let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
+        let pointer = allocate_local_for_test(value).unwrap();
         // SAFETY: pointer is live and its root type is multi.
         let array = unsafe { (*pointer).value.array };
         assert_eq!(array.rows, 1);
@@ -1576,12 +1527,12 @@ mod tests {
     #[test]
     fn encoded_array_buffer_is_adopted_without_copying_cells() {
         let _test = test_lock();
-        let mut builder = crate::XlArrayBuilder::numbers(1, 2).unwrap();
+        let mut builder = crate::XlArrayBuilder::new(1, 2).unwrap();
         builder.push_f64(10.0).unwrap();
         builder.push_f64(20.0).unwrap();
         let encoded = builder.finish().unwrap();
         let original_cells = encoded.cells.as_ptr();
-        let pointer = allocate_local_for_test(OwnedExcelValue::ArrayOutput(encoded)).unwrap();
+        let pointer = allocate_local_for_test(ExcelOutput::Array(encoded)).unwrap();
         // SAFETY: pointer is a live encoded array return.
         let returned_cells = unsafe { (*pointer).value.array.values };
         assert_eq!(returned_cells.cast_const(), original_cells);
@@ -1603,18 +1554,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_blank_returns_are_explicit_not_available_errors() {
+    fn explicit_output_errors_are_encoded_as_not_available_errors() {
         let _test = test_lock();
-        for value in [OwnedExcelValue::Missing, OwnedExcelValue::Blank] {
-            let pointer = allocate_local_for_test(value).unwrap();
-            // SAFETY: pointer is a live encoded return value.
-            assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
-            // SAFETY: XLTYPE_ERR selects the error union member.
-            let error = unsafe { (*pointer).value.error };
-            assert_eq!(error, ExcelError::NotAvailable.code());
-            // SAFETY: pointer has not yet been freed.
-            unsafe { free_return(pointer) };
-        }
+        let pointer = allocate_local_for_test(ExcelOutput::Scalar(ExcelCellOutput::Error(
+            ExcelError::NotAvailable,
+        )))
+        .unwrap();
+        // SAFETY: pointer is a live encoded return value.
+        assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
+        // SAFETY: XLTYPE_ERR selects the error union member.
+        let error = unsafe { (*pointer).value.error };
+        assert_eq!(error, ExcelError::NotAvailable.code());
+        // SAFETY: pointer has not yet been freed.
+        unsafe { free_return(pointer) };
     }
 
     #[test]
@@ -1642,12 +1594,12 @@ mod tests {
     }
 
     #[test]
-    fn panicking_into_excel_value_does_not_cross_ffi() {
+    fn panicking_return_conversion_does_not_cross_ffi() {
         struct PanickingReturn;
 
-        impl IntoExcelValue for PanickingReturn {
-            fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-                panic!("injected IntoExcelValue panic")
+        impl ExcelReturn for PanickingReturn {
+            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+                panic!("injected return conversion panic")
             }
         }
 
@@ -1667,11 +1619,11 @@ mod tests {
             release: mpsc::Receiver<()>,
         }
 
-        impl IntoExcelValue for BlockingReturn {
-            fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
+        impl ExcelReturn for BlockingReturn {
+            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
                 self.converting.send(()).unwrap();
                 self.release.recv().unwrap();
-                Ok(OwnedExcelValue::Number(1.0))
+                Ok(ExcelOutput::Scalar(ExcelCellOutput::Number(1.0)))
             }
         }
 
@@ -1833,7 +1785,7 @@ mod tests {
     fn owned_values_cannot_bypass_scalar_validation() {
         let _test = test_lock();
         let runtime = open_test_runtime();
-        let pointer = ffi_boundary(&runtime, || Ok(OwnedExcelValue::Number(f64::NAN)));
+        let pointer = ffi_boundary(&runtime, || Ok(f64::NAN));
         // SAFETY: pointer is a live encoded validation error.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1846,7 +1798,10 @@ mod tests {
         crate::with_excel_call_scope(|scope| {
             let mut context = ReturnContext::for_call(&runtime, "scalar", None, scope);
             let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
-            assert_eq!(value, 4.5);
+            assert!(matches!(
+                value,
+                ExcelOutput::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
+            ));
         });
     }
 
@@ -1855,7 +1810,9 @@ mod tests {
         let _test = test_lock();
         let runtime = open_test_runtime();
         let excel_ptr = ffi_boundary(&runtime, || Ok(42.0));
-        let async_ptr = allocate_local_async_return(OwnedExcelValue::Number(42.0)).unwrap();
+        let async_ptr =
+            allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
+                .unwrap();
 
         // SAFETY: both pointers are valid ReturnBlock pointers
         unsafe {
@@ -1951,7 +1908,7 @@ mod tests {
         let mut producer = tracker.try_enter_producer().unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let ptr = PreparedReturn::encode(OwnedExcelValue::Number(42.0))
+        let ptr = PreparedReturn::encode(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
             .unwrap()
             .publish_excel(&mut producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
@@ -1995,7 +1952,8 @@ mod tests {
         let mut producer = tracker.try_enter_producer().unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let err_res = PreparedReturn::encode(OwnedExcelValue::Number(f64::NAN));
+        let err_res =
+            PreparedReturn::encode(ExcelOutput::Scalar(ExcelCellOutput::Number(f64::NAN)));
         let err = match err_res {
             Ok(_) => panic!("expected encoding failure"),
             Err(e) => e,
@@ -2037,8 +1995,8 @@ mod tests {
     #[test]
     fn string_backing_survives_in_matrix_return() {
         let matrix = Matrix::new(1, 2, vec!["hello".to_string(), "world".to_string()]).unwrap();
-        let value = matrix.into_excel_value().unwrap();
-        assert!(matches!(value, OwnedExcelValue::ArrayOutput(_)));
+        let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
+        assert!(matches!(value, ExcelOutput::Array(_)));
 
         let prepared = PreparedReturn::encode(value).unwrap();
         let cells = prepared.array.as_ref().unwrap();

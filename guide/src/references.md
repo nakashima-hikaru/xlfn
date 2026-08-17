@@ -75,7 +75,7 @@ fn range_sum(
 }
 ```
 
-`coerce` returns `OwnedExcelValue`; `coerce_matrix<T>` applies normal element conversion to an owned matrix. Once coercion succeeds, the resulting value can be retained or passed to internal workers according to its Rust `Send`/`Sync` properties.
+`coerce` returns `ExcelValue`; `coerce_matrix<T>` applies normal element conversion to an owned matrix. Once coercion succeeds, the resulting value can be retained or passed to internal workers according to its Rust `Send`/`Sync` properties.
 
 Coercion is an Excel callback and must occur on the permitted thread. It can fail because the reference is invalid, Excel rejects the callback in the current state, or an element cannot convert to `T`.
 

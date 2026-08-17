@@ -274,13 +274,12 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
         .collect::<Vec<_>>();
     Ok(quote! {
-        impl #from_excel_impl_generics #krate::convert::ExcelParameter<'__xlfn_call>
+        impl #from_excel_impl_generics #krate::value::FromExcel<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
         {
             fn from_excel(
-                __value: #krate::convert::XlValueRef<'__xlfn_call>,
+                __value: #krate::value::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
-                __context: &#krate::convert::CallContext<'__xlfn_call>,
             ) -> #krate::error::XllResult<Self> {
                 let __text = __value.as_str_with_argument(__argument)?;
                 #(#comparisons)*
@@ -298,7 +297,7 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
             fn encode_identity(
                 &self,
-                __encoder: &mut #krate::convert::InputIdentityEncoder,
+                __encoder: &mut #krate::__private::InputIdentityEncoder,
             ) {
                 __encoder.u32(match self {
                     #(#identity_variants,)*
@@ -306,47 +305,18 @@ fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
         }
 
-        impl #base_impl_generics #krate::convert::IntoExcelValue
+        impl #base_impl_generics #krate::value::IntoExcel
             for #ident #type_generics #base_where_clause
         {
-            fn into_excel_value(
-                self,
-            ) -> #krate::error::XllResult<#krate::convert::OwnedExcelValue> {
+            fn into_excel(self) -> #krate::error::XllResult<#krate::value::ExcelCellOutput> {
                 let __text = match self {
                     #(#outputs,)*
                 };
-                <&str as #krate::convert::IntoExcelValue>::into_excel_value(__text)
+                ::core::result::Result::Ok(
+                    #krate::value::ExcelCellOutput::String(__text.to_owned())
+                )
             }
         }
-
-        impl #base_impl_generics #krate::convert::ExcelReturn
-            for #ident #type_generics #base_where_clause
-        {
-            type Output = Self;
-
-            fn into_excel(
-                self,
-                _: &mut #krate::__private::ReturnContext<'_, '_>,
-            ) -> #krate::error::XllResult<Self::Output> {
-                ::core::result::Result::Ok(self)
-            }
-        }
-
-        impl #base_impl_generics #krate::convert::MainThreadReturn
-            for #ident #type_generics #base_where_clause
-        {}
-        impl #base_impl_generics #krate::convert::ThreadSafeReturn
-            for #ident #type_generics #base_where_clause
-        {}
-        impl #base_impl_generics #krate::convert::MacroSheetReturn
-            for #ident #type_generics #base_where_clause
-        {}
-        impl #base_impl_generics #krate::convert::AsyncReturn
-            for #ident #type_generics #base_where_clause
-        {}
-        impl #base_impl_generics #krate::convert::VolatileReturn
-            for #ident #type_generics #base_where_clause
-        {}
 
     })
 }
@@ -378,29 +348,36 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
             for #ident #type_generics #where_clause
         {}
 
-        impl #impl_generics #krate::convert::ExcelReturn
+        impl #impl_generics #krate::__private::ExcelReturn
             for #ident #type_generics #where_clause
         {
-            type Output = ::std::string::String;
             const USES_FORMULA_REVISION: bool = true;
 
             fn invoke(
                 __context: &mut #krate::__private::ReturnContext<'_, '_>,
                 __operation: impl ::core::ops::FnOnce()
                     -> #krate::error::XllResult<Self>,
-            ) -> #krate::error::XllResult<Self::Output> {
-                __context.publish_new_handle(__operation)
+            ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
+                __context
+                    .publish_new_handle(__operation)
+                    .map(|__token| #krate::__private::ExcelOutput::Scalar(
+                        #krate::__private::ExcelCellOutput::String(__token)
+                    ))
             }
 
             fn into_excel(
                 self,
                 __context: &mut #krate::__private::ReturnContext<'_, '_>,
-            ) -> #krate::error::XllResult<Self::Output> {
-                __context.publish_new_handle(|| ::core::result::Result::Ok(self))
+            ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
+                __context
+                    .publish_new_handle(|| ::core::result::Result::Ok(self))
+                    .map(|__token| #krate::__private::ExcelOutput::Scalar(
+                        #krate::__private::ExcelCellOutput::String(__token)
+                    ))
             }
         }
 
-        impl #impl_generics #krate::convert::MainThreadReturn
+        impl #impl_generics #krate::__private::MainThreadReturn
             for #ident #type_generics #where_clause
         {}
     })
@@ -790,12 +767,7 @@ fn expand_excel_function(
     };
     let async_result_expression = quote! {
         let __result = #invocation.await;
-        let mut __return_context =
-            #krate::__private::ReturnContext::new();
-        #krate::convert::ExcelReturn::invoke(
-            &mut __return_context,
-            || ::core::result::Result::Ok(__result),
-        )
+        ::core::result::Result::Ok(__result)
     };
     let context_setup = generated_context_expression.map(|expression| {
         let ty = context_type
@@ -872,17 +844,17 @@ fn expand_excel_function(
                 let default_expr = options.default.as_ref();
                 let blank_arm = if blank_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::convert::CellPresence::Blank => #default,)
+                    quote!(#krate::__private::CellPresence::Blank => #default,)
                 } else if blank_error {
-                    quote!(#krate::convert::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
+                    quote!(#krate::__private::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
                 } else {
                     quote!()
                 };
                 let missing_arm = if missing_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::convert::CellPresence::Missing => #default,)
+                    quote!(#krate::__private::CellPresence::Missing => #default,)
                 } else if missing_error {
-                    quote!(#krate::convert::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
+                    quote!(#krate::__private::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
                 } else {
                     quote!()
                 };
@@ -961,7 +933,7 @@ fn expand_excel_function(
                                 __call_scope,
                             );
                         #context_setup
-                        #krate::convert::ExcelReturn::invoke(
+                        #krate::__private::ExcelReturn::invoke(
                             &mut __return_context,
                             || ::core::result::Result::Ok(#invocation),
                         )
@@ -1080,7 +1052,7 @@ fn expand_excel_addin(
         #item
 
         #gating
-        impl #krate::addin::AddinMetadata for #ident {
+        impl #krate::__private::AddinMetadata for #ident {
             const ID: &'static str = #id;
             const DISPLAY_NAME: &'static str = #display_name;
             const DEFAULT_CATEGORY: &'static str = #category;
@@ -1116,7 +1088,7 @@ fn expand_excel_addin(
         pub extern "system" fn xlAutoOpen() -> i32 {
             let __addin_id = match crate::__XLFN_ADDIN_ID.get_or_init(|| {
                 #krate::__private::AddinId::parse(
-                    <#ident as #krate::addin::AddinMetadata>::ID,
+                    <#ident as #krate::__private::AddinMetadata>::ID,
                 )
             }) {
                 Ok(__addin_id) => __addin_id,
@@ -1132,7 +1104,7 @@ fn expand_excel_addin(
             for __descriptor in &mut __descriptors {
                 if __descriptor.category.is_empty() {
                     __descriptor.category =
-                        <#ident as #krate::addin::AddinMetadata>::DEFAULT_CATEGORY;
+                        <#ident as #krate::__private::AddinMetadata>::DEFAULT_CATEGORY;
                 }
             }
             __descriptors.sort_unstable_by_key(|__descriptor| __descriptor.excel_name);
@@ -1190,7 +1162,7 @@ fn expand_excel_addin(
                         };
                         if __action == 1.0 {
                             ::core::result::Result::Ok(
-                                <#ident as #krate::addin::AddinMetadata>::DISPLAY_NAME.to_owned(),
+                                <#ident as #krate::__private::AddinMetadata>::DISPLAY_NAME.to_owned(),
                             )
                         } else {
                             ::core::result::Result::Err(#krate::error::XllError::input(
@@ -1645,19 +1617,20 @@ mod tests {
         .unwrap();
         let expanded = expand_excel_enum(input).unwrap().to_string();
         assert!(expanded.contains("eq_ignore_ascii_case"));
-        assert!(expanded.contains("ExcelParameter"));
-        assert!(!expanded.contains("FromExcel"));
+        assert!(expanded.contains("FromExcel"));
+        assert!(!expanded.contains("ExcelParameter"));
         assert!(!expanded.contains("ExcelInputIdentity"));
         assert!(expanded.contains("encode_identity"));
         assert!(expanded.contains("__encoder . u32"));
         assert!(!expanded.contains("__encoder . domain"));
-        assert!(expanded.contains("IntoExcelValue"));
-        assert!(expanded.contains("ExcelReturn"));
-        assert!(expanded.contains("MainThreadReturn"));
-        assert!(expanded.contains("ThreadSafeReturn"));
-        assert!(expanded.contains("MacroSheetReturn"));
-        assert!(expanded.contains("AsyncReturn"));
-        assert!(expanded.contains("VolatileReturn"));
+        assert!(expanded.contains("ExcelCellOutput"));
+        assert!(expanded.contains("IntoExcel"));
+        assert!(!expanded.contains("ExcelReturn"));
+        assert!(!expanded.contains("MainThreadReturn"));
+        assert!(!expanded.contains("ThreadSafeReturn"));
+        assert!(!expanded.contains("MacroSheetReturn"));
+        assert!(!expanded.contains("AsyncReturn"));
+        assert!(!expanded.contains("VolatileReturn"));
         assert!(!expanded.contains("HandleKey"));
     }
 
@@ -2011,7 +1984,7 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(func_expanded.contains("my_custom_xlfn :: __private"));
-        assert!(func_expanded.contains("my_custom_xlfn :: convert"));
+        assert!(!func_expanded.contains("my_custom_xlfn :: convert"));
 
         let addin_item: ItemStruct = syn::parse2(quote!(
             struct MyAddin;
@@ -2020,7 +1993,7 @@ mod tests {
         let addin_expanded = expand_excel_addin(quote!(crate = my_custom_xlfn), addin_item)
             .unwrap()
             .to_string();
-        assert!(addin_expanded.contains("my_custom_xlfn :: addin :: AddinMetadata"));
+        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: AddinMetadata"));
         assert!(addin_expanded.contains("my_custom_xlfn :: __private :: Runtime"));
     }
 }

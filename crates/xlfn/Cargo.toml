@@ -7,7 +7,7 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Facade crate for building safe Rust Excel XLL add-ins"
-readme = "../../README.md"
+readme = "README.md"
 
 [features]
 default = []

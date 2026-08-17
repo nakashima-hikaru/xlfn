@@ -22,15 +22,15 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `Column<T>` | scalar or `N x 1` | rejects a true 2-D shape |
 | `Vec<T>` | scalar, row, or column | input only; rejects a true 2-D shape |
 | `BoundedVarArgs<T, MAX>` | scalar, row, or column | input only; requires `MAX > 0` and enforces the bound |
-| `OwnedExcelValue` | supported scalar, error, blank, missing, or array | intentionally dynamic, owned representation |
+| `ExcelValue` | supported scalar, error, blank, missing, or array | intentionally dynamic, owned input representation; array cells are `ExcelCellValue` |
 | a type deriving `ExcelEnum` | string | exact or optional ASCII case-insensitive match |
-| a custom `T: ExcelParameter<'call>` | defined by the implementation | may borrow only for the generated call lifetime; identity is defined from the converted value |
+| a custom `T: FromExcel<'call>` | defined by the implementation | may borrow only for the generated call lifetime |
 
 An Excel error supplied where another type is expected is propagated as that Excel error. Ordinary conversions do not ask Excel to coerce strings, booleans, references, or arrays into unrelated types.
 
 ## Reference conversions
 
-A parameter marked `#[excel_arg(reference)]` uses `FromExcelReference<'call>`, not `ExcelParameter`.
+A parameter marked `#[excel_arg(reference)]` uses `FromExcelReference<'call>`, not `FromExcel`.
 
 The built-in `ExcelReference<'call>` preserves:
 
@@ -49,11 +49,11 @@ The following are direct scalar returns:
 - `String` and `&str`;
 - `ExcelErrorValue`;
 - `ExcelSerialDate`;
-- `OwnedExcelValue`;
+- `ExcelCellOutput` and custom `IntoExcel` implementations;
 - a type deriving `ExcelEnum`;
 - `RtdValue`.
 
-`Matrix<T>`, `Row<T>`, and `Column<T>` are owned array returns when every element implements `IntoExcelValue`. `XlArrayBuilder::numbers` produces `XlArrayOutput` directly in the final `XLOPER12` cell buffer, avoiding an intermediate `Vec<OwnedExcelValue>` and a cell-buffer copy.
+`Matrix<T>`, `Row<T>`, and `Column<T>` are owned array returns when every element implements `IntoExcel`. `xlfn::advanced::output::XlArrayBuilder::new` produces `XlArrayOutput` directly in the final `XLOPER12` cell buffer, avoiding an intermediate cell vector and a cell-buffer copy.
 
 `Result<T, E>` is supported whenever `T` is supported for the selected execution mode and `E: IntoXllError`. The wrapper converts the error exactly once at the Excel boundary.
 
@@ -92,7 +92,7 @@ See [Optional arguments and enums](optional-arguments.md).
 
 `XlArrayRef` is the allocation-free mixed-value input path. It exposes shape, indexed access, and lazy cell iteration through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Use `Matrix<T>` or `Vec<T>` when the input must be owned, especially for async work.
 
-`Matrix::new` and `XlArrayBuilder::numbers` require non-zero dimensions, checked multiplication, matching element count, and values within both Excel and framework limits.
+`Matrix::new` and `XlArrayBuilder::new` require non-zero dimensions, checked multiplication, matching element count, and values within both Excel and framework limits.
 
 | Limit | x86 | x64 |
 |---|---:|---:|
@@ -106,30 +106,35 @@ Validate application-specific limits before allocating. Framework checks are hos
 
 ## Dynamic value variants
 
-`OwnedExcelValue` represents:
+`ExcelCellValue` represents:
 
 ```text
-Number | Boolean | Integer | String | Error | Blank | Missing | Matrix
+Number | Boolean | String | Error | Blank
 ```
 
-`Blank` and `Missing` are meaningful inputs but are not normal standalone worksheet results; returning them maps to `#N/A`. A dynamic matrix contains `OwnedExcelValue` elements and remains subject to shape and memory limits.
+`ExcelValue` represents:
+
+```text
+Scalar(ExcelCellValue) | Missing | Array(Matrix<ExcelCellValue>)
+```
+
+`Missing` is an omitted argument and cannot occur inside an array. `Blank` is an empty cell and can occur as a scalar or array cell. The raw `xltypeInt` transport form is canonicalized to `Number`; it is not an input semantic variant. `ExcelCellOutput` intentionally has no blank or missing variant. Return `ExcelErrorValue(ExcelError::NotAvailable)` or an explicit `ExcelCellOutput::Error` when an unavailable result is intended.
 
 ## Custom conversion checklist
 
-For `ExcelParameter<'call>`:
+For `FromExcel<'call>`:
 
 1. inspect only the active `XlValueRef<'_>`;
 2. copy owned data before returning;
 3. use the supplied static argument name in `XllError::Input`;
 4. reject unsupported coercions and non-finite values explicitly;
 5. bound all allocation from workbook-controlled lengths.
-6. implement `encode_identity` from the value's observable semantic state, not from temporary Excel pointers or presentation details; equal semantic values must encode equally and distinguishable values must encode differently.
+6. keep the public conversion independent of framework runtime state; do not retain temporary Excel pointers or call-scoped views in an owned result.
 
-For `ExcelReturn` and `IntoExcelValue`:
+For `IntoExcel`:
 
 1. validate the application value before allocation;
-2. implement only execution-mode marker traits that are actually safe;
-3. do not call Excel from thread-safe or async conversion paths;
-4. preserve ownership until Excel calls `xlAutoFree12` through framework-managed return storage.
+2. do not call Excel from thread-safe or async conversion paths;
+3. preserve ownership until Excel calls `xlAutoFree12` through framework-managed return storage.
 
 See [Custom conversions](custom-conversions.md).

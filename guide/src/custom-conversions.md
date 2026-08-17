@@ -2,34 +2,29 @@
 
 The framework's conversion traits let domain types appear directly in worksheet signatures. Keep conversions strict, owned, bounded, and independent of Excel callbacks.
 
-## Custom input with `ExcelParameter`
+## Custom input with `FromExcel`
 
-A custom input receives a call-scoped `XlValueRef`, the static argument name, and a `CallContext`:
+A custom input receives a call-scoped `XlValueRef` and the static argument name:
 
 ```rust
 use xlfn::{
-    convert::{CallContext, ExcelParameter, InputIdentityEncoder, XlValueRef},
+    value::{FromExcel, XlValueRef},
     error::{InputError, XllError, XllResult},
 };
 
 #[derive(Clone, Copy)]
 struct PositiveRate(f64);
 
-impl<'call> ExcelParameter<'call> for PositiveRate {
+impl<'call> FromExcel<'call> for PositiveRate {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext,
     ) -> XllResult<Self> {
-        let rate = f64::from_excel(value, argument, context)?;
+        let rate = <f64 as FromExcel>::from_excel(value, argument)?;
         if rate < 0.0 {
             return Err(XllError::input(argument, InputError::OutOfRange));
         }
         Ok(Self(rate))
-    }
-
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.f64(self.0);
     }
 }
 ```
@@ -38,53 +33,28 @@ The call lifetime is explicit. Owned conversions work for every `'call`; borrowe
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 
-Every type used as an Excel-visible parameter implements one `ExcelParameter` contract. It owns both conversion and semantic equality, so a custom type cannot accidentally omit or separately define its identity. Do not hash a token, pointer, or source spelling unless that representation is part of the type's documented semantics. For a case-insensitive enum, hash the normalized variant; for a wrapper around a handle, hash the underlying `ObjectId` if the wrapper preserves handle identity.
+Every type used as an Excel-visible parameter implements one `FromExcel` contract. Runtime context and formula-fingerprint construction stay inside the framework boundary. Do not retain `XlValueRef` or any pointer derived from it in an owned result.
 
-`encode_identity` must encode exactly the semantic state observable through the converted Rust value. Equal semantic values must produce equal encodings, and distinguishable values must produce different encodings. Types with an expensive conversion may override `from_excel_with_identity` to convert and encode in one pass.
+## Custom cell and output conversions
 
-## Custom output with `IntoExcelValue`
-
-A value that converts to one ordinary Excel value implements `IntoExcelValue`:
+A value used as one cell in a returned matrix, or as a custom scalar return, implements `IntoExcel`:
 
 ```rust
 use xlfn::{
-    convert::{IntoExcelValue, OwnedExcelValue},
+    value::{ExcelCellOutput, IntoExcel},
     error::XllResult,
 };
 
 struct Percentage(f64);
 
-impl IntoExcelValue for Percentage {
-    fn into_excel_value(self) -> XllResult<OwnedExcelValue> {
-        self.0.into_excel_value()
+impl IntoExcel for Percentage {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        self.0.into_excel()
     }
 }
 ```
 
-To return `Percentage` directly from an exported function, it also needs `ExcelReturn` and the marker traits for every permitted execution mode:
-
-```rust
-use xlfn::{
-    convert::{ExcelReturn, MainThreadReturn, ReturnContext, ThreadSafeReturn},
-    error::XllResult,
-};
-
-impl ExcelReturn for Percentage {
-    type Output = Self;
-
-    fn into_excel(
-        self,
-        _: &mut ReturnContext<'_, '_>,
-    ) -> XllResult<Self::Output> {
-        Ok(self)
-    }
-}
-
-impl MainThreadReturn for Percentage {}
-impl ThreadSafeReturn for Percentage {}
-```
-
-Implement only the mode markers you can justify. Marker traits are compile-time capability claims, not boilerplate to add indiscriminately.
+The same implementation is used for scalar returns and matrix cells. Execution-mode capability checks are supplied by the framework's internal return dispatcher.
 
 A simpler alternative is to convert inside the function and return a built-in value:
 

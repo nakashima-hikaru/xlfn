@@ -25,18 +25,22 @@ impl RtdValue {
     }
 }
 
-impl TryFrom<crate::OwnedExcelValue> for RtdValue {
+impl TryFrom<crate::ExcelValue> for RtdValue {
     type Error = XllError;
 
-    fn try_from(value: crate::OwnedExcelValue) -> XllResult<Self> {
+    fn try_from(value: crate::ExcelValue) -> XllResult<Self> {
         let value = match value {
-            crate::OwnedExcelValue::Number(value) => Self::Number(value),
-            crate::OwnedExcelValue::Boolean(value) => Self::Boolean(value),
-            crate::OwnedExcelValue::Integer(value) => Self::Integer(value),
-            crate::OwnedExcelValue::String(value) => Self::String(value),
-            crate::OwnedExcelValue::Error(value) => Self::Error(value),
-            crate::OwnedExcelValue::Missing | crate::OwnedExcelValue::Blank => Self::Empty,
-            crate::OwnedExcelValue::Matrix(_) | crate::OwnedExcelValue::ArrayOutput(_) => {
+            crate::ExcelValue::Scalar(crate::ExcelCellValue::Number(value)) => Self::Number(value),
+            crate::ExcelValue::Scalar(crate::ExcelCellValue::Boolean(value)) => {
+                Self::Boolean(value)
+            }
+            crate::ExcelValue::Scalar(crate::ExcelCellValue::String(value)) => Self::String(value),
+            crate::ExcelValue::Scalar(crate::ExcelCellValue::Error(value)) => {
+                Self::Error(crate::ExcelErrorValue(value))
+            }
+            crate::ExcelValue::Missing
+            | crate::ExcelValue::Scalar(crate::ExcelCellValue::Blank) => Self::Empty,
+            crate::ExcelValue::Array(_) => {
                 return Err(XllError::input(
                     "RTD value",
                     crate::InputError::Malformed("RTD values must be scalar"),
@@ -48,27 +52,26 @@ impl TryFrom<crate::OwnedExcelValue> for RtdValue {
     }
 }
 
-impl crate::IntoExcelValue for RtdValue {
-    fn into_excel_value(self) -> XllResult<crate::OwnedExcelValue> {
-        self.validate()?;
-        Ok(match self {
-            Self::Number(value) => crate::OwnedExcelValue::Number(value),
-            Self::Boolean(value) => crate::OwnedExcelValue::Boolean(value),
-            Self::Integer(value) => crate::OwnedExcelValue::Integer(value),
-            Self::String(value) => crate::OwnedExcelValue::String(value),
-            Self::Error(value) => crate::OwnedExcelValue::Error(value),
-            Self::Empty => crate::OwnedExcelValue::Blank,
-        })
-    }
-}
-
 impl crate::ExcelReturn for RtdValue {
-    type Output = Self;
-
-    fn into_excel(self, _: &mut crate::ReturnContext<'_, '_>) -> XllResult<Self::Output> {
-        Ok(self)
+    fn into_excel(self, _: &mut crate::ReturnContext<'_, '_>) -> XllResult<crate::ExcelOutput> {
+        self.validate()?;
+        let cell = match self {
+            Self::Number(value) => crate::ExcelCellOutput::Number(value),
+            Self::Boolean(value) => crate::ExcelCellOutput::Boolean(value),
+            Self::Integer(value) => crate::ExcelCellOutput::Number(value as f64),
+            Self::String(value) => crate::ExcelCellOutput::String(value),
+            Self::Error(value) => crate::ExcelCellOutput::Error(value.0),
+            Self::Empty => crate::ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
+        };
+        Ok(crate::ExcelOutput::Scalar(cell))
     }
 }
+
+impl crate::MainThreadReturn for RtdValue {}
+impl crate::ThreadSafeReturn for RtdValue {}
+impl crate::MacroSheetReturn for RtdValue {}
+impl crate::AsyncReturn for RtdValue {}
+impl crate::VolatileReturn for RtdValue {}
 
 pub trait IntoRtdValue {
     fn into_rtd_value(self) -> XllResult<RtdValue>;

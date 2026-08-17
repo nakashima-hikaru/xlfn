@@ -1,4 +1,5 @@
 use xlfn::prelude::*;
+use xlfn::value::XlArrayRef;
 
 struct State;
 

@@ -1,24 +1,25 @@
-error[E0277]: the trait bound `Dataset: AsyncReturn` is not satisfied
+error[E0277]: the trait bound `Dataset: xlfn::__private::AsyncReturn` is not satisfied
   --> tests/ui/fail_async/handle_return_async.rs:10:19
    |
 10 | async fn bad() -> Dataset {
    |                   ^^^^^^^ unsatisfied trait bound
    |
-help: the trait `AsyncReturn` is not implemented for `Dataset`
+help: the trait `IntoExcel` is not implemented for `Dataset`
   --> tests/ui/fail_async/handle_return_async.rs:4:1
    |
  4 | struct Dataset;
    | ^^^^^^^^^^^^^^
-   = help: the following other types implement trait `AsyncReturn`:
+   = help: the following other types implement trait `IntoExcel`:
              &str
-             Column<T>
+             ExcelCellOutput
              ExcelErrorValue
              ExcelSerialDate
-             OwnedExcelValue
-             Result<T, E>
-             Row<T>
-             RtdValue
-           and $N others
+             bool
+             f64
+             i32
+             i64
+             std::string::String
+   = note: required for `Dataset` to implement `xlfn::__private::AsyncReturn`
 note: required by a bound in `xlfn::__private::assert_async_return`
   --> $WORKSPACE/crates/xlfn-core/src/value.rs
    |

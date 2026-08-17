@@ -50,7 +50,7 @@ fn range_name(
 
 A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; like `MainThreadContext`, its second inferred lifetime is the current Excel-call scope. It provides:
 
-- `coerce` for an owned `OwnedExcelValue`;
+- `coerce` for an owned `ExcelValue`;
 - `coerce_matrix<T>` for an owned matrix;
 - `sheet_name`.
 

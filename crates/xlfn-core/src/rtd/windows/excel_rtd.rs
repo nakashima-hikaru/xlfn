@@ -3,7 +3,7 @@ use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensur
 use crate::handle::HandleRuntime;
 use crate::host_callback::HostCallbackSession;
 use crate::subscription::SubscriptionRuntime;
-use crate::{ExcelCallbackStatus, ExcelParameter, OwnedExcelValue, RtdValue, XllError, XllResult};
+use crate::{ExcelCallbackStatus, ExcelValue, FromExcel, RtdValue, XllError, XllResult};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -91,11 +91,7 @@ pub(crate) fn observe(
         }));
     }
 
-    let returned = String::from_excel(
-        result.borrow()?,
-        "RTD handle",
-        &crate::CallContext::without_runtime(),
-    )?;
+    let returned = <String as FromExcel>::from_excel(result.borrow()?, "RTD handle")?;
     result.try_release()?;
 
     if returned != token {
@@ -190,11 +186,7 @@ pub(crate) fn observe_subscription(
         }));
     }
 
-    let value = OwnedExcelValue::from_excel(
-        result.borrow()?,
-        "RTD value",
-        &crate::CallContext::without_runtime(),
-    )?;
+    let value = <ExcelValue as FromExcel>::from_excel(result.borrow()?, "RTD value")?;
     result.try_release()?;
 
     RtdValue::try_from(value)
@@ -219,11 +211,7 @@ fn module_path(callbacks: &HostCallbackSession) -> XllResult<String> {
         }));
     }
 
-    let path = String::from_excel(
-        result.borrow()?,
-        "module",
-        &crate::CallContext::without_runtime(),
-    )?;
+    let path = <String as FromExcel>::from_excel(result.borrow()?, "module")?;
     result.try_release()?;
 
     Ok(path)

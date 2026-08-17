@@ -1,4 +1,5 @@
 use xlfn::prelude::*;
+use xlfn::{advanced::output::{XlArrayBuilder, XlArrayOutput}, value::XlArrayRef};
 
 struct State;
 
@@ -28,7 +29,7 @@ fn normalize(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
         .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))?
         / values.len() as f64;
     let (rows, columns) = values.shape();
-    let mut output = XlArrayBuilder::numbers(rows, columns)?;
+    let mut output = XlArrayBuilder::new(rows, columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? - mean)?;
     }
