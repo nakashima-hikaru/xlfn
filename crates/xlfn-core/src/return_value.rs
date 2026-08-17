@@ -250,7 +250,7 @@ impl ReturnTracker {
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
         if !self.admission_closed() || !self.is_quiescent() {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5254_4e52_454f_504e,
+                diagnostic_id: crate::DiagnosticId::RETURN_REOPEN,
             });
         }
         for stripe in &self.stripes {
@@ -416,16 +416,16 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         T: crate::handle::ExcelHandleObject,
     {
         let runtime = self.runtime.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4354_5854,
+            diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
         })?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_5544_4649,
+            diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
         })?;
         let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4449_4745,
+            diagnostic_id: crate::DiagnosticId::HANDLE_DIGEST,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4342_4b53,
+            diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;
@@ -443,16 +443,16 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         T: crate::handle::ExcelHandleObject,
     {
         let runtime = self.runtime.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4354_5854,
+            diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
         })?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_5544_4649,
+            diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
         })?;
         let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4449_4745,
+            diagnostic_id: crate::DiagnosticId::HANDLE_DIGEST,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: 0x4841_4e44_4342_4b53,
+            diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let handles = runtime.handle_runtime()?;

@@ -22,7 +22,7 @@ unsafe impl RtdSubscription for MetricSubscription {
         self.request_cancel();
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| XllError::Internal {
-                diagnostic_id: 0x5254_4457_4f52_4b52,
+                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDWORKR"),
             })?;
         }
         Ok(())

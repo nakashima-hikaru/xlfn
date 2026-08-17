@@ -76,7 +76,7 @@ impl Addin for HelloXll {
     fn open(context: &OpenContext) -> Result<State, XllError> {
         xlfn::diagnostics::install_file_diagnostic_sink(&context.build_info().addin_id)
             .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x4449_4147_5349_4e4b,
+                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"DIAGSINK"),
             })?;
         Ok(State)
     }

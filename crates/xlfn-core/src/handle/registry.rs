@@ -346,8 +346,6 @@ impl Drop for PendingHandleValue<'_> {
     }
 }
 
-pub(crate) const HANDLE_ENTROPY_DIAGNOSTIC_ID: u64 = 0x4841_4e44_524e_4746;
-
 impl HandleRegistry {
     pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
         Self::try_new_with(maximum_bindings, |entropy| getrandom::fill(entropy), true)
@@ -364,13 +362,13 @@ impl HandleRegistry {
         let mut entropy = [0_u8; 40];
         if let Err(source) = fill(&mut entropy) {
             let error = XllError::Internal {
-                diagnostic_id: HANDLE_ENTROPY_DIAGNOSTIC_ID,
+                diagnostic_id: crate::DiagnosticId::HANDLE_ENTROPY,
             };
             if report_failure {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::error!(
                         error = ?source,
-                        diagnostic_id = HANDLE_ENTROPY_DIAGNOSTIC_ID,
+                        diagnostic_id = crate::DiagnosticId::HANDLE_ENTROPY.as_u64(),
                         "OS CSPRNG failed while initializing Excel handle tokens"
                     );
                 }));
@@ -525,7 +523,7 @@ impl HandleRegistry {
         let (index, slot, reused) = match state.free.pop() {
             Some(index) => {
                 let slot = u32::try_from(index).map_err(|_| XllError::Internal {
-                    diagnostic_id: 0x4841_4e44_534c_4f54,
+                    diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
                 })?;
                 (index, slot, true)
             }

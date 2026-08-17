@@ -1,9 +1,7 @@
 use super::*;
 use crate::ExcelParameter;
 use crate::input_identity::InputFingerprint;
-use crate::input_identity::{
-    ARGUMENT_DOMAIN, INLINE_ARGUMENT_MODE, InputFingerprintBuilder, ROOT_DOMAIN,
-};
+use crate::input_identity::InputFingerprintBuilder;
 
 fn format_formula_revision_key(
     caller: FormulaCaller,
@@ -38,32 +36,21 @@ where
 }
 
 fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> InputFingerprint {
-    let mut builder = InputFingerprintBuilder::new(1);
+    let mut builder = InputFingerprintBuilder::new();
     builder
-        .with_argument::<Handle<'call, T>, _, _>(|encoder| {
+        .with_argument("handle", |encoder| {
             value.encode_identity(encoder);
             Ok(())
         })
         .unwrap();
-    builder.finish().unwrap()
+    builder.finish()
 }
 
 fn reference_handle_identity(object_id: u64) -> InputFingerprint {
-    let mut argument = Vec::new();
-    argument.extend_from_slice(&(ARGUMENT_DOMAIN.len() as u64).to_le_bytes());
-    argument.extend_from_slice(ARGUMENT_DOMAIN);
-    let type_domain = b"xlfn.input.handle-object.v1";
-    argument.extend_from_slice(&(type_domain.len() as u64).to_le_bytes());
-    argument.extend_from_slice(type_domain);
-    argument.extend_from_slice(&object_id.to_le_bytes());
-
     let mut root = blake3::Hasher::new();
-    root.update(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
-    root.update(ROOT_DOMAIN);
-    root.update(&1_u64.to_le_bytes());
-    root.update(&[INLINE_ARGUMENT_MODE]);
-    root.update(&(argument.len() as u64).to_le_bytes());
-    root.update(&argument);
+    root.update(&[0]);
+    root.update(&8_u64.to_le_bytes());
+    root.update(&object_id.to_le_bytes());
     InputFingerprint::from_bytes(*root.finalize().as_bytes())
 }
 
@@ -335,7 +322,7 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: HANDLE_TOPIC_RTD_KEY_COLLISION_DIAGNOSTIC_ID
+            diagnostic_id: crate::DiagnosticId::HANDLE_TOPIC_COLLISION
         })
     ));
 
@@ -581,7 +568,7 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: HANDLE_ENTROPY_DIAGNOSTIC_ID
+            diagnostic_id: crate::DiagnosticId::HANDLE_ENTROPY
         }
     ));
 }

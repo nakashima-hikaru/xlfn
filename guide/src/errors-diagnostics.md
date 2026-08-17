@@ -45,7 +45,7 @@ impl Addin for DeskTools {
             &context.build_info().addin_id,
         )
             .map_err(|_| XllError::Internal {
-                diagnostic_id: 0x4449_4147_494e_4954,
+                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"DIAGINIT"),
             })?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
         Ok(State::new())
@@ -100,7 +100,8 @@ Do not assume a tracing subscriber is infallible. The runtime contains panics ar
 Use stable, searchable IDs for internal failures:
 
 ```rust
-const CONFIG_PARSE_FAILED: u64 = 0x434f_4e46_5041_5253;
+const CONFIG_PARSE_FAILED: xlfn::error::DiagnosticId =
+    xlfn::error::DiagnosticId::from_ascii8(*b"CONFPARS");
 ```
 
 Recommended practice:

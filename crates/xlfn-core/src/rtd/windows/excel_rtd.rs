@@ -100,7 +100,7 @@ pub(crate) fn observe(
 
     if returned != token {
         return Err(XllError::Internal {
-            diagnostic_id: 0x5254_4448_414e_444c,
+            diagnostic_id: crate::DiagnosticId::RTD_HANDLE,
         });
     }
 

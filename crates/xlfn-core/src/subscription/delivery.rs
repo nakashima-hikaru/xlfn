@@ -124,7 +124,7 @@ impl RefreshState {
     pub(crate) fn ensure_notification_ticket(&self) -> XllResult<()> {
         let ticket = self.next_notification_ticket;
         ticket.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5449_434b_4f56_464c,
+            diagnostic_id: crate::DiagnosticId::TICKET_OVERFLOW,
         })?;
         Ok(())
     }

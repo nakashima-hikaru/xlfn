@@ -40,15 +40,16 @@ bumpalo = "3.20.3"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.6", features = ["derive"] }
 constant_time_eq = "0.5.0"
+crossbeam-utils = "0.8.22"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 fs-err = "3.3.1"
-futures-util = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 inventory = "0.3.24"
 libc = "0.2.189"
 loom = "0.7.2"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
-object = { version = "0.40.0", default-features = false, features = ["pe", "read", "std"] }
+object = { version = "0.40.0", default-features = false, features = ["pe", "read_core", "std"] }
 parking_lot = "0.12.5"
 proc-macro-crate = "3.5.0"
 proc-macro2 = "1.0.107"
@@ -59,14 +60,14 @@ scopeguard = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_path_to_error = "0.1.20"
-sha2 = "0.11.0"
+sha2 = { version = "0.11.0", default-features = false }
 smallvec = "1.15.2"
 shuttle = "0.9.1"
 static_assertions = "1.1.0"
 syn = { version = "3.0.3", features = ["full"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-tracing = "0.1.44"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 trybuild = "1.0.120"
 windows-bindgen = "=0.66.0"
 windows-link = "=0.2.1"

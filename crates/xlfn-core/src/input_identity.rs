@@ -1,15 +1,12 @@
-use crate::{DomainErrorCode, ExcelParameter, InputError, XllError, XllResult};
+use crate::{InputError, XllError, XllResult};
 
-const MAX_INPUT_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const ARGUMENT_DOMAIN: &[u8] = b"xlfn-input-argument-v5\0";
-pub(crate) const ROOT_DOMAIN: &[u8] = b"xlfn-input-fingerprint-v5\0";
-// Part of the v5 wire schema. Changing this value requires v6.
 const INLINE_ARGUMENT_BYTES: usize = 128;
-pub(crate) const INLINE_ARGUMENT_MODE: u8 = 0;
-pub(crate) const HASHED_ARGUMENT_MODE: u8 = 1;
-const ROOT_PREFIX_BYTES: usize = 8 + ROOT_DOMAIN.len() + 8;
 
-/// The fixed-size semantic identity of one converted Excel argument list.
+/// Runtime-local semantic identity of one UDF argument list.
+///
+/// This value is meaningful only together with the fixed UDF signature
+/// identified by [`FormulaRevisionKey::udf_id`](crate::handle::FormulaRevisionKey).
+/// It is not a stable, serialized, or cross-version identifier.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct InputFingerprint([u8; 32]);
@@ -24,13 +21,17 @@ impl InputFingerprint {
     }
 }
 
+#[repr(u8)]
+enum ArgumentEncoding {
+    Inline = 0,
+    Hashed = 1,
+}
+
 /// Encodes the semantic identity of one converted Excel argument.
 ///
 /// Implementations of [`ExcelParameter`] encode every value that is observable
-/// through the Rust parameter type. The trait's associated domain is written
-/// by [`InputFingerprintBuilder`], so an implementation cannot accidentally
-/// omit its top-level type separator. Small arguments are kept inline and
-/// large arguments promote to a digest without changing the encoded bytes.
+/// through the Rust parameter type. Small arguments are kept inline and large
+/// arguments promote to a digest without changing the encoded bytes.
 #[allow(
     clippy::large_enum_variant,
     reason = "keep the inline path small while retaining a stack hasher and staging buffer for large arguments"
@@ -57,27 +58,20 @@ enum ArgumentIdentity {
 
 pub struct InputIdentityEncoder {
     sink: ArgumentSink,
-    bytes: usize,
     error: Option<XllError>,
+    argument: &'static str,
 }
 
 impl InputIdentityEncoder {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(argument: &'static str) -> Self {
         Self {
             sink: ArgumentSink::Inline {
                 bytes: [0; INLINE_ARGUMENT_BYTES],
                 len: 0,
             },
-            bytes: 0,
             error: None,
+            argument,
         }
-    }
-
-    /// Adds a length-prefixed nested stable domain separator for a semantic
-    /// type.
-    pub fn domain(&mut self, domain: &[u8]) {
-        self.u64(domain.len() as u64);
-        self.write(domain);
     }
 
     /// Adds a caller-defined one-byte variant tag.
@@ -125,28 +119,6 @@ impl InputIdentityEncoder {
         if self.error.is_some() {
             return;
         }
-
-        let actual = match self.bytes.checked_add(bytes.len()) {
-            Some(actual) => actual,
-            None => {
-                self.error = Some(XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                });
-                return;
-            }
-        };
-        if actual > MAX_INPUT_IDENTITY_BYTES {
-            self.error = Some(XllError::input(
-                "input_identity",
-                InputError::TooLarge {
-                    limit: MAX_INPUT_IDENTITY_BYTES,
-                    actual,
-                },
-            ));
-            return;
-        }
-
-        self.bytes = actual;
 
         let needs_promotion = match &self.sink {
             ArgumentSink::Inline { len, .. } => len
@@ -236,102 +208,70 @@ impl InputIdentityEncoder {
         }
     }
 
+    pub(crate) const fn argument(&self) -> &'static str {
+        self.argument
+    }
+
     pub(crate) fn fail(&mut self, error: XllError) {
+        let error = match error {
+            XllError::Input { reason, .. } => XllError::Input {
+                argument: self.argument,
+                reason,
+            },
+            other => other,
+        };
         if self.error.is_none() {
             self.error = Some(error);
         }
     }
 
-    pub(crate) const fn bytes_written(&self) -> usize {
-        self.bytes
+    pub(crate) fn fail_input(&mut self, reason: InputError) {
+        self.fail(XllError::input(self.argument, reason));
     }
 }
 
-/// Builds one input fingerprint without allocating a collection of
-/// per-argument digests. The argument count is known by the generated wrapper,
-/// so the root hash can be initialized with its final framing immediately.
+impl ArgumentIdentity {
+    fn update_root(self, root: &mut blake3::Hasher) {
+        match self {
+            Self::Inline { bytes, len } => {
+                root.update(&[ArgumentEncoding::Inline as u8]);
+                root.update(&(len as u64).to_le_bytes());
+                root.update(&bytes[..len]);
+            }
+            Self::Hashed(digest) => {
+                root.update(&[ArgumentEncoding::Hashed as u8]);
+                root.update(&digest);
+            }
+        }
+    }
+}
+
+/// Builds one runtime-local input fingerprint.
 pub(crate) struct InputFingerprintBuilder {
     root: blake3::Hasher,
-    expected_arguments: usize,
-    recorded_arguments: usize,
-    bytes: usize,
 }
 
 impl InputFingerprintBuilder {
-    pub(crate) fn new(expected_arguments: usize) -> Self {
-        let mut root = blake3::Hasher::new();
-        let mut prefix = [0_u8; ROOT_PREFIX_BYTES];
-        prefix[..8].copy_from_slice(&(ROOT_DOMAIN.len() as u64).to_le_bytes());
-        prefix[8..8 + ROOT_DOMAIN.len()].copy_from_slice(ROOT_DOMAIN);
-        prefix[8 + ROOT_DOMAIN.len()..].copy_from_slice(&(expected_arguments as u64).to_le_bytes());
-        root.update(&prefix);
+    pub(crate) fn new() -> Self {
         Self {
-            root,
-            expected_arguments,
-            recorded_arguments: 0,
-            bytes: 0,
+            root: blake3::Hasher::new(),
         }
     }
 
-    pub(crate) fn with_argument<'call, T, R, F>(&mut self, encode: F) -> XllResult<R>
-    where
-        T: ExcelParameter<'call>,
-        F: FnOnce(&mut InputIdentityEncoder) -> XllResult<R>,
-    {
-        if self.recorded_arguments >= self.expected_arguments {
-            return Err(XllError::input(
-                "input_identity",
-                InputError::Malformed("too many arguments recorded"),
-            ));
-        }
-
-        let mut encoder = InputIdentityEncoder::new();
-        encoder.domain(ARGUMENT_DOMAIN);
-        encoder.domain(T::IDENTITY_DOMAIN);
+    pub(crate) fn with_argument<R>(
+        &mut self,
+        argument: &'static str,
+        encode: impl FnOnce(&mut InputIdentityEncoder) -> XllResult<R>,
+    ) -> XllResult<R> {
+        let mut encoder = InputIdentityEncoder::new(argument);
         let value = encode(&mut encoder)?;
-        let encoded_bytes = encoder.bytes_written();
         let identity = encoder.finish()?;
-        let actual = self
-            .bytes
-            .checked_add(encoded_bytes)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
-        if actual > MAX_INPUT_IDENTITY_BYTES {
-            return Err(XllError::input(
-                "input_identity",
-                InputError::TooLarge {
-                    limit: MAX_INPUT_IDENTITY_BYTES,
-                    actual,
-                },
-            ));
-        }
-        self.bytes = actual;
-        match identity {
-            ArgumentIdentity::Inline { bytes, len } => {
-                self.root.update(&[INLINE_ARGUMENT_MODE]);
-                self.root.update(&(len as u64).to_le_bytes());
-                self.root.update(&bytes[..len]);
-            }
-            ArgumentIdentity::Hashed(digest) => {
-                self.root.update(&[HASHED_ARGUMENT_MODE]);
-                self.root.update(&digest);
-            }
-        }
-        self.recorded_arguments += 1;
+        identity.update_root(&mut self.root);
         Ok(value)
     }
 
-    pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
-        if self.recorded_arguments != self.expected_arguments {
-            return Err(XllError::input(
-                "input_identity",
-                InputError::Malformed("argument count mismatch"),
-            ));
-        }
-        Ok(InputFingerprint::from_bytes(
-            *self.root.finalize().as_bytes(),
-        ))
+    pub(crate) fn finish(self) -> InputFingerprint {
+        InputFingerprint::from_bytes(*self.root.finalize().as_bytes())
     }
 }
 
@@ -344,8 +284,6 @@ mod tests {
     struct Pair(u32, u32);
 
     impl<'call> ExcelParameter<'call> for Pair {
-        const IDENTITY_DOMAIN: &'static [u8] = b"test.pair.v1";
-
         fn from_excel(
             _value: crate::XlValueRef<'call>,
             _argument: &'static str,
@@ -367,25 +305,20 @@ mod tests {
     where
         T: for<'call> ExcelParameter<'call>,
     {
-        let mut builder = InputFingerprintBuilder::new(values.len());
+        let mut builder = InputFingerprintBuilder::new();
         for value in values {
             builder
-                .with_argument::<T, (), _>(|encoder| {
+                .with_argument("arg", |encoder| {
                     value.encode_identity(encoder);
                     Ok(())
                 })
                 .unwrap();
         }
-        builder.finish().unwrap()
+        builder.finish()
     }
 
     fn append_u64(bytes: &mut Vec<u8>, value: u64) {
         bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn append_domain(bytes: &mut Vec<u8>, domain: &[u8]) {
-        append_u64(bytes, domain.len() as u64);
-        bytes.extend_from_slice(domain);
     }
 
     fn append_string(bytes: &mut Vec<u8>, value: &str) {
@@ -393,25 +326,17 @@ mod tests {
         bytes.extend_from_slice(value.as_bytes());
     }
 
-    fn reference_fingerprint<F>(domain: &[u8], encode: F) -> InputFingerprint
-    where
-        F: FnOnce(&mut Vec<u8>),
-    {
-        let mut argument = Vec::new();
-        append_domain(&mut argument, ARGUMENT_DOMAIN);
-        append_domain(&mut argument, domain);
-        encode(&mut argument);
-
+    fn reference_fingerprint(arguments: &[&[u8]]) -> InputFingerprint {
         let mut root = blake3::Hasher::new();
-        append_domain_stream(&mut root, ROOT_DOMAIN);
-        append_u64_stream(&mut root, 1);
-        if argument.len() <= INLINE_ARGUMENT_BYTES {
-            root.update(&[INLINE_ARGUMENT_MODE]);
-            append_u64_stream(&mut root, argument.len() as u64);
-            root.update(&argument);
-        } else {
-            root.update(&[HASHED_ARGUMENT_MODE]);
-            root.update(blake3::hash(&argument).as_bytes());
+        for argument in arguments {
+            if argument.len() <= INLINE_ARGUMENT_BYTES {
+                root.update(&[ArgumentEncoding::Inline as u8]);
+                append_u64_stream(&mut root, argument.len() as u64);
+                root.update(argument);
+            } else {
+                root.update(&[ArgumentEncoding::Hashed as u8]);
+                root.update(blake3::hash(argument).as_bytes());
+            }
         }
         InputFingerprint::from_bytes(*root.finalize().as_bytes())
     }
@@ -420,114 +345,101 @@ mod tests {
         hasher.update(&value.to_le_bytes());
     }
 
-    fn append_domain_stream(hasher: &mut blake3::Hasher, domain: &[u8]) {
-        append_u64_stream(hasher, domain.len() as u64);
-        hasher.update(domain);
-    }
-
     #[test]
-    fn v5_fingerprint_matches_reference_for_builtin_values() {
+    fn fingerprint_matches_reference_for_builtin_values() {
         let number = 42.0_f64;
+        let mut number_payload = Vec::new();
+        append_u64(&mut number_payload, number.to_bits());
         assert_eq!(
             fingerprint(&[number]),
-            reference_fingerprint(f64::IDENTITY_DOMAIN, |bytes| append_u64(
-                bytes,
-                number.to_bits()
-            )),
+            reference_fingerprint(&[number_payload.as_slice()]),
         );
 
         let string = String::from("short");
+        let mut string_payload = Vec::new();
+        append_string(&mut string_payload, &string);
         assert_eq!(
             fingerprint(std::slice::from_ref(&string)),
-            reference_fingerprint(String::IDENTITY_DOMAIN, |bytes| append_string(
-                bytes, &string
-            )),
+            reference_fingerprint(&[string_payload.as_slice()]),
         );
 
         let optional = Some(42.0_f64);
+        let mut optional_payload = vec![1];
+        append_u64(&mut optional_payload, number.to_bits());
         assert_eq!(
             fingerprint(std::slice::from_ref(&optional)),
-            reference_fingerprint(<Option<f64>>::IDENTITY_DOMAIN, |bytes| {
-                append_domain(bytes, f64::IDENTITY_DOMAIN);
-                bytes.push(1);
-                append_u64(bytes, number.to_bits());
-            }),
+            reference_fingerprint(&[optional_payload.as_slice()]),
         );
 
         let optional_excel = OptionalExcelValue::Value(number);
+        let mut optional_excel_payload = vec![2];
+        append_u64(&mut optional_excel_payload, number.to_bits());
         assert_eq!(
             fingerprint(std::slice::from_ref(&optional_excel)),
-            reference_fingerprint(<OptionalExcelValue<f64>>::IDENTITY_DOMAIN, |bytes| {
-                append_domain(bytes, f64::IDENTITY_DOMAIN);
-                bytes.push(2);
-                append_u64(bytes, number.to_bits());
-            }),
+            reference_fingerprint(&[optional_excel_payload.as_slice()]),
         );
 
         let values = vec![number, 7.0];
+        let mut values_payload = Vec::new();
+        append_u64(&mut values_payload, values.len() as u64);
+        for value in &values {
+            append_u64(&mut values_payload, value.to_bits());
+        }
         assert_eq!(
             fingerprint(std::slice::from_ref(&values)),
-            reference_fingerprint(<Vec<f64>>::IDENTITY_DOMAIN, |bytes| {
-                append_domain(bytes, f64::IDENTITY_DOMAIN);
-                append_u64(bytes, values.len() as u64);
-                for value in &values {
-                    append_u64(bytes, value.to_bits());
-                }
-            }),
+            reference_fingerprint(&[values_payload.as_slice()]),
         );
 
         let matrix = Matrix::new(1, 2, values.clone()).unwrap();
+        let mut matrix_payload = Vec::new();
+        append_u64(&mut matrix_payload, matrix.rows() as u64);
+        append_u64(&mut matrix_payload, matrix.columns() as u64);
+        for value in matrix.as_slice() {
+            append_u64(&mut matrix_payload, value.to_bits());
+        }
         assert_eq!(
             fingerprint(std::slice::from_ref(&matrix)),
-            reference_fingerprint(<Matrix<f64>>::IDENTITY_DOMAIN, |bytes| {
-                append_domain(bytes, f64::IDENTITY_DOMAIN);
-                append_u64(bytes, matrix.rows() as u64);
-                append_u64(bytes, matrix.columns() as u64);
-                for value in matrix.as_slice() {
-                    append_u64(bytes, value.to_bits());
-                }
-            }),
+            reference_fingerprint(&[matrix_payload.as_slice()]),
         );
 
         let owned = OwnedExcelValue::Number(number);
+        let mut owned_payload = vec![0];
+        append_u64(&mut owned_payload, number.to_bits());
         assert_eq!(
             fingerprint(std::slice::from_ref(&owned)),
-            reference_fingerprint(OwnedExcelValue::IDENTITY_DOMAIN, |bytes| {
-                bytes.push(0);
-                append_u64(bytes, number.to_bits());
-            }),
+            reference_fingerprint(&[owned_payload.as_slice()]),
         );
     }
 
     #[test]
-    fn v5_fingerprint_matches_reference_for_custom_parameters() {
+    fn fingerprint_matches_reference_for_custom_parameters() {
         let pair = Pair(7, 11);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&pair.0.to_le_bytes());
+        payload.extend_from_slice(&pair.1.to_le_bytes());
         assert_eq!(
             fingerprint(std::slice::from_ref(&pair)),
-            reference_fingerprint(Pair::IDENTITY_DOMAIN, |bytes| {
-                bytes.extend_from_slice(&pair.0.to_le_bytes());
-                bytes.extend_from_slice(&pair.1.to_le_bytes());
-            }),
+            reference_fingerprint(&[payload.as_slice()]),
         );
     }
 
     #[test]
-    fn v5_inline_argument_boundary_is_128_bytes() {
-        let mut encoder_127 = InputIdentityEncoder::new();
+    fn inline_argument_boundary_is_128_bytes() {
+        let mut encoder_127 = InputIdentityEncoder::new("arg");
         encoder_127.write(&[0; 127]);
         assert!(matches!(
             encoder_127.finish().unwrap(),
             ArgumentIdentity::Inline { len: 127, .. }
         ));
 
-        let mut encoder_128 = InputIdentityEncoder::new();
+        let mut encoder_128 = InputIdentityEncoder::new("arg");
         encoder_128.write(&[0; 128]);
         assert!(matches!(
             encoder_128.finish().unwrap(),
             ArgumentIdentity::Inline { len: 128, .. }
         ));
 
-        let mut encoder_129 = InputIdentityEncoder::new();
+        let mut encoder_129 = InputIdentityEncoder::new("arg");
         encoder_129.write(&[0; 129]);
         assert!(matches!(
             encoder_129.finish().unwrap(),
@@ -536,17 +448,16 @@ mod tests {
     }
 
     #[test]
-    fn large_arguments_use_the_hashed_v5_framing() {
+    fn large_arguments_use_hashed_framing() {
         let values: Vec<f64> = (0..32).map(|value| value as f64).collect();
+        let mut payload = Vec::new();
+        append_u64(&mut payload, values.len() as u64);
+        for value in &values {
+            append_u64(&mut payload, value.to_bits());
+        }
         assert_eq!(
             fingerprint(std::slice::from_ref(&values)),
-            reference_fingerprint(<Vec<f64>>::IDENTITY_DOMAIN, |bytes| {
-                append_domain(bytes, f64::IDENTITY_DOMAIN);
-                append_u64(bytes, values.len() as u64);
-                for value in &values {
-                    append_u64(bytes, value.to_bits());
-                }
-            }),
+            reference_fingerprint(&[payload.as_slice()]),
         );
     }
 
@@ -562,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_presence_and_matrix_shape_are_semantic_identity() {
+    fn optional_states_and_matrix_shape_remain_semantic() {
         assert_ne!(
             fingerprint(&[OptionalExcelValue::<f64>::Missing]),
             fingerprint(&[OptionalExcelValue::<f64>::Blank]),
@@ -574,72 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn container_element_domain_is_encoded_once() {
-        let values = vec![1.0_f64, 2.0, 3.0];
-        let actual = fingerprint(std::slice::from_ref(&values));
-        let expected = reference_fingerprint(<Vec<f64>>::IDENTITY_DOMAIN, |bytes| {
-            append_domain(bytes, f64::IDENTITY_DOMAIN);
-            append_u64(bytes, values.len() as u64);
-            for value in &values {
-                append_u64(bytes, value.to_bits());
-            }
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn domain_framing_separates_namespace_from_payload() {
-        fn digest(domain: &[u8], payload: &[u8]) -> InputFingerprint {
-            reference_fingerprint(domain, |bytes| {
-                append_u64(bytes, payload.len() as u64);
-                bytes.extend_from_slice(payload);
-            })
-        }
-
-        assert_ne!(digest(b"ab", b"c"), digest(b"a", b"bc"));
-    }
-
-    #[test]
-    fn too_large_identity_is_rejected() {
-        let mut builder = InputFingerprintBuilder::new(1);
-        let result = builder.with_argument::<Pair, _, _>(|encoder| {
-            encoder.bytes(&vec![0_u8; MAX_INPUT_IDENTITY_BYTES]);
-            Ok(Pair(1, 2))
-        });
-        assert!(matches!(result, Err(XllError::Input { .. })));
-    }
-
-    #[test]
-    fn finish_rejects_an_incomplete_argument_stream() {
-        let builder = InputFingerprintBuilder::new(1);
-        assert!(matches!(
-            builder.finish(),
-            Err(XllError::Input {
-                reason: InputError::Malformed("argument count mismatch"),
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn record_rejects_more_arguments_than_the_wrapper_declared() {
-        let mut builder = InputFingerprintBuilder::new(1);
-        builder
-            .with_argument::<Pair, _, _>(|encoder| {
-                Pair(1, 2).encode_identity(encoder);
-                Ok(Pair(1, 2))
-            })
-            .unwrap();
-        assert!(matches!(
-            builder.with_argument::<Pair, _, _>(|encoder| {
-                Pair(3, 4).encode_identity(encoder);
-                Ok(Pair(3, 4))
-            }),
-            Err(XllError::Input {
-                reason: InputError::Malformed("too many arguments recorded"),
-                ..
-            })
-        ));
+    fn owned_excel_value_variants_remain_distinct() {
+        assert_ne!(
+            fingerprint(&[OwnedExcelValue::Number(1.0)]),
+            fingerprint(&[OwnedExcelValue::Integer(1)]),
+        );
     }
 }

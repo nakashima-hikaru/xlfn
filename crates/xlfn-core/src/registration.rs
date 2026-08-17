@@ -70,7 +70,7 @@ impl RegistrationSignature {
             || self.arguments.contains(&ArgumentAbi::RawReference) && !self.flags.macro_sheet
         {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5245_4753_4947_4E41,
+                diagnostic_id: crate::DiagnosticId::REGISTRATION_SIGNATURE,
             });
         }
         let mut text = String::with_capacity(self.arguments.len() + 4);
@@ -306,7 +306,7 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
             || descriptor.signature.encode().is_err()
         {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5245_4749_5354_5259,
+                diagnostic_id: crate::DiagnosticId::REGISTRY,
             });
         }
     }
@@ -378,7 +378,7 @@ fn validate_excel_string(s: &str) -> XllResult<()> {
     let utf16_len = s.encode_utf16().count();
     if utf16_len > crate::utf16::EXCEL_STRING_LIMIT || s.contains('\0') {
         Err(XllError::Internal {
-            diagnostic_id: 0x5354_5249_4e47_4c45,
+            diagnostic_id: crate::DiagnosticId::STRING_LENGTH,
         })
     } else {
         Ok(())
@@ -412,8 +412,6 @@ struct ModuleName {
 }
 
 impl<'call> ExcelParameter<'call> for ModuleName {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.internal.module-name.v1";
-
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -2497,7 +2495,9 @@ mod tests {
         let result = registration_release_failure(
             &mut callbacks,
             registration,
-            XllError::Internal { diagnostic_id: 1 },
+            XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::from_u64(1),
+            },
             |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());
                 outcome.failed.push((

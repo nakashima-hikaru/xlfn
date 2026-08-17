@@ -51,7 +51,7 @@ impl SourceIdentityRegistry {
     pub(crate) fn allocate_id(&mut self) -> XllResult<u64> {
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: 0x5254_4453_4944_4f56,
+            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
         })?;
         Ok(id)
     }
@@ -132,7 +132,7 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
             current.checked_add(1)
         })
         .map_err(|_| XllError::Internal {
-            diagnostic_id: 0x5254_4452_5449_444f,
+            diagnostic_id: crate::DiagnosticId::RTD_RT_ID_OVERFLOW,
         })
 }
 
@@ -154,7 +154,7 @@ impl SubscriptionIdentityIndex {
     ) -> XllResult<()> {
         if self.key_by_identity.contains_key(&identity) || self.identity_by_key.contains_key(&key) {
             return Err(XllError::Internal {
-                diagnostic_id: 0x5254_4449_4458_4455,
+                diagnostic_id: crate::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
         }
 
