@@ -1,8 +1,9 @@
 use super::*;
+use crate::ExcelParameter;
+use crate::input_identity::InputFingerprint;
 use crate::input_identity::{
     ARGUMENT_DOMAIN, INLINE_ARGUMENT_MODE, InputFingerprintBuilder, ROOT_DOMAIN,
 };
-use crate::{ExcelParameter, InputFingerprint};
 
 fn format_formula_revision_key(
     caller: FormulaCaller,

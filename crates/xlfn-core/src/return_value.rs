@@ -1,5 +1,5 @@
-use crate::InputFingerprint;
 use crate::host_callback::HostCallbackSession;
+use crate::input_identity::InputFingerprint;
 use crate::return_storage::ReturnStorage;
 use crate::{
     CallId, CallMetadata, CallOutcome, ExcelErrorValue, IntoExcelValue, OwnedExcelValue, Runtime,
@@ -384,13 +384,13 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     pub fn for_call<S>(
         runtime: &'call Runtime<S>,
         udf_id: &'static str,
-        inputs: Option<InputFingerprint>,
+        inputs: Option<[u8; 32]>,
         scope: &'scope crate::CallScope<'scope>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
             udf_id: Some(udf_id),
-            inputs,
+            inputs: inputs.map(InputFingerprint::from_bytes),
             callbacks: Some(scope.callbacks()),
             lifetime: PhantomData,
         }

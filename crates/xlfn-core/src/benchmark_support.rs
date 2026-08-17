@@ -10,10 +10,12 @@
 #[cfg(feature = "async")]
 use crate::CancellationGuarantee;
 #[cfg(feature = "async")]
+use crate::XllError;
+#[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationSource;
-use crate::{ExcelParameter, InputError, InputIdentityEncoder, Matrix, XllError, XllResult};
+use crate::{ExcelParameter, Matrix};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -297,7 +299,7 @@ use crate::handle::{
     resolve_formula_caller,
 };
 use crate::host_callback::HostCallbackSession;
-use crate::{InputFingerprint, OwnedExcelValue};
+use crate::input_identity::InputFingerprint;
 
 struct BenchHandleObject {
     _payload: u64,
@@ -422,21 +424,11 @@ const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
 pub enum FormulaRevisionBenchCase {
     ScalarNumber,
     ShortString,
-    Utf16String32KiB,
-    NumericCells10K,
     NumericCells100K,
 }
 
 impl FormulaRevisionBenchCase {
-    pub const ALL: [Self; 5] = [
-        Self::ScalarNumber,
-        Self::ShortString,
-        Self::Utf16String32KiB,
-        Self::NumericCells10K,
-        Self::NumericCells100K,
-    ];
-
-    pub const END_TO_END: [Self; 3] = [
+    pub const ALL: [Self; 3] = [
         Self::ScalarNumber,
         Self::ShortString,
         Self::NumericCells100K,
@@ -446,65 +438,93 @@ impl FormulaRevisionBenchCase {
         match self {
             Self::ScalarNumber => "scalar_number",
             Self::ShortString => "short_string",
-            Self::Utf16String32KiB => "utf16_string_32kib",
-            Self::NumericCells10K => "numeric_cells_10k",
             Self::NumericCells100K => "numeric_cells_100k",
         }
     }
 }
 
-/// Converted semantic arguments whose identity is measured before the timed
-/// handle lookup.
-struct PreparedFormulaArguments {
-    value: OwnedExcelValue,
+#[derive(Clone, Copy, Debug)]
+pub enum InputIdentityBenchCase {
+    F64,
+    StringShort,
+    MatrixF64_100K,
+}
+
+impl InputIdentityBenchCase {
+    pub const ALL: [Self; 3] = [Self::F64, Self::StringShort, Self::MatrixF64_100K];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::F64 => "f64",
+            Self::StringShort => "string_short",
+            Self::MatrixF64_100K => "matrix_f64_100k",
+        }
+    }
+}
+
+/// Prepared typed semantic arguments shared by identity and formula-revision
+/// benchmarks.
+enum PreparedFormulaArguments {
+    F64(f64),
+    String(String),
+    MatrixF64(Matrix<f64>),
 }
 
 impl PreparedFormulaArguments {
-    fn new(case: FormulaRevisionBenchCase) -> Self {
-        let value = match case {
-            FormulaRevisionBenchCase::ScalarNumber => OwnedExcelValue::Number(42.0),
-            FormulaRevisionBenchCase::ShortString => OwnedExcelValue::String("short".to_owned()),
-            FormulaRevisionBenchCase::Utf16String32KiB => OwnedExcelValue::String(
-                (0..16 * 1024)
-                    .map(|index| char::from(b'a' + (index % 26) as u8))
-                    .collect(),
-            ),
-            FormulaRevisionBenchCase::NumericCells10K => Self::numeric_array(10_000),
-            FormulaRevisionBenchCase::NumericCells100K => Self::numeric_array(100_000),
-        };
-
-        Self { value }
+    fn for_formula_revision(case: FormulaRevisionBenchCase) -> Self {
+        match case {
+            FormulaRevisionBenchCase::ScalarNumber => Self::F64(42.0),
+            FormulaRevisionBenchCase::ShortString => Self::String("short".to_owned()),
+            FormulaRevisionBenchCase::NumericCells100K => Self::matrix_f64(100_000),
+        }
     }
 
-    fn numeric_array(cells: usize) -> OwnedExcelValue {
+    fn for_input_identity(case: InputIdentityBenchCase) -> Self {
+        match case {
+            InputIdentityBenchCase::F64 => Self::F64(42.0),
+            InputIdentityBenchCase::StringShort => Self::String("short".to_owned()),
+            InputIdentityBenchCase::MatrixF64_100K => Self::matrix_f64(100_000),
+        }
+    }
+
+    fn matrix_f64(cells: usize) -> Self {
         let columns = cells.min(10_000);
         let rows = cells.div_ceil(columns);
-        OwnedExcelValue::Matrix(
-            crate::Matrix::new(
+        Self::MatrixF64(
+            Matrix::new(
                 rows,
                 columns,
-                (0..cells)
-                    .map(|index| OwnedExcelValue::Number(index as f64))
-                    .collect(),
+                (0..cells).map(|index| index as f64).collect(),
             )
             .expect("benchmark matrix dimensions must be valid"),
         )
     }
 
-    pub fn fingerprint(&self) -> [u8; 32] {
-        let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
-        builder
-            .with_argument::<OwnedExcelValue, _, _>(|encoder| {
-                self.value.encode_identity(encoder);
-                Ok(())
-            })
-            .expect("benchmark semantic argument must fingerprint successfully");
-        builder
-            .finish()
-            .expect("benchmark semantic argument fingerprint must finish")
-            .as_bytes()
-            .to_owned()
+    fn fingerprint(&self) -> [u8; 32] {
+        match self {
+            Self::F64(value) => fingerprint_argument(value),
+            Self::String(value) => fingerprint_argument(value),
+            Self::MatrixF64(value) => fingerprint_argument(value),
+        }
     }
+}
+
+fn fingerprint_argument<T>(value: &T) -> [u8; 32]
+where
+    T: for<'call> ExcelParameter<'call>,
+{
+    let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
+    builder
+        .with_argument::<T, _, _>(|encoder| {
+            value.encode_identity(encoder);
+            Ok(())
+        })
+        .expect("benchmark semantic argument must fingerprint successfully");
+    builder
+        .finish()
+        .expect("benchmark semantic argument fingerprint must finish")
+        .as_bytes()
+        .to_owned()
 }
 
 pub struct InputIdentityBenchmark {
@@ -512,127 +532,14 @@ pub struct InputIdentityBenchmark {
 }
 
 impl InputIdentityBenchmark {
-    pub fn new(case: FormulaRevisionBenchCase) -> Self {
+    pub fn new(case: InputIdentityBenchCase) -> Self {
         Self {
-            arguments: PreparedFormulaArguments::new(case),
+            arguments: PreparedFormulaArguments::for_input_identity(case),
         }
     }
 
     pub fn run(&self) -> [u8; 32] {
         self.arguments.fingerprint()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Typed semantic identity benchmarks
-// ---------------------------------------------------------------------------
-
-/// A benchmark-only stand-in for the payload encoded by a typed handle.
-///
-/// The production `Handle<'call, T>` carries the same object identity in its
-/// `ExcelParameter` implementation. Keeping the fixture as a small owned
-/// value lets this benchmark measure identity encoding alone, without adding
-/// call-scope or registry work to the result.
-struct BenchmarkHandleIdentity(u64);
-
-impl<'call> ExcelParameter<'call> for BenchmarkHandleIdentity {
-    const IDENTITY_DOMAIN: &'static [u8] = b"xlfn.input.handle-object.v1";
-
-    fn from_excel(
-        _value: crate::XlValueRef<'call>,
-        _argument: &'static str,
-        _context: &crate::CallContext<'call>,
-    ) -> XllResult<Self> {
-        Err(XllError::input(
-            "benchmark",
-            InputError::Malformed("benchmark-only parameter"),
-        ))
-    }
-
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.u64(self.0);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum TypedInputIdentityBenchCase {
-    F64,
-    StringShort,
-    Handle,
-    MatrixF64_100K,
-}
-
-impl TypedInputIdentityBenchCase {
-    pub const ALL: [Self; 4] = [
-        Self::F64,
-        Self::StringShort,
-        Self::Handle,
-        Self::MatrixF64_100K,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::F64 => "f64",
-            Self::StringShort => "string_short",
-            Self::Handle => "handle",
-            Self::MatrixF64_100K => "matrix_f64_100k",
-        }
-    }
-}
-
-pub struct TypedInputIdentityBenchmark {
-    f64_value: f64,
-    short_string: String,
-    handle: BenchmarkHandleIdentity,
-    matrix_f64_100k: Matrix<f64>,
-}
-
-impl Default for TypedInputIdentityBenchmark {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TypedInputIdentityBenchmark {
-    pub fn new() -> Self {
-        Self {
-            f64_value: 42.0,
-            short_string: "short".to_owned(),
-            handle: BenchmarkHandleIdentity(42),
-            matrix_f64_100k: Matrix::new(
-                10,
-                10_000,
-                (0..100_000).map(|index| index as f64).collect(),
-            )
-            .expect("typed identity benchmark matrix dimensions must be valid"),
-        }
-    }
-
-    fn fingerprint<T>(&self, value: &T) -> [u8; 32]
-    where
-        T: for<'call> ExcelParameter<'call>,
-    {
-        let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
-        builder
-            .with_argument::<T, _, _>(|encoder| {
-                value.encode_identity(encoder);
-                Ok(())
-            })
-            .expect("typed semantic argument must fingerprint successfully");
-        builder
-            .finish()
-            .expect("typed semantic argument fingerprint must finish")
-            .as_bytes()
-            .to_owned()
-    }
-
-    pub fn run(&self, case: TypedInputIdentityBenchCase) -> [u8; 32] {
-        match case {
-            TypedInputIdentityBenchCase::F64 => self.fingerprint(&self.f64_value),
-            TypedInputIdentityBenchCase::StringShort => self.fingerprint(&self.short_string),
-            TypedInputIdentityBenchCase::Handle => self.fingerprint(&self.handle),
-            TypedInputIdentityBenchCase::MatrixF64_100K => self.fingerprint(&self.matrix_f64_100k),
-        }
     }
 }
 
@@ -645,7 +552,7 @@ pub struct FormulaRevisionBenchmark {
 
 impl FormulaRevisionBenchmark {
     pub fn new(case: FormulaRevisionBenchCase) -> Self {
-        let arguments = PreparedFormulaArguments::new(case);
+        let arguments = PreparedFormulaArguments::for_formula_revision(case);
         let caller = FormulaCaller {
             sheet_id: 7,
             row: 42,

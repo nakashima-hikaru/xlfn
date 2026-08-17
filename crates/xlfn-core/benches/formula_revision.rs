@@ -4,7 +4,7 @@ use xlfn_core::benchmark_support::{FormulaRevisionBenchCase, FormulaRevisionBenc
 fn formula_revision_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("formula_revision/warm_hit");
 
-    for case in FormulaRevisionBenchCase::END_TO_END {
+    for case in FormulaRevisionBenchCase::ALL {
         let benchmark = FormulaRevisionBenchmark::new(case);
         group.bench_function(BenchmarkId::from_parameter(case.name()), |b| {
             b.iter(|| std::hint::black_box(benchmark.run()));

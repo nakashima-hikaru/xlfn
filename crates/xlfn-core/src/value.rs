@@ -1,5 +1,5 @@
 use crate::host_callback::HostCallbackSession;
-use crate::input_identity::{InputFingerprint, InputFingerprintBuilder, InputIdentityEncoder};
+use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
 use crate::return_storage::ReturnStorage;
 use crate::{
     DomainErrorCode, ExcelError, InputError, IntoXllError, ReturnContext, Shape, XllError,
@@ -617,8 +617,10 @@ impl<'call> ArgumentContext<'call> {
     }
 
     #[doc(hidden)]
-    pub fn finish(self) -> XllResult<Option<InputFingerprint>> {
-        self.inputs.map(InputFingerprintBuilder::finish).transpose()
+    pub fn finish(self) -> XllResult<Option<[u8; 32]>> {
+        self.inputs
+            .map(|inputs| inputs.finish().map(|fingerprint| *fingerprint.as_bytes()))
+            .transpose()
     }
 }
 
@@ -2346,7 +2348,9 @@ mod tests {
         with_excel_call_scope(|scope| unsafe { argument_from_raw(scope, "arg", raw) })
     }
 
-    fn identity<'call, T: ExcelParameter<'call>>(value: &T) -> crate::InputFingerprint {
+    fn identity<'call, T: ExcelParameter<'call>>(
+        value: &T,
+    ) -> crate::input_identity::InputFingerprint {
         let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder
             .with_argument::<T, _, _>(|encoder| {

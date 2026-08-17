@@ -1,5 +1,5 @@
 use super::*;
-use crate::InputFingerprint;
+use crate::input_identity::InputFingerprint;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {
