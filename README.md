@@ -6,6 +6,10 @@
 [![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+[User Guide](https://nakashima-hikaru.github.io/xlfn/) ·
+[API Docs](https://docs.rs/xlfn) ·
+[crates.io](https://crates.io/crates/xlfn)
+
 **xlfn is a Rust framework for building native Microsoft Excel XLL add-ins.**
 
 Write worksheet functions as typed Rust functions. xlfn handles the Excel 12 / `XLOPER12` ABI, function registration, value conversion, runtime lifecycle, and XLL packaging.
@@ -15,10 +19,6 @@ Write worksheet functions as typed Rust functions. xlfn handles the Excel 12 / `
 - Typed synchronous, asynchronous, and streaming APIs
 - Typed handles and calculation state
 - Integrated XLL packaging and validation
-
-[User guide](https://nakashima-hikaru.github.io/xlfn/) ·
-[API docs](https://docs.rs/xlfn) ·
-[crates.io](https://crates.io/crates/xlfn)
 
 > [!NOTE]
 > xlfn is pre-1.0. Public APIs may change between minor releases.
