@@ -59,6 +59,11 @@ name = "formula_caller"
 harness = false
 required-features = ["bench-internals"]
 
+[[bench]]
+name = "argument_ingress"
+harness = false
+required-features = ["bench-internals"]
+
 [dependencies]
 arc-swap.workspace = true
 async-channel = { workspace = true, optional = true }

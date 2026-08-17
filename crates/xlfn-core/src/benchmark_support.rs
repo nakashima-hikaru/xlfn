@@ -301,8 +301,8 @@ use crate::handle::{
 use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
-struct BenchHandleObject {
-    _payload: u64,
+pub struct BenchHandleObject {
+    pub _payload: u64,
 }
 impl ExcelHandleObject for BenchHandleObject {}
 
@@ -938,5 +938,209 @@ impl Drop for HandleDistinctKeyBenchmark {
             let _ = worker.join();
         }
         cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+fn get_benchmark_runtime() -> &'static crate::Runtime<()> {
+    static RUNTIME: std::sync::OnceLock<crate::Runtime<()>> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(crate::Runtime::new)
+}
+
+/// Benchmark harness for measuring raw Excel argument ingress conversion costs
+/// with and without semantic identity fingerprinting.
+pub struct RawArgumentIngressBenchmark {
+    runtime: &'static crate::Runtime<()>,
+    handle_runtime: Option<Arc<HandleRuntime>>,
+    raw: xlfn_sys::XLOPER12,
+    _storage: Option<Box<dyn std::any::Any>>,
+}
+
+impl RawArgumentIngressBenchmark {
+    pub fn number(value: f64) -> Self {
+        Self {
+            runtime: get_benchmark_runtime(),
+            handle_runtime: None,
+            raw: xlfn_sys::XLOPER12::number(value),
+            _storage: None,
+        }
+    }
+
+    pub fn string(value: &str) -> Self {
+        let mut u16_chars: Vec<u16> = Vec::with_capacity(value.len() + 1);
+        u16_chars.push(value.len() as u16);
+        u16_chars.extend(value.encode_utf16());
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: u16_chars.as_ptr() as *mut u16,
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            handle_runtime: None,
+            raw,
+            _storage: Some(Box::new(u16_chars)),
+        }
+    }
+
+    pub fn number_matrix(rows: usize, columns: usize) -> Self {
+        let len = rows * columns;
+        let mut cells = (0..len)
+            .map(|i| xlfn_sys::XLOPER12::number(i as f64))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: rows as i32,
+                    columns: columns as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            handle_runtime: None,
+            raw,
+            _storage: Some(Box::new(cells)),
+        }
+    }
+
+    pub fn number_vec(len: usize) -> Self {
+        // Excel worksheet rows support up to 1,048,576 elements while columns support up to 16,384.
+        // We use an N x 1 column vector representation so 100k+ element 1D vectors fit within Excel dimensions.
+        Self::number_matrix(len, 1)
+    }
+
+    pub fn handle() -> Self {
+        let runtime = get_benchmark_runtime();
+        let handle_runtime = runtime
+            .handles()
+            .expect("benchmark handle runtime must initialize");
+        let key = benchmark_revision_key("BENCH.INGRESS.HANDLE", 1);
+        let token = handle_runtime
+            .prepare_observed(
+                key,
+                || Ok(BenchHandleObject { _payload: 42 }),
+                |_, _| Ok(()),
+            )
+            .expect("benchmark handle preparation must succeed")
+            .0;
+        let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
+        u16_chars.push(token.len() as u16);
+        u16_chars.extend(token.encode_utf16());
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: u16_chars.as_ptr() as *mut u16,
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        Self {
+            runtime,
+            handle_runtime: Some(handle_runtime),
+            raw,
+            _storage: Some(Box::new(u16_chars)),
+        }
+    }
+
+    pub fn run_plain<T>(&mut self)
+    where
+        T: for<'call> ExcelParameter<'call>,
+    {
+        crate::with_excel_call_scope(|scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<T>(
+                    &mut arguments,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark raw argument ingress must succeed");
+            std::hint::black_box(&value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call>,
+    {
+        crate::with_excel_call_scope(|scope| {
+            let mut arguments = crate::value::ArgumentContext::for_return::<
+                crate::HandleAlias<'static, BenchHandleObject>,
+                _,
+            >(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<T>(
+                    &mut arguments,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark raw argument ingress with identity must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+
+    pub fn run_handle_plain<T>(&mut self)
+    where
+        T: ExcelHandleObject,
+    {
+        crate::with_excel_call_scope(|scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<crate::Handle<'_, T>>(
+                    &mut arguments,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark raw handle ingress must succeed");
+            std::hint::black_box(&value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_handle_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: ExcelHandleObject,
+    {
+        crate::with_excel_call_scope(|scope| {
+            let mut arguments = crate::value::ArgumentContext::for_return::<
+                crate::HandleAlias<'static, BenchHandleObject>,
+                _,
+            >(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<crate::Handle<'_, T>>(
+                    &mut arguments,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark raw handle ingress with identity must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+}
+
+impl Drop for RawArgumentIngressBenchmark {
+    fn drop(&mut self) {
+        if let Some(handle_rt) = &self.handle_runtime {
+            cleanup_handle_runtime(handle_rt);
+        }
     }
 }
