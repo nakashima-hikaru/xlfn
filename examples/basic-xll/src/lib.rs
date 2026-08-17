@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 use xlfn::prelude::*;
+use xlfn::reference::ExcelReference;
 
 pub struct ExampleState;
 

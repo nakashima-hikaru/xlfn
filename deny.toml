@@ -21,7 +21,6 @@ multiple-versions = "deny"
 wildcards = "deny"
 skip = [
     { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.6 while xlfn-core uses constant_time_eq 0.5.0 directly." },
-    { crate = "syn@2.0.119", reason = "Required by dependencies that have not yet migrated to syn 3." },
 ]
 
 [sources]

@@ -1775,6 +1775,7 @@ impl<'call> FromExcel<'call> for ExcelCellValue {
             XLTYPE_INT => {
                 // `xltypeInt` is a transport representation; worksheet
                 // semantics use the canonical numeric cell representation.
+                // SAFETY: XLTYPE_INT selects the integer union member.
                 Ok(Self::Number(unsafe { value.raw.value.integer } as f64))
             }
             XLTYPE_BOOL => <bool as FromExcel>::from_excel(value, argument).map(Self::Boolean),
