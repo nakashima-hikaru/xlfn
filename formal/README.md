@@ -90,7 +90,7 @@ stopSubscriptions
 detachHost
   ↓ hostDetached
 closeState
-  ↓ stateClosed
+  ↓ generationReclaimed
 drainHandles
   ↓ handlesDrained
 stopDiagnostics
@@ -116,13 +116,13 @@ an explicit Add-in contract:
 - subscriptions, callbacks, RTD operations, factories, servers and locks;
 - call-scoped handle borrows and published handles;
 - registration state and callback-gate state;
-- `stateUnique`, `addinQuiesced`, and `stateOwnedByRuntime` for Add-in state;
+- `generationUnique`, `addinQuiesced`, and `generationOwnedByRuntime` for open generation reclamation;
 - diagnostics and cleanup-issue accounting.
 
 Arbitrary user threads and native callbacks are not represented by unverifiable
-ghost counters. `Arc::try_unwrap(state)` establishes `stateUnique`,
+ghost counters. `Arc::try_unwrap(generation)` establishes `generationUnique`,
 `Addin::quiesce` establishes `addinQuiesced`, and consuming the runtime root
-establishes `stateOwnedByRuntime = false`.
+establishes `generationOwnedByRuntime = false`.
 
 `RtdDrained` is intentionally limited to RTD operations, class factories,
 servers, and server locks. `SubscriptionsDrained` owns the separate

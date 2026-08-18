@@ -44,14 +44,14 @@ def Certified (s : State) : Prop :=
       s.resources.AsyncDrained ∧
       s.resources.SubscriptionsDrained ∧
       s.resources.HostDetached ∧
-      s.resources.StateClosed
+      s.resources.GenerationReclaimed
   | .closing .stopDiagnostics =>
       s.resources.CallsDrained ∧
       s.resources.ReturnsDrained ∧
       s.resources.AsyncDrained ∧
       s.resources.SubscriptionsDrained ∧
       s.resources.HostDetached ∧
-      s.resources.StateClosed ∧
+      s.resources.GenerationReclaimed ∧
       s.resources.HandlesDrained
   | .closing .drainRtd =>
       s.resources.CallsDrained ∧
@@ -59,7 +59,7 @@ def Certified (s : State) : Prop :=
       s.resources.AsyncDrained ∧
       s.resources.SubscriptionsDrained ∧
       s.resources.HostDetached ∧
-      s.resources.StateClosed ∧
+      s.resources.GenerationReclaimed ∧
       s.resources.HandlesDrained ∧
       s.resources.DiagnosticsDrained
   | .closing .finalize =>
@@ -109,7 +109,7 @@ theorem Step.certified_preserved
         Resources.ReturnsDrained, Resources.AsyncDrained,
         Resources.SubscriptionsDrained, Resources.RtdDrained,
         Resources.HandlesDrained,
-        Resources.StateClosed, Resources.DiagnosticsDrained,
+        Resources.GenerationReclaimed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
@@ -122,7 +122,7 @@ theorem Step.certified_preserved
         Resources.ReturnsDrained, Resources.AsyncDrained,
         Resources.SubscriptionsDrained, Resources.RtdDrained,
         Resources.HandlesDrained,
-        Resources.StateClosed, Resources.DiagnosticsDrained,
+        Resources.GenerationReclaimed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
@@ -135,7 +135,7 @@ theorem Step.certified_preserved
         Resources.ReturnsDrained, Resources.AsyncDrained,
         Resources.SubscriptionsDrained, Resources.RtdDrained,
         Resources.HandlesDrained,
-        Resources.StateClosed, Resources.DiagnosticsDrained,
+        Resources.GenerationReclaimed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
@@ -148,7 +148,7 @@ theorem Step.certified_preserved
         Resources.ReturnsDrained, Resources.AsyncDrained,
         Resources.SubscriptionsDrained, Resources.RtdDrained,
         Resources.HandlesDrained,
-        Resources.StateClosed, Resources.DiagnosticsDrained,
+        Resources.GenerationReclaimed, Resources.DiagnosticsDrained,
         Resources.Quiescent,
         Phase.IsLive, Phase.AllowsReturnCreation,
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,

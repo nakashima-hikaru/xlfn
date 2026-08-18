@@ -21,7 +21,7 @@ private instance committedClosePrerequisitesDecidable
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
     Shutdown.Resources.RtdDrained Shutdown.Resources.HandlesDrained
-    Shutdown.Resources.StateClosed Shutdown.Resources.DiagnosticsDrained
+    Shutdown.Resources.GenerationReclaimed Shutdown.Resources.DiagnosticsDrained
   infer_instance
 
 private instance uncommittedClosePrerequisitesDecidable
@@ -33,7 +33,7 @@ private instance uncommittedClosePrerequisitesDecidable
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
     Shutdown.Resources.RtdDrained Shutdown.Resources.HandlesDrained
-    Shutdown.Resources.StateClosed Shutdown.Resources.DiagnosticsDrained
+    Shutdown.Resources.GenerationReclaimed Shutdown.Resources.DiagnosticsDrained
   infer_instance
 
 private instance openRollbackPrerequisitesDecidable
@@ -45,7 +45,7 @@ private instance openRollbackPrerequisitesDecidable
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
     Shutdown.Resources.RtdDrained Shutdown.Resources.HandlesDrained
-    Shutdown.Resources.StateClosed Shutdown.Resources.DiagnosticsDrained
+    Shutdown.Resources.GenerationReclaimed Shutdown.Resources.DiagnosticsDrained
   infer_instance
 
 def apply? (s : State) (event : Event) : Option State :=

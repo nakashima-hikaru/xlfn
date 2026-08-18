@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 
 #[cfg(any(test, feature = "shutdown-trace"))]
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +35,7 @@ pub(crate) enum GhostFailure {
     AsyncShutdownFailed,
     RtdShutdownFailed,
     HandleShutdownFailed,
-    StateEscaped,
+    GenerationEscaped,
     AddinShutdownFailed,
     DiagnosticsShutdownFailed,
     InvariantViolation,
@@ -79,9 +79,9 @@ pub(crate) struct GhostResources {
     pub(crate) rtd_servers: u64,
     pub(crate) rtd_server_locks: u64,
     pub(crate) handles: u64,
-    pub(crate) state_unique: bool,
+    pub(crate) generation_unique: bool,
     pub(crate) addin_quiesced: bool,
-    pub(crate) state_owned_by_runtime: bool,
+    pub(crate) generation_owned_by_runtime: bool,
     pub(crate) diagnostics_pending: u64,
     pub(crate) diagnostics_running: bool,
     pub(crate) cleanup_issues: u64,
@@ -109,9 +109,9 @@ impl GhostResources {
             rtd_servers: 0,
             rtd_server_locks: 0,
             handles: 0,
-            state_unique: false,
+            generation_unique: false,
             addin_quiesced: false,
-            state_owned_by_runtime: true,
+            generation_owned_by_runtime: true,
             diagnostics_pending: 0,
             diagnostics_running: false,
             cleanup_issues: 0,
@@ -144,9 +144,9 @@ impl GhostResources {
             rtd_servers: 0,
             rtd_server_locks: 0,
             handles: 0,
-            state_unique: true,
+            generation_unique: true,
             addin_quiesced: true,
-            state_owned_by_runtime: false,
+            generation_owned_by_runtime: false,
             diagnostics_pending: 0,
             diagnostics_running: false,
             cleanup_issues: 0,
@@ -190,8 +190,8 @@ impl GhostResources {
         self.handles == 0
     }
 
-    fn state_closed(&self) -> bool {
-        self.state_unique && self.addin_quiesced && !self.state_owned_by_runtime
+    fn is_generation_reclaimed(&self) -> bool {
+        self.generation_unique && self.addin_quiesced && !self.generation_owned_by_runtime
     }
 
     fn diagnostics_drained(&self) -> bool {
@@ -206,7 +206,7 @@ impl GhostResources {
             && self.subscriptions_drained()
             && self.rtd_drained()
             && self.handles_drained()
-            && self.state_closed()
+            && self.is_generation_reclaimed()
             && self.diagnostics_drained()
     }
 
@@ -275,9 +275,9 @@ pub(crate) enum GhostEvent {
     SubscriptionsDrained,
     CloseCallbackGate,
     HostDetached,
-    ProveStateUnique,
+    ProveGenerationUnique,
     ProveAddinQuiesced,
-    StateClosed,
+    GenerationReclaimed,
     HandlesDrained,
     DiagnosticsDrained,
     RtdDrained,
@@ -747,13 +747,13 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             }
             target.phase = GhostPhase::Closing(GhostStage::CloseState);
         }
-        GhostEvent::ProveStateUnique => {
-            if !phase_is(&source.phase, GhostStage::CloseState) || resources.state_unique {
+        GhostEvent::ProveGenerationUnique => {
+            if !phase_is(&source.phase, GhostStage::CloseState) || resources.generation_unique {
                 return Err(GhostViolation::Precondition(
-                    "state uniqueness must be proven exactly once during state close",
+                    "generation uniqueness must be proven exactly once during state close",
                 ));
             }
-            resources.state_unique = true;
+            resources.generation_unique = true;
         }
         GhostEvent::ProveAddinQuiesced => {
             if !phase_is(&source.phase, GhostStage::CloseState) || resources.addin_quiesced {
@@ -763,17 +763,17 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             }
             resources.addin_quiesced = true;
         }
-        GhostEvent::StateClosed => {
+        GhostEvent::GenerationReclaimed => {
             if !phase_is(&source.phase, GhostStage::CloseState)
-                || !resources.state_unique
+                || !resources.generation_unique
                 || !resources.addin_quiesced
-                || !resources.state_owned_by_runtime
+                || !resources.generation_owned_by_runtime
             {
                 return Err(GhostViolation::Precondition(
-                    "state milestone requires unique quiesced runtime-owned state",
+                    "generation reclamation milestone requires unique quiesced runtime-owned generation",
                 ));
             }
-            resources.state_owned_by_runtime = false;
+            resources.generation_owned_by_runtime = false;
             target.phase = GhostPhase::Closing(GhostStage::DrainHandles);
         }
         GhostEvent::HandlesDrained => {
@@ -1172,9 +1172,9 @@ mod tests {
             GhostEvent::SubscriptionsDrained,
             GhostEvent::CloseCallbackGate,
             GhostEvent::HostDetached,
-            GhostEvent::ProveStateUnique,
+            GhostEvent::ProveGenerationUnique,
             GhostEvent::ProveAddinQuiesced,
-            GhostEvent::StateClosed,
+            GhostEvent::GenerationReclaimed,
             GhostEvent::HandlesDrained,
             GhostEvent::StopDiagnostics,
             GhostEvent::DiagnosticsDrained,
@@ -1208,9 +1208,9 @@ mod tests {
             GhostEvent::SubscriptionsDrained,
             GhostEvent::CloseCallbackGate,
             GhostEvent::HostDetached,
-            GhostEvent::ProveStateUnique,
+            GhostEvent::ProveGenerationUnique,
             GhostEvent::ProveAddinQuiesced,
-            GhostEvent::StateClosed,
+            GhostEvent::GenerationReclaimed,
             GhostEvent::HandlesDrained,
             GhostEvent::StopDiagnostics,
             GhostEvent::DiagnosticsDrained,

@@ -26,9 +26,9 @@
       "rtdServers": 0,
       "rtdServerLocks": 0,
       "handles": 0,
-      "stateUnique": true,
+      "generationUnique": true,
       "addinQuiesced": true,
-      "stateOwnedByRuntime": false,
+      "generationOwnedByRuntime": false,
       "diagnosticsPending": 0,
       "diagnosticsRunning": false,
       "cleanupIssues": 0

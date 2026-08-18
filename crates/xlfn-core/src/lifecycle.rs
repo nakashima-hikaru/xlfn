@@ -906,11 +906,11 @@ where
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_state_unique();
+    runtime.record_ghost_generation_unique();
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_addin_quiesced();
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::StateClosed);
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
 
     let handles_quiescent = runtime.close_handles().unwrap_or_else(|error| {
         fatal_unload_hazard(

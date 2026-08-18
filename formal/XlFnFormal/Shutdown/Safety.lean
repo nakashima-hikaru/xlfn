@@ -88,12 +88,12 @@ theorem reachable_closed_has_quiesced_state
     (hInitialOpen : initial.phase = .open)
     (hReachable : Reachable initial current)
     (hClosed : current.phase = .closed) :
-    current.resources.stateUnique = true ∧
+    current.resources.generationUnique = true ∧
     current.resources.addinQuiesced = true ∧
-    current.resources.stateOwnedByRuntime = false := by
+    current.resources.generationOwnedByRuntime = false := by
   have hQuiescent := reachable_closed_is_quiescent
     hInitialOpen hReachable hClosed
-  rcases Resources.quiescent_stateClosed hQuiescent with
+  rcases Resources.quiescent_generationReclaimed hQuiescent with
     ⟨hUnique, hQuiesced, hOwned⟩
   exact ⟨hUnique, hQuiesced, hOwned⟩
 
@@ -142,16 +142,16 @@ theorem reachable_closed_has_no_host_or_dispatcher
     current.resources.eventRegistrations = 0 ∧
     current.resources.registrationStateKnown = true ∧
     current.resources.callbackGateOpen = false ∧
-    current.resources.stateUnique = true ∧
+    current.resources.generationUnique = true ∧
     current.resources.addinQuiesced = true ∧
-    current.resources.stateOwnedByRuntime = false ∧
+    current.resources.generationOwnedByRuntime = false ∧
     current.resources.diagnosticsPending = 0 ∧
     current.resources.diagnosticsRunning = false := by
   have hQuiescent := reachable_closed_is_quiescent
     hInitialOpen hReachable hClosed
   rcases Resources.quiescent_hostDetached hQuiescent with
     ⟨hIngress, hRegistrations, hEvents, hKnown, hGate⟩
-  rcases Resources.quiescent_stateClosed hQuiescent with
+  rcases Resources.quiescent_generationReclaimed hQuiescent with
     ⟨hUnique, hQuiesced, hStateOwned⟩
   rcases Resources.quiescent_diagnosticsDrained hQuiescent with
     ⟨hPending, hRunning⟩
@@ -211,9 +211,9 @@ theorem failStop_cannot_reach_closed
   | refl => simp [hFailedPhase]
   | cons hStep _ => exact False.elim (failStopped_terminal hFailedPhase hStep)
 
-theorem stateEscape_cannot_reach_closed
+theorem generationEscape_cannot_reach_closed
     {s failed final : State} {events : List Event}
-    (hFail : Step s (.failStop .stateEscaped) failed)
+    (hFail : Step s (.failStop .generationEscaped) failed)
     (hTail : Steps failed events final) :
     final.phase ≠ .closed :=
   failStop_cannot_reach_closed hFail hTail

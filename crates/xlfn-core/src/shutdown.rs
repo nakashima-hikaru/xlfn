@@ -108,7 +108,7 @@ impl UnloadHazard {
             Self::HandleRuntimeNotQuiescent => {
                 crate::shutdown_refinement::GhostFailure::HandleShutdownFailed
             }
-            Self::AddinStateEscaped => crate::shutdown_refinement::GhostFailure::StateEscaped,
+            Self::AddinStateEscaped => crate::shutdown_refinement::GhostFailure::GenerationEscaped,
             Self::AddinQuiesceFailed => {
                 crate::shutdown_refinement::GhostFailure::AddinShutdownFailed
             }

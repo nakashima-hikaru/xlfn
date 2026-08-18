@@ -54,9 +54,9 @@ inductive Event where
   | subscriptionsDrained
   | closeCallbackGate
   | hostDetached
-  | proveStateUnique
+  | proveGenerationUnique
   | proveAddinQuiesced
-  | stateClosed
+  | generationReclaimed
   | handlesDrained
   | diagnosticsDrained
   | rtdDrained
@@ -353,11 +353,11 @@ inductive Step : State → Event → State → Prop where
       (hDetached : s.resources.HostDetached) :
       Step s .hostDetached { s with phase := .closing .closeState }
 
-  | proveStateUnique {s : State}
+  | proveGenerationUnique {s : State}
       (hStage : s.phase = .closing .closeState)
-      (hNotProven : s.resources.stateUnique = false) :
-      Step s .proveStateUnique
-        { s with resources := { s.resources with stateUnique := true } }
+      (hNotProven : s.resources.generationUnique = false) :
+      Step s .proveGenerationUnique
+        { s with resources := { s.resources with generationUnique := true } }
 
   | proveAddinQuiesced {s : State}
       (hStage : s.phase = .closing .closeState)
@@ -365,14 +365,14 @@ inductive Step : State → Event → State → Prop where
       Step s .proveAddinQuiesced
         { s with resources := { s.resources with addinQuiesced := true } }
 
-  | stateClosed {s : State}
+  | generationReclaimed {s : State}
       (hStage : s.phase = .closing .closeState)
-      (hUnique : s.resources.stateUnique = true)
+      (hUnique : s.resources.generationUnique = true)
       (hQuiesced : s.resources.addinQuiesced = true)
-      (hOwned : s.resources.stateOwnedByRuntime = true) :
-      Step s .stateClosed
+      (hOwned : s.resources.generationOwnedByRuntime = true) :
+      Step s .generationReclaimed
         { phase := .closing .drainHandles,
-          resources := { s.resources with stateOwnedByRuntime := false } }
+          resources := { s.resources with generationOwnedByRuntime := false } }
 
   | handlesDrained {s : State}
       (hStage : s.phase = .closing .drainHandles)

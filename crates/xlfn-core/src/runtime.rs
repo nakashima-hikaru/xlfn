@@ -779,8 +779,8 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    pub(crate) fn record_ghost_state_unique(&self) {
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ProveStateUnique);
+    pub(crate) fn record_ghost_generation_unique(&self) {
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ProveGenerationUnique);
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]

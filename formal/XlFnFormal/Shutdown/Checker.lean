@@ -83,8 +83,8 @@ private def rtdDrained (r : Resources) : Bool :=
 private def handlesDrained (r : Resources) : Bool :=
   r.handles == 0
 
-private def stateClosed (r : Resources) : Bool :=
-  r.stateUnique == true && r.addinQuiesced == true && r.stateOwnedByRuntime == false
+private def generationReclaimed (r : Resources) : Bool :=
+  r.generationUnique == true && r.addinQuiesced == true && r.generationOwnedByRuntime == false
 
 private def diagnosticsDrained (r : Resources) : Bool :=
   r.diagnosticsPending == 0 && r.diagnosticsRunning == false
@@ -99,7 +99,7 @@ private def producerAlive (r : Resources) : Bool :=
 private def quiescent (r : Resources) : Bool :=
   hostDetached r && callsDrained r && returnsDrained r && asyncDrained r &&
     subscriptionsDrained r && rtdDrained r && handlesDrained r &&
-    stateClosed r && diagnosticsDrained r
+    generationReclaimed r && diagnosticsDrained r
 
 def isQuiescent (r : Resources) : Bool :=
   quiescent r
@@ -412,22 +412,22 @@ def apply? (s : State) (event : Event) : Option State :=
       if s.phase = .closing .detachHost ∧ hostDetached s.resources = true then
         some { s with phase := .closing .closeState }
       else none
-  | .proveStateUnique =>
-      if s.phase = .closing .closeState ∧ s.resources.stateUnique = false then
-        some { s with resources := { s.resources with stateUnique := true } }
+  | .proveGenerationUnique =>
+      if s.phase = .closing .closeState ∧ s.resources.generationUnique = false then
+        some { s with resources := { s.resources with generationUnique := true } }
       else none
   | .proveAddinQuiesced =>
       if s.phase = .closing .closeState ∧ s.resources.addinQuiesced = false then
         some { s with resources := { s.resources with addinQuiesced := true } }
       else none
-  | .stateClosed =>
+  | .generationReclaimed =>
       if s.phase = .closing .closeState ∧
-          s.resources.stateUnique = true ∧
+          s.resources.generationUnique = true ∧
           s.resources.addinQuiesced = true ∧
-          s.resources.stateOwnedByRuntime = true then
+          s.resources.generationOwnedByRuntime = true then
         some { s with
           phase := .closing .drainHandles,
-          resources := { s.resources with stateOwnedByRuntime := false } }
+          resources := { s.resources with generationOwnedByRuntime := false } }
       else none
   | .handlesDrained =>
       if s.phase = .closing .drainHandles ∧ handlesDrained s.resources = true then
@@ -505,9 +505,9 @@ theorem apply?_sound
     | apply Step.subscriptionsDrained
     | apply Step.closeCallbackGate
     | apply Step.hostDetached
-    | apply Step.proveStateUnique
+    | apply Step.proveGenerationUnique
     | apply Step.proveAddinQuiesced
-    | apply Step.stateClosed
+    | apply Step.generationReclaimed
     | apply Step.handlesDrained
     | apply Step.diagnosticsDrained
     | apply Step.rtdDrained
@@ -521,7 +521,7 @@ theorem apply?_sound
       allows_diagnostic_creation_iff,
       hostDetached,
       callsDrained, returnsDrained, asyncDrained, subscriptionsDrained,
-      rtdDrained, handlesDrained, stateClosed, diagnosticsDrained,
+      rtdDrained, handlesDrained, generationReclaimed, diagnosticsDrained,
       quiescent, Phase.IsLive,
       Phase.AllowsReturnCreation, Phase.AllowsReturnFree,
       Phase.AllowsAsyncCreation, Phase.AllowsSubscriptionCreation,
@@ -531,7 +531,7 @@ theorem apply?_sound
       Resources.AsyncDrained, Resources.SubscriptionsDrained,
         Resources.RtdDrained, Resources.HandlesDrained,
         Resources.DiagnosticsDrained, Resources.ProducerAlive,
-        Resources.StateClosed, Resources.Quiescent] <;>
+        Resources.GenerationReclaimed, Resources.Quiescent] <;>
       omega
 
 theorem apply?_complete
@@ -546,7 +546,7 @@ theorem apply?_complete
       allows_rtd_creation_iff, allows_handle_creation_iff,
       allows_diagnostic_creation_iff, hostDetached, callsDrained, returnsDrained,
       asyncDrained, subscriptionsDrained, rtdDrained, handlesDrained,
-      stateClosed, diagnosticsDrained, quiescent,
+      generationReclaimed, diagnosticsDrained, quiescent,
       Phase.IsLive, Phase.AllowsReturnCreation, Phase.AllowsReturnFree,
       Phase.AllowsAsyncCreation, Phase.AllowsSubscriptionCreation,
       Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
@@ -555,7 +555,7 @@ theorem apply?_complete
       Resources.AsyncDrained, Resources.SubscriptionsDrained,
       Resources.RtdDrained, Resources.HandlesDrained,
       Resources.DiagnosticsDrained, Resources.ProducerAlive,
-      Resources.StateClosed, Resources.Quiescent] <;>
+      Resources.GenerationReclaimed, Resources.Quiescent] <;>
     omega
 
 end XlFnFormal.Shutdown

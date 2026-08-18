@@ -10,7 +10,7 @@ def unsafePreFinalState : State :=
   { phase := .closing .finalize,
     resources :=
       { activeCalls := 1,
-        stateOwnedByRuntime := false } }
+        generationOwnedByRuntime := false } }
 
 /-- Deliberately unsafe implementation operation, excluded from `Step`. -/
 def uncheckedFinish (s : State) : State :=
@@ -42,7 +42,7 @@ def outstandingReturnPreFinalState : State :=
   { phase := .closing .finalize,
     resources :=
       { returnBlocks := 1,
-        stateOwnedByRuntime := false } }
+        generationOwnedByRuntime := false } }
 
 /-- Draining calls alone is insufficient: an outstanding return block keeps an
 entry point and Rust allocation owned by the module live. -/

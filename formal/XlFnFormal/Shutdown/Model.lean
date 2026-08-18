@@ -44,7 +44,7 @@ inductive Failure where
   | asyncShutdownFailed
   | rtdShutdownFailed
   | handleShutdownFailed
-  | stateEscaped
+  | generationEscaped
   | addinShutdownFailed
   | diagnosticsShutdownFailed
   | invariantViolation
@@ -166,9 +166,9 @@ structure Resources where
   rtdServers : Nat := 0
   rtdServerLocks : Nat := 0
   handles : Nat := 0
-  stateUnique : Bool := false
+  generationUnique : Bool := false
   addinQuiesced : Bool := false
-  stateOwnedByRuntime : Bool := true
+  generationOwnedByRuntime : Bool := true
   diagnosticsPending : Nat := 0
   diagnosticsRunning : Bool := false
   cleanupIssues : Nat := 0
@@ -206,10 +206,10 @@ def RtdDrained (r : Resources) : Prop :=
 def HandlesDrained (r : Resources) : Prop :=
   r.handles = 0
 
-def StateClosed (r : Resources) : Prop :=
-  r.stateUnique = true ∧
+def GenerationReclaimed (r : Resources) : Prop :=
+  r.generationUnique = true ∧
   r.addinQuiesced = true ∧
-  r.stateOwnedByRuntime = false
+  r.generationOwnedByRuntime = false
 
 def DiagnosticsDrained (r : Resources) : Prop :=
   r.diagnosticsPending = 0 ∧ r.diagnosticsRunning = false
@@ -222,7 +222,7 @@ def Quiescent (r : Resources) : Prop :=
   r.SubscriptionsDrained ∧
   r.RtdDrained ∧
   r.HandlesDrained ∧
-  r.StateClosed ∧
+  r.GenerationReclaimed ∧
   r.DiagnosticsDrained
 
 def CleanupComplete (r : Resources) : Prop :=
@@ -259,8 +259,8 @@ theorem quiescent_rtdDrained {r : Resources}
 theorem quiescent_handlesDrained {r : Resources}
     (h : r.Quiescent) : r.HandlesDrained := h.2.2.2.2.2.2.1
 
-theorem quiescent_stateClosed {r : Resources}
-    (h : r.Quiescent) : r.StateClosed := h.2.2.2.2.2.2.2.1
+theorem quiescent_generationReclaimed {r : Resources}
+    (h : r.Quiescent) : r.GenerationReclaimed := h.2.2.2.2.2.2.2.1
 
 theorem quiescent_diagnosticsDrained {r : Resources}
     (h : r.Quiescent) : r.DiagnosticsDrained := h.2.2.2.2.2.2.2.2

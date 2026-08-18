@@ -39,12 +39,12 @@ theorem Step.hostDetached_postcondition
   cases hStep with
   | hostDetached _ hDetached => exact ⟨rfl, hDetached⟩
 
-theorem Step.stateClosed_postcondition
+theorem Step.generationReclaimed_postcondition
     {s t : State}
-    (hStep : Step s .stateClosed t) :
-    t.phase = .closing .drainHandles ∧ t.resources.StateClosed := by
+    (hStep : Step s .generationReclaimed t) :
+    t.phase = .closing .drainHandles ∧ t.resources.GenerationReclaimed := by
   cases hStep with
-  | stateClosed _ hUnique hQuiesced _ =>
+  | generationReclaimed _ hUnique hQuiesced _ =>
       exact ⟨rfl, ⟨hUnique, hQuiesced, rfl⟩⟩
 
 theorem Step.handlesDrained_postcondition

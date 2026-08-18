@@ -44,7 +44,7 @@ private def parseFailure : Json → Except String Shutdown.Failure
   | .str "asyncShutdownFailed" => return .asyncShutdownFailed
   | .str "rtdShutdownFailed" => return .rtdShutdownFailed
   | .str "handleShutdownFailed" => return .handleShutdownFailed
-  | .str "stateEscaped" => return .stateEscaped
+  | .str "generationEscaped" => return .generationEscaped
   | .str "addinShutdownFailed" => return .addinShutdownFailed
   | .str "diagnosticsShutdownFailed" => return .diagnosticsShutdownFailed
   | .str "invariantViolation" => return .invariantViolation
@@ -112,9 +112,9 @@ private def simpleShutdownEvent : String → Option Shutdown.Event
   | "subscriptionsDrained" => some .subscriptionsDrained
   | "closeCallbackGate" => some .closeCallbackGate
   | "hostDetached" => some .hostDetached
-  | "proveStateUnique" => some .proveStateUnique
+  | "proveGenerationUnique" => some .proveGenerationUnique
   | "proveAddinQuiesced" => some .proveAddinQuiesced
-  | "stateClosed" => some .stateClosed
+  | "generationReclaimed" => some .generationReclaimed
   | "handlesDrained" => some .handlesDrained
   | "diagnosticsDrained" => some .diagnosticsDrained
   | "rtdDrained" => some .rtdDrained
@@ -155,9 +155,9 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
   let rtdServers : Nat ← field json "rtdServers"
   let rtdServerLocks : Nat ← field json "rtdServerLocks"
   let handles : Nat ← field json "handles"
-  let stateUnique : Bool ← field json "stateUnique"
+  let generationUnique : Bool ← field json "generationUnique"
   let addinQuiesced : Bool ← field json "addinQuiesced"
-  let stateOwnedByRuntime : Bool ← field json "stateOwnedByRuntime"
+  let generationOwnedByRuntime : Bool ← field json "generationOwnedByRuntime"
   let diagnosticsPending : Nat ← field json "diagnosticsPending"
   let diagnosticsRunning : Bool ← field json "diagnosticsRunning"
   let cleanupIssues : Nat ← field json "cleanupIssues"
@@ -181,9 +181,9 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
     rtdServers,
     rtdServerLocks,
     handles,
-    stateUnique,
+    generationUnique,
     addinQuiesced,
-    stateOwnedByRuntime,
+    generationOwnedByRuntime,
     diagnosticsPending,
     diagnosticsRunning,
     cleanupIssues
