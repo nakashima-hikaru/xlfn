@@ -67,9 +67,10 @@ impl<S> OpeningGeneration<S> {
     }
 
     #[must_use]
-    pub(crate) fn into_state(self) -> S {
+    pub(crate) fn into_parts(self) -> (S, Box<[Box<dyn crate::UdfLayer>]>) {
         match self {
-            Self::StateOnly { state } | Self::Ready { state, .. } => state,
+            Self::StateOnly { state } => (state, Box::new([])),
+            Self::Ready { state, layers } => (state, layers),
         }
     }
 
@@ -329,12 +330,15 @@ impl<S> Runtime<S> {
         });
     }
 
-    pub(crate) fn stage_opening_state(&self, state: S) -> XllResult<()> {
+    pub(crate) fn stage_opening_state(&self, state: S) -> Result<(), (XllError, S)> {
         let mut slot = self.opening.lock();
         if slot.is_some() || self.current.load().is_some() {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
-            });
+            return Err((
+                XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+                },
+                state,
+            ));
         }
         *slot = Some(OpeningGeneration::StateOnly { state });
         Ok(())
@@ -343,12 +347,15 @@ impl<S> Runtime<S> {
     pub(crate) fn restore_opening_generation(
         &self,
         opening: OpeningGeneration<S>,
-    ) -> XllResult<()> {
+    ) -> Result<(), (XllError, OpeningGeneration<S>)> {
         let mut slot = self.opening.lock();
         if slot.is_some() {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
-            });
+            return Err((
+                XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+                },
+                opening,
+            ));
         }
         *slot = Some(opening);
         Ok(())
@@ -360,7 +367,8 @@ impl<S> Runtime<S> {
         })?;
         let (state, layers) = match opening {
             OpeningGeneration::Ready { state, layers } => (state, layers),
-            OpeningGeneration::StateOnly { .. } => {
+            OpeningGeneration::StateOnly { state } => {
+                std::mem::forget(state);
                 return Err(XllError::Internal {
                     diagnostic_id: crate::DiagnosticId::OPEN_STATE,
                 });
@@ -967,6 +975,11 @@ pub struct CloseCertificate {
         reason = "Typestate proof token for linear lifecycle release"
     )]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
+    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     composition_resources: crate::shutdown_refinement::GhostResources,
     runtime_address: usize,
@@ -1023,6 +1036,11 @@ pub(crate) struct OpenRollbackCertificate {
         reason = "Typestate proof token for linear lifecycle release"
     )]
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
+    #[allow(
+        dead_code,
+        reason = "Typestate proof token for linear lifecycle release"
+    )]
+    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     composition_resources: crate::shutdown_refinement::GhostResources,
     runtime_address: usize,
@@ -1037,6 +1055,7 @@ pub(crate) struct ClosePrerequisites {
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
     pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
+    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
 }
 
 pub(crate) struct OpenRollbackPrerequisites {
@@ -1048,6 +1067,7 @@ pub(crate) struct OpenRollbackPrerequisites {
     pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
     pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
+    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1067,6 +1087,7 @@ fn composition_resources_from_close_prerequisites(
         &prerequisites.handles_quiescent,
         &prerequisites.diagnostics_stopped,
         &prerequisites.addin_quiesced,
+        &prerequisites.generation_reclaimed,
     );
     crate::shutdown_refinement::GhostResources::quiescent_snapshot()
 }
@@ -1087,6 +1108,7 @@ fn composition_resources_from_open_rollback_prerequisites(
         &prerequisites.handles_quiescent,
         &prerequisites.diagnostics_stopped,
         &prerequisites.addin_quiesced,
+        &prerequisites.generation_reclaimed,
     );
     crate::shutdown_refinement::GhostResources::quiescent_snapshot()
 }
@@ -1136,6 +1158,7 @@ impl<S> Runtime<S> {
             handles_quiescent: prerequisites.handles_quiescent,
             diagnostics_stopped: prerequisites.diagnostics_stopped,
             addin_quiesced: prerequisites.addin_quiesced,
+            generation_reclaimed: prerequisites.generation_reclaimed,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             composition_resources,
             runtime_address: std::ptr::from_ref(self).addr(),
@@ -1224,6 +1247,7 @@ impl<S> Runtime<S> {
             handles_quiescent: prerequisites.handles_quiescent,
             diagnostics_stopped: prerequisites.diagnostics_stopped,
             addin_quiesced: prerequisites.addin_quiesced,
+            generation_reclaimed: prerequisites.generation_reclaimed,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             composition_resources,
             runtime_address: std::ptr::from_ref(self).addr(),
@@ -1586,6 +1610,7 @@ pub(crate) mod tests {
                 handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
             })
             .unwrap();
         runtime.finish_close(certificate).unwrap();
@@ -1611,6 +1636,7 @@ pub(crate) mod tests {
                 handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
             })
             .unwrap();
         runtime.finish_open_rollback(certificate).unwrap();
@@ -1738,7 +1764,7 @@ pub(crate) mod tests {
                 .expect("shutdown extracts generation")
             {
                 ShutdownGeneration::Open(generation) => generation.state,
-                ShutdownGeneration::Opening(opening) => opening.into_state(),
+                ShutdownGeneration::Opening(opening) => opening.into_parts().0,
             };
             assert_eq!(state, 17);
             finish_test_close(&closing_runtime);
@@ -1797,6 +1823,7 @@ pub(crate) mod tests {
                 handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
             })
             .unwrap();
 
@@ -1914,6 +1941,7 @@ pub(crate) mod tests {
                     handles_quiescent: crate::shutdown::HandlesQuiescent::new(),
                     diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                     addin_quiesced: crate::shutdown::AddinQuiesced::new(),
+                    generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
                 })
                 .is_err()
         );

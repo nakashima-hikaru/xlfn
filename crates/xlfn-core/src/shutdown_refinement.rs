@@ -8,9 +8,6 @@ use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "shutdown-trace"))]
-pub(crate) const SCHEMA_VERSION: u32 = 4;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum GhostStage {
@@ -305,7 +302,6 @@ impl GhostOutcome {
 #[cfg(any(test, feature = "shutdown-trace"))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct GhostTrace {
-    pub(crate) schema_version: u32,
     pub(crate) generation: u64,
     pub(crate) initial: GhostState,
     pub(crate) events: Vec<GhostEvent>,
@@ -944,7 +940,6 @@ impl GhostMachine {
             GhostOutcome::InProgress
         };
         GhostTrace {
-            schema_version: SCHEMA_VERSION,
             generation: self.initial.generation,
             initial: self.initial.clone(),
             events: self.events.clone(),
@@ -1121,11 +1116,10 @@ mod tests {
     }
 
     #[test]
-    fn trace_has_schema_and_ordered_events() {
+    fn trace_has_generation_and_ordered_events() {
         let mut machine = open_machine();
         machine.apply(GhostEvent::BeginClose).unwrap();
         let trace = machine.trace();
-        assert_eq!(trace.schema_version, SCHEMA_VERSION);
         assert_eq!(trace.generation, 42);
         assert_eq!(trace.events[0], GhostEvent::BeginClose);
         assert!(!trace.trace_truncated);

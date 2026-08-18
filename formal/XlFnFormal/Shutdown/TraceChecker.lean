@@ -8,15 +8,12 @@ namespace XlFnFormal.Shutdown
 
 open Lean
 
-private def schemaVersion : Nat := 4
-
 private structure WireState where
   generation : Nat
   state : State
   deriving DecidableEq
 
 private structure WireTrace where
-  schemaVersion : Nat
   generation : Nat
   initial : WireState
   events : Array Event
@@ -242,7 +239,6 @@ private def parseState (json : Json) : Except String WireState := do
 private def parseTrace (json : Json) : Except String WireTrace := do
   let eventsJson : Array Json ← field json "events"
   return {
-    schemaVersion := (← field json "schema_version")
     generation := (← field json "generation")
     initial := (← parseState (← json.getObjVal? "initial"))
     events := (← eventsJson.mapM parseEvent)
@@ -290,8 +286,6 @@ private def checkReturnedSuccess
 
 private def checkTrace (json : Json) : Except String Unit := do
   let trace ← parseTrace json
-  if trace.schemaVersion != schemaVersion then
-    throw s!"unsupported shutdown trace schema version: {trace.schemaVersion}"
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"
   if trace.generation != trace.initial.generation then

@@ -2,8 +2,6 @@ use crate::shutdown_refinement::{GhostEvent, GhostResources};
 use parking_lot::Mutex;
 use serde::Serialize;
 
-#[cfg(test)]
-pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_TRACE_EVENTS: usize = 16_384;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -39,8 +37,6 @@ pub(crate) enum CompositionEvent {
 #[cfg(test)]
 #[derive(Serialize)]
 struct TraceDocument {
-    #[serde(rename = "schema_version")]
-    schema_version: u32,
     initial: &'static str,
     events: Vec<CompositionEvent>,
     #[serde(rename = "trace_truncated")]
@@ -137,7 +133,6 @@ impl CompositionTrace {
     pub(crate) fn trace_json(&self) -> Result<String, serde_json::Error> {
         let machine = self.inner.lock();
         let document = TraceDocument {
-            schema_version: SCHEMA_VERSION,
             initial: "initial",
             events: machine.events.clone(),
             trace_truncated: machine.trace_truncated,

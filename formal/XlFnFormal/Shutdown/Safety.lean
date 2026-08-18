@@ -83,7 +83,7 @@ theorem Steps.successful_shutdown_is_quiescent
     final.resources.Quiescent :=
   reachable_closed_is_quiescent hInitialOpen hSteps.reachable hClosed
 
-theorem reachable_closed_has_quiesced_state
+theorem reachable_closed_has_quiesced_generation
     {initial current : State}
     (hInitialOpen : initial.phase = .open)
     (hReachable : Reachable initial current)
@@ -96,6 +96,9 @@ theorem reachable_closed_has_quiesced_state
   rcases Resources.quiescent_generationReclaimed hQuiescent with
     ⟨hUnique, hQuiesced, hOwned⟩
   exact ⟨hUnique, hQuiesced, hOwned⟩
+
+@[deprecated reachable_closed_has_quiesced_generation (since := "2026-08-19")]
+abbrev reachable_closed_has_quiesced_state := @reachable_closed_has_quiesced_generation
 
 theorem reachable_closed_has_no_executable_work
     {initial current : State}

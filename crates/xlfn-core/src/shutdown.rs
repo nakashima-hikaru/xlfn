@@ -79,7 +79,7 @@ pub(crate) enum UnloadHazard {
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
     HandleRuntimeNotQuiescent,
-    AddinStateEscaped,
+    AddinGenerationEscaped,
     AddinQuiesceFailed,
     DiagnosticWorkerStillRunning,
     RegistrationStateUnknown,
@@ -108,7 +108,9 @@ impl UnloadHazard {
             Self::HandleRuntimeNotQuiescent => {
                 crate::shutdown_refinement::GhostFailure::HandleShutdownFailed
             }
-            Self::AddinStateEscaped => crate::shutdown_refinement::GhostFailure::GenerationEscaped,
+            Self::AddinGenerationEscaped => {
+                crate::shutdown_refinement::GhostFailure::GenerationEscaped
+            }
             Self::AddinQuiesceFailed => {
                 crate::shutdown_refinement::GhostFailure::AddinShutdownFailed
             }
@@ -148,3 +150,4 @@ shutdown_token!(AsyncStopped);
 shutdown_token!(SubscriptionsStopped);
 shutdown_token!(HandlesQuiescent);
 shutdown_token!(AddinQuiesced);
+shutdown_token!(GenerationReclaimed);

@@ -316,7 +316,9 @@ are outside the Lean model.
 
 Correspondence with the Rust implementation is checked by targeted
 concurrency tests and the retained feature-gated trace checkers; it is not
-a machine-code refinement proof.
+a machine-code refinement proof. Refinement traces are ephemeral build/test
+artifacts generated in-tree and validated by the checker built from the same source
+revision. No backward compatibility contract is provided for refinement trace JSON.
 
 ---
 

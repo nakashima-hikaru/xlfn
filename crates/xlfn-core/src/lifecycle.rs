@@ -217,7 +217,10 @@ where
     // Stage unique ownership in OpeningGeneration before invoking add-in hooks.
     // If subsequent hooks panic, the outer boundary can roll the state back
     // through quiesce and cleanup with complete unique ownership.
-    runtime.stage_opening_state(state)?;
+    if let Err((error, state)) = runtime.stage_opening_state(state) {
+        std::mem::forget(state);
+        return Err(error);
+    }
     let opening = runtime
         .take_opening_generation()
         .ok_or(XllError::Internal {
@@ -228,13 +231,18 @@ where
     let layers = match layers_result {
         Ok(layers) => layers.into_boxed_slice(),
         Err(payload) => {
-            let _ = runtime.restore_opening_generation(opening);
+            if let Err((_, opening)) = runtime.restore_opening_generation(opening) {
+                std::mem::forget(opening);
+            }
             std::panic::resume_unwind(payload);
         }
     };
 
     let opening = opening.attach_layers(layers);
-    runtime.restore_opening_generation(opening)?;
+    if let Err((error, opening)) = runtime.restore_opening_generation(opening) {
+        std::mem::forget(opening);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -253,12 +261,17 @@ where
     let count = match count_result {
         Ok(count) => count,
         Err(payload) => {
-            let _ = runtime.restore_opening_generation(opening);
+            if let Err((_, opening)) = runtime.restore_opening_generation(opening) {
+                std::mem::forget(opening);
+            }
             std::panic::resume_unwind(payload);
         }
     };
 
-    runtime.restore_opening_generation(opening)?;
+    if let Err((error, opening)) = runtime.restore_opening_generation(opening) {
+        std::mem::forget(opening);
+        return Err(error);
+    }
     Ok(count)
 }
 
@@ -414,27 +427,32 @@ where
     // are call-scoped borrows and cannot be stored in state.
     let mut addin_state = None;
     let mut addin_quiesced = None;
+    let mut generation_reclaimed = None;
     if let Some(opening) = runtime.take_opening_generation() {
-        let mut state = opening.into_state();
+        let (mut state, layers) = opening.into_parts();
         match catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
             .map_err(|_| XllError::Panic)
             .and_then(|result| result.map_err(IntoXllError::into_xll_error))
         {
             Ok(()) => {
+                drop(layers);
                 addin_state = Some(state);
                 addin_quiesced = Some(crate::shutdown::AddinQuiesced::new());
+                generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
             }
             Err(error) => {
                 report_boundary_error("xlAutoOpen rollback quiesce", &error);
                 // A failed quiesce cannot prove that State-owned
                 // execution resources have stopped. Preserve it until
                 // the caller enters the fail-stop path.
+                std::mem::forget(layers);
                 std::mem::forget(state);
                 local_quiescent = false;
             }
         }
     } else {
         addin_quiesced = Some(crate::shutdown::AddinQuiesced::new());
+        generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
     }
 
     let handles_quiescent = if local_quiescent {
@@ -541,6 +559,9 @@ where
                 .expect("diagnostic certificate is present when rollback is local-quiescent"),
             addin_quiesced: addin_quiesced
                 .expect("addin certificate is present when rollback is local-quiescent"),
+            generation_reclaimed: generation_reclaimed.expect(
+                "generation reclaimed certificate is present when rollback is local-quiescent",
+            ),
         };
         match runtime
             .certify_open_rollback(prerequisites)
@@ -924,7 +945,7 @@ where
                         let _ = std::sync::Arc::into_raw(generation);
                         fatal_unload_hazard(
                             runtime,
-                            crate::shutdown::UnloadHazard::AddinStateEscaped,
+                            crate::shutdown::UnloadHazard::AddinGenerationEscaped,
                             "xlAutoClose state escaped",
                             &error,
                         );
@@ -932,12 +953,13 @@ where
                 }
             }
             crate::runtime::ShutdownGeneration::Opening(opening) => {
-                let mut state = opening.into_state();
+                let (mut state, layers) = opening.into_parts();
                 if let Err(error) = catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
                     .map_err(|_| XllError::Panic)
                     .and_then(|result| result.map_err(IntoXllError::into_xll_error))
                 {
                     report_boundary_error("xlAutoClose quiesce", &error);
+                    std::mem::forget(layers);
                     std::mem::forget(state);
                     fatal_unload_hazard(
                         runtime,
@@ -946,6 +968,7 @@ where
                         &error,
                     );
                 }
+                drop(layers);
                 addin_state = Some(state);
             }
         }
@@ -974,6 +997,7 @@ where
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HandlesDrained);
 
     let addin_quiesced = crate::shutdown::AddinQuiesced::new();
+    let generation_reclaimed = crate::shutdown::GenerationReclaimed::new();
     if let Some(mut state) = addin_state {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             let mut reporter = crate::CleanupReporter::new(&mut report);
@@ -1060,6 +1084,7 @@ where
             handles_quiescent,
             diagnostics_stopped,
             addin_quiesced,
+            generation_reclaimed,
         })
         .unwrap_or_else(|error| {
             fatal_unload_hazard(
@@ -2323,10 +2348,10 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
-        runtime.stage_opening_state(state).unwrap();
+        assert!(runtime.stage_opening_state(state).is_ok());
         let opening = runtime.take_opening_generation().unwrap();
         let opening = opening.attach_layers(Vec::new().into_boxed_slice());
-        runtime.restore_opening_generation(opening).unwrap();
+        assert!(runtime.restore_opening_generation(opening).is_ok());
 
         let closer_runtime = std::sync::Arc::clone(&runtime);
         let (closed_tx, closed_rx) = std::sync::mpsc::channel();
@@ -2415,7 +2440,7 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
-        runtime.stage_opening_state(state).unwrap();
+        assert!(runtime.stage_opening_state(state).is_ok());
         let opening = runtime.take_opening_generation().unwrap();
 
         let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -2425,10 +2450,10 @@ mod tests {
             match layers_result {
                 Ok(layers) => {
                     let opening = opening.attach_layers(layers.into_boxed_slice());
-                    runtime.restore_opening_generation(opening).unwrap();
+                    assert!(runtime.restore_opening_generation(opening).is_ok());
                 }
                 Err(payload) => {
-                    runtime.restore_opening_generation(opening).unwrap();
+                    assert!(runtime.restore_opening_generation(opening).is_ok());
                     std::panic::resume_unwind(payload);
                 }
             }

@@ -8,10 +8,7 @@ namespace XlFnFormal.Composition
 
 open Lean
 
-private def schemaVersion : Nat := 1
-
 private structure WireTrace where
-  schemaVersion : Nat
   initial : State
   events : Array Event
   traceTruncated : Bool
@@ -233,7 +230,6 @@ private def parseInitial : Json → Except String State
 private def parseTrace (json : Json) : Except String WireTrace := do
   let eventsJson : Array Json ← field json "events"
   return {
-    schemaVersion := (← field json "schema_version")
     initial := (← parseInitial (← json.getObjVal? "initial"))
     events := (← eventsJson.mapM parseCompositionEvent)
     traceTruncated := (← field json "trace_truncated")
@@ -285,8 +281,6 @@ private def checkReturnedSuccess
 
 private def checkTrace (json : Json) : Except String Unit := do
   let trace ← parseTrace json
-  if trace.schemaVersion != schemaVersion then
-    throw s!"unsupported composition trace schema version: {trace.schemaVersion}"
   if trace.traceTruncated then
     throw "composition trace exceeded its in-memory event budget"
   let replayed ← replayEvents trace.events.toList State.initialState
