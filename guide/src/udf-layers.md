@@ -56,8 +56,8 @@ impl Addin for DeskTools {
         Ok(State::new())
     }
 
-    fn udf_layers(_: &State) -> Vec<Arc<dyn UdfLayer>> {
-        vec![Arc::new(MetricsLayer)]
+    fn udf_layers(_: &State) -> Vec<Box<dyn UdfLayer>> {
+        vec![Box::new(MetricsLayer)]
     }
 }
 ```

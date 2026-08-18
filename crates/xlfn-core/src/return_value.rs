@@ -987,7 +987,7 @@ where
     F: FnOnce(&S) -> XllResult<T>,
     T: ExcelReturn,
 {
-    let instrumentation = crate::execution::InstrumentationPlan::for_runtime(runtime);
+    let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
 
     if !instrumentation.enabled() {
         return udf_boundary_uninstrumented(guard, producer, udf_id, operation);
@@ -1036,19 +1036,19 @@ where
     }
 }
 
-struct InstrumentedUdfContext {
-    instrumentation: crate::execution::InstrumentationPlan,
+struct InstrumentedUdfContext<'a> {
+    instrumentation: crate::execution::InstrumentationPlan<'a>,
     concurrent_calls: usize,
 }
 
-fn udf_boundary_instrumented<S, F, T>(
+fn udf_boundary_instrumented<'a, S, F, T>(
     runtime: &Runtime<S>,
-    guard: &crate::runtime::CallGuard<'_, S>,
+    guard: &'a crate::runtime::CallGuard<'_, S>,
     producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
-    context: InstrumentedUdfContext,
+    context: InstrumentedUdfContext<'a>,
 ) -> *mut XLOPER12
 where
     F: FnOnce(&S) -> XllResult<T>,
@@ -1070,29 +1070,28 @@ where
         concurrent_calls,
     };
 
-    let layers = match instrumentation.layers() {
-        Some(configured_layers) => {
-            let layer_metadata = CallMetadata {
-                udf_id,
-                excel_name,
-                call_id,
-                calculation_id,
-                started_at: std::time::SystemTime::now(),
-                concurrent_calls,
-            };
-            match crate::execution::EnteredLayers::enter(configured_layers, &layer_metadata) {
-                Ok(layers) => Some(layers),
-                Err(error) => {
-                    crate::diagnostics::report_no_unwind(udf_id, &error);
-                    let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
-                    if instrumentation.trace_enabled() {
-                        crate::execution::trace(&trace_metadata, &outcome);
-                    }
-                    return allocate_excel_error(&error, producer);
+    let layers = if !instrumentation.layers().is_empty() {
+        let layer_metadata = CallMetadata {
+            udf_id,
+            excel_name,
+            call_id,
+            calculation_id,
+            started_at: std::time::SystemTime::now(),
+            concurrent_calls,
+        };
+        match crate::execution::EnteredLayers::enter(instrumentation.layers(), &layer_metadata) {
+            Ok(layers) => Some(layers),
+            Err(error) => {
+                crate::diagnostics::report_no_unwind(udf_id, &error);
+                let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+                if instrumentation.trace_enabled() {
+                    crate::execution::trace(&trace_metadata, &outcome);
                 }
+                return allocate_excel_error(&error, producer);
             }
         }
-        None => None,
+    } else {
+        None
     };
 
     let prepared = catch_unwind(AssertUnwindSafe(|| {
@@ -1741,7 +1740,7 @@ mod tests {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let runtime = Runtime::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), vec![Arc::new(Recorder(Arc::clone(&events)))]);
+        runtime.publish((), vec![Box::new(Recorder(Arc::clone(&events)))]);
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let pointer = udf_boundary_named(&runtime, "test_conversion", "TEST.CONVERSION", |_| {

@@ -8,7 +8,7 @@ pub trait Addin: Send + Sync + 'static {
     type Error: IntoXllError;
 
     fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
-    fn udf_layers(state: &Self::State) -> Vec<Arc<dyn UdfLayer>>;
+    fn udf_layers(state: &Self::State) -> Vec<Box<dyn UdfLayer>>;
     fn quiesce(state: &mut Self::State) -> Result<(), Self::Error>;
     fn cleanup(state: &mut Self::State, reporter: &mut CleanupReporter<'_>);
 }

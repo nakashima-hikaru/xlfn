@@ -7,7 +7,7 @@
 #[cfg(feature = "async")]
 use std::future::Future;
 
-#[cfg(any(feature = "async", test))]
+#[cfg(feature = "async")]
 use crate::cancellation::CancellationToken;
 use crate::error::{InputError, XllError, XllResult};
 use crate::lifecycle::{close_addin, open_addin};
@@ -75,14 +75,17 @@ pub fn macro_sheet_context<'state, 'call, S>(
     crate::addin::MacroSheetContext::new(state, frame.scope)
 }
 
+#[doc(hidden)]
+pub use crate::runtime::GenerationLease;
+
 /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
 #[cfg(feature = "async")]
 #[doc(hidden)]
 pub fn async_context<S>(
-    state: &std::sync::Arc<S>,
+    lease: crate::runtime::GenerationLease<S>,
     cancellation: &CancellationToken,
 ) -> crate::addin::AsyncContext<S> {
-    crate::addin::AsyncContext::new(state.clone(), cancellation.clone())
+    crate::addin::AsyncContext::new(lease, cancellation.clone())
 }
 
 /// Opaque wrapper around the add-in [`Runtime`] for generated code.
@@ -419,7 +422,7 @@ pub unsafe fn async_udf<S, R, F, Fut>(
     S: Send + Sync + 'static,
     R: ExcelReturn + Send + 'static,
     F: for<'call> FnOnce(
-        &std::sync::Arc<S>,
+        crate::runtime::GenerationLease<S>,
         &CancellationToken,
         &mut CallFrame<'call>,
     ) -> XllResult<Fut>,
@@ -432,10 +435,10 @@ pub unsafe fn async_udf<S, R, F, Fut>(
             udf_id,
             excel_name,
             async_handle,
-            |state, cancellation| {
+            |lease, cancellation| {
                 with_excel_call_scope(|scope| {
                     let mut frame = CallFrame::new::<R, S>(runtime.runtime(), scope);
-                    let future = execute(&state, &cancellation, &mut frame)?;
+                    let future = execute(lease, &cancellation, &mut frame)?;
                     let _ = frame.arguments.finish();
                     Ok(future)
                 })

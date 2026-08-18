@@ -83,7 +83,7 @@ pub trait Addin: Send + Sync + 'static {
         Ok(())
     }
 
-    fn udf_layers(_state: &Self::State) -> Vec<Arc<dyn UdfLayer>> {
+    fn udf_layers(_state: &Self::State) -> Vec<Box<dyn UdfLayer>> {
         Vec::new()
     }
 
@@ -131,15 +131,15 @@ pub struct ThreadSafeContext<'call, S> {
 
 /// Owned Add-in state available to an asynchronous worksheet function.
 ///
-/// The context must remain owned by the generated async invocation. Moving it
+/// The context holds an explicit open-generation lifetime lease. Moving it
 /// into a detached thread or task that can outlive the returned future violates
 /// the XLL shutdown contract: Excel may unload the module immediately after
-/// `xlAutoClose`. The runtime detects an escaped state lease during shutdown
+/// `xlAutoClose`. The runtime detects an escaped lease during shutdown
 /// and terminates the process rather than returning with executable XLL code
 /// still reachable.
 #[cfg(feature = "async")]
 pub struct AsyncContext<S> {
-    state: Arc<S>,
+    lease: crate::runtime::GenerationLease<S>,
     cancellation: crate::CancellationToken,
 }
 
@@ -147,16 +147,19 @@ pub struct AsyncContext<S> {
 impl<S> AsyncContext<S> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new(state: Arc<S>, cancellation: crate::CancellationToken) -> Self {
+    pub fn new(
+        lease: crate::runtime::GenerationLease<S>,
+        cancellation: crate::CancellationToken,
+    ) -> Self {
         Self {
-            state,
+            lease,
             cancellation,
         }
     }
 
     #[must_use]
     pub fn state(&self) -> &S {
-        &self.state
+        self.lease.state()
     }
 
     #[must_use]
@@ -183,14 +186,14 @@ impl<S> Deref for AsyncContext<S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
-        &self.state
+        self.lease.state()
     }
 }
 
 #[cfg(feature = "async")]
 impl<S> AsRef<S> for AsyncContext<S> {
     fn as_ref(&self) -> &S {
-        &self.state
+        self.lease.state()
     }
 }
 
@@ -557,7 +560,13 @@ mod tests {
         let (source, token) = crate::cancellation::CancellationSource::new(
             crate::CancellationGuarantee::CalculationScoped,
         );
-        let context = AsyncContext::new(Arc::new(23_u32), token);
+        let lease = crate::runtime::GenerationLease {
+            generation: Arc::new(crate::runtime::OpenGeneration {
+                state: 23_u32,
+                layers: Box::new([]),
+            }),
+        };
+        let context = AsyncContext::new(lease, token);
 
         assert_eq!(context.state(), &23);
         assert!(!context.cancellation().is_cancelled());

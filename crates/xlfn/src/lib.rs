@@ -188,7 +188,7 @@ pub mod __private {
     };
     #[cfg(feature = "async")]
     pub use xlfn_core::macro_support::{
-        async_context, async_udf, cancel_async_calculation, end_async_calculation,
+        GenerationLease, async_context, async_udf, cancel_async_calculation, end_async_calculation,
     };
     pub use xlfn_sys::XLOPER12;
 }

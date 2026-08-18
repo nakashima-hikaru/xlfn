@@ -483,7 +483,7 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
     let mut open_attempt = runtime.begin_open().unwrap();
     runtime.publish(
         7_u32,
-        vec![Arc::new(ReentrantLayer {
+        vec![Box::new(ReentrantLayer {
             runtime,
             exited: exited_tx,
         })],
@@ -915,7 +915,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, vec![Arc::new(Recorder(event_sender))]);
+    runtime.publish(7_u32, vec![Box::new(Recorder(event_sender))]);
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -979,7 +979,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, vec![Arc::new(Recorder(event_sender))]);
+    runtime.publish(7_u32, vec![Box::new(Recorder(event_sender))]);
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
@@ -1724,7 +1724,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
     let runtime = Box::leak(Box::new(Runtime::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(1_u32, vec![Arc::new(PanickingLayer)]);
+    runtime.publish(1_u32, vec![Box::new(PanickingLayer)]);
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 

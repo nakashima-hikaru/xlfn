@@ -15,7 +15,7 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     start: Start,
 ) where
     S: Send + Sync + 'static,
-    Start: FnOnce(Arc<S>, CancellationToken) -> XllResult<Fut>,
+    Start: FnOnce(crate::runtime::GenerationLease<S>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
@@ -63,7 +63,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
     start: Start,
 ) where
     S: Send + Sync + 'static,
-    Start: FnOnce(Arc<S>, CancellationToken) -> XllResult<Fut>,
+    Start: FnOnce(crate::runtime::GenerationLease<S>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
@@ -80,10 +80,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
         started_at,
         concurrent_calls,
     };
-    let configured_layers = runtime
-        .layers_if_configured()
-        .unwrap_or_else(|| Arc::new(Vec::new()));
-    let layers = match crate::execution::EnteredLayers::enter(&configured_layers, &metadata) {
+    let layers = match crate::execution::EnteredLayers::enter(guard.layers(), &metadata) {
         Ok(layers) => layers,
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
@@ -110,7 +107,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_unwind(AssertUnwindSafe(|| start(guard.state_arc(), token.clone())))
+    let future = catch_unwind(AssertUnwindSafe(|| start(guard.lease(), token.clone())))
         .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {

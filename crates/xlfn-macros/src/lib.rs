@@ -730,7 +730,7 @@ fn expand_excel_function(
             quote!(#krate::__private::macro_sheet_context(__frame, __state))
         }
         ContextKind::Async => {
-            quote!(#krate::__private::async_context(__state, __cancellation))
+            quote!(#krate::__private::async_context(__lease, __cancellation))
         }
     });
     let macro_sheet = options.macro_sheet || matches!(context, Some(ContextKind::MacroSheet));
@@ -868,7 +868,7 @@ fn expand_excel_function(
                         #udf_id,
                         #excel_name,
                         __async_handle,
-                        |__state, __cancellation, __frame| {
+                        |__lease, __cancellation, __frame| {
                             #context_setup
                             #(#conversions)*
                             ::core::result::Result::Ok(async move {

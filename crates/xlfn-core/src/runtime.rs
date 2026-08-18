@@ -1,4 +1,3 @@
-use crate::execution::SharedUdfLayers;
 use crate::{RegistrationId, XllError, XllResult};
 use arc_swap::ArcSwapOption;
 #[cfg(test)]
@@ -42,6 +41,31 @@ impl LifecyclePhase {
     }
 }
 
+/// The published root of an open Add-in generation.
+pub struct OpenGeneration<S> {
+    pub(crate) state: S,
+    pub(crate) layers: Box<[Box<dyn crate::UdfLayer>]>,
+}
+
+/// Unique Add-in state staged during `OPENING`.
+pub struct OpeningGeneration<S> {
+    pub(crate) state: S,
+    pub(crate) layers: Option<Box<[Box<dyn crate::UdfLayer>]>>,
+}
+
+/// Explicit open-generation lifetime lease for asynchronous UDF executions.
+#[derive(Clone)]
+pub struct GenerationLease<S> {
+    pub(crate) generation: Arc<OpenGeneration<S>>,
+}
+
+impl<S> GenerationLease<S> {
+    #[must_use]
+    pub fn state(&self) -> &S {
+        &self.generation.state
+    }
+}
+
 pub struct Runtime<S> {
     phase: AtomicU8,
     next_lifecycle_attempt: AtomicU64,
@@ -50,8 +74,8 @@ pub struct Runtime<S> {
     // Invalidates opens that sampled an earlier lifecycle boundary. Close
     // owner exclusivity is tracked separately by `close_attempt_active`.
     close_epoch: AtomicU64,
-    state: ArcSwapOption<S>,
-    layers: ArcSwapOption<SharedUdfLayers>,
+    opening: Mutex<Option<OpeningGeneration<S>>>,
+    current: ArcSwapOption<OpenGeneration<S>>,
     registrations: Mutex<Vec<crate::registration::PendingRegistration>>,
     metadata_debt:
         Mutex<BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>>>,
@@ -91,8 +115,8 @@ impl<S> Runtime<S> {
             generation: AtomicU64::new(0),
             open_attempt_id: AtomicU64::new(0),
             close_epoch: AtomicU64::new(0),
-            state: ArcSwapOption::const_empty(),
-            layers: ArcSwapOption::const_empty(),
+            opening: Mutex::new(None),
+            current: ArcSwapOption::const_empty(),
             registrations: Mutex::new(Vec::new()),
             metadata_debt: Mutex::new(BTreeMap::new()),
             event_registrations: Mutex::new(Vec::new()),
@@ -263,26 +287,51 @@ impl<S> Runtime<S> {
         self.close_epoch.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish(&self, state: S, layers: Vec<Arc<dyn crate::UdfLayer>>) {
-        self.publish_state(state);
-        self.publish_layers(layers);
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn publish(&self, state: S, layers: Vec<Box<dyn crate::UdfLayer>>) {
+        *self.opening.lock() = Some(OpeningGeneration {
+            state,
+            layers: Some(layers.into_boxed_slice()),
+        });
     }
 
-    pub(crate) fn publish_state(&self, state: S) {
-        self.state.store(Some(Arc::new(state)));
+    pub(crate) fn stage_opening_state(&self, state: S) {
+        *self.opening.lock() = Some(OpeningGeneration {
+            state,
+            layers: None,
+        });
     }
 
-    pub(crate) fn opening_state(&self) -> Option<Arc<S>> {
-        self.state.load_full()
+    pub(crate) fn with_opening_state<R>(&self, f: impl FnOnce(&S) -> R) -> Option<R> {
+        let guard = self.opening.lock();
+        guard.as_ref().map(|opening| f(&opening.state))
     }
 
-    pub(crate) fn publish_layers(&self, layers: Vec<Arc<dyn crate::UdfLayer>>) {
-        if layers.is_empty() {
-            self.layers.store(None);
-        } else {
-            self.layers.store(Some(Arc::new(layers)));
+    pub(crate) fn stage_opening_layers(&self, layers: Box<[Box<dyn crate::UdfLayer>]>) {
+        if let Some(opening) = self.opening.lock().as_mut() {
+            opening.layers = Some(layers);
         }
+    }
+
+    pub(crate) fn publish_opening_generation(&self) -> XllResult<()> {
+        let opening = self.opening.lock().take().ok_or(XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+        })?;
+        let layers = opening.layers.unwrap_or_default();
+        let generation = OpenGeneration {
+            state: opening.state,
+            layers,
+        };
+        self.current.store(Some(Arc::new(generation)));
+        Ok(())
+    }
+
+    pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<S>> {
+        self.opening.lock().take()
+    }
+
+    pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<S>>> {
+        self.current.swap(None)
     }
 
     pub(crate) fn finish_open(
@@ -315,6 +364,7 @@ impl<S> Runtime<S> {
                 let ghost = self.ghost_handle();
                 ingress
                     .complete_open(|| {
+                        self.publish_opening_generation()?;
                         let mut resources = crate::shutdown_refinement::GhostResources::opened(
                             self.registrations.lock().len() as u64,
                             self.event_registrations.lock().len() as u64,
@@ -370,6 +420,7 @@ impl<S> Runtime<S> {
             #[cfg(not(any(test, feature = "shutdown-refinement")))]
             ingress
                 .complete_open(|| {
+                    self.publish_opening_generation()?;
                     self.phase
                         .store(LifecyclePhase::Open as u8, Ordering::Release);
                     self.generation.store(attempt.attempt_id, Ordering::Release);
@@ -482,8 +533,8 @@ impl<S> Runtime<S> {
                 return Err(XllError::Closing);
             }
 
-            let state = self.state.load();
-            if state.is_none() {
+            let generation = self.current.load();
+            if generation.is_none() {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::DiagnosticId::MISSING_STATE,
                 });
@@ -495,7 +546,7 @@ impl<S> Runtime<S> {
                 runtime: self,
                 #[cfg(not(any(test, feature = "shutdown-refinement")))]
                 _runtime: std::marker::PhantomData,
-                state,
+                generation,
             })
         })
     }
@@ -712,14 +763,6 @@ impl<S> Runtime<S> {
         self.returns
             .get()
             .is_none_or(|tracker| tracker.admission_closed() && tracker.is_quiescent())
-    }
-
-    pub(crate) fn take_state(&self) -> Option<Arc<S>> {
-        self.state.swap(None)
-    }
-
-    pub(crate) fn restore_state_arc(&self, state: Arc<S>) {
-        self.state.store(Some(state));
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -1001,7 +1044,8 @@ impl<S> Runtime<S> {
             && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
-            && self.state.load_full().is_none()
+            && self.opening.lock().is_none()
+            && self.current.load_full().is_none()
             && self.registrations.lock().is_empty()
             && self.event_registrations.lock().is_empty()
             && !self.registration_state_unknown();
@@ -1042,7 +1086,6 @@ impl<S> Runtime<S> {
         }
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = certificate.composition_resources;
-        self.layers.store(None);
         let _wait_guard = self.wait_lock.lock();
         debug_assert_eq!(self.open_attempt_id.load(Ordering::Acquire), 0);
         if !matches!(
@@ -1090,7 +1133,8 @@ impl<S> Runtime<S> {
             && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
-            && self.state.load_full().is_none()
+            && self.opening.lock().is_none()
+            && self.current.load_full().is_none()
             && self.registrations.lock().is_empty()
             && self.event_registrations.lock().is_empty()
             && !self.registration_state_unknown();
@@ -1133,7 +1177,6 @@ impl<S> Runtime<S> {
         }
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = certificate.composition_resources;
-        self.layers.store(None);
         let _wait_guard = self.wait_lock.lock();
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let committed = self.ghost_handle().active();
@@ -1153,8 +1196,15 @@ impl<S> Runtime<S> {
         self.phase
             .store(LifecyclePhase::Closed as u8, Ordering::Release);
         #[cfg(any(test, feature = "shutdown-refinement"))]
+        debug_assert_eq!(self.phase(), LifecyclePhase::Closed);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        if committed {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
+            );
+        }
+        #[cfg(any(test, feature = "shutdown-refinement"))]
         {
-            debug_assert_eq!(self.phase(), LifecyclePhase::Closed);
             if !committed {
                 self.record_composition_event(
                     crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(
@@ -1162,12 +1212,6 @@ impl<S> Runtime<S> {
                     ),
                 );
             }
-        }
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        if committed {
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
-            );
         }
         self.lifecycle_changed.notify_all();
         crate::rtd::certify_module_unload();
@@ -1188,14 +1232,6 @@ impl<S> Runtime<S> {
     #[cfg(test)]
     pub(crate) fn peek_next_call_id(&self) -> u64 {
         self.next_call_id.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn layers_if_configured(&self) -> Option<Arc<SharedUdfLayers>> {
-        let layers = self.layers.load();
-        match layers.as_ref() {
-            Some(layers) if !layers.is_empty() => Some(Arc::clone(layers)),
-            _ => None,
-        }
     }
 
     pub(crate) fn calculation_id(&self) -> crate::CalculationId {
@@ -1406,26 +1442,36 @@ pub struct CallGuard<'runtime, S> {
     runtime: &'runtime Runtime<S>,
     #[cfg(not(any(test, feature = "shutdown-refinement")))]
     _runtime: std::marker::PhantomData<&'runtime Runtime<S>>,
-    state: arc_swap::Guard<Option<Arc<S>>>,
+    generation: arc_swap::Guard<Option<Arc<OpenGeneration<S>>>>,
 }
 
 impl<S> CallGuard<'_, S> {
     #[must_use]
     pub fn state(&self) -> &S {
-        self.state
+        &self.generation().state
+    }
+
+    #[must_use]
+    pub(crate) fn layers(&self) -> &[Box<dyn crate::UdfLayer>] {
+        &self.generation().layers
+    }
+
+    fn generation(&self) -> &OpenGeneration<S> {
+        self.generation
             .as_ref()
-            .expect("a live CallGuard always observes published runtime state")
-            .as_ref()
+            .expect("a live CallGuard always observes published runtime generation")
     }
 
     #[cfg(feature = "async")]
     #[must_use]
-    pub(crate) fn state_arc(&self) -> Arc<S> {
-        Arc::clone(
-            self.state
-                .as_ref()
-                .expect("a live CallGuard always observes published runtime state"),
-        )
+    pub(crate) fn lease(&self) -> GenerationLease<S> {
+        GenerationLease {
+            generation: Arc::clone(
+                self.generation
+                    .as_ref()
+                    .expect("a live CallGuard always observes published runtime generation"),
+            ),
+        }
     }
 }
 
@@ -1524,7 +1570,7 @@ pub(crate) mod tests {
 
         let close_attempt = runtime.begin_final_close().unwrap();
         runtime.close_handles().unwrap();
-        assert_eq!(*runtime.take_state().unwrap(), 1);
+        assert_eq!(runtime.take_current_generation().unwrap().state, 1);
         finish_test_close(&runtime);
         drop(close_attempt);
 
@@ -1584,7 +1630,7 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         assert_eq!(runtime.enter().unwrap().state(), &11);
         let _close = runtime.begin_final_close();
-        let _ = runtime.take_state();
+        let _ = runtime.take_current_generation();
         finish_test_close(&runtime);
     }
 
@@ -1620,7 +1666,12 @@ pub(crate) mod tests {
             let _close = closing_runtime
                 .begin_final_close()
                 .expect("the opening runtime requires final close");
-            assert_eq!(*closing_runtime.take_state().unwrap(), 17);
+            let state = closing_runtime
+                .take_current_generation()
+                .map(|g| g.state)
+                .or_else(|| closing_runtime.take_opening_generation().map(|g| g.state))
+                .unwrap();
+            assert_eq!(state, 17);
             finish_test_close(&closing_runtime);
             closed_tx.send(()).unwrap();
         });
@@ -1655,7 +1706,7 @@ pub(crate) mod tests {
         runtime.wait_for_returns();
         runtime.close_handles().unwrap();
         runtime.close_subscriptions().unwrap();
-        assert!(runtime.take_state().is_some());
+        assert!(runtime.take_current_generation().is_some());
 
         let ingress = crate::ingress::global_ingress();
         ingress.begin_close_with(|| {
@@ -1745,7 +1796,7 @@ pub(crate) mod tests {
         drop(first);
 
         let second = runtime.begin_final_close().unwrap();
-        let _ = runtime.take_state();
+        let _ = runtime.take_current_generation();
         finish_test_close(&runtime);
         drop(second);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -1799,7 +1850,7 @@ pub(crate) mod tests {
         );
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
-        assert!(runtime.take_state().is_some());
+        assert!(runtime.take_current_generation().is_some());
         finish_test_close(&runtime);
         drop(close_attempt);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);

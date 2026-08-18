@@ -1,6 +1,5 @@
 use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -60,25 +59,25 @@ pub(crate) fn udf_trace_enabled() -> bool {
     .unwrap_or(false)
 }
 
-pub(crate) struct InstrumentationPlan {
-    layers: Option<Arc<SharedUdfLayers>>,
+pub(crate) struct InstrumentationPlan<'a> {
+    layers: &'a [Box<dyn UdfLayer>],
     trace_enabled: bool,
 }
 
-impl InstrumentationPlan {
-    pub(crate) fn for_runtime<S>(runtime: &crate::Runtime<S>) -> Self {
+impl<'a> InstrumentationPlan<'a> {
+    pub(crate) fn for_call<S>(call: &'a crate::runtime::CallGuard<'_, S>) -> Self {
         Self {
-            layers: runtime.layers_if_configured(),
+            layers: call.layers(),
             trace_enabled: udf_trace_enabled(),
         }
     }
 
     pub(crate) const fn enabled(&self) -> bool {
-        self.layers.is_some() || self.trace_enabled
+        !self.layers.is_empty() || self.trace_enabled
     }
 
-    pub(crate) fn layers(&self) -> Option<&SharedUdfLayers> {
-        self.layers.as_deref()
+    pub(crate) const fn layers(&self) -> &'a [Box<dyn UdfLayer>] {
+        self.layers
     }
 
     pub(crate) const fn trace_enabled(&self) -> bool {
@@ -142,14 +141,12 @@ pub trait UdfLayer: Send + Sync + 'static {
     fn enter(&self, metadata: &CallMetadata) -> XllResult<Box<dyn UdfLayerGuard>>;
 }
 
-pub(crate) type SharedUdfLayers = Vec<Arc<dyn UdfLayer>>;
-
 pub(crate) struct EnteredLayers {
     guards: Vec<Box<dyn UdfLayerGuard>>,
 }
 
 impl EnteredLayers {
-    pub(crate) fn enter(layers: &SharedUdfLayers, metadata: &CallMetadata) -> XllResult<Self> {
+    pub(crate) fn enter(layers: &[Box<dyn UdfLayer>], metadata: &CallMetadata) -> XllResult<Self> {
         let mut entered = Self {
             guards: Vec::with_capacity(layers.len()),
         };
@@ -255,6 +252,7 @@ pub(crate) fn trace(metadata: &UdfTraceMetadata, outcome: &CallOutcome<'_>) {
 mod tests {
     use super::*;
     use parking_lot::Mutex;
+    use std::sync::Arc;
 
     struct OrderedLayer {
         name: &'static str,
@@ -334,13 +332,13 @@ mod tests {
     #[test]
     fn layers_exit_in_reverse_order() {
         let order = Arc::new(Mutex::new(Vec::new()));
-        let layers: SharedUdfLayers = vec![
-            Arc::new(OrderedLayer {
+        let layers: Vec<Box<dyn UdfLayer>> = vec![
+            Box::new(OrderedLayer {
                 name: "enter-a",
                 order: Arc::clone(&order),
                 reject: false,
             }),
-            Arc::new(OrderedLayer {
+            Box::new(OrderedLayer {
                 name: "enter-b",
                 order: Arc::clone(&order),
                 reject: false,
@@ -362,13 +360,13 @@ mod tests {
     #[test]
     fn rejected_entry_unwinds_previously_entered_layers() {
         let order = Arc::new(Mutex::new(Vec::new()));
-        let layers: SharedUdfLayers = vec![
-            Arc::new(OrderedLayer {
+        let layers: Vec<Box<dyn UdfLayer>> = vec![
+            Box::new(OrderedLayer {
                 name: "enter-a",
                 order: Arc::clone(&order),
                 reject: false,
             }),
-            Arc::new(OrderedLayer {
+            Box::new(OrderedLayer {
                 name: "reject",
                 order: Arc::clone(&order),
                 reject: true,
@@ -384,13 +382,13 @@ mod tests {
     #[test]
     fn panicking_layer_exit_does_not_skip_outer_layers() {
         let order = Arc::new(Mutex::new(Vec::new()));
-        let layers: SharedUdfLayers = vec![
-            Arc::new(PanicExitLayer {
+        let layers: Vec<Box<dyn UdfLayer>> = vec![
+            Box::new(PanicExitLayer {
                 name: "outer",
                 order: Arc::clone(&order),
                 panic_on_exit: false,
             }),
-            Arc::new(PanicExitLayer {
+            Box::new(PanicExitLayer {
                 name: "inner",
                 order: Arc::clone(&order),
                 panic_on_exit: true,
