@@ -48,9 +48,43 @@ pub struct OpenGeneration<S> {
 }
 
 /// Unique Add-in state staged during `OPENING`.
-pub struct OpeningGeneration<S> {
-    pub(crate) state: S,
-    pub(crate) layers: Option<Box<[Box<dyn crate::UdfLayer>]>>,
+pub enum OpeningGeneration<S> {
+    StateOnly {
+        state: S,
+    },
+    Ready {
+        state: S,
+        layers: Box<[Box<dyn crate::UdfLayer>]>,
+    },
+}
+
+impl<S> OpeningGeneration<S> {
+    #[must_use]
+    pub(crate) fn state(&self) -> &S {
+        match self {
+            Self::StateOnly { state } | Self::Ready { state, .. } => state,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn into_state(self) -> S {
+        match self {
+            Self::StateOnly { state } | Self::Ready { state, .. } => state,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn attach_layers(self, layers: Box<[Box<dyn crate::UdfLayer>]>) -> Self {
+        match self {
+            Self::StateOnly { state } | Self::Ready { state, .. } => Self::Ready { state, layers },
+        }
+    }
+}
+
+/// Generation reclaimed during shutdown.
+pub(crate) enum ShutdownGeneration<S> {
+    Opening(OpeningGeneration<S>),
+    Open(Arc<OpenGeneration<S>>),
 }
 
 /// Explicit open-generation lifetime lease for asynchronous UDF executions.
@@ -289,41 +323,62 @@ impl<S> Runtime<S> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish(&self, state: S, layers: Vec<Box<dyn crate::UdfLayer>>) {
-        *self.opening.lock() = Some(OpeningGeneration {
+        *self.opening.lock() = Some(OpeningGeneration::Ready {
             state,
-            layers: Some(layers.into_boxed_slice()),
+            layers: layers.into_boxed_slice(),
         });
     }
 
-    pub(crate) fn stage_opening_state(&self, state: S) {
-        *self.opening.lock() = Some(OpeningGeneration {
-            state,
-            layers: None,
-        });
-    }
-
-    pub(crate) fn with_opening_state<R>(&self, f: impl FnOnce(&S) -> R) -> Option<R> {
-        let guard = self.opening.lock();
-        guard.as_ref().map(|opening| f(&opening.state))
-    }
-
-    pub(crate) fn stage_opening_layers(&self, layers: Box<[Box<dyn crate::UdfLayer>]>) {
-        if let Some(opening) = self.opening.lock().as_mut() {
-            opening.layers = Some(layers);
+    pub(crate) fn stage_opening_state(&self, state: S) -> XllResult<()> {
+        let mut slot = self.opening.lock();
+        if slot.is_some() || self.current.load().is_some() {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+            });
         }
+        *slot = Some(OpeningGeneration::StateOnly { state });
+        Ok(())
+    }
+
+    pub(crate) fn restore_opening_generation(
+        &self,
+        opening: OpeningGeneration<S>,
+    ) -> XllResult<()> {
+        let mut slot = self.opening.lock();
+        if slot.is_some() {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+            });
+        }
+        *slot = Some(opening);
+        Ok(())
     }
 
     pub(crate) fn publish_opening_generation(&self) -> XllResult<()> {
         let opening = self.opening.lock().take().ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::OPEN_STATE,
         })?;
-        let layers = opening.layers.unwrap_or_default();
-        let generation = OpenGeneration {
-            state: opening.state,
-            layers,
+        let (state, layers) = match opening {
+            OpeningGeneration::Ready { state, layers } => (state, layers),
+            OpeningGeneration::StateOnly { .. } => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+                });
+            }
         };
+        let generation = OpenGeneration { state, layers };
         self.current.store(Some(Arc::new(generation)));
         Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn has_opening_generation(&self) -> bool {
+        self.opening.lock().is_some()
+    }
+
+    #[must_use]
+    pub(crate) fn has_current_generation(&self) -> bool {
+        self.current.load().is_some()
     }
 
     pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<S>> {
@@ -332,6 +387,18 @@ impl<S> Runtime<S> {
 
     pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<S>>> {
         self.current.swap(None)
+    }
+
+    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<S>> {
+        debug_assert!(
+            !(self.has_opening_generation() && self.has_current_generation()),
+            "Runtime cannot have both opening and current generations simultaneously"
+        );
+        if let Some(generation) = self.take_current_generation() {
+            return Some(ShutdownGeneration::Open(generation));
+        }
+        self.take_opening_generation()
+            .map(ShutdownGeneration::Opening)
     }
 
     pub(crate) fn finish_open(
@@ -1666,11 +1733,13 @@ pub(crate) mod tests {
             let _close = closing_runtime
                 .begin_final_close()
                 .expect("the opening runtime requires final close");
-            let state = closing_runtime
-                .take_current_generation()
-                .map(|g| g.state)
-                .or_else(|| closing_runtime.take_opening_generation().map(|g| g.state))
-                .unwrap();
+            let state = match closing_runtime
+                .take_generation_for_shutdown()
+                .expect("shutdown extracts generation")
+            {
+                ShutdownGeneration::Open(generation) => generation.state,
+                ShutdownGeneration::Opening(opening) => opening.into_state(),
+            };
             assert_eq!(state, 17);
             finish_test_close(&closing_runtime);
             closed_tx.send(()).unwrap();

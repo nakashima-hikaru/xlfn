@@ -69,7 +69,7 @@ async fn slow(
 }
 ```
 
-`AsyncContext` owns an `Arc<State>` and a per-call cancellation token. It is available only with the `async` feature and only to `async fn`. An async function may omit the context if it does not need state or cancellation.
+`AsyncContext` owns a lease on the current open generation (`GenerationLease<State>`) and a per-call cancellation token. It is available only with the `async` feature and only to `async fn`. An async function may omit the context if it does not need state or cancellation.
 
 ## Compatibility table
 

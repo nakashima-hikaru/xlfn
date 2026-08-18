@@ -30,7 +30,7 @@ Do not perform unbounded I/O or long-running initialization in `open`. Excel is 
 
 ## Shared state
 
-Contexts expose `&State`, or an `Arc<State>` for asynchronous functions. State therefore needs explicit synchronization for mutable shared data:
+Synchronous contexts borrow `&State`. `AsyncContext` owns a lease on the current open generation (`GenerationLease`), keeping `State` and generation-scoped resources alive until the asynchronous invocation releases it. State therefore needs explicit synchronization for mutable shared data:
 
 ```rust
 use std::sync::RwLock;
@@ -72,7 +72,7 @@ fn quiesce(state: &mut State) -> Result<(), Error> {
 }
 ```
 
-`xlAutoClose` cannot reject DLL unload. If `quiesce` fails or panics, the framework fail-stops because unload safety is unknown. It also fail-stops when an Excel callback remains registered, a framework producer cannot be stopped, an RTD/COM object remains live, a handle runtime is not quiescent, or an `Arc<State>` escaped.
+`xlAutoClose` cannot reject DLL unload. If `quiesce` fails or panics, the framework fail-stops because unload safety is unknown. It also fail-stops when an Excel callback remains registered, a framework producer cannot be stopped, an RTD/COM object remains live, a handle runtime is not quiescent, or an open-generation lease escaped.
 
 For application-owned concurrent or thread-affine resources, a safe shutdown sequence is:
 

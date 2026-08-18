@@ -217,14 +217,24 @@ where
     // Stage unique ownership in OpeningGeneration before invoking add-in hooks.
     // If subsequent hooks panic, the outer boundary can roll the state back
     // through quiesce and cleanup with complete unique ownership.
-    runtime.stage_opening_state(state);
-    let layers = runtime
-        .with_opening_state(|state| A::udf_layers(state))
+    runtime.stage_opening_state(state)?;
+    let opening = runtime
+        .take_opening_generation()
         .ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::OPEN_STATE,
-        })?
-        .into_boxed_slice();
-    runtime.stage_opening_layers(layers);
+        })?;
+
+    let layers_result = catch_unwind(AssertUnwindSafe(|| A::udf_layers(opening.state())));
+    let layers = match layers_result {
+        Ok(layers) => layers.into_boxed_slice(),
+        Err(payload) => {
+            let _ = runtime.restore_opening_generation(opening);
+            std::panic::resume_unwind(payload);
+        }
+    };
+
+    let opening = opening.attach_layers(layers);
+    runtime.restore_opening_generation(opening)?;
     Ok(())
 }
 
@@ -233,11 +243,23 @@ fn async_worker_count<A>(runtime: &Runtime<A::State>) -> XllResult<usize>
 where
     A: Addin,
 {
-    runtime
-        .with_opening_state(|state| A::async_worker_count(state))
+    let opening = runtime
+        .take_opening_generation()
         .ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::OPEN_STATE,
-        })
+        })?;
+
+    let count_result = catch_unwind(AssertUnwindSafe(|| A::async_worker_count(opening.state())));
+    let count = match count_result {
+        Ok(count) => count,
+        Err(payload) => {
+            let _ = runtime.restore_opening_generation(opening);
+            std::panic::resume_unwind(payload);
+        }
+    };
+
+    runtime.restore_opening_generation(opening)?;
+    Ok(count)
 }
 
 fn retain_transaction_error<S>(
@@ -393,7 +415,7 @@ where
     let mut addin_state = None;
     let mut addin_quiesced = None;
     if let Some(opening) = runtime.take_opening_generation() {
-        let mut state = opening.state;
+        let mut state = opening.into_state();
         match catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
             .map_err(|_| XllError::Panic)
             .and_then(|result| result.map_err(IntoXllError::into_xll_error))
@@ -626,10 +648,17 @@ fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession
     let _ = catch_unwind(AssertUnwindSafe(|| runtime.close_subscriptions()));
     crate::callback_gate::close_from_runtime();
     let _ = catch_unwind(AssertUnwindSafe(|| runtime.close_handles()));
-    if let Some(generation) = runtime.take_current_generation() {
-        // The normal close path panicked before quiescence was certified. Keeping a permanent strong
-        // reference avoids running unknown destructor code after module unload.
-        let _ = std::sync::Arc::into_raw(generation);
+    if let Some(generation) = runtime.take_generation_for_shutdown() {
+        match generation {
+            crate::runtime::ShutdownGeneration::Open(generation) => {
+                // The normal close path panicked before quiescence was certified. Keeping a permanent strong
+                // reference avoids running unknown destructor code after module unload.
+                let _ = std::sync::Arc::into_raw(generation);
+            }
+            crate::runtime::ShutdownGeneration::Opening(opening) => {
+                std::mem::forget(opening);
+            }
+        }
     }
     let _ = crate::diagnostics::close_diagnostic_router();
     if let Err(error) = crate::rtd::wait_for_module_quiescence() {
@@ -866,16 +895,50 @@ where
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HostDetached);
 
     let mut addin_state = None;
-    if let Some(generation) = runtime.take_current_generation() {
-        match std::sync::Arc::try_unwrap(generation) {
-            Ok(mut generation) => {
-                if let Err(error) =
-                    catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut generation.state)))
-                        .map_err(|_| XllError::Panic)
-                        .and_then(|result| result.map_err(IntoXllError::into_xll_error))
+    if let Some(generation) = runtime.take_generation_for_shutdown() {
+        match generation {
+            crate::runtime::ShutdownGeneration::Open(generation) => {
+                match std::sync::Arc::try_unwrap(generation) {
+                    Ok(mut generation) => {
+                        if let Err(error) =
+                            catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut generation.state)))
+                                .map_err(|_| XllError::Panic)
+                                .and_then(|result| result.map_err(IntoXllError::into_xll_error))
+                        {
+                            report_boundary_error("xlAutoClose quiesce", &error);
+                            std::mem::forget(generation);
+                            fatal_unload_hazard(
+                                runtime,
+                                crate::shutdown::UnloadHazard::AddinQuiesceFailed,
+                                "xlAutoClose quiesce",
+                                &error,
+                            );
+                        }
+                        addin_state = Some(generation.state);
+                    }
+                    Err(generation) => {
+                        let error = XllError::Internal {
+                            diagnostic_id: crate::DiagnosticId::STATE_SCAN,
+                        };
+                        report_boundary_error("xlAutoClose state escaped", &error);
+                        let _ = std::sync::Arc::into_raw(generation);
+                        fatal_unload_hazard(
+                            runtime,
+                            crate::shutdown::UnloadHazard::AddinStateEscaped,
+                            "xlAutoClose state escaped",
+                            &error,
+                        );
+                    }
+                }
+            }
+            crate::runtime::ShutdownGeneration::Opening(opening) => {
+                let mut state = opening.into_state();
+                if let Err(error) = catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
+                    .map_err(|_| XllError::Panic)
+                    .and_then(|result| result.map_err(IntoXllError::into_xll_error))
                 {
                     report_boundary_error("xlAutoClose quiesce", &error);
-                    std::mem::forget(generation);
+                    std::mem::forget(state);
                     fatal_unload_hazard(
                         runtime,
                         crate::shutdown::UnloadHazard::AddinQuiesceFailed,
@@ -883,20 +946,7 @@ where
                         &error,
                     );
                 }
-                addin_state = Some(generation.state);
-            }
-            Err(generation) => {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::STATE_SCAN,
-                };
-                report_boundary_error("xlAutoClose state escaped", &error);
-                let _ = std::sync::Arc::into_raw(generation);
-                fatal_unload_hazard(
-                    runtime,
-                    crate::shutdown::UnloadHazard::AddinStateEscaped,
-                    "xlAutoClose state escaped",
-                    &error,
-                );
+                addin_state = Some(state);
             }
         }
     } else {
@@ -2226,5 +2276,175 @@ mod tests {
 
         assert_eq!(close_addin::<OrderedClose>(&runtime), 1);
         assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);
+    }
+
+    struct StagedRaceState {
+        quiesced: std::sync::Arc<AtomicUsize>,
+        cleaned: std::sync::Arc<AtomicUsize>,
+        dropped: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Drop for StagedRaceState {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct StagedRaceAddin;
+
+    impl Addin for StagedRaceAddin {
+        type State = StagedRaceState;
+        type Error = XllError;
+
+        fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+
+        fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
+            state.quiesced.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+            state.cleaned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn close_reclaims_staged_opening_generation_when_finish_open_loses_race() {
+        let runtime = std::sync::Arc::new(Runtime::new());
+        let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
+        let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let mut open_attempt = runtime.begin_open().unwrap();
+        let state = StagedRaceState {
+            quiesced: std::sync::Arc::clone(&quiesced),
+            cleaned: std::sync::Arc::clone(&cleaned),
+            dropped: std::sync::Arc::clone(&dropped),
+        };
+        runtime.stage_opening_state(state).unwrap();
+        let opening = runtime.take_opening_generation().unwrap();
+        let opening = opening.attach_layers(Vec::new().into_boxed_slice());
+        runtime.restore_opening_generation(opening).unwrap();
+
+        let closer_runtime = std::sync::Arc::clone(&runtime);
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            closed_tx
+                .send(close_addin::<StagedRaceAddin>(&closer_runtime))
+                .unwrap();
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while runtime.phase() != crate::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
+
+        assert!(matches!(
+            runtime.finish_open(&mut open_attempt, Vec::new()),
+            Err(XllError::Closing)
+        ));
+        assert!(!open_attempt.is_active());
+
+        assert_eq!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            1
+        );
+        closer.join().unwrap();
+
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(quiesced.load(Ordering::SeqCst), 1);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(runtime.take_current_generation().is_none());
+        assert!(runtime.take_opening_generation().is_none());
+    }
+
+    struct PanicLayersState {
+        quiesced: std::sync::Arc<AtomicUsize>,
+        cleaned: std::sync::Arc<AtomicUsize>,
+        dropped: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Drop for PanicLayersState {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PanicLayersAddin;
+
+    impl Addin for PanicLayersAddin {
+        type State = PanicLayersState;
+        type Error = XllError;
+
+        fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+
+        fn udf_layers(_state: &Self::State) -> Vec<Box<dyn crate::UdfLayer>> {
+            panic!("udf_layers intentionally panicked");
+        }
+
+        fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
+            state.quiesced.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+            state.cleaned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn udf_layers_panic_restores_opening_generation_for_rollback() {
+        let runtime = Runtime::new();
+        let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
+        let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let mut open_attempt = runtime.begin_open().unwrap();
+        let state = PanicLayersState {
+            quiesced: std::sync::Arc::clone(&quiesced),
+            cleaned: std::sync::Arc::clone(&cleaned),
+            dropped: std::sync::Arc::clone(&dropped),
+        };
+        runtime.stage_opening_state(state).unwrap();
+        let opening = runtime.take_opening_generation().unwrap();
+
+        let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let layers_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                PanicLayersAddin::udf_layers(opening.state())
+            }));
+            match layers_result {
+                Ok(layers) => {
+                    let opening = opening.attach_layers(layers.into_boxed_slice());
+                    runtime.restore_opening_generation(opening).unwrap();
+                }
+                Err(payload) => {
+                    runtime.restore_opening_generation(opening).unwrap();
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }));
+        assert!(panic_result.is_err());
+        assert!(runtime.has_opening_generation());
+
+        assert!(open_attempt.fail());
+        let mut callbacks = HostCallbackSession::new();
+        let outcome = rollback_open::<PanicLayersAddin>(&runtime, &mut callbacks);
+        assert!(outcome.unload_safe());
+        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+
+        assert_eq!(quiesced.load(Ordering::SeqCst), 1);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(runtime.take_opening_generation().is_none());
     }
 }

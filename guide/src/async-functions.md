@@ -41,7 +41,7 @@ Async functions are registered as thread-safe by the generated boundary. They ca
 
 ## State and converted inputs
 
-`AsyncContext<State>` owns an `Arc<State>`. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
+`AsyncContext<State>` owns a `GenerationLease<State>` on the open generation. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
 
 The add-in controls executor size:
 
