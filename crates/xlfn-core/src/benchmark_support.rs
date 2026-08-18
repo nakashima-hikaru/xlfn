@@ -414,6 +414,104 @@ impl Drop for HandleWarmBenchmark {
     }
 }
 
+/// A cold-growth benchmark that inserts `N` unique topic keys into a single runtime.
+pub struct HandleColdGrowthBenchmark {
+    runtime: Arc<HandleRuntime>,
+    keys: Vec<HandleTopicKey>,
+}
+
+impl HandleColdGrowthBenchmark {
+    pub fn new(count: usize) -> Self {
+        Self {
+            runtime: Arc::new(
+                HandleRuntime::try_new_with_ingress(count.max(1), None)
+                    .expect("benchmark host provides an OS CSPRNG"),
+            ),
+            keys: (0..count)
+                .map(|i| benchmark_revision_key("BENCH.COLD_GROW", i as u64))
+                .collect(),
+        }
+    }
+
+    pub fn run(&self) {
+        for (i, &key) in self.keys.iter().enumerate() {
+            let result = self
+                .runtime
+                .prepare_observed(
+                    key,
+                    || Ok(BenchHandleObject { _payload: i as u64 }),
+                    |_, _| Ok(()),
+                )
+                .expect("cold handle growth publication failed");
+            std::hint::black_box(result);
+        }
+    }
+}
+
+impl Drop for HandleColdGrowthBenchmark {
+    fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
+/// A revision-churn benchmark that repeatedly updates the same `N` topics with new objects.
+pub struct HandleRevisionChurnBenchmark {
+    runtime: Arc<HandleRuntime>,
+    keys: Vec<HandleTopicKey>,
+    churn_cycles: usize,
+}
+
+impl HandleRevisionChurnBenchmark {
+    pub fn new(topics: usize, churn_cycles: usize) -> Self {
+        let runtime = Arc::new(
+            HandleRuntime::try_new_with_ingress(topics.max(1), None)
+                .expect("benchmark host provides an OS CSPRNG"),
+        );
+        let keys: Vec<_> = (0..topics)
+            .map(|i| benchmark_revision_key("BENCH.CHURN", i as u64))
+            .collect();
+        for (i, &key) in keys.iter().enumerate() {
+            runtime
+                .prepare_observed(
+                    key,
+                    || Ok(BenchHandleObject { _payload: i as u64 }),
+                    |_, _| Ok(()),
+                )
+                .expect("initial seed publication failed");
+        }
+        Self {
+            runtime,
+            keys,
+            churn_cycles,
+        }
+    }
+
+    pub fn run(&self) {
+        for cycle in 0..self.churn_cycles {
+            let key = self.keys[cycle % self.keys.len()];
+            let result = self
+                .runtime
+                .prepare_observed(
+                    key,
+                    || {
+                        Ok(BenchHandleObject {
+                            _payload: cycle as u64,
+                        })
+                    },
+                    |_, _| Ok(()),
+                )
+                .expect("revision churn publication failed");
+            std::hint::black_box(result);
+        }
+    }
+}
+
+impl Drop for HandleRevisionChurnBenchmark {
+    fn drop(&mut self) {
+        cleanup_handle_runtime(&self.runtime);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Formula-to-handle end-to-end benchmarks
 // ---------------------------------------------------------------------------

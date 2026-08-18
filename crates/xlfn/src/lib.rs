@@ -177,14 +177,14 @@ pub mod __private {
     };
 
     pub use xlfn_core::macro_support::{
-        CallFrame, CellPresence, ExcelOutput, ExcelReturn, FunctionRegistration,
-        InputIdentityEncoder, MacroRuntime, MainThreadReturn, ReturnContext, addin_manager_info,
-        argument_presence, assert_async_parameter, assert_async_return, assert_excel_parameter,
-        assert_macro_sheet_return, assert_main_thread_return, assert_thread_safe_return,
-        assert_volatile_return, close_generated_addin, convert_argument, convert_reference,
-        dll_can_unload_now, dll_get_class_object, free_generated_return, macro_sheet_context,
-        main_thread_context, open_generated_addin, publish_new_handle, submit_registration,
-        sync_udf, thread_safe_context, utf16_eq_ignore_ascii_case,
+        ArgumentAbi, ArgumentDescriptor, CallFrame, CellPresence, ExcelOutput, ExcelReturn,
+        FunctionRegistration, InputIdentityEncoder, MacroRuntime, MainThreadReturn, ReturnContext,
+        addin_manager_info, argument_presence, assert_async_parameter, assert_async_return,
+        assert_excel_parameter, assert_macro_sheet_return, assert_main_thread_return,
+        assert_thread_safe_return, assert_volatile_return, close_generated_addin, convert_argument,
+        convert_reference, dll_can_unload_now, dll_get_class_object, free_generated_return,
+        macro_sheet_context, main_thread_context, open_generated_addin, publish_new_handle,
+        submit_registration, sync_udf, thread_safe_context, utf16_eq_ignore_ascii_case,
     };
     #[cfg(feature = "async")]
     pub use xlfn_core::macro_support::{

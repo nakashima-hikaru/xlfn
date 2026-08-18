@@ -6,7 +6,6 @@ use crate::{
     CallId, CallMetadata, CallOutcome, ExcelCellOutput, ExcelOutput, ExcelReturn, Runtime,
     UdfResultKind, XllError, XllResult,
 };
-use parking_lot::{Condvar, Mutex};
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -200,8 +199,6 @@ pub(crate) struct ReturnTracker {
     // Ordinary producer entry and obligation release use one thread-assigned
     // stripe. Shutdown seals all stripes and only then scans them for quiescence.
     stripes: [Arc<ReturnStripe>; RETURN_STRIPE_COUNT],
-    wait_lock: Mutex<()>,
-    quiescent: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
@@ -229,8 +226,6 @@ impl ReturnTracker {
     pub(crate) fn new_closed() -> Self {
         Self {
             stripes: std::array::from_fn(|_| Arc::new(ReturnStripe::new_closed())),
-            wait_lock: Mutex::new(()),
-            quiescent: Condvar::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
@@ -291,11 +286,8 @@ impl ReturnTracker {
     pub(crate) fn wait_for_quiescence(&self) {
         debug_assert!(self.admission_closed());
 
-        let mut guard = self.wait_lock.lock();
-
         while !self.is_quiescent() {
-            self.quiescent
-                .wait_for(&mut guard, RETURN_QUIESCENCE_RECHECK_INTERVAL);
+            std::thread::sleep(RETURN_QUIESCENCE_RECHECK_INTERVAL);
         }
     }
 

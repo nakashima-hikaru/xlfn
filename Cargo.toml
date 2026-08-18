@@ -24,11 +24,11 @@ publish = true
 
 [workspace.dependencies]
 # Member crates
-xlfn-common = { version = "0.2.0", path = "crates/xlfn-common" }
-xlfn-core = { version = "0.2.0", path = "crates/xlfn-core" }
-xlfn-macros = { version = "0.2.0", path = "crates/xlfn-macros" }
-xlfn-package = { version = "0.2.0", path = "crates/xlfn-package" }
-xlfn-sys = { version = "0.2.0", path = "crates/xlfn-sys" }
+xlfn-common = { version = "=0.2.0", path = "crates/xlfn-common" }
+xlfn-core = { version = "=0.2.0", path = "crates/xlfn-core" }
+xlfn-macros = { version = "=0.2.0", path = "crates/xlfn-macros" }
+xlfn-package = { version = "=0.2.0", path = "crates/xlfn-package" }
+xlfn-sys = { version = "=0.2.0", path = "crates/xlfn-sys" }
 
 # Third-party dependencies
 anyhow = "1.0.104"

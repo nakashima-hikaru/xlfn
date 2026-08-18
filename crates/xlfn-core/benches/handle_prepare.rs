@@ -2,12 +2,15 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn_core::benchmark_support::{
-    HandleColdBatch, HandleDistinctKeyBenchmark, HandleWarmBenchmark,
+    HandleColdBatch, HandleColdGrowthBenchmark, HandleDistinctKeyBenchmark,
+    HandleRevisionChurnBenchmark, HandleWarmBenchmark,
 };
 
 const DISTINCT_WORKERS: [usize; 4] = [1, 4, 16, 32];
 const DISTINCT_ITERATIONS_PER_WORKER: usize = 1_000;
 const BATCH_SIZE: usize = 100;
+const COLD_GROW_SIZES: [usize; 3] = [1_000, 10_000, 100_000];
+const REVISION_CHURN_SIZE: usize = 10_000;
 
 fn handle_prepare_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_prepare");
@@ -44,6 +47,26 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
         );
         bench.assert_warm_hit();
     }
+
+    // Cold growth at scale (measuring COW topic table insertion scaling)
+    for size in COLD_GROW_SIZES {
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("cold_grow", size), &size, |b, &size| {
+            b.iter_batched_ref(
+                || HandleColdGrowthBenchmark::new(size),
+                |bench| bench.run(),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+
+    // Revision churn at scale
+    group.throughput(Throughput::Elements(REVISION_CHURN_SIZE as u64));
+    let churn_bench = HandleRevisionChurnBenchmark::new(REVISION_CHURN_SIZE, REVISION_CHURN_SIZE);
+    group.bench_function("revision_churn/10_000", |b| {
+        b.iter(|| churn_bench.run());
+    });
+    drop(churn_bench);
 
     group.finish();
 }

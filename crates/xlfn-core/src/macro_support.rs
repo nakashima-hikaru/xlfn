@@ -13,8 +13,7 @@ use crate::error::{InputError, XllError, XllResult};
 use crate::lifecycle::{close_addin, open_addin};
 use crate::reference::{ExcelReference, reference_from_raw};
 use crate::registration::{
-    ArgumentAbi, ArgumentDescriptor, FunctionVisibility, RegistrationDescriptor, RegistrationFlags,
-    RegistrationSignature, ResultAbi,
+    FunctionVisibility, RegistrationDescriptor, RegistrationFlags, RegistrationSignature, ResultAbi,
 };
 #[cfg(feature = "async")]
 use crate::return_value::ffi_boundary_void;
@@ -30,6 +29,8 @@ pub use inventory::submit as submit_registration;
 
 #[doc(hidden)]
 pub use crate::input_identity::InputIdentityEncoder;
+#[doc(hidden)]
+pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
 #[doc(hidden)]
 pub use crate::return_value::ReturnContext;
 #[doc(hidden)]
@@ -120,9 +121,8 @@ pub struct FunctionRegistration {
     description: &'static str,
     help_topic: &'static str,
 
-    argument_names: &'static [&'static str],
-    argument_descriptions: &'static [&'static str],
-    reference_arguments: &'static [bool],
+    arguments: &'static [ArgumentDescriptor],
+    argument_abis: &'static [ArgumentAbi],
 
     is_async: bool,
     thread_safe: bool,
@@ -145,9 +145,8 @@ impl FunctionRegistration {
         category: &'static str,
         description: &'static str,
         help_topic: &'static str,
-        argument_names: &'static [&'static str],
-        argument_descriptions: &'static [&'static str],
-        reference_arguments: &'static [bool],
+        arguments: &'static [ArgumentDescriptor],
+        argument_abis: &'static [ArgumentAbi],
         is_async: bool,
         thread_safe: bool,
         macro_sheet: bool,
@@ -160,9 +159,8 @@ impl FunctionRegistration {
             category,
             description,
             help_topic,
-            argument_names,
-            argument_descriptions,
-            reference_arguments,
+            arguments,
+            argument_abis,
             is_async,
             thread_safe,
             macro_sheet,
@@ -180,22 +178,6 @@ impl FunctionRegistration {
         } else {
             self.category
         };
-        let mut arguments = Vec::with_capacity(self.argument_names.len());
-        let mut argument_abis = Vec::with_capacity(self.argument_names.len());
-        for (i, &name) in self.argument_names.iter().enumerate() {
-            let description = self
-                .argument_descriptions
-                .get(i)
-                .copied()
-                .unwrap_or_default();
-            let is_ref = self.reference_arguments.get(i).copied().unwrap_or(false);
-            arguments.push(ArgumentDescriptor { name, description });
-            argument_abis.push(if is_ref {
-                ArgumentAbi::RawReference
-            } else {
-                ArgumentAbi::CoercedValue
-            });
-        }
         let result_abi = if self.is_async {
             ResultAbi::AsyncVoid
         } else {
@@ -212,25 +194,19 @@ impl FunctionRegistration {
             volatile: self.volatile,
         };
 
-        // Leak argument descriptors to produce static slices for the registration table.
-        let arguments_slice: &'static [ArgumentDescriptor] =
-            Box::leak(arguments.into_boxed_slice());
-        let argument_abis_slice: &'static [ArgumentAbi] =
-            Box::leak(argument_abis.into_boxed_slice());
-
         Ok(RegistrationDescriptor {
             export_name: self.export_name,
             excel_name: self.excel_name,
             signature: RegistrationSignature {
                 result: result_abi,
-                arguments: argument_abis_slice,
+                arguments: self.argument_abis,
                 flags,
             },
             category,
             description: self.description,
             help_topic: self.help_topic,
             visibility,
-            arguments: arguments_slice,
+            arguments: self.arguments,
         })
     }
 }

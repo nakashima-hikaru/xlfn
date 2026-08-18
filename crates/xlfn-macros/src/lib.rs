@@ -931,6 +931,14 @@ fn expand_excel_function(
         }
     };
 
+    let argument_abi_tokens = reference_arguments.iter().map(|&is_ref| {
+        if is_ref {
+            quote!(#krate::__private::ArgumentAbi::RawReference)
+        } else {
+            quote!(#krate::__private::ArgumentAbi::CoercedValue)
+        }
+    });
+
     Ok(quote! {
         #function
 
@@ -944,9 +952,17 @@ fn expand_excel_function(
                 #category,
                 #description,
                 #help_topic,
-                &[#(#argument_name_literals),*],
-                &[#(#argument_descriptions),*],
-                &[#(#reference_arguments),*],
+                &[
+                    #(
+                        #krate::__private::ArgumentDescriptor {
+                            name: #argument_name_literals,
+                            description: #argument_descriptions,
+                        },
+                    )*
+                ],
+                &[
+                    #(#argument_abi_tokens),*
+                ],
                 #is_async,
                 #thread_safe,
                 #macro_sheet,
