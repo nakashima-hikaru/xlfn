@@ -44,11 +44,15 @@ impl SourceIdentityRegistry {
         Ok(id)
     }
 
-    pub(crate) fn resolve(
+    pub(crate) fn resolve<S>(
         &mut self,
-        source: &Arc<dyn ErasedRtdSource>,
+        source: &Arc<S>,
         limit: usize,
-    ) -> XllResult<ResolvedSourceIdentity> {
+        downgrade: impl FnOnce() -> Weak<dyn ErasedRtdSource>,
+    ) -> XllResult<ResolvedSourceIdentity>
+    where
+        S: ?Sized,
+    {
         let address = SourceAddress::of(source);
 
         if let Some(entry) = self.by_address.get(&address)
@@ -72,7 +76,7 @@ impl SourceIdentityRegistry {
         }
 
         let id = self.allocate_id()?;
-        let anchor = Arc::downgrade(source);
+        let anchor = downgrade();
 
         self.by_address
             .insert(address, SourceIdentityEntry { id, anchor });

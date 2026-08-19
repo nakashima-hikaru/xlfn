@@ -154,7 +154,7 @@ impl SubscriptionRuntime {
 
     pub(crate) fn prepare<S>(
         self: &Arc<Self>,
-        source: Arc<S>,
+        source: &Arc<S>,
         topic: RtdTopic,
     ) -> XllResult<PreparedSubscription>
     where
@@ -167,12 +167,15 @@ impl SubscriptionRuntime {
         }
         topic.validate_with_limits(&self.limits)?;
 
-        let source: Arc<dyn ErasedRtdSource> = source;
         let mut catalog = self.catalog.lock();
 
-        let source_identity = catalog
-            .sources
-            .resolve(&source, self.limits.max_source_ids)?;
+        let source_identity =
+            catalog
+                .sources
+                .resolve(source, self.limits.max_source_ids, || {
+                    let erased: Arc<dyn ErasedRtdSource> = Arc::clone(source) as _;
+                    Arc::downgrade(&erased)
+                })?;
         let source_id = source_identity.id;
 
         let identity = SubscriptionIdentity {
@@ -233,12 +236,13 @@ impl SubscriptionRuntime {
 
         let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;
+        let erased_source: Arc<dyn ErasedRtdSource> = Arc::clone(source) as _;
         catalog.pending.insert(
             key.clone(),
             PendingSubscription {
                 live_reservations: 1,
                 committed: false,
-                source,
+                source: erased_source,
                 topic,
                 server_generation: None,
                 connecting_generation: None,

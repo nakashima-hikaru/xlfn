@@ -1677,11 +1677,12 @@ mod tests {
             )))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let source = std::sync::Arc::new(TraceSource {
+            sink: std::sync::Arc::clone(&trace_sink),
+        });
         let prepared = subscriptions
             .prepare(
-                std::sync::Arc::new(TraceSource {
-                    sink: std::sync::Arc::clone(&trace_sink),
-                }),
+                &source,
                 crate::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
@@ -2317,13 +2318,11 @@ mod tests {
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(1))
             .unwrap();
+        let source = std::sync::Arc::new(OrderedSource {
+            events: std::sync::Arc::clone(&events),
+        });
         let prepared = subscriptions
-            .prepare(
-                std::sync::Arc::new(OrderedSource {
-                    events: std::sync::Arc::clone(&events),
-                }),
-                crate::RtdTopic::single("ordered").unwrap(),
-            )
+            .prepare(&source, crate::RtdTopic::single("ordered").unwrap())
             .unwrap();
         let key = prepared.key().clone();
         prepared.commit();

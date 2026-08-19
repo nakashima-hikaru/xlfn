@@ -1426,7 +1426,7 @@ impl RtdPublishNumberBenchmark {
         let topic =
             crate::RtdTopic::new(["BENCH", "NUMBER"]).expect("benchmark RTD topic must be valid");
         let prepared = runtime
-            .prepare(Arc::clone(&source), topic)
+            .prepare(&source, topic)
             .expect("prepare must succeed");
         let key = prepared.key().clone();
         let conn = runtime
@@ -1492,7 +1492,7 @@ impl RtdPublishStringBenchmark {
         let topic =
             crate::RtdTopic::new(["BENCH", "STRING"]).expect("benchmark RTD topic must be valid");
         let prepared = runtime
-            .prepare(Arc::clone(&source), topic)
+            .prepare(&source, topic)
             .expect("prepare must succeed");
         let key = prepared.key().clone();
         let conn = runtime

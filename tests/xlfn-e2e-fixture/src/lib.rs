@@ -162,7 +162,7 @@ pub fn rtd_fixture(
         ));
     }
     context.subscribe(
-        Arc::clone(&context.state().rtd),
+        &context.state().rtd,
         RtdTopic::single(format!("topic-{topic_id}"))?,
     )
 }

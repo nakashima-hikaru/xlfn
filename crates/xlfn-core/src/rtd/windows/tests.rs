@@ -2315,10 +2315,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let handle = ensured.subscription_server.as_ref().unwrap().clone();
 
     let prepared = subscriptions
-        .prepare(
-            Arc::clone(&source),
-            RtdTopic::single("dispatch-refresh").unwrap(),
-        )
+        .prepare(&source, RtdTopic::single("dispatch-refresh").unwrap())
         .unwrap();
     let key_obj = prepared.key().clone();
     let conn = subscriptions
@@ -2574,7 +2571,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
 
     let (source, sink, _) = crate::subscription::tests::publishing_source(None);
     let prepared = subscriptions
-        .prepare(source, RtdTopic::single("ensure-test").unwrap())
+        .prepare(&source, RtdTopic::single("ensure-test").unwrap())
         .unwrap();
     let key_obj = prepared.key().clone();
     prepared.commit();

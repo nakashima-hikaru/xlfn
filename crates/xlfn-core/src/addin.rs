@@ -397,7 +397,7 @@ impl<'state, 'scope, A: Addin> MainThreadContext<'state, 'scope, A> {
 
     pub fn subscribe<Source>(
         &self,
-        source: Arc<Source>,
+        source: &Arc<Source>,
         topic: crate::RtdTopic,
     ) -> XllResult<crate::RtdValue>
     where
@@ -560,9 +560,7 @@ mod tests {
             disconnected: Arc::clone(&disconnected),
         });
         let topic = crate::RtdTopic::single("shared-observation").unwrap();
-        let prepared = subscriptions
-            .prepare(Arc::clone(&source), topic.clone())
-            .unwrap();
+        let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(51))
             .unwrap();
@@ -576,9 +574,7 @@ mod tests {
         );
         conn.commit().unwrap();
 
-        let repeated = subscriptions
-            .prepare(Arc::clone(&source), topic.clone())
-            .unwrap();
+        let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
         assert_eq!(repeated.key(), &key_obj);
         assert_eq!(
             repeated.ownership,
@@ -590,7 +586,7 @@ mod tests {
         crate::with_excel_call_scope(|scope| {
             let context = MainThreadContext::new(&state, &runtime, scope);
             assert!(matches!(
-                context.subscribe(source, topic),
+                context.subscribe(&source, topic),
                 Err(crate::XllError::ExcelApi {
                     function: "xlfRtd",
                     code: xlfn_sys::XLRET_FAILED,
