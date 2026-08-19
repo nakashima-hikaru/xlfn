@@ -4,7 +4,7 @@ use super::{
     IID_IRTD_UPDATE_EVENT, RtdServer, com_boundary, connect_data, disconnect_data, guid_eq,
     heartbeat, refresh_data, server_start, server_terminate,
 };
-use crate::subscription::RtdUpdate;
+use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
     DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPATCH_METHOD, DISPID_UNKNOWN, DISPPARAMS,
@@ -15,7 +15,7 @@ use crate::win32::{
     VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
     VariantClear,
 };
-use crate::{InputError, RtdValue, XllError, XllResult};
+use crate::{InputError, XllError, XllResult};
 use std::ptr::{self, NonNull};
 
 pub(super) const IID_NULL: super::GUID = super::GUID::from_u128(0);
@@ -638,7 +638,7 @@ pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i3
     S_OK
 }
 
-pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &RtdValue) -> i32 {
+pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtdValue) -> i32 {
     if result.is_null() {
         return E_POINTER;
     }
@@ -646,28 +646,28 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &RtdValue)
     let mut variant = VARIANT::default();
 
     match value {
-        RtdValue::Number(value) => {
+        StoredRtdValue::Number(value) => {
             variant.Anonymous.Anonymous.vt = VT_R8;
             variant.Anonymous.Anonymous.Anonymous.dblVal = *value;
         }
-        RtdValue::Boolean(value) => {
+        StoredRtdValue::Boolean(value) => {
             variant.Anonymous.Anonymous.vt = VT_BOOL;
             variant.Anonymous.Anonymous.Anonymous.boolVal = if *value { -1 } else { 0 };
         }
-        RtdValue::Integer(value) => {
+        StoredRtdValue::Integer(value) => {
             variant.Anonymous.Anonymous.vt = VT_I4;
             variant.Anonymous.Anonymous.Anonymous.lVal = *value;
         }
-        RtdValue::String(value) => {
+        StoredRtdValue::String(value) => {
             // SAFETY: `result` was validated as non-null above and `value`
             // remains readable for the duration of the call.
-            return unsafe { write_bstr_variant(result, value) };
+            return unsafe { write_bstr_variant(result, value.as_str()) };
         }
-        RtdValue::Error(value) => {
+        StoredRtdValue::Error(value) => {
             variant.Anonymous.Anonymous.vt = VT_ERROR;
             variant.Anonymous.Anonymous.Anonymous.scode = 2000 + value.0.code();
         }
-        RtdValue::Empty => {
+        StoredRtdValue::Empty => {
             variant.Anonymous.Anonymous.vt = VT_EMPTY;
         }
     }
@@ -734,8 +734,7 @@ pub(super) unsafe fn write_refresh_data(
 
         // SAFETY: `value_variant` is initialized writable VARIANT storage owned
         // by this stack frame and `update.value` remains readable.
-        let value_status =
-            unsafe { write_value_variant(&mut value_variant, update.value.as_ref()) };
+        let value_status = unsafe { write_value_variant(&mut value_variant, &update.value) };
 
         if value_status != S_OK {
             // SAFETY: `value_variant` is initialized and locally owned.

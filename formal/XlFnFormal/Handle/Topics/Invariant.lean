@@ -460,9 +460,9 @@ theorem updateTopicServerGeneration_roots
   intro topic hMem
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
   by_cases hKey : old.key == key
-  · simp [State.updateTopicServerGeneration, hKey]
+  · simp [hKey]
     exact hInv old hOldMem
-  · simp [State.updateTopicServerGeneration, hKey]
+  · simp [hKey]
     exact hInv old hOldMem
 
 theorem updateTopicServerGeneration_provisional
@@ -472,9 +472,9 @@ theorem updateTopicServerGeneration_provisional
   intro topic hMem hStage
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
   by_cases hKey : old.key == key
-  · simp [State.updateTopicServerGeneration, hKey] at hStage ⊢
+  · simp [hKey] at hStage ⊢
     exact hInv old hOldMem hStage
-  · simp [State.updateTopicServerGeneration, hKey] at hStage ⊢
+  · simp [hKey] at hStage ⊢
     exact hInv old hOldMem hStage
 
 theorem updateTopicServerGeneration_reverse_sound
@@ -1529,12 +1529,12 @@ theorem provisionalTopics_after_topic_excel_update
   intro topic hMem hStage
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
   by_cases hKey : old.key == key
-  · simp [State.updateTopicExcel, hKey] at hStage ⊢
+  · simp [hKey] at hStage ⊢
     rcases hProv old hOldMem hStage with ⟨init, hInitMem, hInitKey, hPending⟩
     refine ⟨init, hInitMem, ?_, ?_⟩
     · simpa [State.updateTopicExcel, hKey] using hInitKey
     · simpa [State.updateTopicExcel, hKey] using hPending
-  · simp [State.updateTopicExcel, hKey] at hStage ⊢
+  · simp [hKey] at hStage ⊢
     rcases hProv old hOldMem hStage with ⟨init, hInitMem, hInitKey, hPending⟩
     refine ⟨init, hInitMem, ?_, ?_⟩
     · simpa [State.updateTopicExcel, hKey] using hInitKey
@@ -1815,20 +1815,8 @@ theorem reverseMapSound_after_topic_excel_update
   · apply List.mem_map.mpr
     exact ⟨old, hOldMem, by
       by_cases hEq : old.key = key <;> cases owner <;> simp [hEq]⟩
-  · by_cases hKey : old.key == key
-    · have hEq : old.key = key := beq_iff_eq.mp hKey
-      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldKey, hEq]
-    · have hEq : old.key ≠ key := by
-        intro hEq
-        exact hKey (beq_iff_eq.mpr hEq)
-      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldKey, hEq]
-  · by_cases hKey : old.key == key
-    · have hEq : old.key = key := beq_iff_eq.mp hKey
-      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldRtd, hEq]
-    · have hEq : old.key ≠ key := by
-        intro hEq
-        exact hKey (beq_iff_eq.mpr hEq)
-      by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldRtd, hEq]
+  · by_cases hEntryKey : entry.key = key <;> simp [hEntryKey, hOldKey]
+  · by_cases hEq : old.key = key <;> simp [hOldRtd, hEq]
 
 theorem reverseMapComplete_after_topic_excel_update
     {s : State} {key : TopicKey} {owner : Option ExcelOwnerId} {committed : Bool}
@@ -2136,7 +2124,7 @@ theorem excelOwnerMapComplete_after_beginConnection
           have hOldKeyNe : old.key ≠ key := by
             intro hEq
             exact hKey (beq_iff_eq.mpr hEq)
-          simpa [hOldKeyNe]
+          simp [hOldKeyNe]
 
 theorem excelOwnersUnique_after_beginConnection
     {s : State} {topic : Topic} {key : TopicKey} {owner : ExcelOwnerId}
@@ -2218,7 +2206,7 @@ theorem excelCommitConsistent_after_topic_excel_update
   · rcases hOwnerCommit (by simpa [hKey] using hTopicCommitted) with
       ⟨value, hOwnerEq⟩
     refine ⟨value, ?_⟩
-    simpa [hKey, hOwnerEq]
+    simp [hKey, hOwnerEq]
   · have hOldCommitted : old.excelCommitted = true := by
       simpa [hKey] using hTopicCommitted
     rcases hCommit old hOldMem hOldCommitted with ⟨value, hOldOwner⟩
@@ -2253,7 +2241,7 @@ theorem excelOwnerMapSound_after_topic_stage_update
     ?_, ?_, ?_⟩
   · apply List.mem_map.mpr
     refine ⟨old, hOldMem, ?_⟩
-    by_cases h : old.key == key <;> simp [State.updateTopicStage, h]
+    by_cases h : old.key == key <;> simp [h]
   · exact (updateTopicStage_key (topic := old) (key := key) (stage := stage)).trans hOldKey
   · exact (updateTopicStage_excelOwner (topic := old) (key := key) (stage := stage)).trans hOldOwner
 
@@ -2324,7 +2312,7 @@ theorem excelOwnerMapSound_after_commitConnection
     · apply List.mem_map.mpr
       exact ⟨old, hOldMem, rfl⟩
     · simpa [State.updateTopicExcel, hKey] using hOldKey
-    · simp [hKey, hBindingOwner, hOldOwner]
+    · simp [hKey, hBindingOwner]
   · refine ⟨
       (if old.key == key then
           { old with
@@ -2371,7 +2359,7 @@ theorem excelOwnerMapComplete_after_commitConnection
           have hOldKeyNe : old.key ≠ key := by
             intro hEq
             exact hKey (beq_iff_eq.mpr hEq)
-          simpa [hOldKeyNe]
+          simp [hOldKeyNe]
 
 theorem excelOwnersUnique_after_commitConnection
     {s : State} {topic : Topic} {key : TopicKey} {owner : ExcelOwnerId}
@@ -2526,7 +2514,7 @@ theorem excelOwnerMapComplete_after_rollbackConnection
             have hOldKeyNe : old.key ≠ key := by
               intro hEq
               exact hKey (beq_iff_eq.mpr hEq)
-            simpa [hOldKeyNe]
+            simp [hOldKeyNe]
 
 theorem excelOwnersUnique_after_rollbackConnection
     {s : State} {key : TopicKey} {owner : ExcelOwnerId}
@@ -2718,7 +2706,7 @@ theorem excelOwnerMapComplete_after_withdrawVisible
           have hTopicEq := hUnique removedOwner old topic hOldMem hTopicMem
             hOldOwnerRemoved hRemoved
           exact hOldKeyNe (hTopicEq.trans hTopicKey)
-        simpa [hBindingOwnerNe]
+        simp [hBindingOwnerNe]
   · exact hBindingKey
 
 theorem excelOwnersUnique_after_withdrawVisible
@@ -2758,13 +2746,13 @@ theorem excelOwnerGenerationConsistent_after_topic_excel_update
   rcases List.mem_map.mp hMem with ⟨old, hOldMem, rfl⟩
   by_cases hKey : old.key == key
   · cases owner with
-    | none => simp [State.updateTopicExcel, hKey] at hOwner
+    | none => simp [hKey] at hOwner
     | some owner' =>
         have hOwnerEq : owner' = newOwner := by
           simpa [State.updateTopicExcel, hKey] using hOwner
         subst newOwner
-        simp [State.updateTopicExcel, hKey]
-  · simp [State.updateTopicExcel, hKey] at hOwner ⊢
+        simp [hKey]
+  · simp [hKey] at hOwner ⊢
     exact hInv old hOldMem newOwner hOwner
 
 theorem excelOwnershipInvariant_after_topic_server_generation_update
@@ -2835,7 +2823,7 @@ theorem excelOwnerGenerationConsistent_after_topic_server_generation_update
     cases hOldEq
     have hKey' : (topic.key == key) = true := beq_iff_eq.mpr hTopicKey
     cases hOwnerOld : topic.excelOwner with
-    | none => simp [State.updateTopicServerGeneration, hKey', hOwnerOld] at hOwner
+    | none => simp [hKey', hOwnerOld] at hOwner
     | some oldOwner =>
         have hOwnerEq : oldOwner = newOwner := by
           simpa [State.updateTopicServerGeneration, hKey', hOwnerOld] using hOwner

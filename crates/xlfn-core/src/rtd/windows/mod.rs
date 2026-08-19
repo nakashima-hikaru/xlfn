@@ -90,6 +90,7 @@ use server_gate::{
     ServerPhase, ServerTermination, ServerTerminationRequest, TerminationWorker,
     TerminationWorkerStatus,
 };
+pub(crate) use update_event::RtdNotifier;
 use update_event::retry_git_revocation_debt;
 #[cfg(test)]
 use update_event::{RetainedUpdateCallback, install_callback, retry_git_revocation_debt_with};

@@ -1,8 +1,5 @@
 use super::*;
 use arc_swap::ArcSwapAny;
-use smallbox::SmallBox;
-use smallbox::space::S4;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
 #[repr(u8)]
@@ -67,55 +64,123 @@ impl HandleCleanupState {
     }
 }
 
-/// Strongly owned storage for one shared handle object identity.
+/// # Invariants
 ///
-/// Published snapshots retain `Arc<HandleObject>` values. A formula binding
-/// points at this object through its `ObjectId`, so aliases can create another
-/// binding without cloning the business value. Destruction is centralized here
-/// so consumer handles do not need ownership or cleanup behavior.
+/// - `ptr` was produced by `Arc::into_raw(Arc<T>)` for exactly one
+///   concrete `T: Send + Sync + 'static`.
+/// - `type_id == TypeId::of::<T>()`.
+/// - `clone_strong` and `drop_strong` are the monomorphized operations
+///   for that same `T`.
+/// - Every live `HandleObject` represents exactly one `Arc<T>` strong count.
+/// - Cloning creates exactly one additional strong count.
+/// - Dropping consumes exactly one strong count.
+/// - These fields are never independently mutated.
 pub(crate) struct HandleObject {
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
-    value: ManuallyDrop<SmallBox<dyn Any + Send + Sync, S4>>,
+    ptr: NonNull<()>,
+    type_id: TypeId,
+    type_name: &'static str,
+    clone_strong: unsafe fn(NonNull<()>),
+    drop_strong: unsafe fn(NonNull<()>),
     cleanup: Arc<HandleCleanupState>,
 }
 
+// SAFETY: construction only accepts `T: Send + Sync + 'static` and all
+// type-erasure metadata is immutable and installed atomically by
+// `new::<T>` / `from_arc::<T>`.
+unsafe impl Send for HandleObject {}
+
+// SAFETY: same invariant as Send; dereference is only exposed after
+// TypeId validation as a shared `&T`.
+unsafe impl Sync for HandleObject {}
+
+unsafe fn clone_strong<T: Send + Sync + 'static>(ptr: NonNull<()>) {
+    // SAFETY: HandleObject construction produced `ptr` from `Arc::into_raw(Arc<T>)`.
+    unsafe {
+        Arc::<T>::increment_strong_count(ptr.cast::<T>().as_ptr());
+    }
+}
+
+unsafe fn drop_strong<T: Send + Sync + 'static>(ptr: NonNull<()>) {
+    // SAFETY: this HandleObject owns exactly one `Arc<T>` strong reference.
+    unsafe {
+        drop(Arc::<T>::from_raw(ptr.cast::<T>().as_ptr()));
+    }
+}
+
 impl HandleObject {
-    pub(crate) fn new<T>(value: T, cleanup: Arc<HandleCleanupState>) -> triomphe::Arc<Self>
-    where
-        T: Any + Send + Sync + 'static,
-    {
-        let value: SmallBox<dyn Any + Send + Sync, S4> = smallbox::smallbox!(value);
-        triomphe::Arc::new(Self {
+    pub(crate) fn new<T: Send + Sync + 'static>(
+        value: T,
+        cleanup: Arc<HandleCleanupState>,
+    ) -> Self {
+        Self::from_arc(Arc::new(value), cleanup)
+    }
+
+    pub(crate) fn from_arc<T: Send + Sync + 'static>(
+        value: Arc<T>,
+        cleanup: Arc<HandleCleanupState>,
+    ) -> Self {
+        let ptr = Arc::into_raw(value);
+        Self {
+            ptr: NonNull::new(ptr.cast_mut().cast())
+                .expect("Arc::into_raw returns a non-null pointer"),
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            value: ManuallyDrop::new(value),
+            clone_strong: clone_strong::<T>,
+            drop_strong: drop_strong::<T>,
             cleanup,
-        })
+        }
     }
 
-    pub(crate) fn get<T>(&self) -> Option<&T>
-    where
-        T: Any + Send + Sync + 'static,
-    {
-        self.value.downcast_ref::<T>()
+    #[inline]
+    pub(crate) fn typed_ptr<T: Send + Sync + 'static>(&self) -> Option<NonNull<T>> {
+        (self.type_id == TypeId::of::<T>()).then(|| self.ptr.cast::<T>())
     }
 
-    #[cfg(test)]
-    fn clone_typed<T>(&self) -> Option<T>
-    where
-        T: Any + Send + Sync + Clone + 'static,
-    {
-        self.get::<T>().cloned()
+    pub(crate) fn clone_typed_arc<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        if self.type_id != TypeId::of::<T>() {
+            return None;
+        }
+        let ptr = self.ptr.cast::<T>().as_ptr();
+        // SAFETY:
+        // matching TypeId proves that `ptr` was produced from Arc<T>;
+        // this HandleObject owns a live strong reference.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            Some(Arc::from_raw(ptr))
+        }
+    }
+
+    #[inline]
+    pub(crate) fn address(&self) -> usize {
+        self.ptr.as_ptr().addr()
+    }
+}
+
+impl Clone for HandleObject {
+    fn clone(&self) -> Self {
+        // SAFETY: `clone_strong` matches the concrete type used at construction.
+        unsafe {
+            (self.clone_strong)(self.ptr);
+        }
+        Self {
+            ptr: self.ptr,
+            type_id: self.type_id,
+            type_name: self.type_name,
+            clone_strong: self.clone_strong,
+            drop_strong: self.drop_strong,
+            cleanup: Arc::clone(&self.cleanup),
+        }
     }
 }
 
 impl Drop for HandleObject {
     fn drop(&mut self) {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: `value` is initialized exactly once and is never
-            // accessed again after this final drop.
-            unsafe { ManuallyDrop::drop(&mut self.value) };
+            // SAFETY: this HandleObject owns exactly one strong count
+            // for the concrete type associated with `drop_strong`.
+            unsafe {
+                (self.drop_strong)(self.ptr);
+            }
         }));
         if result.is_err() {
             let error = XllError::Panic;
@@ -135,12 +200,12 @@ impl Drop for HandleObject {
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     pub(crate) object_id: ObjectId,
-    pub(crate) object: triomphe::Arc<HandleObject>,
+    pub(crate) object: HandleObject,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object_id: ObjectId, object: triomphe::Arc<HandleObject>) -> Self {
+    fn new(id: HandleId, object_id: ObjectId, object: HandleObject) -> Self {
         Self {
             id,
             object_id,
@@ -277,7 +342,9 @@ pub(crate) struct BindingSlot {
 /// the registry lock. This table is the authoritative identity index used by
 /// cold binding creation and tracks when an object has no live bindings left.
 pub(crate) struct ObjectEntry {
-    pub(crate) object: triomphe::Arc<HandleObject>,
+    pub(crate) address: usize,
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
     pub(crate) bindings: usize,
 }
 
@@ -317,14 +384,14 @@ pub(crate) struct HandleRegistry {
 
 pub(crate) struct PendingHandleValue<'a> {
     registry: &'a HandleRegistry,
-    value: Option<triomphe::Arc<HandleObject>>,
+    value: Option<HandleObject>,
     operation: &'static str,
 }
 
 impl<'a> PendingHandleValue<'a> {
     pub(crate) fn new(
         registry: &'a HandleRegistry,
-        value: triomphe::Arc<HandleObject>,
+        value: HandleObject,
         operation: &'static str,
     ) -> Self {
         Self {
@@ -334,7 +401,7 @@ impl<'a> PendingHandleValue<'a> {
         }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<triomphe::Arc<HandleObject>> {
+    pub(crate) fn slot(&mut self) -> &mut Option<HandleObject> {
         &mut self.value
     }
 }
@@ -449,7 +516,7 @@ impl HandleRegistry {
     #[cfg(test)]
     pub(crate) fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
     where
-        T: Any + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         let object = HandleObject::new(
             value.take().expect("pending handle value is armed"),
@@ -462,11 +529,11 @@ impl HandleRegistry {
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<triomphe::Arc<HandleObject>>,
+        value: &mut Option<HandleObject>,
         requested_object_id: Option<ObjectId>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
-        T: Any + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         let mut state = self.state.write();
         if !self.is_open() {
@@ -493,8 +560,8 @@ impl HandleRegistry {
         let object_id = requested_object_id.unwrap_or(ObjectId(state.next_object_id));
         let new_object_id = requested_object_id.is_none();
         let existing_bindings = if let Some(entry) = state.objects.get(&object_id) {
-            if entry.object.type_id != TypeId::of::<T>() {
-                let actual_type = entry.object.type_name;
+            if entry.type_id != TypeId::of::<T>() {
+                let actual_type = entry.type_name;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
                         expected_type = type_name::<T>(),
@@ -504,7 +571,7 @@ impl HandleRegistry {
                 }));
                 return Err(XllError::InvalidHandle);
             }
-            if !triomphe::Arc::ptr_eq(&entry.object, object) {
+            if entry.address != object.address() {
                 return Err(XllError::StaleHandle);
             }
             Some(entry.bindings.checked_add(1).ok_or(XllError::Domain {
@@ -560,7 +627,9 @@ impl HandleRegistry {
                 state.objects.insert(
                     object_id,
                     ObjectEntry {
-                        object: triomphe::Arc::clone(object),
+                        address: object.address(),
+                        type_id: object.type_id,
+                        type_name: object.type_name,
                         bindings: 1,
                     },
                 );
@@ -580,7 +649,7 @@ impl HandleRegistry {
     #[cfg(test)]
     pub fn lookup<T>(&self, token: &str) -> XllResult<T>
     where
-        T: Any + Send + Sync + Clone + 'static,
+        T: Send + Sync + Clone + 'static,
     {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
@@ -597,7 +666,7 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        if record.object.type_id != TypeId::of::<T>() {
+        let Some(value) = record.object.typed_ptr::<T>() else {
             let actual_type = record.object.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -608,11 +677,9 @@ impl HandleRegistry {
                 );
             }));
             return Err(XllError::InvalidHandle);
-        }
-        let value = record
-            .object
-            .clone_typed::<T>()
-            .ok_or(XllError::InvalidHandle)?;
+        };
+        // SAFETY: `value` points to the live data payload retained by `record.object`.
+        let value = unsafe { value.as_ref().clone() };
         drop(state);
         Ok(value)
     }
@@ -638,7 +705,7 @@ impl HandleRegistry {
             if !self.is_open() {
                 return Err(XllError::Closing);
             }
-            if record.object.type_id != TypeId::of::<T>() {
+            let Some(value) = record.object.typed_ptr::<T>() else {
                 let actual_type = record.object.type_name;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
@@ -648,15 +715,13 @@ impl HandleRegistry {
                     );
                 }));
                 return Err(XllError::InvalidHandle);
-            }
+            };
 
             match record.state() {
                 BindingState::Live => {}
                 BindingState::Retired => return Err(XllError::StaleHandle),
             }
 
-            let value = record.object.get::<T>().ok_or(XllError::InvalidHandle)?;
-            let value = NonNull::from(value);
             let object_id = record.object_id;
             return Ok(Handle::new(published_snapshot, id, object_id, value, scope));
         }
@@ -691,7 +756,7 @@ impl HandleRegistry {
             .get(id.slot)
             .filter(|published| triomphe::Arc::ptr_eq(published, record))
             .ok_or(XllError::StaleHandle)?;
-        if record.object.type_id != TypeId::of::<T>() {
+        let Some(value) = record.object.typed_ptr::<T>() else {
             let actual_type = record.object.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -702,13 +767,11 @@ impl HandleRegistry {
                 );
             }));
             return Err(XllError::InvalidHandle);
-        }
+        };
 
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
-        let value = record.object.get::<T>().ok_or(XllError::InvalidHandle)?;
-        let value = NonNull::from(value);
         let object_id = record.object_id;
         drop(state);
         Ok(Handle::new(published_snapshot, id, object_id, value, scope))
@@ -717,7 +780,7 @@ impl HandleRegistry {
     #[cfg(test)]
     pub(crate) fn remove<T>(&self, token: &str) -> XllResult<()>
     where
-        T: Any + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
@@ -734,10 +797,7 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        if record.object.type_id != TypeId::of::<T>() {
-            return Err(XllError::InvalidHandle);
-        }
-        if record.object.get::<T>().is_none() {
+        if record.object.typed_ptr::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
         let record = triomphe::Arc::clone(record);
@@ -768,7 +828,7 @@ impl HandleRegistry {
         dead_code,
         reason = "The kind-reporting wrapper is used by lifecycle trace production"
     )]
-    pub(crate) fn remove_any(&self, token: &str) -> XllResult<triomphe::Arc<HandleObject>> {
+    pub(crate) fn remove_any(&self, token: &str) -> XllResult<HandleObject> {
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let result = self
             .remove_any_with_kind(token, |_| {})
@@ -784,7 +844,7 @@ impl HandleRegistry {
         &self,
         token: &str,
         #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
-    ) -> XllResult<(triomphe::Arc<HandleObject>, bool)> {
+    ) -> XllResult<(HandleObject, bool)> {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
         let mut state = self.state.write();
@@ -806,7 +866,10 @@ impl HandleRegistry {
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
         self.published.remove(id, &record);
-        drop(slot.record.take().expect("record was checked above"));
+        let slot_record = slot.record.take().expect("record was checked above");
+        let object = triomphe::Arc::try_unwrap(slot_record)
+            .map(|r| r.object)
+            .unwrap_or_else(|r| r.object.clone());
         let reusable = if let Some(next) = slot.next_generation.checked_add(1) {
             slot.next_generation = next;
             true
@@ -823,7 +886,7 @@ impl HandleRegistry {
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Ok((triomphe::Arc::clone(&record.object), reusable))
+        Ok((object, reusable))
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
@@ -838,7 +901,7 @@ impl HandleRegistry {
 
     pub(crate) fn drop_values(
         &self,
-        values: impl IntoIterator<Item = triomphe::Arc<HandleObject>>,
+        values: impl IntoIterator<Item = HandleObject>,
         operation: &'static str,
     ) {
         self.record_cleanup_result(drop_handle_objects(values, operation));
@@ -880,10 +943,10 @@ impl HandleRegistry {
         }
     }
 
-    pub(crate) fn take_values_for_close(&self) -> Vec<triomphe::Arc<HandleObject>> {
+    pub(crate) fn take_values_for_close(&self) -> Vec<triomphe::Arc<BindingRecord>> {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
-        let mut values = Vec::with_capacity(live_bindings);
+        let mut records = Vec::with_capacity(live_bindings);
         state.free.clear();
         self.published.clear();
         for index in 0..state.slots.len() {
@@ -892,7 +955,7 @@ impl HandleRegistry {
                 record
                     .state
                     .store(BindingState::Retired as u8, Ordering::Release);
-                values.push(triomphe::Arc::clone(&record.object));
+                records.push(record);
             }
             if let Some(next) = slot.next_generation.checked_add(1) {
                 slot.next_generation = next;
@@ -906,7 +969,7 @@ impl HandleRegistry {
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }
-        values
+        records
     }
 
     /// Reject new token resolutions while the runtime drains topic and
@@ -932,8 +995,8 @@ impl HandleRegistry {
         if HandleRegistryPhase::from_raw(previous) == HandleRegistryPhase::Closed {
             return self.cleanup_result();
         }
-        let values = self.take_values_for_close();
-        self.drop_values(values, "handle registry close");
+        let records = self.take_values_for_close();
+        self.record_cleanup_result(drop_binding_records(records, "handle registry close"));
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()

@@ -1,4 +1,6 @@
 use super::*;
+use crate::rtd::RtdNotifier;
+use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -129,23 +131,18 @@ fn notification_callback_isolation() {
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let release_rx = Arc::new(Mutex::new(release_rx));
+
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(entered_tx);
+    *state_a.release.lock() = Some(release_rx);
 
     server_a
-        .attach_update_callback(Arc::new(move || {
-            entered_tx.send(()).unwrap();
-            release_rx.lock().recv().unwrap();
-            Ok(())
-        }))
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
         .unwrap();
 
-    let callback_b_count = Arc::new(AtomicUsize::new(0));
-    let cb_b = Arc::clone(&callback_b_count);
+    let state_b = Arc::new(TestNotifierState::default());
     server_b
-        .attach_update_callback(Arc::new(move || {
-            cb_b.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }))
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_b)))
         .unwrap();
 
     let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
@@ -184,7 +181,7 @@ fn notification_callback_isolation() {
         sink_b.publish(i as f64).unwrap();
     }
 
-    assert!(callback_b_count.load(Ordering::SeqCst) > 0);
+    assert!(state_b.calls.load(Ordering::SeqCst) > 0);
 
     release_tx.send(()).unwrap();
     thread_a.join().unwrap();
@@ -225,7 +222,7 @@ fn server_locality_refresh_lock_independence() {
         .expect("server_b.begin_refresh should not block on server_a state lock");
 
     assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value.as_ref(), &RtdValue::Number(42.0));
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(42.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -248,15 +245,13 @@ fn runtime_close_blocks_all_servers_immediately() {
 
     let (callback_started_tx, callback_started_rx) = std::sync::mpsc::channel();
     let (unblock_callback_tx, unblock_callback_rx) = std::sync::mpsc::channel();
-    let unblock_callback_rx = Arc::new(Mutex::new(unblock_callback_rx));
 
-    let unblock_rx_clone = Arc::clone(&unblock_callback_rx);
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(callback_started_tx);
+    *state_a.release.lock() = Some(unblock_callback_rx);
+
     server_a
-        .attach_update_callback(Arc::new(move || {
-            callback_started_tx.send(()).unwrap();
-            let _ = unblock_rx_clone.lock().recv();
-            Ok(())
-        }))
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
         .unwrap();
 
     let (source_a, sink_a, _) = publishing_source(Some(0.0f64));
@@ -343,7 +338,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
 
     let batch = server_b.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value.as_ref(), &RtdValue::Number(20.0));
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(20.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -352,13 +347,9 @@ fn uncommitted_update_does_not_trigger_notification() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
 
-    let callback_count = Arc::new(AtomicUsize::new(0));
-    let count_clone = Arc::clone(&callback_count);
+    let state = Arc::new(TestNotifierState::new());
     server
-        .attach_update_callback(Arc::new(move || {
-            count_clone.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }))
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
     let (source_a, _, _) = publishing_source(Some(0.0f64));
@@ -382,14 +373,14 @@ fn uncommitted_update_does_not_trigger_notification() {
         .connect_transaction(&server, TopicId(2), &key_b)
         .unwrap();
 
-    callback_count.store(0, Ordering::SeqCst);
+    state.calls.store(0, Ordering::SeqCst);
 
     let sink_b = sink_b.lock().clone().unwrap();
     sink_b.publish(100.0).unwrap();
 
     server.pulse_notification().unwrap();
 
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -552,14 +543,13 @@ fn runtime_close_waits_for_inflight() {
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let release_rx = Arc::new(Mutex::new(release_rx));
+
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(entered_tx);
+    *state_a.release.lock() = Some(release_rx);
 
     server_a
-        .attach_update_callback(Arc::new(move || {
-            entered_tx.send(()).unwrap();
-            release_rx.lock().recv().unwrap();
-            Ok(())
-        }))
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
         .unwrap();
 
     let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
@@ -774,7 +764,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
         .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
     assert!(matches!(
-        server.attach_update_callback(Arc::new(|| Ok(()))),
+        server.attach_update_notifier(RtdNotifier::for_test(Arc::new(TestNotifierState::new()))),
         Err(XllError::Closing)
     ));
     assert!(matches!(
@@ -843,28 +833,16 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     ));
 }
 
-struct PanickingDropCallback {
-    _guard: std::marker::PhantomData<()>,
-}
-impl Drop for PanickingDropCallback {
-    fn drop(&mut self) {
-        panic!("callback drop panic test");
-    }
-}
-
 #[test]
 fn server_terminate_callback_drop_failure_reaches_waiter() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
 
-    let panicker = PanickingDropCallback {
-        _guard: std::marker::PhantomData,
-    };
-    let callback: NotificationCallback = Arc::new(move || {
-        let _ = &panicker;
-        Ok(())
-    });
-    server.attach_update_callback(callback).unwrap();
+    let mut state = TestNotifierState::new();
+    state.panicking_drop = true;
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::new(state)))
+        .unwrap();
 
     let server_clone = server.inner.clone();
     let admission = server_clone.begin_termination();
@@ -1389,4 +1367,146 @@ fn transport_key_parser_rejects_noncanonical_keys() {
     ] {
         assert!(SubscriptionKey::parse_transport(invalid).is_err());
     }
+}
+
+#[test]
+fn refresh_state_attach_prepare_commit_lifecycle() {
+    let mut state: RefreshState<u32> = RefreshState::default();
+    assert_eq!(state.attach_notifier(100), None);
+
+    let prepared = state.prepare_notification(true).unwrap().unwrap();
+    assert_eq!(prepared.ticket, 0);
+    assert_eq!(prepared.notifier, 100);
+
+    let attempt = state.commit_notification(prepared);
+    assert_eq!(attempt.ticket, 0);
+    assert_eq!(attempt.notifier, 100);
+
+    // While Calling, prepare_notification returns None
+    assert!(state.prepare_notification(true).unwrap().is_none());
+
+    // Calling signal can be inspected
+    assert!(state.signal_calling_mut(0).is_some());
+    assert!(state.signal_calling_mut(1).is_none());
+
+    // Detach notifier resets signal to Dormant
+    assert_eq!(state.detach_notifier(), Some(100));
+}
+
+#[test]
+fn server_notification_retry_sequence_eventually_succeeds() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+    let state = Arc::new(TestNotifierState::new());
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state.outcomes.lock().push_back(TestNotifyOutcome::Success);
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let prep = runtime
+        .prepare(source, RtdTopic::single("retry_test").unwrap())
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(1.0).unwrap();
+
+    // 2 errors followed by 1 success -> 3 calls total
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn server_notification_retry_suppressed_after_max_attempts() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+    let state = Arc::new(TestNotifierState::new());
+    // 4 consecutive errors
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let prep = runtime
+        .prepare(source, RtdTopic::single("suppress_test").unwrap())
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(1.0).unwrap();
+
+    // Max 3 attempts allowed, then suppressed
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn server_notification_panic_records_cleanup_failure() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+    let state = Arc::new(TestNotifierState::new());
+    state.outcomes.lock().push_back(TestNotifyOutcome::Panic);
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let prep = runtime
+        .prepare(source, RtdTopic::single("panic_test").unwrap())
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        sink.publish(1.0).unwrap();
+    }));
+    assert!(res.is_err());
+    assert!(runtime.cleanup_result().is_err());
 }

@@ -72,7 +72,7 @@ theorem disconnect_retains_root_until_drain
         hInv.2.2.2.2.2.2.2.2.2.2.1 source hSourceMem
       refine ⟨{ topic := source }, ?_, ?_, ?_⟩
       · simp
-      · simpa [hTopicKey]
+      · simp [hTopicKey]
       · exact hRoot
 
 theorem drain_pending_reuse_removes_root
@@ -276,7 +276,7 @@ private theorem runtime_invariant_after_published_reuse
         have hNe : kept ≠ token := by
           intro hEq
           apply hNoPending init hInit
-          simpa [hStage, hEq]
+          simp [hStage, hEq]
         exact registry_remove_reuse_preserves_other_live hKept hNe hStep
     | beforeInsert => trivial
     | resolved => trivial
@@ -317,7 +317,7 @@ private theorem runtime_invariant_after_published_retire
         have hNe : kept ≠ token := by
           intro hEq
           apply hNoPending init hInit
-          simpa [hStage, hEq]
+          simp [hStage, hEq]
         exact registry_remove_retire_preserves_other_live hKept hNe hStep
     | beforeInsert => trivial
     | resolved => trivial
@@ -466,7 +466,7 @@ private theorem reverse_sound_after_disconnect
     apply hEntryRtdNe
     calc
       entry.rtdKey = old.rtdKey := hOldRtd.symm
-      _ = source.rtdKey := by simpa [hOldEq]
+      _ = source.rtdKey := by simp [hOldEq]
   refine ⟨old, ?_, hOldKey, hOldRtd⟩
   apply List.mem_filter.mpr
   exact ⟨hOldMem, by simp [hOldKeyNe]⟩
@@ -547,7 +547,7 @@ private theorem provisional_roots_after_pending_drain
       injection hStageEq with hTokenEq
     have hDetachedMem := mem_of_findDetached_some hDetached
     have hTokenNe := hDisjoint detached hDetachedMem topic hTopic
-    exact hTokenNe (by simpa [detached_token_of_find hDetached, hTokenEq])
+    exact hTokenNe (by simp [detached_token_of_find hDetached, hTokenEq])
   cases hStep with
   | rollbackPendingReuse hFind hRegistry =>
       rw [hPending] at hFind
@@ -632,7 +632,7 @@ private theorem provisional_roots_after_pending_retire
       injection hStageEq with hTokenEq
     have hDetachedMem := mem_of_findDetached_some hDetached
     have hTokenNe := hDisjoint detached hDetachedMem topic hTopic
-    exact hTokenNe (by simpa [detached_token_of_find hDetached, hTokenEq])
+    exact hTokenNe (by simp [detached_token_of_find hDetached, hTokenEq])
   cases hStep with
   | rollbackPendingRetire hFind hRegistry =>
       rw [hPending] at hFind
@@ -879,7 +879,7 @@ private theorem excel_owner_map_complete_after_detachGeneration
   change binding ∈ s.byExcelOwner.filter
     (fun binding => binding.owner.serverGeneration != generation)
   apply List.mem_filter.mpr
-  exact ⟨hBinding, by simpa [hBindingOwner, hOwnerNe]⟩
+  exact ⟨hBinding, by simp [hBindingOwner, hOwnerNe]⟩
 
 private theorem detachedGeneration_tokens_unique
     {s : State} {generation : ServerGeneration}

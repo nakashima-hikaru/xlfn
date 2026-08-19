@@ -1,6 +1,7 @@
 use super::*;
 use arc_swap::ArcSwap;
 use rustc_hash::FxHasher;
+use std::cell::OnceCell;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicU8;
 
@@ -412,20 +413,29 @@ impl HandleRuntime {
         &self,
         key: K,
         object_id: ObjectId,
-        object: triomphe::Arc<HandleObject>,
+        object: Arc<T>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
     {
-        self.prepare_observed_object::<T, K>(key, || Ok((Some(object_id), object)), observe)
+        self.prepare_observed_object::<T, K>(
+            key,
+            || {
+                Ok((
+                    Some(object_id),
+                    HandleObject::from_arc(object, Arc::clone(&self.registry.cleanup)),
+                ))
+            },
+            observe,
+        )
     }
 
     pub(crate) fn prepare_observed_object<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<(Option<ObjectId>, triomphe::Arc<HandleObject>)>,
+        create: impl FnOnce() -> XllResult<(Option<ObjectId>, HandleObject)>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -1278,5 +1288,236 @@ impl HandleRuntime {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.registry.len()
+    }
+}
+
+pub(crate) struct HandleRuntimeSlot {
+    published: arc_swap::ArcSwapOption<HandleRuntime>,
+    state: Mutex<HandleRuntimeSlotState>,
+    changed: parking_lot::Condvar,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
+}
+
+enum HandleRuntimeSlotState {
+    Vacant,
+    Initializing,
+    Ready,
+    Failed(XllError),
+}
+
+/// A read capability that holds an `arc_swap::Guard` over a published
+/// `HandleRuntime`.  The warm path acquires this without any `Mutex` or
+/// `Arc::clone`.
+pub(crate) struct HandleRuntimeRead {
+    guard: arc_swap::Guard<Option<Arc<HandleRuntime>>>,
+}
+
+impl std::ops::Deref for HandleRuntimeRead {
+    type Target = HandleRuntime;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_ref()
+            .expect("HandleRuntimeRead always contains a runtime")
+            .as_ref()
+    }
+}
+
+impl HandleRuntimeRead {
+    /// Expose the underlying `Arc` for ownership-escape paths (RTD observe,
+    /// `ensure_server`).
+    #[inline]
+    pub(crate) fn as_arc(&self) -> &Arc<HandleRuntime> {
+        self.guard
+            .as_ref()
+            .expect("HandleRuntimeRead always contains a runtime")
+    }
+}
+
+impl HandleRuntimeSlot {
+    pub(crate) const fn new() -> Self {
+        Self {
+            published: arc_swap::ArcSwapOption::const_empty(),
+            state: Mutex::new(HandleRuntimeSlotState::Vacant),
+            changed: parking_lot::Condvar::new(),
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            ghost: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+        let _ = self.ghost.set(ghost.clone());
+        let runtime = self.published.load();
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.set_ghost(ghost);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_none(&self) -> bool {
+        if self.published.load().is_some() {
+            return false;
+        }
+        matches!(
+            *self.state.lock(),
+            HandleRuntimeSlotState::Vacant | HandleRuntimeSlotState::Failed(_)
+        )
+    }
+
+    /// Acquire a read guard over the published `HandleRuntime`.
+    ///
+    /// The warm path (runtime already initialized) performs a single
+    /// `ArcSwap::load` with no `Mutex` and no `Arc::clone`.
+    #[inline]
+    pub(crate) fn read(&self) -> XllResult<HandleRuntimeRead> {
+        let guard = self.published.load();
+        if guard.is_some() {
+            return Ok(HandleRuntimeRead { guard });
+        }
+        drop(guard);
+        self.read_slow()
+    }
+
+    #[cold]
+    fn read_slow(&self) -> XllResult<HandleRuntimeRead> {
+        let mut state = self.state.lock();
+
+        loop {
+            match &*state {
+                HandleRuntimeSlotState::Ready => {
+                    drop(state);
+                    let guard = self.published.load();
+                    debug_assert!(guard.is_some());
+                    return Ok(HandleRuntimeRead { guard });
+                }
+
+                HandleRuntimeSlotState::Failed(error) => {
+                    return Err(error.clone());
+                }
+
+                HandleRuntimeSlotState::Initializing => {
+                    self.changed.wait(&mut state);
+                }
+
+                HandleRuntimeSlotState::Vacant => {
+                    *state = HandleRuntimeSlotState::Initializing;
+                    break;
+                }
+            }
+        }
+
+        drop(state);
+
+        // Mutex released — only this thread constructs the runtime.
+        let candidate = HandleRuntime::try_new_with_ingress(
+            16_384,
+            Some(crate::ingress::global_ingress()),
+        )
+        .map(Arc::new);
+
+        let mut state = self.state.lock();
+
+        match candidate {
+            Ok(runtime) => {
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                if let Some(ghost) = self.ghost.get() {
+                    runtime.set_ghost(Arc::clone(ghost));
+                }
+
+                self.published.store(Some(runtime));
+                *state = HandleRuntimeSlotState::Ready;
+                self.changed.notify_all();
+                drop(state);
+
+                let guard = self.published.load();
+                debug_assert!(guard.is_some());
+                Ok(HandleRuntimeRead { guard })
+            }
+
+            Err(error) => {
+                *state = HandleRuntimeSlotState::Failed(error.clone());
+                self.changed.notify_all();
+                Err(error)
+            }
+        }
+    }
+
+    /// Owned `Arc` escape for test/benchmark code that needs to hold a
+    /// `HandleRuntime` beyond a call scope.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn get_owned(&self) -> XllResult<Arc<HandleRuntime>> {
+        let read = self.read()?;
+        Ok(Arc::clone(read.as_arc()))
+    }
+
+    pub(crate) fn close(&self) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        let handles = {
+            let mut state = self.state.lock();
+
+            while matches!(*state, HandleRuntimeSlotState::Initializing) {
+                self.changed.wait(&mut state);
+            }
+
+            let handles = match &*state {
+                HandleRuntimeSlotState::Ready => self.published.swap(None),
+                HandleRuntimeSlotState::Vacant | HandleRuntimeSlotState::Failed(_) => None,
+                HandleRuntimeSlotState::Initializing => unreachable!(),
+            };
+
+            // Reset to Vacant so the slot can be reopened, mirroring the
+            // previous `.take()` semantics.
+            *state = HandleRuntimeSlotState::Vacant;
+
+            handles
+        };
+
+        let result = if let Some(handles) = handles {
+            let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
+            let handle_result = handles.close();
+            rtd_result.and(handle_result)
+        } else {
+            Ok(())
+        };
+        result.map(|()| crate::shutdown::HandlesQuiescent::new())
+    }
+}
+
+pub(crate) struct HandleRuntimeResolver<'call> {
+    slot: &'call HandleRuntimeSlot,
+    resolved: OnceCell<XllResult<HandleRuntimeRead>>,
+}
+
+impl<'call> HandleRuntimeResolver<'call> {
+    #[inline]
+    pub(crate) fn new(slot: &'call HandleRuntimeSlot) -> Self {
+        Self {
+            slot,
+            resolved: OnceCell::new(),
+        }
+    }
+
+    /// Returns a shared reference to the `HandleRuntime`.
+    ///
+    /// The first call performs an `ArcSwap::load`; subsequent calls within the
+    /// same UDF invocation return the cached guard with zero atomic operations.
+    #[inline]
+    pub(crate) fn get(&self) -> XllResult<&HandleRuntime> {
+        match self.resolved.get_or_init(|| self.slot.read()) {
+            Ok(runtime) => Ok(runtime),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    /// Returns a reference to the underlying `Arc` for paths that need
+    /// ownership escape (RTD observation, `ensure_server`).
+    #[inline]
+    pub(crate) fn get_arc(&self) -> XllResult<&Arc<HandleRuntime>> {
+        match self.resolved.get_or_init(|| self.slot.read()) {
+            Ok(runtime) => Ok(runtime.as_arc()),
+            Err(error) => Err(error.clone()),
+        }
     }
 }

@@ -282,10 +282,19 @@ struct WeightedValue<V> {
     weight: u32,
 }
 
+impl<V> Clone for WeightedValue<V> {
+    fn clone(&self) -> Self {
+        Self {
+            value: Arc::clone(&self.value),
+            weight: self.weight,
+        }
+    }
+}
+
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
-    cache: Cache<VersionedKey<K>, Arc<WeightedValue<V>>>,
+    cache: Cache<VersionedKey<K>, WeightedValue<V>>,
 }
 
 impl<K, V> CalculationCache<K, V>
@@ -309,7 +318,7 @@ where
             generation: CacheGeneration::new(),
             cache: Cache::builder()
                 .max_capacity(capacity)
-                .weigher(|_, value: &Arc<WeightedValue<V>>| value.weight)
+                .weigher(|_, value: &WeightedValue<V>| value.weight)
                 .support_invalidation_closures()
                 .build(),
         }
@@ -355,7 +364,7 @@ where
             epoch,
             key: key.clone(),
         };
-        self.cache.get(&vkey).map(|entry| Arc::clone(&entry.value))
+        self.cache.get(&vkey).map(|entry| entry.value)
     }
 
     pub fn get_or_try_insert_with<F, W>(&self, key: K, weight: W, compute: F) -> XllResult<Arc<V>>
@@ -380,7 +389,7 @@ where
     {
         let vkey = VersionedKey { epoch, key };
         if let Some(entry) = self.cache.get(&vkey) {
-            return Ok(Arc::clone(&entry.value));
+            return Ok(entry.value);
         }
         let _active = ActiveCacheGuard::enter()?;
         let initialized = self
@@ -388,20 +397,20 @@ where
             .try_get_with(vkey.clone(), move || {
                 let value = compute()?;
                 let measured = weight(&value);
-                Ok::<_, XllError>(Arc::new(WeightedValue {
+                Ok::<_, XllError>(WeightedValue {
                     value: Arc::new(value),
                     // Moka treats zero as consuming no capacity. Every retained
                     // entry must consume at least one unit so callers cannot
                     // bypass the configured budget accidentally.
                     weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
-                }))
+                })
             })
             .map_err(|error| (*error).clone())?;
 
         self.generation.discard_if_stale(epoch, || {
             self.cache.invalidate(&vkey);
         });
-        Ok(Arc::clone(&initialized.value))
+        Ok(initialized.value)
     }
 }
 

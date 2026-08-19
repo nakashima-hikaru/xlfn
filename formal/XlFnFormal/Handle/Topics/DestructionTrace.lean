@@ -199,7 +199,7 @@ theorem replay_close_certified_of_check
   unfold replayCertified? at hCheck
   generalize hReplay : replayMixed? (initialState 0) events = output at hCheck
   cases output with
-  | none => simp [hReplay] at hCheck
+  | none => simp at hCheck
   | some s =>
       have hFields :
           s.runtime.phase = .closed ∧

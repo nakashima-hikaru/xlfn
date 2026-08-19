@@ -26,7 +26,7 @@ fn concurrent_spawns(c: &mut Criterion) {
                         assert_eq!(result.accepted, attempts);
                         std::hint::black_box(result);
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::PerIteration,
                 );
             },
         );

@@ -33,10 +33,11 @@ pub(crate) use operation_gate::*;
 pub(crate) use quota::*;
 pub(crate) use runtime::*;
 pub(crate) use server::*;
-pub(crate) use source::{ErasedRtdSource, SourceAdapter};
+pub(crate) use source::ErasedRtdSource;
 pub(crate) use topic::{
     ConnectionGeneration, ServerGeneration, SourceId, SubscriptionIdentity, SubscriptionKey,
     TopicId,
 };
+pub(crate) use value::StoredRtdValue;
 #[cfg(test)]
 pub(crate) mod tests;

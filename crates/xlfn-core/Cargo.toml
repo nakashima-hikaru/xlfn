@@ -64,6 +64,16 @@ name = "argument_ingress"
 harness = false
 required-features = ["bench-internals"]
 
+[[bench]]
+name = "rtd_publish"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_call_resolution"
+harness = false
+required-features = ["bench-internals"]
+
 [dependencies]
 arc-swap.workspace = true
 async-channel = { workspace = true, optional = true }
@@ -82,7 +92,6 @@ scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustc-hash.workspace = true
-smallbox.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

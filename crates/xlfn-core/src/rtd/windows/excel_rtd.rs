@@ -10,13 +10,13 @@ use std::sync::atomic::Ordering;
 use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 pub(crate) fn observe(
-    handles: Arc<HandleRuntime>,
+    handles: &Arc<HandleRuntime>,
     rtd_key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
     let _rtd_operation = handles.begin_rtd_operation()?;
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None)?;
+    let ensured = ensure_server(Some(handles), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 
@@ -104,12 +104,12 @@ pub(crate) fn observe(
 }
 
 pub(crate) fn observe_subscription(
-    subscriptions: Arc<SubscriptionRuntime>,
+    subscriptions: &Arc<SubscriptionRuntime>,
     key: &crate::subscription::SubscriptionKey,
     callbacks: &HostCallbackSession,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
-    let ensured = ensure_server(None, Some(Arc::clone(&subscriptions)))?;
+    let ensured = ensure_server(None, Some(subscriptions))?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 

@@ -12,28 +12,36 @@ pub(crate) struct SpawnRejection<F> {
     pub(crate) cancel: bool,
 }
 
-pub(crate) struct ActiveReservation {
-    pub(crate) inner: Arc<ExecutorInner>,
+pub(crate) struct ActiveReservation<'a> {
+    pub(crate) shared: &'a ExecutorShared,
     pub(crate) armed: bool,
 }
 
-impl ActiveReservation {
-    pub(crate) fn try_acquire(inner: Arc<ExecutorInner>) -> Option<Self> {
-        inner
+impl<'a> ActiveReservation<'a> {
+    pub(crate) fn try_acquire(shared: &'a ExecutorShared) -> Option<Self> {
+        shared
             .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAX_PENDING).then_some(active + 1)
             })
             .ok()?;
 
-        Some(Self { inner, armed: true })
+        Some(Self {
+            shared,
+            armed: true,
+        })
     }
 
-    pub(crate) fn commit(mut self, generation: Arc<GenerationState>, id: u64) -> CompletionGuard {
+    pub(crate) fn commit(
+        mut self,
+        shared: &Arc<ExecutorShared>,
+        generation: Arc<GenerationState>,
+        id: u64,
+    ) -> CompletionGuard {
         self.armed = false;
 
         CompletionGuard {
-            inner: Arc::clone(&self.inner),
+            shared: Arc::clone(shared),
             generation,
             id,
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -44,16 +52,16 @@ impl ActiveReservation {
     }
 }
 
-impl Drop for ActiveReservation {
+impl<'a> Drop for ActiveReservation<'a> {
     fn drop(&mut self) {
         if self.armed {
-            release_active(&self.inner);
+            release_active(self.shared);
         }
     }
 }
 
 pub(crate) struct CompletionGuard {
-    pub(crate) inner: Arc<ExecutorInner>,
+    pub(crate) shared: Arc<ExecutorShared>,
     pub(crate) generation: Arc<GenerationState>,
     pub(crate) id: u64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -71,6 +79,6 @@ impl Drop for CompletionGuard {
                 *self.completion.lock(),
             ));
         }
-        release_active(&self.inner);
+        release_active(&self.shared);
     }
 }

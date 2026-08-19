@@ -1,26 +1,26 @@
 use super::*;
 
 pub(crate) struct WorkerExitGuard {
-    pub(crate) inner: Arc<ExecutorInner>,
+    pub(crate) shared: Arc<ExecutorShared>,
 }
 
 impl Drop for WorkerExitGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            self.inner
+            self.shared
                 .fatal_worker_failure
                 .store(true, Ordering::Release);
         }
-        self.inner.live_workers.fetch_sub(1, Ordering::AcqRel);
-        let _guard = self.inner.wait_lock.lock();
-        self.inner.idle.notify_all();
+        self.shared.live_workers.fetch_sub(1, Ordering::AcqRel);
+        let _guard = self.shared.wait_lock.lock();
+        self.shared.idle.notify_all();
     }
 }
 
-pub(crate) fn release_active(inner: &ExecutorInner) {
-    if inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-        let _guard = inner.wait_lock.lock();
-        inner.idle.notify_all();
+pub(crate) fn release_active(shared: &ExecutorShared) {
+    if shared.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let _guard = shared.wait_lock.lock();
+        shared.idle.notify_all();
     }
 }
 

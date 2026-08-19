@@ -891,7 +891,7 @@ fn expand_excel_function(
                     #context_setup
                     #(#conversions)*
                     let mut __return_context =
-                        __frame.return_context(&crate::__XLFN_RUNTIME, #udf_id);
+                        __frame.return_context(#udf_id);
                     #krate::__private::ExcelReturn::invoke(
                         &mut __return_context,
                         || ::core::result::Result::Ok(#invocation),

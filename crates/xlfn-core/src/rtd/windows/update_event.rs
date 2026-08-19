@@ -230,14 +230,71 @@ pub(super) fn drain_callbacks(callbacks: &Mutex<ServerCallbacks>) {
     retry_git_revocation_debt();
 }
 
-pub(super) fn notification_for(
+#[cfg(not(test))]
+#[derive(Clone)]
+pub(crate) struct RtdNotifier {
+    inner: Arc<RtdNotifierInner>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) enum RtdNotifier {
+    Production(Arc<RtdNotifierInner>),
+    Test(Arc<crate::rtd::test_support::TestNotifierState>),
+}
+
+pub(super) struct RtdNotifierInner {
     callback: Arc<RetainedUpdateCallback>,
     operations: Arc<ServerOperationBarrier>,
-) -> Arc<dyn Fn() -> XllResult<()> + Send + Sync> {
-    Arc::new(move || {
-        let _notification_operation = operations.enter_notification().ok_or(XllError::Closing)?;
-        callback.notify()
-    })
+}
+
+impl RtdNotifierInner {
+    fn notify(&self) -> XllResult<()> {
+        let _operation = self
+            .operations
+            .enter_notification()
+            .ok_or(XllError::Closing)?;
+        self.callback.notify()
+    }
+}
+
+impl RtdNotifier {
+    pub(crate) fn new(
+        callback: Arc<RetainedUpdateCallback>,
+        operations: Arc<ServerOperationBarrier>,
+    ) -> Self {
+        let inner = Arc::new(RtdNotifierInner {
+            callback,
+            operations,
+        });
+        #[cfg(not(test))]
+        {
+            Self { inner }
+        }
+        #[cfg(test)]
+        {
+            Self::Production(inner)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(state: Arc<crate::rtd::test_support::TestNotifierState>) -> Self {
+        Self::Test(state)
+    }
+
+    pub(crate) fn notify(&self) -> XllResult<()> {
+        #[cfg(not(test))]
+        {
+            self.inner.notify()
+        }
+        #[cfg(test)]
+        {
+            match self {
+                Self::Production(inner) => inner.notify(),
+                Self::Test(state) => state.notify(),
+            }
+        }
+    }
 }
 
 #[repr(C)]

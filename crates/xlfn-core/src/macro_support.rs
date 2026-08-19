@@ -295,13 +295,10 @@ impl<'call> CallFrame<'call> {
     }
 
     #[doc(hidden)]
-    pub fn return_context<A: Addin>(
-        &mut self,
-        runtime: &'call MacroRuntime<A>,
-        udf_id: &'static str,
-    ) -> ReturnContext<'call, 'call> {
+    pub fn return_context(&mut self, udf_id: &'static str) -> ReturnContext<'call, 'call> {
         let inputs = self.arguments.finish();
-        ReturnContext::for_call(runtime.runtime(), udf_id, inputs, self.scope)
+        let handle_runtime = self.arguments.take_handle_runtime();
+        ReturnContext::for_frame(handle_runtime, udf_id, inputs, self.scope)
     }
 
     #[doc(hidden)]

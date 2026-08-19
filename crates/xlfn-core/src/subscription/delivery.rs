@@ -20,21 +20,21 @@ pub(crate) struct ActiveSubscription {
     pub(crate) generation: ConnectionGeneration,
     pub(crate) subscription: Option<Box<dyn RtdSubscription>>,
     pub(crate) committed: bool,
-    pub(crate) latest: Arc<RtdValue>,
+    pub(crate) latest: StoredRtdValue,
     pub(crate) _permit: QuotaPermit,
 }
 
 pub(crate) struct QueuedUpdate {
     pub(crate) connection_generation: ConnectionGeneration,
     pub(crate) sequence: u64,
-    pub(crate) value: Arc<RtdValue>,
+    pub(crate) value: StoredRtdValue,
     pub(crate) _permit: QuotaPermit,
 }
 
 pub(crate) struct RtdUpdate {
     pub(crate) sequence: u64,
     pub(crate) topic_id: i32,
-    pub(crate) value: Arc<RtdValue>,
+    pub(crate) value: StoredRtdValue,
 }
 
 #[cfg(test)]
@@ -43,7 +43,7 @@ impl RtdUpdate {
         Self {
             sequence: 0,
             topic_id,
-            value: Arc::new(value),
+            value: value.into_stored().expect("test RTD value is valid"),
         }
     }
 }
@@ -53,8 +53,6 @@ pub(crate) enum RefreshOutcome {
     Delivered,
     Failed,
 }
-
-pub(crate) type NotificationCallback = Arc<dyn Fn() -> XllResult<()> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SignalState {
@@ -95,32 +93,41 @@ pub(crate) struct TopicShard {
     pub(crate) pending: [FxHashMap<TopicId, QueuedUpdate>; 2],
 }
 
-#[derive(Clone)]
-pub(crate) struct NotificationAttempt {
+pub(crate) struct NotificationAttempt<N> {
     pub(crate) ticket: u64,
-    pub(crate) callback: NotificationCallback,
+    pub(crate) notifier: N,
 }
 
-pub(crate) struct PreparedNotification {
+pub(crate) struct PreparedNotification<N> {
     pub(crate) ticket: u64,
-    pub(crate) callback: NotificationCallback,
+    pub(crate) notifier: N,
 }
 
-pub(crate) enum NotificationCompletion {
+pub(crate) enum NotificationCompletion<N> {
     Finished,
-    Retry(NotificationAttempt),
+    Retry(NotificationAttempt<N>),
     Failed(XllError),
 }
 
-#[derive(Default)]
-pub(crate) struct RefreshState {
+pub(crate) struct RefreshState<N> {
     pub(crate) next_refresh_id: u64,
     pub(crate) next_notification_ticket: u64,
-    pub(crate) callback: Option<NotificationCallback>,
+    pub(crate) notifier: Option<N>,
     pub(crate) phase: DeliveryPhase,
 }
 
-impl RefreshState {
+impl<N> Default for RefreshState<N> {
+    fn default() -> Self {
+        Self {
+            next_refresh_id: 0,
+            next_notification_ticket: 0,
+            notifier: None,
+            phase: DeliveryPhase::default(),
+        }
+    }
+}
+
+impl<N> RefreshState<N> {
     pub(crate) fn ensure_notification_ticket(&self) -> XllResult<()> {
         let ticket = self.next_notification_ticket;
         ticket.checked_add(1).ok_or(XllError::Internal {
@@ -129,50 +136,26 @@ impl RefreshState {
         Ok(())
     }
 
-    pub(crate) fn attach_callback(
-        &mut self,
-        callback: NotificationCallback,
-    ) -> Option<NotificationCallback> {
-        let retired = self.callback.replace(callback);
+    pub(crate) fn attach_notifier(&mut self, notifier: N) -> Option<N> {
+        let retired = self.notifier.replace(notifier);
         if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
             *signal = SignalState::Dormant;
         }
         retired
     }
 
-    pub(crate) fn detach_callback(&mut self) -> Option<NotificationCallback> {
-        let retired = self.callback.take();
+    pub(crate) fn detach_notifier(&mut self) -> Option<N> {
+        let retired = self.notifier.take();
         if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
             *signal = SignalState::Dormant;
         }
         retired
-    }
-
-    pub(crate) fn prepare_notification(
-        &self,
-        has_pending_updates: bool,
-    ) -> XllResult<Option<PreparedNotification>> {
-        if !has_pending_updates {
-            return Ok(None);
-        }
-        let DeliveryPhase::BetweenRefreshes { signal } = &self.phase else {
-            return Ok(None);
-        };
-        if !matches!(signal, SignalState::Dormant) {
-            return Ok(None);
-        }
-        let Some(callback) = self.callback.as_ref().cloned() else {
-            return Ok(None);
-        };
-        let ticket = self.next_notification_ticket;
-        self.ensure_notification_ticket()?;
-        Ok(Some(PreparedNotification { ticket, callback }))
     }
 
     pub(crate) fn commit_notification(
         &mut self,
-        prepared: PreparedNotification,
-    ) -> NotificationAttempt {
+        prepared: PreparedNotification<N>,
+    ) -> NotificationAttempt<N> {
         self.next_notification_ticket = prepared.ticket + 1;
         if let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase {
             *signal = SignalState::Calling {
@@ -182,7 +165,7 @@ impl RefreshState {
         }
         NotificationAttempt {
             ticket: prepared.ticket,
-            callback: prepared.callback,
+            notifier: prepared.notifier,
         }
     }
 
@@ -209,5 +192,28 @@ impl RefreshState {
             }
             _ => None,
         }
+    }
+}
+
+impl<N: Clone> RefreshState<N> {
+    pub(crate) fn prepare_notification(
+        &self,
+        has_pending_updates: bool,
+    ) -> XllResult<Option<PreparedNotification<N>>> {
+        if !has_pending_updates {
+            return Ok(None);
+        }
+        let DeliveryPhase::BetweenRefreshes { signal } = &self.phase else {
+            return Ok(None);
+        };
+        if !matches!(signal, SignalState::Dormant) {
+            return Ok(None);
+        }
+        let Some(notifier) = self.notifier.as_ref().cloned() else {
+            return Ok(None);
+        };
+        let ticket = self.next_notification_ticket;
+        self.ensure_notification_ticket()?;
+        Ok(Some(PreparedNotification { ticket, notifier }))
     }
 }

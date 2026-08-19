@@ -406,7 +406,7 @@ impl<'state, 'scope, A: Addin> MainThreadContext<'state, 'scope, A> {
         let subscriptions = self.runtime.subscriptions();
         let prepared = subscriptions.prepare(source, topic)?;
         match crate::rtd::observe_subscription(
-            Arc::clone(&subscriptions),
+            &subscriptions,
             prepared.key(),
             self.callbacks,
         ) {
@@ -571,7 +571,10 @@ mod tests {
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(7), &key_obj)
             .unwrap();
-        assert_eq!(conn.value(), &crate::RtdValue::Number(17.5));
+        assert_eq!(
+            conn.value(),
+            &crate::subscription::StoredRtdValue::Number(17.5)
+        );
         conn.commit().unwrap();
 
         let repeated = subscriptions

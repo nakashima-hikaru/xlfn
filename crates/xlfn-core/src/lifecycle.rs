@@ -1640,7 +1640,8 @@ mod tests {
             );
         };
 
-        let runtime = Runtime::<TraceCleanup>::new();
+        let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
+        let runtime = static_fixture.runtime();
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
@@ -1649,7 +1650,7 @@ mod tests {
         crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
         crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
 
-        let pointer = crate::ffi_boundary(&runtime, || Ok::<f64, XllError>(1.0));
+        let pointer = crate::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
         // SAFETY: `pointer` is the live DLL-owned block returned by the
         // framework boundary above and is freed exactly once here.
         let free = unsafe { crate::free_return_boundary(pointer) };
@@ -1662,19 +1663,16 @@ mod tests {
             })
             .unwrap();
 
-        let callback_count = std::sync::Arc::new(AtomicUsize::new(0));
+        let notifier_state =
+            std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
         let subscriptions = runtime.subscriptions();
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(1))
             .unwrap();
         server
-            .attach_update_callback({
-                let callback_count = std::sync::Arc::clone(&callback_count);
-                std::sync::Arc::new(move || {
-                    callback_count.fetch_add(1, Ordering::AcqRel);
-                    Ok(())
-                })
-            })
+            .attach_update_notifier(crate::rtd::RtdNotifier::for_test(std::sync::Arc::clone(
+                &notifier_state,
+            )))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let prepared = subscriptions
@@ -1698,7 +1696,7 @@ mod tests {
             .expect("trace source must retain its RTD sink")
             .publish(1.0)
             .unwrap();
-        assert_eq!(callback_count.load(Ordering::Acquire), 1);
+        assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
 
         #[cfg(feature = "async")]
         {
@@ -1726,7 +1724,7 @@ mod tests {
                 .expect("Lean checker async trace task did not complete");
         }
 
-        assert_eq!(close_addin::<TraceCleanup>(&runtime), 1);
+        assert_eq!(close_addin::<TraceCleanup>(runtime), 1);
         let trace = runtime.ghost_trace_json();
         for event in [
             "enterExternal",

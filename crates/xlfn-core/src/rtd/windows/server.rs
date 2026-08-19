@@ -1,6 +1,6 @@
 use super::automation::{
-    server_get_ids_of_names, server_invoke, topic_key_from_safearray, write_refresh_data,
-    write_value_variant,
+    server_get_ids_of_names, server_invoke, topic_key_from_safearray, write_bstr_variant,
+    write_refresh_data, write_value_variant,
 };
 use super::com_abi::IID_IUNKNOWN;
 use super::global_interface_table::get_git;
@@ -11,11 +11,10 @@ use super::server_gate::{
     TerminationWorker,
 };
 use super::update_event::{
-    GitCookieLease, RetainedUpdateCallback, RtdUpdateEvent, ServerCallbacks, active_callback,
-    drain_callbacks, install_callback, notification_for, retry_git_revocation_debt,
+    GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent, ServerCallbacks,
+    active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
 use super::{HandleRuntime, com_boundary, guid_eq};
-use crate::RtdValue;
 use crate::subscription::SubscriptionRuntime;
 use crate::win32::{
     CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
@@ -180,8 +179,8 @@ pub(super) fn synchronize_callback_notification(
         return Ok(());
     };
 
-    subscription_server
-        .attach_update_callback(notification_for(callback, Arc::clone(&server.operations)))?;
+    let notifier = RtdNotifier::new(callback, Arc::clone(&server.operations));
+    subscription_server.attach_update_notifier(notifier)?;
     Ok(())
 }
 
@@ -195,7 +194,7 @@ impl Drop for RtdServer {
         }
         let subscription_server = self.backends.lock().subscription_server.clone();
         if let Some(subscription_server) = subscription_server {
-            subscription_server.detach_update_callback();
+            subscription_server.detach_update_notifier();
         }
 
         drain_callbacks(&self.callbacks);
@@ -511,8 +510,8 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
 }
 
 pub(super) fn ensure_server(
-    handles: Option<Arc<HandleRuntime>>,
-    subscriptions: Option<Arc<SubscriptionRuntime>>,
+    handles: Option<&Arc<HandleRuntime>>,
+    subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();
 
@@ -564,20 +563,20 @@ pub(super) fn ensure_server(
 
         if let Some(handles) = handles {
             match backends.handles.as_ref() {
-                Some(active) if Arc::ptr_eq(active, &handles) => {}
+                Some(active) if Arc::ptr_eq(active, handles) => {}
                 Some(_) => {
                     return Err(XllError::Internal {
                         diagnostic_id: crate::DiagnosticId::RTD_MULTI,
                     });
                 }
-                None => backends.handles = Some(handles),
+                None => backends.handles = Some(Arc::clone(handles)),
             }
         }
 
         let (newly_attached_subscriptions, subscription_handle) =
             if let Some(subscriptions) = subscriptions {
                 match backends.subscriptions.as_ref() {
-                    Some(active) if Arc::ptr_eq(active, &subscriptions) => {
+                    Some(active) if Arc::ptr_eq(active, subscriptions) => {
                         (None, backends.subscription_server.clone())
                     }
                     Some(_) => {
@@ -589,7 +588,7 @@ pub(super) fn ensure_server(
                         let handle = subscriptions.register_server(
                             crate::subscription::ServerGeneration(existing.generation),
                         )?;
-                        backends.subscriptions = Some(Arc::clone(&subscriptions));
+                        backends.subscriptions = Some(Arc::clone(subscriptions));
                         backends.subscription_server = Some(handle.clone());
                         (Some(handle.clone()), Some(handle))
                     }
@@ -604,7 +603,8 @@ pub(super) fn ensure_server(
             // SAFETY: `server` was validated as non-null and COM keeps the server alive.
             let callback = unsafe { active_callback(&(*server).callbacks) };
             if let Some(callback) = callback {
-                handle.attach_update_callback(notification_for(callback, operations.clone()))?;
+                let notifier = RtdNotifier::new(callback, operations.clone());
+                handle.attach_update_notifier(notifier)?;
             }
         }
 
@@ -640,7 +640,7 @@ pub(super) fn ensure_server(
         code: error.code as i32,
     })?;
 
-    let subscription_handle = if let Some(subscriptions) = subscriptions.as_ref() {
+    let subscription_handle = if let Some(subscriptions) = subscriptions {
         Some(subscriptions.register_server(crate::subscription::ServerGeneration(generation))?)
     } else {
         None
@@ -654,8 +654,8 @@ pub(super) fn ensure_server(
         operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
-            handles,
-            subscriptions,
+            handles: handles.cloned(),
+            subscriptions: subscriptions.cloned(),
             subscription_server: subscription_handle.clone(),
         }),
         callbacks: Mutex::new(ServerCallbacks::default()),
@@ -910,10 +910,14 @@ enum ConnectDataTransaction {
 }
 
 impl ConnectDataTransaction {
-    fn value(&self) -> RtdValue {
+    unsafe fn write_value(&self, result: *mut VARIANT) -> i32 {
         match self {
-            Self::Handle(connection) => RtdValue::String(connection.token().to_owned()),
-            Self::Subscription(connection) => connection.value().clone(),
+            // SAFETY: caller validated result as non-null and writable; token remains readable.
+            Self::Handle(connection) => unsafe { write_bstr_variant(result, connection.token()) },
+            // SAFETY: caller validated result as non-null and writable; value remains readable.
+            Self::Subscription(connection) => unsafe {
+                write_value_variant(result, connection.value())
+            },
         }
     }
 
@@ -1004,11 +1008,10 @@ unsafe fn connect_data_inner(
     } else {
         return E_INVALIDARG;
     };
-    let value = connection.value();
 
     // SAFETY: `result` was validated as non-null and points to writable VARIANT
-    // storage supplied by COM. `value` remains readable for the call.
-    let status = unsafe { write_value_variant(result, &value) };
+    // storage supplied by COM.
+    let status = unsafe { connection.write_value(result) };
 
     if status != S_OK {
         // Dropping the uncommitted transaction rolls back only the connection

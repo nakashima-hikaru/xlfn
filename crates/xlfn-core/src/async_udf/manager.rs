@@ -8,7 +8,7 @@ pub(crate) struct AsyncManager {
     ///
     /// `Some` while an executor is published for new spawns.
     /// `None` while stopped or closing.
-    pub(crate) published_handle: ArcSwapOption<ExecutorHandle>,
+    pub(crate) published_executor: ArcSwapOption<ExecutorShared>,
     pub(crate) state_changed: Condvar,
     pub(crate) generation_transition: Mutex<()>,
     pub(crate) current_generation: AtomicU64,
@@ -34,7 +34,7 @@ impl AsyncManager {
     pub(crate) const fn new() -> Self {
         Self {
             state: Mutex::new(ExecutorState::Stopped),
-            published_handle: ArcSwapOption::const_empty(),
+            published_executor: ArcSwapOption::const_empty(),
             state_changed: Condvar::new(),
             generation_transition: Mutex::new(()),
             current_generation: AtomicU64::new(1),
@@ -64,9 +64,9 @@ impl AsyncManager {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             executor.set_ghost(ghost);
         }
-        let published_handle = Arc::clone(&executor.handle);
+        let published_executor = Arc::clone(&executor.shared);
         *state = ExecutorState::Running(executor);
-        self.published_handle.store(Some(published_handle));
+        self.published_executor.store(Some(published_executor));
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
@@ -91,19 +91,20 @@ impl AsyncManager {
         self.current_generation.load(Ordering::Acquire)
     }
 
-    pub(crate) fn snapshot_spawn_handle(&self) -> Result<Arc<ExecutorHandle>, (XllError, bool)> {
-        if let Some(handle) = self.published_handle.load_full() {
-            return Ok(handle);
+    #[cfg(test)]
+    pub(crate) fn snapshot_spawn_executor(&self) -> Result<Arc<ExecutorShared>, (XllError, bool)> {
+        if let Some(shared) = self.published_executor.load_full() {
+            return Ok(shared);
         }
 
         let state = self.state.lock();
         match &*state {
             ExecutorState::Running(executor) => {
                 debug_assert!(
-                    self.published_handle.load().is_some(),
-                    "running executor must have a published spawn handle"
+                    self.published_executor.load().is_some(),
+                    "running executor must have a published spawn root"
                 );
-                Ok(Arc::clone(&executor.handle))
+                Ok(Arc::clone(&executor.shared))
             }
             ExecutorState::Stopped | ExecutorState::Closing(_) => Err((XllError::Closing, false)),
         }
@@ -118,21 +119,22 @@ impl AsyncManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let target = self.snapshot_spawn_handle();
+        let published = self.published_executor.load();
+        let target = published.as_ref();
         #[cfg(test)]
-        if target.is_ok() {
+        if target.is_some() {
             let hook = self.after_spawn_handle_snapshot_hook.lock().clone();
             if let Some(hook) = hook {
                 hook();
             }
         }
         let result = match target {
-            Ok(handle) => handle.spawn(generation, future, cancellation),
-            Err((error, cancel)) => Err(SpawnRejection {
-                error,
+            Some(shared) => shared.spawn(generation, future, cancellation),
+            None => Err(SpawnRejection {
+                error: XllError::Closing,
                 future,
                 cancellation,
-                cancel,
+                cancel: false,
             }),
         };
         match result {
@@ -153,11 +155,11 @@ impl AsyncManager {
     #[cfg(test)]
     pub(crate) fn cancel_generation(&self, generation: u64) {
         let target = match &*self.state.lock() {
-            ExecutorState::Running(executor) => Some((executor.handle.clone(), generation)),
+            ExecutorState::Running(executor) => Some((Arc::clone(&executor.shared), generation)),
             ExecutorState::Stopped | ExecutorState::Closing(_) => None,
         };
         let tasks = target
-            .map(|(handle, generation)| handle.cancel_generation(generation))
+            .map(|(shared, generation)| shared.cancel_generation(generation))
             .unwrap_or_default();
         // Manager state released — safe to invoke arbitrary Waker::wake().
         cancel_tasks(tasks);
@@ -166,12 +168,12 @@ impl AsyncManager {
     pub(crate) fn cancel_current_generation(&self) {
         let target = match &*self.state.lock() {
             ExecutorState::Running(executor) => {
-                Some((executor.handle.clone(), self.current_generation()))
+                Some((Arc::clone(&executor.shared), self.current_generation()))
             }
             ExecutorState::Stopped | ExecutorState::Closing(_) => None,
         };
         let tasks = target
-            .map(|(handle, generation)| handle.cancel_generation(generation))
+            .map(|(shared, generation)| shared.cancel_generation(generation))
             .unwrap_or_default();
         // Manager state released — safe to invoke arbitrary Waker::wake().
         cancel_tasks(tasks);
@@ -196,22 +198,25 @@ impl AsyncManager {
                     None
                 }
                 ExecutorState::Running(executor) => {
-                    Some((executor.handle.clone(), self.current_generation()))
+                    Some((Arc::clone(&executor.shared), self.current_generation()))
                 }
                 ExecutorState::Closing(_) => return false,
             }
         };
         let advanced = match target {
             None => true,
-            Some((handle, current)) => {
+            Some((shared, current)) => {
                 let next = current.wrapping_add(1);
-                if !handle.advance_generation(next) {
+                if !shared.advance_generation(next) {
                     false
                 } else {
                     let state = self.state.lock();
                     match &*state {
+                        // Each successful `Executor::start` allocates exactly one fresh
+                        // `ExecutorShared`. Arc identity therefore uniquely identifies one
+                        // executor incarnation, independent of calculation generation IDs.
                         ExecutorState::Running(executor)
-                            if Arc::ptr_eq(&executor.handle, &handle) =>
+                            if Arc::ptr_eq(&executor.shared, &shared) =>
                         {
                             self.current_generation
                                 .compare_exchange(
@@ -270,7 +275,7 @@ impl AsyncManager {
     ) {
         let state = self.state.lock();
         if let ExecutorState::Running(executor) = &*state {
-            *executor.handle.inner.after_generation_snapshot_hook.lock() = hook;
+            *executor.shared.after_generation_snapshot_hook.lock() = hook;
         } else if hook.is_some() {
             panic!("async executor must be running when installing a test hook");
         }
@@ -283,7 +288,7 @@ impl AsyncManager {
     ) {
         let state = self.state.lock();
         if let ExecutorState::Running(executor) = &*state {
-            *executor.handle.inner.after_generation_admission_hook.lock() = hook;
+            *executor.shared.after_generation_admission_hook.lock() = hook;
         } else if hook.is_some() {
             panic!("async executor must be running when installing a test hook");
         }
@@ -293,7 +298,7 @@ impl AsyncManager {
     pub(crate) fn set_before_task_schedule_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         let state = self.state.lock();
         if let ExecutorState::Running(executor) = &*state {
-            *executor.handle.inner.before_task_schedule_hook.lock() = hook;
+            *executor.shared.before_task_schedule_hook.lock() = hook;
         } else if hook.is_some() {
             panic!("async executor must be running when installing a test hook");
         }
@@ -306,7 +311,7 @@ impl AsyncManager {
                 issues: Vec::new(),
             };
         };
-        let tasks = executor.handle.request_close();
+        let tasks = executor.shared.request_close();
         // Manager state released — cancel/abort and run arbitrary task cleanup
         // without blocking re-entry into cancellation or generation APIs.
         cancel_tasks(tasks);
@@ -336,7 +341,7 @@ impl AsyncManager {
         let Some(executor) = self.take_executor_for_close() else {
             return Ok(());
         };
-        let tasks = executor.handle.request_close();
+        let tasks = executor.shared.request_close();
         // Manager state released — cancel/abort without holding any locks.
         cancel_tasks(tasks);
 
@@ -361,7 +366,7 @@ impl AsyncManager {
             match &*state {
                 ExecutorState::Stopped => return None,
                 ExecutorState::Running(_) | ExecutorState::Closing(Some(_)) => {
-                    self.published_handle.store(None);
+                    self.published_executor.store(None);
                     let previous = std::mem::replace(&mut *state, ExecutorState::Closing(None));
                     self.state_changed.notify_all();
                     return match previous {
@@ -396,7 +401,7 @@ impl AsyncManager {
         let mut state = self.state.lock();
         debug_assert!(matches!(*state, ExecutorState::Closing(None)));
         debug_assert!(
-            self.published_handle.load().is_none(),
+            self.published_executor.load().is_none(),
             "closing executor must not be published for spawning"
         );
         *state = ExecutorState::Closing(Some(executor));
@@ -407,7 +412,7 @@ impl AsyncManager {
         let mut state = self.state.lock();
         debug_assert!(matches!(*state, ExecutorState::Closing(None)));
         debug_assert!(
-            self.published_handle.load().is_none(),
+            self.published_executor.load().is_none(),
             "closed executor must not be published for spawning"
         );
         *state = ExecutorState::Stopped;

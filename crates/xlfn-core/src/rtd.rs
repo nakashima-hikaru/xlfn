@@ -6,8 +6,42 @@ use crate::host_callback::HostCallbackSession;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(target_os = "windows")]
+pub(crate) use windows::RtdNotifier;
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+#[derive(Clone)]
+pub(crate) enum RtdNotifier {}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+impl RtdNotifier {
+    pub(crate) fn notify(&self) -> XllResult<()> {
+        match *self {}
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), test))]
+#[derive(Clone)]
+pub(crate) struct RtdNotifier {
+    state: Arc<test_support::TestNotifierState>,
+}
+
+#[cfg(all(not(target_os = "windows"), test))]
+impl RtdNotifier {
+    pub(crate) fn for_test(state: Arc<test_support::TestNotifierState>) -> Self {
+        Self { state }
+    }
+
+    pub(crate) fn notify(&self) -> XllResult<()> {
+        self.state.notify()
+    }
+}
 
 static MODULE_UNLOAD_CERTIFIED: AtomicBool = AtomicBool::new(false);
 
@@ -46,7 +80,7 @@ pub(crate) struct RtdQuiescenceError {
 }
 
 pub(crate) fn observe(
-    handles: Arc<HandleRuntime>,
+    handles: &Arc<HandleRuntime>,
     key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
@@ -66,7 +100,7 @@ pub(crate) fn observe(
 }
 
 pub(crate) fn observe_subscription(
-    subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
+    subscriptions: &Arc<crate::subscription::SubscriptionRuntime>,
     key: &crate::subscription::SubscriptionKey,
     callbacks: &HostCallbackSession,
 ) -> XllResult<crate::RtdValue> {

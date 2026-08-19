@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 /// A handle-producing UDF is memoized by its formula revision. For one live
 /// formula revision, the producer is evaluated at most once and the resulting
 /// handle token identifies that object for the token's entire lifetime.
-pub trait ExcelHandleObject: Any + Send + Sync + 'static {}
+pub trait ExcelHandleObject: Send + Sync + 'static {}
 
 /// A call-scoped read capability for an object owned by a formula handle.
 ///
@@ -48,11 +48,14 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
             .get(self.binding_id.slot)
             .expect("a resolved handle must retain its binding record");
         debug_assert_eq!(record.id, self.binding_id);
+        let object = record
+            .object
+            .clone_typed_arc::<T>()
+            .expect("resolved handle has matching concrete type");
         HandleAlias {
             object_id: self.object_id,
-            object: triomphe::Arc::clone(&record.object),
+            object,
             _call: PhantomData,
-            _type: PhantomData,
         }
     }
 }
@@ -72,13 +75,12 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
 /// object identity.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
     pub(crate) object_id: ObjectId,
-    pub(crate) object: triomphe::Arc<HandleObject>,
+    pub(crate) object: Arc<T>,
     pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
-    pub(crate) _type: PhantomData<fn() -> T>,
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_parts(self) -> (ObjectId, triomphe::Arc<HandleObject>) {
+    pub(crate) fn into_parts(self) -> (ObjectId, Arc<T>) {
         (self.object_id, self.object)
     }
 }

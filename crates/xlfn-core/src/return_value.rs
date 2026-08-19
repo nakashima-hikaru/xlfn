@@ -12,7 +12,7 @@ use std::mem::MaybeUninit;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::Arc;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use xlfn_sys::{
@@ -198,34 +198,34 @@ impl ReturnStripe {
 pub(crate) struct ReturnTracker {
     // Ordinary producer entry and obligation release use one thread-assigned
     // stripe. Shutdown seals all stripes and only then scans them for quiescence.
-    stripes: [Arc<ReturnStripe>; RETURN_STRIPE_COUNT],
+    stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
-pub(crate) struct ReturnObligation {
-    stripe: Arc<ReturnStripe>,
+pub(crate) struct ReturnObligation<'tracker> {
+    stripe: &'tracker ReturnStripe,
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    tracker: Arc<ReturnTracker>,
+    tracker: &'tracker ReturnTracker,
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
-impl ReturnObligation {
-    fn tracker(&self) -> &ReturnTracker {
-        &self.tracker
+impl<'tracker> ReturnObligation<'tracker> {
+    fn tracker(&self) -> &'tracker ReturnTracker {
+        self.tracker
     }
 }
 
-impl Drop for ReturnObligation {
+impl Drop for ReturnObligation<'_> {
     fn drop(&mut self) {
         self.stripe.release();
     }
 }
 
 impl ReturnTracker {
-    pub(crate) fn new_closed() -> Self {
+    pub(crate) const fn new_closed() -> Self {
         Self {
-            stripes: std::array::from_fn(|_| Arc::new(ReturnStripe::new_closed())),
+            stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
@@ -261,16 +261,16 @@ impl ReturnTracker {
         }
     }
 
-    pub(crate) fn try_enter_producer(self: &Arc<Self>) -> Option<ReturnProducerGuard> {
+    pub(crate) fn try_enter_producer(&self) -> Option<ReturnProducerGuard<'_>> {
         let stripe_index = current_return_stripe();
         if !self.stripes[stripe_index].try_enter() {
             return None;
         }
         Some(ReturnProducerGuard {
             obligation: Some(ReturnObligation {
-                stripe: Arc::clone(&self.stripes[stripe_index]),
+                stripe: &self.stripes[stripe_index],
                 #[cfg(any(test, feature = "shutdown-refinement"))]
-                tracker: Arc::clone(self),
+                tracker: self,
             }),
         })
     }
@@ -297,12 +297,18 @@ impl ReturnTracker {
     }
 }
 
-pub(crate) struct ReturnProducerGuard {
-    obligation: Option<ReturnObligation>,
+pub(crate) struct ReturnProducerGuard<'tracker> {
+    obligation: Option<ReturnObligation<'tracker>>,
 }
 
-impl ReturnProducerGuard {
-    fn transfer_to_block(&mut self) -> ReturnObligation {
+impl<'tracker> ReturnProducerGuard<'tracker> {
+    fn is_armed(&self) -> bool {
+        self.obligation.is_some()
+    }
+}
+
+impl ReturnProducerGuard<'static> {
+    fn transfer_to_block(&mut self) -> ReturnObligation<'static> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
             let _obligation = self
@@ -319,10 +325,6 @@ impl ReturnProducerGuard {
             .take()
             .expect("return obligation is transferred exactly once")
     }
-
-    fn is_armed(&self) -> bool {
-        self.obligation.is_some()
-    }
 }
 
 struct ReturnFreeGuard {
@@ -330,7 +332,7 @@ struct ReturnFreeGuard {
         dead_code,
         reason = "RAII obligation field held for lifecycle accounting"
     )]
-    obligation: ReturnObligation,
+    obligation: ReturnObligation<'static>,
 }
 
 /// Keeps one generated `xlAutoFree12` callback visible to terminal shutdown.
@@ -351,7 +353,7 @@ impl Drop for ReturnFreeGuard {
 /// Call-scoped services used by [`crate::ExcelReturn`] implementations.
 #[doc(hidden)]
 pub struct ReturnContext<'call, 'scope> {
-    runtime: Option<&'call dyn crate::value::HandleRuntimeProvider>,
+    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
     udf_id: Option<&'static str>,
     inputs: Option<InputFingerprint>,
     callbacks: Option<&'scope HostCallbackSession>,
@@ -363,7 +365,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            runtime: None,
+            handle_runtime: None,
             udf_id: None,
             inputs: None,
             callbacks: None,
@@ -381,7 +383,24 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         scope: &'scope crate::CallScope<'scope>,
     ) -> Self {
         Self {
-            runtime: Some(runtime),
+            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
+                runtime.handle_runtime_slot(),
+            )),
+            udf_id: Some(udf_id),
+            inputs: inputs.map(InputFingerprint::from_bytes),
+            callbacks: Some(scope.callbacks()),
+            lifetime: PhantomData,
+        }
+    }
+
+    pub(crate) fn for_frame(
+        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+        udf_id: &'static str,
+        inputs: Option<[u8; 32]>,
+        scope: &'scope crate::CallScope<'scope>,
+    ) -> Self {
+        Self {
+            handle_runtime,
             udf_id: Some(udf_id),
             inputs: inputs.map(InputFingerprint::from_bytes),
             callbacks: Some(scope.callbacks()),
@@ -408,9 +427,14 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let runtime = self.runtime.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
-        })?;
+        let resolver = self
+            .handle_runtime
+            .as_ref()
+            .ok_or(crate::XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+            })?;
+        let handles = resolver.get()?;
+        let arc_handles = resolver.get_arc()?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
             diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
         })?;
@@ -421,12 +445,10 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
             diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
-        let handles = runtime.handle_runtime()?;
         let (object_id, object) = operation()?.into_parts();
-        let observer_handles = Arc::clone(&handles);
         let (token, _) =
-            handles.prepare_observed_alias::<T, _>(key, object_id, object, move |key, token| {
-                crate::rtd::observe(observer_handles, key, token, callbacks)
+            handles.prepare_observed_alias::<T, _>(key, object_id, object, |key, token| {
+                crate::rtd::observe(arc_handles, key, token, callbacks)
             })?;
         Ok(token)
     }
@@ -435,9 +457,14 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let runtime = self.runtime.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
-        })?;
+        let resolver = self
+            .handle_runtime
+            .as_ref()
+            .ok_or(crate::XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+            })?;
+        let handles = resolver.get()?;
+        let arc_handles = resolver.get_arc()?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
             diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
         })?;
@@ -448,10 +475,8 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
             diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
-        let handles = runtime.handle_runtime()?;
-        let observer_handles = Arc::clone(&handles);
-        let (token, _) = handles.prepare_observed(key, operation, move |key, token| {
-            crate::rtd::observe(observer_handles, key, token, callbacks)
+        let (token, _) = handles.prepare_observed(key, operation, |key, token| {
+            crate::rtd::observe(arc_handles, key, token, callbacks)
         })?;
         Ok(token)
     }
@@ -470,7 +495,7 @@ const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
 
 enum ReturnOwnership {
-    Excel(Option<ReturnObligation>),
+    Excel(Option<ReturnObligation<'static>>),
     #[cfg(any(feature = "async", test))]
     Local,
 }
@@ -624,7 +649,7 @@ impl PreparedReturn {
         }
     }
 
-    fn publish_excel(mut self, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
+    fn publish_excel(mut self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
         let obligation = producer.transfer_to_block();
         self.oper.xltype |= XLBIT_DLL_FREE;
 
@@ -778,7 +803,7 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 
 fn allocate_excel_owned(
     value: ExcelOutput,
-    producer: &mut ReturnProducerGuard,
+    producer: &mut ReturnProducerGuard<'static>,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
     Ok(prepared.publish_excel(producer))
@@ -789,7 +814,10 @@ pub(crate) fn allocate_local_async_return(value: ExcelOutput) -> XllResult<NonNu
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
 
-fn allocate_excel_error(error: &XllError, producer: &mut ReturnProducerGuard) -> *mut XLOPER12 {
+fn allocate_excel_error(
+    error: &XllError,
+    producer: &mut ReturnProducerGuard<'static>,
+) -> *mut XLOPER12 {
     PreparedReturn::error(error).publish_excel(producer)
 }
 
@@ -854,7 +882,7 @@ impl Drop for AsyncReturnPointer {
 /// return-admission gate.
 #[doc(hidden)]
 #[must_use]
-pub fn ffi_boundary<A, F, T>(runtime: &Runtime<A>, operation: F) -> *mut XLOPER12
+pub fn ffi_boundary<A, F, T>(runtime: &'static Runtime<A>, operation: F) -> *mut XLOPER12
 where
     A: crate::Addin,
     F: FnOnce() -> XllResult<T>,
@@ -929,7 +957,7 @@ pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
 #[must_use]
 pub fn udf_boundary_named<A, F, T>(
-    runtime: &Runtime<A>,
+    runtime: &'static Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -980,7 +1008,7 @@ where
 fn udf_boundary_named_inner<A, F, T>(
     runtime: &Runtime<A>,
     guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard,
+    producer: &mut ReturnProducerGuard<'static>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -1015,7 +1043,7 @@ where
 #[inline]
 fn udf_boundary_uninstrumented<A, F, T>(
     guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard,
+    producer: &mut ReturnProducerGuard<'static>,
     udf_id: &'static str,
     operation: F,
 ) -> *mut XLOPER12
@@ -1048,7 +1076,7 @@ struct InstrumentedUdfContext<A: crate::Addin> {
 fn udf_boundary_instrumented<A, F, T>(
     runtime: &Runtime<A>,
     guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard,
+    producer: &mut ReturnProducerGuard<'static>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -1323,13 +1351,14 @@ mod tests {
         }
     }
 
-    fn open_test_runtime() -> Runtime<()> {
-        let runtime = Runtime::new();
+    fn open_static_test_runtime() -> crate::runtime::StaticTestRuntime<()> {
+        let fixture = crate::runtime::StaticTestRuntime::new();
+        let runtime = fixture.runtime();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
-        runtime
+        fixture
     }
 
     fn allocate_local_for_test(value: ExcelOutput) -> XllResult<*mut XLOPER12> {
@@ -1344,9 +1373,10 @@ mod tests {
     #[test]
     fn oper_is_the_first_field_and_is_freed_once() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         assert!(runtime.returns_are_quiescent());
-        let pointer = ffi_boundary(&runtime, || Ok(42.0));
+        let pointer = ffi_boundary(runtime, || Ok(42.0));
         assert!(!pointer.is_null());
         // SAFETY: pointer is the live return from ffi_boundary.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_NUM);
@@ -1369,13 +1399,13 @@ mod tests {
     #[test]
     fn excel_returns_reuse_tls_and_fallback_to_heap_when_occupied() {
         let _test = test_lock();
-        let runtime = Arc::new(open_test_runtime());
-        let worker_runtime = Arc::clone(&runtime);
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let worker = std::thread::spawn(move || {
-            let first = ffi_boundary(&worker_runtime, || Ok(1.0));
+            let first = ffi_boundary(runtime, || Ok(1.0));
             assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
 
-            let second = ffi_boundary(&worker_runtime, || Ok(2.0));
+            let second = ffi_boundary(runtime, || Ok(2.0));
             assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
 
             // SAFETY: both pointers are live Excel-owned returns from this
@@ -1385,7 +1415,7 @@ mod tests {
                 free_return(first);
             }
 
-            let reused = ffi_boundary(&worker_runtime, || Ok(3.0));
+            let reused = ffi_boundary(runtime, || Ok(3.0));
             assert_eq!(backing_of(reused), ReturnBlockBacking::ThreadLocal);
             assert_eq!(reused, first);
 
@@ -1398,17 +1428,17 @@ mod tests {
     #[test]
     fn excel_return_tls_slots_are_isolated_between_threads() {
         let _test = test_lock();
-        let runtime = Arc::new(open_test_runtime());
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let barrier = Arc::new(Barrier::new(3));
         let (pointer_tx, pointer_rx) = mpsc::channel();
         let mut workers = Vec::new();
 
         for value in [11.0, 22.0] {
-            let runtime = Arc::clone(&runtime);
             let barrier = Arc::clone(&barrier);
             let pointer_tx = pointer_tx.clone();
             workers.push(std::thread::spawn(move || {
-                let pointer = ffi_boundary(&runtime, || Ok(value));
+                let pointer = ffi_boundary(runtime, || Ok(value));
                 assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
                 pointer_tx.send(pointer as usize).unwrap();
                 barrier.wait();
@@ -1435,16 +1465,16 @@ mod tests {
         let storage_before = RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed);
         let array_before = RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed);
 
-        let runtime = Arc::new(open_test_runtime());
-        let worker_runtime = Arc::clone(&runtime);
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let worker = std::thread::spawn(move || {
-            let string_pointer = ffi_boundary(&worker_runtime, || Ok("hello".to_owned()));
+            let string_pointer = ffi_boundary(runtime, || Ok("hello".to_owned()));
             assert_eq!(backing_of(string_pointer), ReturnBlockBacking::ThreadLocal);
             // SAFETY: string_pointer is the live return produced above.
             unsafe { free_return(string_pointer) };
 
             let matrix = Matrix::new(1, 2, vec!["left".to_owned(), "right".to_owned()]).unwrap();
-            let array_pointer = ffi_boundary(&worker_runtime, || Ok(matrix));
+            let array_pointer = ffi_boundary(runtime, || Ok(matrix));
             assert_eq!(backing_of(array_pointer), ReturnBlockBacking::ThreadLocal);
             // SAFETY: array_pointer is the live return produced above.
             unsafe { free_return(array_pointer) };
@@ -1464,10 +1494,10 @@ mod tests {
     #[test]
     fn panicking_tls_drop_poison_falls_back_to_heap() {
         let _test = test_lock();
-        let runtime = Arc::new(open_test_runtime());
-        let worker_runtime = Arc::clone(&runtime);
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let worker = std::thread::spawn(move || {
-            let pointer = ffi_boundary(&worker_runtime, || Ok(42.0));
+            let pointer = ffi_boundary(runtime, || Ok(42.0));
             assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
             PANIC_ON_RETURN_BLOCK_DROP.store(true, Ordering::SeqCst);
 
@@ -1480,7 +1510,7 @@ mod tests {
                 assert_eq!(slot.state.get(), ReturnBlockSlotState::Poisoned);
             });
 
-            let fallback = ffi_boundary(&worker_runtime, || Ok(43.0));
+            let fallback = ffi_boundary(runtime, || Ok(43.0));
             assert_eq!(backing_of(fallback), ReturnBlockBacking::Heap);
             // SAFETY: fallback is the live heap-backed return produced above.
             unsafe { free_return(fallback) };
@@ -1570,21 +1600,20 @@ mod tests {
     #[test]
     fn errors_and_panics_do_not_cross_ffi() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
-        let error_pointer = ffi_boundary(&runtime, || {
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let error_pointer = ffi_boundary(runtime, || {
             Err::<f64, _>(XllError::input("x", crate::InputError::NonFinite))
         });
         // SAFETY: pointer is a live encoded error.
         assert_eq!(unsafe { (*error_pointer).base_type() }, XLTYPE_ERR);
-        // SAFETY: XLTYPE_ERR selects error.
         // SAFETY: XLTYPE_ERR selects the error union member.
         let error_code = unsafe { (*error_pointer).value.error };
         assert_eq!(error_code, ExcelError::Value.code());
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(error_pointer) };
 
-        let panic_pointer =
-            ffi_boundary(&runtime, || -> XllResult<f64> { panic!("boundary test") });
+        let panic_pointer = ffi_boundary(runtime, || -> XllResult<f64> { panic!("boundary test") });
         // SAFETY: pointer is a live encoded error.
         assert_eq!(unsafe { (*panic_pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1602,8 +1631,9 @@ mod tests {
         }
 
         let _test = test_lock();
-        let runtime = open_test_runtime();
-        let pointer = ffi_boundary(&runtime, || Ok(PanickingReturn));
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let pointer = ffi_boundary(runtime, || Ok(PanickingReturn));
         // SAFETY: pointer is a live encoded panic error.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1626,16 +1656,13 @@ mod tests {
         }
 
         let _test = test_lock();
-        let runtime = Arc::new(Runtime::<()>::new());
-        let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
 
         let (converting_tx, converting_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let caller_runtime = Arc::clone(&runtime);
         let caller = std::thread::spawn(move || {
-            let pointer = udf_boundary_named(&caller_runtime, "test", "TEST", |_| {
+            let pointer = udf_boundary_named(runtime, "test", "TEST", |_| {
                 Ok(BlockingReturn {
                     converting: converting_tx,
                     release: release_rx,
@@ -1663,19 +1690,16 @@ mod tests {
     #[test]
     fn close_waits_until_excel_releases_a_framework_return() {
         let _test = test_lock();
-        let runtime = Arc::new(Runtime::<()>::new());
-        let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
 
-        let pointer = ffi_boundary(&runtime, || Ok(7.0));
+        let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
         assert!(runtime.begin_close());
 
         let (drained_tx, drained_rx) = mpsc::sync_channel(1);
-        let closer_runtime = Arc::clone(&runtime);
         let closer = std::thread::spawn(move || {
-            closer_runtime.wait_for_returns();
+            runtime.wait_for_returns();
             drained_tx.send(()).unwrap();
         });
 
@@ -1691,13 +1715,11 @@ mod tests {
     #[test]
     fn closed_return_admission_never_publishes_another_dll_free_block() {
         let _test = test_lock();
-        let runtime = Runtime::<()>::new();
-        let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         assert!(runtime.begin_close());
 
-        let pointer = ffi_boundary(&runtime, || Ok(7.0));
+        let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
         // SAFETY: Admission rejection returns the permanently owned detached closing
         // error singleton, which deliberately does not carry XLBIT_DLL_FREE.
@@ -1706,7 +1728,7 @@ mod tests {
         }
         assert!(is_detached_error_pointer(pointer));
 
-        let second = ffi_boundary(&runtime, || Ok(8.0));
+        let second = ffi_boundary(runtime, || Ok(8.0));
         assert_eq!(pointer, second);
         assert!(is_detached_error_pointer(second));
     }
@@ -1759,12 +1781,14 @@ mod tests {
 
         let _test = test_lock();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runtime = Runtime::<LayerTestAddin>::new();
+        let fixture = crate::runtime::StaticTestRuntime::<LayerTestAddin>::new();
+        let runtime = fixture.runtime();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), (Recorder(Arc::clone(&events)),));
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        drop(open_attempt);
 
-        let pointer = udf_boundary_named(&runtime, "test_conversion", "TEST.CONVERSION", |_| {
+        let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_| {
             Err::<f64, _>(XllError::input("value", crate::InputError::NonFinite))
         });
         // SAFETY: this test owns the live return pointer.
@@ -1778,12 +1802,10 @@ mod tests {
             assert_eq!(recorded[0].2, 1);
         }
 
-        let panic_pointer = udf_boundary_named(
-            &runtime,
-            "test_panic",
-            "TEST.PANIC",
-            |_| -> XllResult<f64> { panic!("injected UDF panic") },
-        );
+        let panic_pointer =
+            udf_boundary_named(runtime, "test_panic", "TEST.PANIC", |_| -> XllResult<f64> {
+                panic!("injected UDF panic")
+            });
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(panic_pointer) };
 
@@ -1796,8 +1818,9 @@ mod tests {
     #[test]
     fn owned_values_cannot_bypass_scalar_validation() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
-        let pointer = ffi_boundary(&runtime, || Ok(f64::NAN));
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let pointer = ffi_boundary(runtime, || Ok(f64::NAN));
         // SAFETY: pointer is a live encoded validation error.
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
@@ -1820,8 +1843,9 @@ mod tests {
     #[test]
     fn async_return_allocation_does_not_set_xlbit_dll_free() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
-        let excel_ptr = ffi_boundary(&runtime, || Ok(42.0));
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let excel_ptr = ffi_boundary(runtime, || Ok(42.0));
         let async_ptr =
             allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
                 .unwrap();
@@ -1839,25 +1863,27 @@ mod tests {
     #[test]
     fn producer_entry_is_linearized_against_close() {
         for _ in 0..10_000 {
-            let tracker = Arc::new(ReturnTracker::new_closed());
+            let tracker = ReturnTracker::new_closed();
             tracker.reopen_admission().unwrap();
 
             let barrier = Arc::new(Barrier::new(2));
 
-            let producer_tracker = Arc::clone(&tracker);
-            let producer_barrier = Arc::clone(&barrier);
-            let producer = std::thread::spawn(move || {
-                producer_barrier.wait();
-                let guard = producer_tracker.try_enter_producer();
-                let admitted = guard.is_some();
-                drop(guard);
-                admitted
+            std::thread::scope(|scope| {
+                let tracker_ref = &tracker;
+                let producer_barrier = Arc::clone(&barrier);
+                let producer = scope.spawn(move || {
+                    producer_barrier.wait();
+                    let guard = tracker_ref.try_enter_producer();
+                    let admitted = guard.is_some();
+                    drop(guard);
+                    admitted
+                });
+
+                barrier.wait();
+                tracker.close_admission();
+
+                let _admitted = producer.join().unwrap();
             });
-
-            barrier.wait();
-            tracker.close_admission();
-
-            let _admitted = producer.join().unwrap();
 
             tracker.wait_for_quiescence();
             assert!(tracker.is_quiescent());
@@ -1866,14 +1892,13 @@ mod tests {
 
     #[test]
     fn closed_admission_rejects_all_producers() {
-        let tracker = Arc::new(ReturnTracker::new_closed());
+        let tracker = ReturnTracker::new_closed();
 
         std::thread::scope(|scope| {
             for _ in 0..32 {
-                let tracker_ref = &tracker;
-                scope.spawn(move || {
+                scope.spawn(|| {
                     for _ in 0..10_000 {
-                        assert!(tracker_ref.try_enter_producer().is_none());
+                        assert!(tracker.try_enter_producer().is_none());
                     }
                 });
             }
@@ -1886,19 +1911,18 @@ mod tests {
     fn quiescent_lost_wakeup_stress_test() {
         let _test = test_lock();
         for _ in 0..200 {
-            let runtime = Arc::new(open_test_runtime());
+            let fixture = open_static_test_runtime();
+            let runtime = fixture.runtime();
 
             let barrier = Arc::new(Barrier::new(2));
-            let runtime_waiter = Arc::clone(&runtime);
             let barrier_waiter = Arc::clone(&barrier);
             let waiter_handle = std::thread::spawn(move || {
                 barrier_waiter.wait();
-                runtime_waiter.wait_for_returns();
+                runtime.wait_for_returns();
             });
 
-            let runtime_prod = Arc::clone(&runtime);
             let producer_handle = std::thread::spawn(move || {
-                let ptr = ffi_boundary(&runtime_prod, || Ok(42.0));
+                let ptr = ffi_boundary(runtime, || Ok(42.0));
                 // SAFETY: ptr is a live return pointer produced by ffi_boundary above.
                 let free_guard = unsafe { free_return_boundary(ptr) };
                 drop(free_guard);
@@ -1914,7 +1938,7 @@ mod tests {
 
     #[test]
     fn obligation_transfer_does_not_change_count() {
-        let tracker = Arc::new(ReturnTracker::new_closed());
+        let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
         let mut producer = tracker.try_enter_producer().unwrap();
@@ -1942,8 +1966,9 @@ mod tests {
     #[test]
     fn return_obligation_can_be_released_on_another_thread() {
         let _test = test_lock();
-        let runtime = Arc::new(open_test_runtime());
-        let pointer = ffi_boundary(&runtime, || Ok(42.0));
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let pointer = ffi_boundary(runtime, || Ok(42.0));
         assert!(!runtime.returns_are_quiescent());
         let pointer = pointer as usize;
 
@@ -1958,7 +1983,7 @@ mod tests {
 
     #[test]
     fn failed_encoding_reuses_same_obligation() {
-        let tracker = Arc::new(ReturnTracker::new_closed());
+        let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
         let mut producer = tracker.try_enter_producer().unwrap();
@@ -1985,10 +2010,11 @@ mod tests {
     #[test]
     fn panic_error_uses_same_obligation() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
 
         let ptr = udf_boundary_named(
-            &runtime,
+            runtime,
             "test_panic_obligation",
             "TEST.PANIC_OBLIGATION",
             |_| -> XllResult<f64> { panic!("injected UDF panic") },
@@ -2028,13 +2054,13 @@ mod tests {
     #[test]
     fn uninstrumented_udf_does_not_allocate_call_id() {
         let _test = test_lock();
-        let runtime = open_test_runtime();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
 
         let before = runtime.peek_next_call_id();
 
         for _ in 0..100 {
-            let ptr =
-                udf_boundary_named(&runtime, "test_fast_path", "TEST.FAST_PATH", |_| Ok(42.0));
+            let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_| Ok(42.0));
             // SAFETY: ptr is a live ReturnBlock produced above.
             let free_guard = unsafe { free_return_boundary(ptr) };
             drop(free_guard);

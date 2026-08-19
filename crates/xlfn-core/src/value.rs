@@ -569,23 +569,13 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call> for T {
     }
 }
 
-pub(crate) trait HandleRuntimeProvider {
-    fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>>;
-}
-
-impl<A: crate::Addin> HandleRuntimeProvider for crate::Runtime<A> {
-    fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>> {
-        self.handles()
-    }
-}
-
 /// Runtime services available while converting one Excel-visible argument.
 ///
 /// The handle runtime is acquired lazily so ordinary scalar conversions do not
 /// initialize handle registry state.
 #[doc(hidden)]
 pub struct CallContext<'call> {
-    runtime: Option<&'call (dyn HandleRuntimeProvider + 'call)>,
+    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
     scope: Option<&'call CallScope<'call>>,
 }
 
@@ -595,16 +585,35 @@ impl<'call> CallContext<'call> {
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
-            runtime: Some(runtime),
+            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
+                runtime.handle_runtime_slot(),
+            )),
             scope: Some(scope),
         }
     }
 
     pub(crate) const fn without_runtime() -> Self {
         Self {
-            runtime: None,
+            handle_runtime: None,
             scope: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_resolver(
+        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+        scope: Option<&'call CallScope<'call>>,
+    ) -> Self {
+        Self {
+            handle_runtime,
+            scope,
+        }
+    }
+
+    pub(crate) fn take_handle_runtime(
+        &mut self,
+    ) -> Option<crate::handle::HandleRuntimeResolver<'call>> {
+        self.handle_runtime.take()
     }
 
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
@@ -614,11 +623,12 @@ impl<'call> CallContext<'call> {
         let scope = self.scope.ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::HANDLE_SCOPE_MISSING,
         })?;
-        self.runtime
+        self.handle_runtime
+            .as_ref()
             .ok_or(XllError::Internal {
                 diagnostic_id: crate::DiagnosticId::HANDLE_NO_CONTEXT,
             })?
-            .handle_runtime()?
+            .get()?
             .lookup(scope, token)
     }
 }
@@ -647,6 +657,12 @@ impl<'call> ArgumentContext<'call> {
             call: CallContext::new(runtime, scope),
             inputs: R::USES_FORMULA_REVISION.then(InputFingerprintBuilder::new),
         }
+    }
+
+    pub(crate) fn take_handle_runtime(
+        &mut self,
+    ) -> Option<crate::handle::HandleRuntimeResolver<'call>> {
+        self.call.take_handle_runtime()
     }
 
     #[doc(hidden)]

@@ -363,13 +363,13 @@ private theorem mem_update_publication_identity
   rcases List.mem_map.mp hMem with ⟨old, hOld, rfl⟩
   refine ⟨old, hOld, ?_, ?_, ?_, ?_⟩
   · by_cases hTarget : old.key == key && old.token == token <;>
-      simp [State.updatePublicationState, hTarget]
+      simp [hTarget]
   · by_cases hTarget : old.key == key && old.token == token <;>
-      simp [State.updatePublicationState, hTarget]
+      simp [hTarget]
   · by_cases hTarget : old.key == key && old.token == token <;>
-      simp [State.updatePublicationState, hTarget]
+      simp [hTarget]
   · by_cases hTarget : old.key == key && old.token == token <;>
-      simp [State.updatePublicationState, hTarget]
+      simp [hTarget]
 
 private theorem target_publication_mem_update
     {s : State} {key : TopicKey} {token : Registry.Token}
@@ -380,7 +380,7 @@ private theorem target_publication_mem_update
     { publication with state := state } ∈ s.updatePublicationState key token state := by
   apply List.mem_map.mpr
   refine ⟨publication, hMem, ?_⟩
-  simp [State.updatePublicationState, hKey, hToken]
+  simp [hKey, hToken]
 
 private theorem mem_update_generation_publication_identity
     {s : State} {generation : ServerGeneration} {publication : Publication}
@@ -398,19 +398,19 @@ private theorem mem_update_generation_publication_identity
   · by_cases hTarget : s.topics.byKey.any (fun topic =>
         topic.key == old.key && topic.token == old.token &&
           topic.serverGeneration == some generation) <;>
-      simp [State.updateGenerationPublications, hTarget]
+      simp [hTarget]
   · by_cases hTarget : s.topics.byKey.any (fun topic =>
         topic.key == old.key && topic.token == old.token &&
           topic.serverGeneration == some generation) <;>
-      simp [State.updateGenerationPublications, hTarget]
+      simp [hTarget]
   · by_cases hTarget : s.topics.byKey.any (fun topic =>
         topic.key == old.key && topic.token == old.token &&
           topic.serverGeneration == some generation) <;>
-      simp [State.updateGenerationPublications, hTarget]
+      simp [hTarget]
   · by_cases hTarget : s.topics.byKey.any (fun topic =>
         topic.key == old.key && topic.token == old.token &&
           topic.serverGeneration == some generation) <;>
-      simp [State.updateGenerationPublications, hTarget]
+      simp [hTarget]
 
 private theorem mem_update_closing_publication_identity
     {s : State} {publication : Publication}
@@ -565,7 +565,7 @@ private theorem canonical_stage_after_commit
       · by_cases hOldKeyBool : old.key == key
         · have hOldKeyEq : old.key = key := beq_iff_eq.mp hOldKeyBool
           exact False.elim (hKeyNe (hOldKey.symm.trans hOldKeyEq))
-        · simp [Topics.State.updateTopicStage, hOldKeyBool]
+        · simp [hOldKeyBool]
           exact hOldStage
 
 private theorem live_publications_after_topic_step
@@ -631,8 +631,8 @@ private theorem committed_target_after_commit
       · apply List.mem_map.mpr
         refine ⟨{ source with stage := .provisional }, ?_, ?_⟩
         · exact Topics.mem_of_findTopic_some hTopic'
-        · simp [Topics.State.updateTopicStage, hTopicKey']
-      · simpa [hTopicKey'] using hTopicKey
+        · simp [hTopicKey']
+      · exact hTopicKey'
       · rfl
       · rfl
       · rfl
@@ -653,7 +653,7 @@ private theorem canonical_key_ne_provisional_topic
   have hSame : old = topic := Topics.topic_eq_of_same_key
     hTopics.2.2.2.2.1 hOld hTopicMem hOldKey' hTopicKey
   have hTokenEq : publication.token = topic.token := by
-    exact hOldToken.symm.trans (by simpa [hSame])
+    exact hOldToken.symm.trans (by simp [hSame])
   rcases hDifferent with hKeyNe | hTokenNe
   · exact hKeyNe hPublicationKey
   · exact hTokenNe hTokenEq
@@ -876,7 +876,7 @@ theorem Step.invariant_preserved
           hTopicStep hOldCanonical hOldKeyNe
         have hMappedMem : old ∈ s.updatePublicationState key token .stale := by
           apply List.mem_map.mpr
-          exact ⟨old, hOld, by simp [State.updatePublicationState, hOldKeyNe]⟩
+          exact ⟨old, hOld, by simp [hOldKeyNe]⟩
         exact ⟨old, hMappedMem, hOldLive, hBindingKey, hBindingToken, hCanonical⟩
       refine ⟨hTopics', hPublicationUnique, hSnapshots, hWarmReaders, ?_, ?_,
         ?_, ?_, ?_, ?_⟩

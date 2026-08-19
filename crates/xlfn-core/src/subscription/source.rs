@@ -45,14 +45,13 @@ pub(crate) trait ErasedRtdSource: Send + Sync {
     fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>>;
 }
 
-pub(crate) struct SourceAdapter<S>(pub(crate) Arc<S>);
-
-impl<S> ErasedRtdSource for SourceAdapter<S>
+impl<S> ErasedRtdSource for S
 where
     S: RtdSource,
 {
     fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>> {
-        self.0.subscribe(
+        RtdSource::subscribe(
+            self,
             topic,
             RtdSink {
                 sink,

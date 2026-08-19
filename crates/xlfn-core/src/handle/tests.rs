@@ -14,7 +14,7 @@ fn format_formula_revision_key(
 
 fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
 where
-    T: Any + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
     let mut value = Some(
         Arc::try_unwrap(value)
@@ -2078,4 +2078,419 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     closer.join().unwrap();
 
     assert_eq!(runtime.registry.phase(), HandleRegistryPhase::Closed);
+}
+
+#[test]
+fn handle_type_mismatch_returns_invalid_handle() {
+    #[derive(Debug, PartialEq, Clone)]
+    struct TypeA(u32);
+    impl ExcelHandleObject for TypeA {}
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct TypeB(u32);
+    impl ExcelHandleObject for TypeB {}
+
+    let runtime = HandleRuntime::new(16);
+    let key = test_topic_key("type_mismatch");
+    let (token, _) = runtime
+        .prepare_observed(key, || Ok(TypeA(42)), |_, _| Ok(()))
+        .unwrap();
+
+    // Looking up TypeA as TypeB must fail with InvalidHandle
+    crate::with_excel_call_scope(|scope| {
+        let result = runtime.lookup::<TypeB>(scope, &token);
+        assert!(matches!(result, Err(XllError::InvalidHandle)));
+    });
+
+    // Looking up TypeA as TypeA must succeed
+    crate::with_excel_call_scope(|scope| {
+        let handle = runtime.lookup::<TypeA>(scope, &token).unwrap();
+        assert_eq!(*handle, TypeA(42));
+    });
+}
+
+#[test]
+fn alias_preserves_pointer_and_object_identity() {
+    #[derive(Debug, PartialEq)]
+    struct TrackedObj(u64);
+    impl ExcelHandleObject for TrackedObj {}
+
+    let runtime = HandleRuntime::new(16);
+    let key1 = test_topic_key("alias_identity_1");
+    let (token1, _) = runtime
+        .prepare_observed(key1, || Ok(TrackedObj(12345)), |_, _| Ok(()))
+        .unwrap();
+
+    let (token2, object_id1, ptr1) = crate::with_excel_call_scope(|scope| {
+        let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
+        let object_id = handle1.object_id;
+        let ptr = handle1.value.as_ptr();
+        let alias = handle1.alias();
+        let key2 = test_topic_key("alias_identity_2");
+        let (token2, _) = runtime
+            .prepare_observed_alias::<TrackedObj, _>(key2, alias.object_id, alias.object, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        (token2, object_id, ptr)
+    });
+
+    assert_ne!(token1, token2);
+
+    crate::with_excel_call_scope(|scope| {
+        let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
+        assert_eq!(handle2.object_id, object_id1);
+        assert_eq!(handle2.value.as_ptr(), ptr1);
+        assert_eq!(*handle2, TrackedObj(12345));
+    });
+}
+
+#[test]
+fn removing_original_binding_keeps_aliased_object_alive() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct DropCounter {
+        _value: u64,
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for DropCounter {}
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = HandleRuntime::new(16);
+    let key1 = test_topic_key("retire_alias_1");
+    let (token1, _) = runtime
+        .prepare_observed(
+            key1,
+            || {
+                Ok(DropCounter {
+                    _value: 999,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+    let key2 = test_topic_key("retire_alias_2");
+    let token2 = crate::with_excel_call_scope(|scope| {
+        let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
+        let alias = handle1.alias();
+        let (token2, _) = runtime
+            .prepare_observed_alias::<DropCounter, _>(
+                key2,
+                alias.object_id,
+                alias.object,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        token2
+    });
+
+    // Remove token1 binding
+    runtime.registry.remove_and_drop(&token1, "test remove 1");
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    // Reading token2 must still work and access the same value
+    crate::with_excel_call_scope(|scope| {
+        let handle2 = runtime.lookup::<DropCounter>(scope, &token2).unwrap();
+        assert_eq!(handle2._value, 999);
+    });
+
+    // Remove token2 binding -> last reference dropped
+    runtime.registry.remove_and_drop(&token2, "test remove 2");
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn snapshot_borrow_keeps_value_alive_across_binding_retirement() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct DropCounter {
+        val: u32,
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for DropCounter {}
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = HandleRuntime::new(16);
+    let key = test_topic_key("snapshot_borrow_alive");
+    let (token, _) = runtime
+        .prepare_observed(
+            key,
+            || {
+                Ok(DropCounter {
+                    val: 777,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+    crate::with_excel_call_scope(|scope| {
+        let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
+        assert_eq!(handle.val, 777);
+
+        // Retire binding while handle snapshot is in scope
+        runtime.registry.remove_and_drop(&token, "test remove");
+
+        // Object has not been dropped yet because handle._snapshot holds the chunk
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        // Dereference remains safe
+        assert_eq!(handle.val, 777);
+    });
+
+    // After CallScope ends and handle is dropped, the object is dropped
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn registry_close_drops_each_handle_exactly_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct TrackedItem {
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for TrackedItem {}
+    impl Drop for TrackedItem {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = HandleRuntime::new(16);
+    for i in 0..5 {
+        let key = test_topic_key(&format!("close_drop_{i}"));
+        let d = Arc::clone(&drops);
+        let _ = runtime
+            .prepare_observed(key, || Ok(TrackedItem { drops: d }), |_, _| Ok(()))
+            .unwrap();
+    }
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    runtime.close().unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn drop_panic_is_recorded_in_handle_cleanup_state() {
+    struct PanickingDrop;
+    impl ExcelHandleObject for PanickingDrop {}
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            panic!("intended destructor panic in test");
+        }
+    }
+
+    let runtime = HandleRuntime::new(16);
+    let key = test_topic_key("drop_panic_test");
+    let (token, _) = runtime
+        .prepare_observed(key, || Ok(PanickingDrop), |_, _| Ok(()))
+        .unwrap();
+
+    // Removing and dropping the object should catch the panic and record it
+    runtime
+        .registry
+        .remove_and_drop(&token, "test panic remove");
+
+    assert!(matches!(
+        runtime.registry.cleanup_result(),
+        Err(XllError::Panic)
+    ));
+}
+
+#[test]
+fn zero_sized_type_handle_lifecycle() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct ZeroSized;
+    impl ExcelHandleObject for ZeroSized {}
+
+    let runtime = HandleRuntime::new(16);
+    let key1 = test_topic_key("zst_test_1");
+    let (token1, _) = runtime
+        .prepare_observed(key1, || Ok(ZeroSized), |_, _| Ok(()))
+        .unwrap();
+
+    let (token2, object_id) = crate::with_excel_call_scope(|scope| {
+        let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
+        assert_eq!(*handle1, ZeroSized);
+        let alias = handle1.alias();
+        let key2 = test_topic_key("zst_test_2");
+        let (token2, _) = runtime
+            .prepare_observed_alias::<ZeroSized, _>(key2, alias.object_id, alias.object, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        (token2, alias.object_id)
+    });
+
+    crate::with_excel_call_scope(|scope| {
+        let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
+        assert_eq!(*handle2, ZeroSized);
+        assert_eq!(handle2.object_id, object_id);
+    });
+
+    runtime.registry.remove_and_drop(&token1, "remove zst 1");
+    crate::with_excel_call_scope(|scope| {
+        let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
+        assert_eq!(*handle2, ZeroSized);
+    });
+
+    runtime.registry.remove_and_drop(&token2, "remove zst 2");
+    runtime.close().unwrap();
+}
+
+#[test]
+fn alias_capability_alone_keeps_object_alive_and_drops_on_alias_drop() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct TrackedValue {
+        _id: u32,
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for TrackedValue {}
+    impl Drop for TrackedValue {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = HandleRuntime::new(16);
+    let key = test_topic_key("alias_alone_alive");
+    let (token, _) = runtime
+        .prepare_observed(
+            key,
+            || {
+                Ok(TrackedValue {
+                    _id: 42,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+    crate::with_excel_call_scope(|scope| {
+        let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
+        let alias = handle.alias();
+
+        // Remove the original binding from registry
+        runtime.registry.remove_and_drop(&token, "remove original");
+
+        // Original binding is removed, but `alias` holds `Arc<TrackedValue>` directly
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(alias.object._id, 42);
+
+        // Dropping the alias capability releases the last Arc strong count
+        drop(alias);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn resolver_does_not_initialize_slot_when_unused() {
+    let slot = HandleRuntimeSlot::new();
+    assert!(slot.is_none());
+
+    let resolver = HandleRuntimeResolver::new(&slot);
+    assert!(slot.is_none());
+    drop(resolver);
+    assert!(slot.is_none());
+}
+
+#[test]
+fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
+    struct TestObj(u32);
+    impl ExcelHandleObject for TestObj {}
+
+    let slot: &'static HandleRuntimeSlot = Box::leak(Box::new(HandleRuntimeSlot::new()));
+    assert!(slot.is_none());
+
+    let handle_rt = slot.get_owned().unwrap();
+    let key = test_topic_key("resolver_test");
+    let (token, _) = handle_rt
+        .prepare_observed(key, || Ok(TestObj(123)), |_, _| Ok(()))
+        .unwrap();
+
+    crate::with_excel_call_scope(|scope| {
+        let resolver = HandleRuntimeResolver::new(slot);
+        let mut call_ctx = crate::value::CallContext::from_resolver(Some(resolver), Some(scope));
+
+        // First handle resolution initializes resolver OnceCell
+        let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
+        assert_eq!(h1.0, 123);
+
+        // Second handle resolution reuses OnceCell
+        let h2: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
+        assert_eq!(h2.0, 123);
+
+        // Take resolver and move to ReturnContext
+        let moved_resolver = call_ctx.take_handle_runtime();
+        assert!(call_ctx.take_handle_runtime().is_none());
+
+        let res_ref = moved_resolver.as_ref().unwrap();
+        assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
+        assert!(std::ptr::eq(&**res_ref.get_arc().unwrap(), &*handle_rt));
+
+        let mut return_ctx =
+            ReturnContext::for_frame(moved_resolver, "test_udf", Some([0; 32]), scope);
+        let err = return_ctx
+            .publish_new_handle(|| Ok(TestObj(456)))
+            .unwrap_err();
+        assert!(matches!(err, XllError::ExcelApi { .. }));
+    });
+}
+
+#[test]
+fn concurrent_first_use_initializes_exactly_once() {
+    let slot: &'static HandleRuntimeSlot = Box::leak(Box::new(HandleRuntimeSlot::new()));
+    assert!(slot.is_none());
+
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let read = slot.read().unwrap();
+                &*read as *const HandleRuntime as usize
+            })
+        })
+        .collect();
+
+    let mut ptrs = Vec::new();
+    for handle in handles {
+        ptrs.push(handle.join().unwrap());
+    }
+    assert_ne!(ptrs[0], 0);
+    for ptr in &ptrs {
+        assert_eq!(*ptr, ptrs[0]);
+    }
+    assert!(!slot.is_none());
+}
+
+#[test]
+fn close_resets_to_vacant_for_reopen() {
+    let slot = HandleRuntimeSlot::new();
+    assert!(slot.is_none());
+
+    let rt1 = slot.get_owned().unwrap();
+    assert!(!slot.is_none());
+
+    let _quiescent = slot.close().unwrap();
+    assert!(slot.is_none());
+
+    let rt2 = slot.get_owned().unwrap();
+    assert!(!slot.is_none());
+
+    assert!(!Arc::ptr_eq(&rt1, &rt2));
 }

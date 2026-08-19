@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdUpdate};
+use crate::subscription::{
+    RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdUpdate, StoredRtdValue,
+};
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
@@ -754,7 +756,7 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the allocation throughout
     // this test, including after deferred ACTIVE cleanup is postponed.
@@ -794,7 +796,7 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
 fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
@@ -856,7 +858,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
 fn deferred_termination_spawn_failure_rolls_back_atomically() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
@@ -910,7 +912,7 @@ fn termination_worker_can_finish_before_handle_registration() {
 fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
@@ -986,7 +988,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let server_address = server as usize;
 
@@ -1062,7 +1064,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let _generation = ensured.active.generation;
 
@@ -1080,7 +1082,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
         let attached_rendezvous = Arc::clone(&rendezvous);
         scope.spawn(move || {
             let attached =
-                ensure_server(None, Some(attached_subscriptions)).expect("attach subscriptions");
+                ensure_server(None, Some(&attached_subscriptions)).expect("attach subscriptions");
             attached_rendezvous.wait();
             attached_rendezvous.wait();
             drop(attached);
@@ -1435,16 +1437,16 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
             assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
             assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, update.topic_id);
 
-            match update.value.as_ref() {
-                RtdValue::Number(expected) => {
+            match &update.value {
+                StoredRtdValue::Number(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
                     assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, *expected);
                 }
-                RtdValue::Integer(expected) => {
+                StoredRtdValue::Integer(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_I4);
                     assert_eq!(value.Anonymous.Anonymous.Anonymous.lVal, *expected);
                 }
-                RtdValue::Boolean(expected) => {
+                StoredRtdValue::Boolean(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_BOOL);
                     assert_eq!(
                         value.Anonymous.Anonymous.Anonymous.boolVal,
@@ -1455,22 +1457,22 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
                         }
                     );
                 }
-                RtdValue::String(expected) => {
+                StoredRtdValue::String(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_BSTR);
                     let bstr = value.Anonymous.Anonymous.Anonymous.bstrVal;
                     assert!(!bstr.is_null());
                     let length = SysStringLen(bstr) as usize;
                     let actual = String::from_utf16_lossy(std::slice::from_raw_parts(bstr, length));
-                    assert_eq!(actual, *expected);
+                    assert_eq!(actual, expected.as_str());
                 }
-                RtdValue::Error(expected) => {
+                StoredRtdValue::Error(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);
                     assert_eq!(
                         value.Anonymous.Anonymous.Anonymous.scode,
                         2000 + expected.0.code()
                     );
                 }
-                RtdValue::Empty => {
+                StoredRtdValue::Empty => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_EMPTY);
                 }
             }
@@ -1613,7 +1615,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
 fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     assert!(ensured.newly_created);
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the RTD server while the
@@ -1668,7 +1670,7 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
 fn create_instance_nulls_output_on_every_rejected_request() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
     let factory = get_test_class_factory(&ensured.active);
@@ -1749,7 +1751,7 @@ fn create_instance_nulls_output_on_every_rejected_request() {
 fn com_query_failures_clear_stale_output_pointers() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
     let class_factory_iid = iid_iclass_factory_from_fields();
     let unknown_iid = iid_iunknown_from_fields();
     let unsupported_iid = GUID {
@@ -1891,7 +1893,7 @@ fn com_query_failures_clear_stale_output_pointers() {
 fn idispatch_resolves_names_and_invokes_heartbeat() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
     // interfaces are used below.
@@ -2065,7 +2067,7 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
 fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let ensured = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
     let factory = get_test_class_factory(&ensured.active);
@@ -2307,7 +2309,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         sink: Mutex::new(None),
         disconnected: Arc::clone(&disconnected),
     });
-    let ensured = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+    let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.as_ref().unwrap().clone();
 
@@ -2321,7 +2323,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let conn = subscriptions
         .connect_transaction(&handle, crate::subscription::TopicId(77), &key_obj)
         .unwrap();
-    assert_eq!(conn.value(), &RtdValue::Number(12.5));
+    assert_eq!(conn.value(), &StoredRtdValue::Number(12.5));
     conn.commit().unwrap();
     drop(prepared);
     assert_eq!(handle.pending_update_count(), 0);
@@ -2490,7 +2492,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
 fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = Arc::new(HandleRuntime::new(4));
-    let _active = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let _active = ensure_server(Some(&handles), None).unwrap();
     let wrong = GUID::from_u128(1);
     let class_factory_iid = iid_iclass_factory_from_fields();
     let mut output = ptr::null_mut();
@@ -2517,10 +2519,10 @@ fn existing_server_attaches_each_backend_without_replacement() {
     let handles = Arc::new(HandleRuntime::new(4));
     let subscriptions = Arc::new(SubscriptionRuntime::new());
 
-    let first = ensure_server(Some(Arc::clone(&handles)), None).unwrap();
+    let first = ensure_server(Some(&handles), None).unwrap();
     assert!(first.newly_created);
 
-    let second = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+    let second = ensure_server(None, Some(&subscriptions)).unwrap();
     assert!(!second.newly_created);
     assert_eq!(first.active.pointer, second.active.pointer);
 
@@ -2552,7 +2554,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let subscriptions = Arc::new(SubscriptionRuntime::new());
     let notifications = Arc::new(AtomicUsize::new(0));
 
-    let ensured = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+    let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
 
     let callback = Arc::new(RetainedUpdateCallback {
@@ -2564,15 +2566,12 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
         install_callback(&(*server).callbacks, callback);
     }
 
+    let notifier_state = Arc::new(crate::rtd::test_support::TestNotifierState::new());
     let handle = ensured.subscription_server.as_ref().unwrap();
     handle
-        .attach_update_callback({
-            let notifications = Arc::clone(&notifications);
-            Arc::new(move || {
-                notifications.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        })
+        .attach_update_notifier(crate::rtd::RtdNotifier::for_test(Arc::clone(
+            &notifier_state,
+        )))
         .unwrap();
 
     let (source, sink, _) = crate::subscription::tests::publishing_source(None);
@@ -2589,13 +2588,13 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let sink = sink.lock().clone().unwrap();
     sink.publish(1.0).unwrap();
 
-    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+    assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
 
     for _ in 0..100 {
-        let _res = ensure_server(None, Some(Arc::clone(&subscriptions))).unwrap();
+        let _res = ensure_server(None, Some(&subscriptions)).unwrap();
     }
 
-    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+    assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
     drop(ensured);
     shutdown_subscriptions(subscriptions).unwrap();
 }

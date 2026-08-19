@@ -8,7 +8,7 @@ pub(crate) struct SubscriptionRuntime {
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    pub(crate) runtime_gate: Arc<OperationGate>,
+    pub(crate) runtime_gate: OperationGate,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<ServerRuntime>>>,
     pub(crate) active_quota: Arc<Quota>,
@@ -24,12 +24,12 @@ pub(crate) struct SubscriptionRuntime {
 }
 
 impl SubscriptionRuntime {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn new() -> Self {
         Self::with_limits(RtdLimits::standard())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn with_limits(limits: RtdLimits) -> Self {
         Self::with_limits_and_ingress(limits, None)
     }
@@ -103,7 +103,7 @@ impl SubscriptionRuntime {
             .map_or(Ok(()), |error| Err(error.clone()))
     }
 
-    pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard> {
+    pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard<'_>> {
         self.runtime_gate.enter()
     }
 
@@ -230,7 +230,7 @@ impl SubscriptionRuntime {
             PendingSubscription {
                 live_reservations: 1,
                 committed: false,
-                source: Arc::new(SourceAdapter(source)),
+                source,
                 topic,
                 server_generation: None,
                 connecting_generation: None,
@@ -343,7 +343,7 @@ impl SubscriptionRuntime {
         topic_id: TopicId,
         key: &SubscriptionKey,
     ) -> XllResult<SubscriptionConnection> {
-        let operation = server_handle.inner.enter_operation()?;
+        let operation = server_handle.inner.enter_owned_operation()?;
         let conn_gen = ConnectionGeneration(
             self.next_connection_generation
                 .fetch_add(1, Ordering::Relaxed),
@@ -412,7 +412,7 @@ impl SubscriptionRuntime {
                                 generation: conn_gen,
                                 subscription: None,
                                 committed: false,
-                                latest: Arc::new(RtdValue::Empty),
+                                latest: StoredRtdValue::Empty,
                                 _permit: permit,
                             },
                         );
@@ -459,7 +459,7 @@ impl SubscriptionRuntime {
                 match shard.active_by_topic.get_mut(&topic_id) {
                     Some(active) if active.generation == conn_gen => {
                         active.subscription = Some(subscription);
-                        let latest = (*active.latest).clone();
+                        let latest = active.latest.clone();
                         let epoch = server_handle.inner.publish_epoch.load(Ordering::Acquire);
                         let buf0 = (epoch & 1) as usize;
                         let buf1 = 1 - buf0;
@@ -491,7 +491,6 @@ impl SubscriptionRuntime {
 
         Ok(SubscriptionConnection {
             runtime: Arc::clone(self),
-            server: Arc::clone(&server_handle.inner),
             operation: Some(operation),
             topic_id,
             generation: conn_gen,
@@ -926,19 +925,27 @@ impl Drop for PreparedSubscription {
 
 pub(crate) struct SubscriptionConnection {
     pub(crate) runtime: Arc<SubscriptionRuntime>,
-    pub(crate) server: Arc<ServerRuntime>,
-    pub(crate) operation: Option<ServerOperation>,
+    pub(crate) operation: Option<OwnedServerOperation>,
     pub(crate) topic_id: TopicId,
     pub(crate) generation: ConnectionGeneration,
     pub(crate) key: SubscriptionKey,
-    pub(crate) value: RtdValue,
+    pub(crate) value: StoredRtdValue,
     pub(crate) observed_sequence: Option<u64>,
     pub(crate) created: bool,
     pub(crate) finished: bool,
 }
 
 impl SubscriptionConnection {
-    pub(crate) fn value(&self) -> &RtdValue {
+    #[inline]
+    pub(crate) fn server(&self) -> &Arc<ServerRuntime> {
+        &self
+            .operation
+            .as_ref()
+            .expect("active connection operation")
+            .server
+    }
+
+    pub(crate) fn value(&self) -> &StoredRtdValue {
         &self.value
     }
 
@@ -947,8 +954,9 @@ impl SubscriptionConnection {
             return Ok(());
         }
         let result = if self.created {
+            let server = Arc::clone(self.server());
             self.runtime.commit_connection(
-                &self.server,
+                &server,
                 self.topic_id,
                 self.generation,
                 &self.key,
@@ -970,9 +978,11 @@ impl SubscriptionConnection {
             return;
         }
         self.finished = true;
-        if self.created {
+        if self.created
+            && let Some(operation) = &self.operation
+        {
             let handle = RtdServerHandle {
-                inner: Arc::clone(&self.server),
+                inner: Arc::clone(&operation.server),
             };
             let _ = self.runtime.rollback_connection(
                 &handle,

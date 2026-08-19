@@ -158,7 +158,7 @@ fn install_benchmark_subscriber() -> tracing::dispatcher::DefaultGuard {
 }
 
 pub struct SyncBoundaryWorkerPool {
-    _runtime: Arc<crate::Runtime<()>>,
+    _runtime: &'static crate::Runtime<()>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -172,7 +172,7 @@ impl SyncBoundaryWorkerPool {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
         }
-        let runtime = Arc::new(crate::Runtime::<()>::new());
+        let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::<()>::new()));
         let close_epoch = runtime.close_epoch();
         let mut open_attempt = runtime
             .begin_open_if_epoch(close_epoch)
@@ -192,7 +192,7 @@ impl SyncBoundaryWorkerPool {
             let d_tx = done_tx.clone();
             start_tx.push(s_tx);
 
-            let r = Arc::clone(&runtime);
+            let r = runtime;
             let handle = std::thread::spawn(move || {
                 let _subscriber_guard = matches!(kind, SyncBenchKind::ScalarReturnUdfTraceEnabled)
                     .then(install_benchmark_subscriber);
@@ -221,7 +221,7 @@ impl SyncBoundaryWorkerPool {
                         | SyncBenchKind::ScalarReturnUdfTraceEnabled => {
                             for _ in 0..iterations_per_thread {
                                 let ptr = crate::return_value::udf_boundary_named(
-                                    &r,
+                                    r,
                                     "bench_udf",
                                     "BENCH.UDF",
                                     |_| Ok(42.0),
@@ -1239,6 +1239,296 @@ impl Drop for RawArgumentIngressBenchmark {
     fn drop(&mut self) {
         if let Some(handle_rt) = &self.handle_runtime {
             cleanup_handle_runtime(handle_rt);
+        }
+    }
+}
+
+pub struct MultiHandleCallBenchmark {
+    runtime: &'static crate::Runtime<()>,
+    _handle_runtime: Arc<HandleRuntime>,
+    raw_tokens: Vec<xlfn_sys::XLOPER12>,
+    _storage: Vec<Vec<u16>>,
+}
+
+impl MultiHandleCallBenchmark {
+    pub fn new(count: usize) -> Self {
+        let runtime = get_benchmark_runtime();
+        let handle_runtime = runtime
+            .handles()
+            .expect("benchmark handle runtime must initialize");
+        let mut raw_tokens = Vec::with_capacity(count);
+        let mut storage = Vec::with_capacity(count);
+        for i in 0..count {
+            let key = benchmark_revision_key("BENCH.MULTI.HANDLE", i as u64);
+            let token = handle_runtime
+                .prepare_observed(
+                    key,
+                    move || Ok(BenchHandleObject { _payload: i as u64 }),
+                    |_, _| Ok(()),
+                )
+                .expect("benchmark handle preparation must succeed")
+                .0;
+            let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
+            u16_chars.push(token.len() as u16);
+            u16_chars.extend(token.encode_utf16());
+            let raw = xlfn_sys::XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: u16_chars.as_ptr() as *mut u16,
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            };
+            raw_tokens.push(raw);
+            storage.push(u16_chars);
+        }
+        Self {
+            runtime,
+            _handle_runtime: handle_runtime,
+            raw_tokens,
+            _storage: storage,
+        }
+    }
+
+    pub fn run(&mut self) {
+        crate::with_excel_call_scope(|scope| {
+            let mut frame = crate::macro_support::CallFrame::new::<f64, _>(self.runtime, scope);
+            for raw in &mut self.raw_tokens {
+                // SAFETY: raw points to valid benchmark storage.
+                let handle: crate::Handle<'_, BenchHandleObject> = unsafe {
+                    frame
+                        .convert_argument("arg", raw)
+                        .expect("benchmark argument conversion must succeed")
+                };
+                std::hint::black_box(handle);
+            }
+            let return_ctx = frame.return_context("bench_udf");
+            std::hint::black_box(return_ctx);
+        });
+    }
+}
+
+pub struct ConcurrentHandleResolutionBenchmark {
+    _slot: &'static crate::handle::HandleRuntimeSlot,
+    threads: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ConcurrentHandleResolutionBenchmark {
+    pub fn new(threads: usize, iterations_per_thread: usize) -> Self {
+        let runtime = get_benchmark_runtime();
+        let _ = runtime
+            .handles()
+            .expect("benchmark handle runtime must initialize");
+        let slot = runtime.handle_runtime_slot();
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
+        let mut start_tx = Vec::with_capacity(threads);
+        let mut workers = Vec::with_capacity(threads);
+
+        for _ in 0..threads {
+            let (s_tx, s_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let d_tx = done_tx.clone();
+            start_tx.push(s_tx);
+
+            let handle = std::thread::spawn(move || {
+                while s_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_thread {
+                        let resolver = crate::handle::HandleRuntimeResolver::new(slot);
+                        let rt = resolver.get().expect("handle runtime must resolve");
+                        std::hint::black_box(rt);
+                    }
+                    let _ = d_tx.send(());
+                }
+            });
+            workers.push(handle);
+        }
+
+        Self {
+            _slot: slot,
+            threads,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run_batch(&self) {
+        for tx in &self.start_tx {
+            let _ = tx.send(());
+        }
+        for _ in 0..self.threads {
+            let _ = self.done_rx.recv();
+        }
+    }
+}
+
+impl Drop for ConcurrentHandleResolutionBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct BenchmarkSubscription;
+
+// SAFETY: benchmark dummy subscription is thread-safe and has no resources.
+unsafe impl crate::RtdSubscription for BenchmarkSubscription {
+    fn request_cancel(&self) {}
+    fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
+        Ok(())
+    }
+}
+
+struct BenchmarkRtdSource<T> {
+    sink: parking_lot::Mutex<Option<crate::RtdSink<T>>>,
+}
+
+impl<T: crate::IntoRtdValue + Clone + Send + Sync + 'static> crate::RtdSource
+    for BenchmarkRtdSource<T>
+{
+    type Value = T;
+
+    fn subscribe(
+        &self,
+        _topic: &crate::RtdTopic,
+        sink: crate::RtdSink<Self::Value>,
+    ) -> crate::XllResult<Box<dyn crate::RtdSubscription>> {
+        *self.sink.lock() = Some(sink);
+        Ok(Box::new(BenchmarkSubscription))
+    }
+}
+
+pub struct RtdPublishNumberBenchmark {
+    _runtime: Arc<crate::subscription::SubscriptionRuntime>,
+    server: crate::subscription::RtdServerHandle,
+    sink: crate::RtdSink<f64>,
+}
+
+impl Default for RtdPublishNumberBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RtdPublishNumberBenchmark {
+    pub fn new() -> Self {
+        let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
+        let server = runtime
+            .register_server(crate::subscription::ServerGeneration(1))
+            .expect("server registration must succeed");
+        let source = Arc::new(BenchmarkRtdSource {
+            sink: parking_lot::Mutex::new(None),
+        });
+        let topic =
+            crate::RtdTopic::new(["BENCH", "NUMBER"]).expect("benchmark RTD topic must be valid");
+        let prepared = runtime
+            .prepare(Arc::clone(&source), topic)
+            .expect("prepare must succeed");
+        let key = prepared.key().clone();
+        let conn = runtime
+            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+            .expect("connect_transaction must succeed");
+        conn.commit().expect("connection commit must succeed");
+        prepared.commit();
+        let sink = source.sink.lock().clone().expect("sink must be captured");
+        Self {
+            _runtime: runtime,
+            server,
+            sink,
+        }
+    }
+
+    #[inline]
+    pub fn run_coalesced(&self, iterations: usize) {
+        for i in 0..iterations {
+            self.sink
+                .publish(12.5 + i as f64)
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_drain_each(&self, iterations: usize) {
+        for i in 0..iterations {
+            self.sink
+                .publish(12.5 + i as f64)
+                .expect("publish must succeed");
+            let batch = self
+                .server
+                .begin_refresh()
+                .expect("begin_refresh must succeed");
+            batch
+                .complete(crate::subscription::RefreshOutcome::Delivered)
+                .expect("complete must succeed");
+        }
+    }
+}
+
+pub struct RtdPublishStringBenchmark {
+    _runtime: Arc<crate::subscription::SubscriptionRuntime>,
+    server: crate::subscription::RtdServerHandle,
+    sink: crate::RtdSink<String>,
+}
+
+impl Default for RtdPublishStringBenchmark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RtdPublishStringBenchmark {
+    pub fn new() -> Self {
+        let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
+        let server = runtime
+            .register_server(crate::subscription::ServerGeneration(1))
+            .expect("server registration must succeed");
+        let source = Arc::new(BenchmarkRtdSource {
+            sink: parking_lot::Mutex::new(None),
+        });
+        let topic =
+            crate::RtdTopic::new(["BENCH", "STRING"]).expect("benchmark RTD topic must be valid");
+        let prepared = runtime
+            .prepare(Arc::clone(&source), topic)
+            .expect("prepare must succeed");
+        let key = prepared.key().clone();
+        let conn = runtime
+            .connect_transaction(&server, crate::subscription::TopicId(2), &key)
+            .expect("connect_transaction must succeed");
+        conn.commit().expect("connection commit must succeed");
+        prepared.commit();
+        let sink = source.sink.lock().clone().expect("sink must be captured");
+        Self {
+            _runtime: runtime,
+            server,
+            sink,
+        }
+    }
+
+    #[inline]
+    pub fn run_coalesced(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish("stream_market_data_update_payload".to_owned())
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_drain_each(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish("stream_market_data_update_payload".to_owned())
+                .expect("publish must succeed");
+            let batch = self
+                .server
+                .begin_refresh()
+                .expect("begin_refresh must succeed");
+            batch
+                .complete(crate::subscription::RefreshOutcome::Delivered)
+                .expect("complete must succeed");
         }
     }
 }

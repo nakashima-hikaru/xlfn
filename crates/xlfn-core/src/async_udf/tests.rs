@@ -1658,13 +1658,13 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    let executor_inner = match &*manager.state.lock() {
-        ExecutorState::Running(executor) => Arc::clone(&executor.handle.inner),
+    let executor_shared = match &*manager.state.lock() {
+        ExecutorState::Running(executor) => Arc::clone(&executor.shared),
         _ => panic!("executor should be running"),
     };
 
     assert!(
-        executor_inner.control.try_lock().is_some(),
+        executor_shared.control.try_lock().is_some(),
         "advance_generation must release control mutex while waiting for admission idle"
     );
 
@@ -1727,16 +1727,14 @@ fn close_preempts_in_progress_advance_generation() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    let executor_inner = match &*manager.state.lock() {
-        ExecutorState::Closing(executor) => {
-            executor.as_ref().map(|exec| Arc::clone(&exec.handle.inner))
-        }
+    let executor_shared = match &*manager.state.lock() {
+        ExecutorState::Closing(executor) => executor.as_ref().map(|exec| Arc::clone(&exec.shared)),
         _ => None,
     };
 
-    if let Some(inner) = executor_inner {
+    if let Some(shared) = executor_shared {
         assert!(
-            inner.closing.load(Ordering::Acquire),
+            shared.closing.load(Ordering::Acquire),
             "close must set closing atomic mirror even while advance is waiting"
         );
     }
@@ -1853,4 +1851,57 @@ fn spawn_fast_path_does_not_wait_for_manager_state() {
     drop(state_guard);
     thread.join().unwrap();
     assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn stale_spawn_snapshot_rejects_spawns_after_close() {
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(1).unwrap();
+
+    // Take snapshot while running
+    let snapshot = manager.snapshot_spawn_executor().unwrap();
+
+    // Close the manager
+    let outcome = manager.close();
+    assert!(outcome.issues.is_empty());
+
+    // Spawning on stale snapshot must fail with XllError::Closing
+    let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+    let result = snapshot.spawn(TEST_GENERATION, async {}, source);
+    assert!(matches!(
+        result,
+        Err(SpawnRejection {
+            error: XllError::Closing,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn executor_incarnation_identity_guards_advance_generation() {
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(1).unwrap();
+    let old_snapshot = manager.snapshot_spawn_executor().unwrap();
+
+    // Stop and restart to create a new executor incarnation
+    assert!(manager.close().issues.is_empty());
+    manager.start(1).unwrap();
+    let new_snapshot = manager.snapshot_spawn_executor().unwrap();
+
+    // old and new have distinct pointer identities
+    assert!(!Arc::ptr_eq(&old_snapshot, &new_snapshot));
+
+    assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
+    // Inject failure at worker index 2 of 4
+    let result = Executor::start_with_failure_at(4, 1, Some(2));
+    assert!(matches!(
+        result,
+        Err(XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::ASYNC_SPAWN
+        })
+    ));
 }

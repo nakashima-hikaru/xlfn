@@ -7,15 +7,15 @@ pub(crate) struct RtdServerHandle {
 }
 
 impl RtdServerHandle {
-    pub(crate) fn attach_update_callback(
+    pub(crate) fn attach_update_notifier(
         &self,
-        callback: NotificationCallback,
-    ) -> XllResult<Option<NotificationCallback>> {
+        notifier: crate::rtd::RtdNotifier,
+    ) -> XllResult<Option<crate::rtd::RtdNotifier>> {
         let _operation = self.inner.enter_operation()?;
         let (retired, attempt) = {
             self.inner.ensure_open()?;
             let mut refresh = self.inner.refresh.lock();
-            let retired = refresh.attach_callback(callback);
+            let retired = refresh.attach_notifier(notifier);
             let has_updates = self.inner.has_deliverable_updates();
             let prepared = refresh.prepare_notification(has_updates)?;
             let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
@@ -31,9 +31,9 @@ impl RtdServerHandle {
         Ok(retired)
     }
 
-    pub(crate) fn detach_update_callback(&self) -> Option<NotificationCallback> {
+    pub(crate) fn detach_update_notifier(&self) -> Option<crate::rtd::RtdNotifier> {
         let mut refresh = self.inner.refresh.lock();
-        refresh.detach_callback()
+        refresh.detach_notifier()
     }
 
     pub(crate) fn pulse_notification(&self) -> XllResult<()> {
@@ -56,7 +56,7 @@ impl RtdServerHandle {
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch> {
-        let operation = self.inner.enter_operation()?;
+        let operation = self.inner.enter_owned_operation()?;
         let (refresh_id, updates) = {
             self.inner.ensure_open()?;
             let mut refresh = self.inner.refresh.lock();
@@ -72,7 +72,7 @@ impl RtdServerHandle {
 
             self.inner.publish_epoch.fetch_add(1, Ordering::AcqRel);
 
-            let mut by_topic: FxHashMap<i32, (u64, Arc<RtdValue>)> = FxHashMap::default();
+            let mut by_topic: FxHashMap<i32, (u64, StoredRtdValue)> = FxHashMap::default();
             for shard_mutex in self.inner.shards.iter() {
                 let shard = shard_mutex.lock();
                 for buf in [0, 1] {
@@ -84,11 +84,11 @@ impl RtdServerHandle {
                         {
                             match by_topic.entry(topic_id.0) {
                                 std::collections::hash_map::Entry::Vacant(slot) => {
-                                    slot.insert((queued.sequence, Arc::clone(&queued.value)));
+                                    slot.insert((queued.sequence, queued.value.clone()));
                                 }
                                 std::collections::hash_map::Entry::Occupied(mut slot) => {
                                     if queued.sequence > slot.get().0 {
-                                        slot.insert((queued.sequence, Arc::clone(&queued.value)));
+                                        slot.insert((queued.sequence, queued.value.clone()));
                                     }
                                 }
                             }
@@ -111,7 +111,6 @@ impl RtdServerHandle {
             (refresh_id, updates_vec)
         };
         Ok(RtdRefreshBatch {
-            server: Arc::clone(&self.inner),
             operation: Some(operation),
             refresh_id,
             updates,
@@ -172,28 +171,45 @@ impl RtdServerHandle {
 pub(crate) struct ServerRuntime {
     pub(crate) generation: ServerGeneration,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    pub(crate) operation_gate: Arc<OperationGate>,
+    pub(crate) operation_gate: OperationGate,
     pub(crate) lifecycle: AtomicU8,
     pub(crate) publish_epoch: AtomicU64,
     pub(crate) next_update_sequence: AtomicU64,
     pub(crate) notified_epoch: AtomicU64,
     pub(crate) pending_updates: AtomicUsize,
     pub(crate) shards: Box<[Mutex<TopicShard>]>,
-    pub(crate) refresh: Mutex<RefreshState>,
+    pub(crate) refresh: Mutex<RefreshState<crate::rtd::RtdNotifier>>,
     pub(crate) parent: Weak<SubscriptionRuntime>,
     pub(crate) termination_coordinator: TerminationCoordinator,
 }
 
-pub(crate) struct ServerOperation {
-    pub(crate) _gate_guard: OperationGuard,
+pub(crate) struct ScopedServerOperation<'a> {
+    pub(crate) _gate_guard: OperationGuard<'a>,
     pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) parent: Weak<SubscriptionRuntime>,
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
-impl Drop for ServerOperation {
+impl Drop for ScopedServerOperation<'_> {
     fn drop(&mut self) {
+        if let Some(parent) = self.parent.upgrade() {
+            parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        }
+    }
+}
+
+pub(crate) struct OwnedServerOperation {
+    pub(crate) server: Arc<ServerRuntime>,
+    pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) parent: Weak<SubscriptionRuntime>,
+}
+
+impl Drop for OwnedServerOperation {
+    fn drop(&mut self) {
+        self.server.operation_gate.leave();
+        #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(parent) = self.parent.upgrade() {
             parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
         }
@@ -227,7 +243,7 @@ impl ServerRuntime {
         })
     }
 
-    pub(crate) fn ensure_notified(self: &Arc<Self>, epoch: u64) -> XllResult<()> {
+    pub(crate) fn ensure_notified(&self, epoch: u64) -> XllResult<()> {
         if self.notified_epoch.load(Ordering::Acquire) == epoch {
             return Ok(());
         }
@@ -246,7 +262,7 @@ impl ServerRuntime {
         Ok(())
     }
 
-    pub(crate) fn enter_operation(&self) -> XllResult<ServerOperation> {
+    pub(crate) fn enter_operation(&self) -> XllResult<ScopedServerOperation<'_>> {
         let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
         if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
             return Err(XllError::Closing);
@@ -275,7 +291,7 @@ impl ServerRuntime {
                 drop(ingress_guard);
                 return Err(err);
             }
-            Ok(ServerOperation {
+            Ok(ScopedServerOperation {
                 _gate_guard: gate_guard.expect("gate guard is acquired"),
                 _ingress_guard: Some(ingress_guard),
                 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -288,7 +304,7 @@ impl ServerRuntime {
                 parent
                     .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
             }
-            Ok(ServerOperation {
+            Ok(ScopedServerOperation {
                 _gate_guard: gate_guard,
                 _ingress_guard: None,
                 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -297,18 +313,68 @@ impl ServerRuntime {
         }
     }
 
+    pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation> {
+        let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
+        if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
+            return Err(XllError::Closing);
+        }
+
+        if let Some(ingress) = self.module_ingress {
+            let mut acquired = false;
+            let mut gate_error = None;
+            let (ingress_guard, accepted) =
+                ingress.enter_with(|| match self.operation_gate.acquire() {
+                    Ok(()) => {
+                        acquired = true;
+                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        if let Some(parent) = self.parent.upgrade() {
+                            parent.record_ghost_event(
+                                crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
+                            );
+                        }
+                    }
+                    Err(err) => gate_error = Some(err),
+                });
+            if !accepted {
+                return Err(XllError::Closing);
+            }
+            if let Some(err) = gate_error {
+                drop(ingress_guard);
+                return Err(err);
+            }
+            assert!(acquired, "gate guard must be acquired");
+            Ok(OwnedServerOperation {
+                server: Arc::clone(self),
+                _ingress_guard: Some(ingress_guard),
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                parent: self.parent.clone(),
+            })
+        } else {
+            self.operation_gate.acquire()?;
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            if let Some(parent) = self.parent.upgrade() {
+                parent
+                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+            }
+            Ok(OwnedServerOperation {
+                server: Arc::clone(self),
+                _ingress_guard: None,
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                parent: self.parent.clone(),
+            })
+        }
+    }
+
     pub(crate) fn publish(
-        self: &Arc<Self>,
+        &self,
         topic_id: TopicId,
         generation: ConnectionGeneration,
         value: RtdValue,
     ) -> XllResult<()> {
         let _operation = self.enter_operation()?;
-        value.validate()?;
+        let value = value.into_stored()?;
 
         let shard_index = shard_index(topic_id);
-
-        let value = Arc::new(value);
 
         let epoch = loop {
             self.ensure_open()?;
@@ -348,13 +414,13 @@ impl ServerRuntime {
                     let existing = entry.get_mut();
                     existing.connection_generation = conn_gen;
                     existing.sequence = sequence;
-                    existing.value = Arc::clone(&value);
+                    existing.value = value.clone();
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(QueuedUpdate {
                         connection_generation: conn_gen,
                         sequence,
-                        value: Arc::clone(&value),
+                        value: value.clone(),
                         _permit: permit.expect("new update owns quota permit"),
                     });
                     self.pending_updates.fetch_add(1, Ordering::Relaxed);
@@ -362,7 +428,7 @@ impl ServerRuntime {
             }
 
             if let Some(active) = shard.active_by_topic.get_mut(&topic_id) {
-                active.latest = Arc::clone(&value);
+                active.latest = value;
             }
             break epoch;
         };
@@ -371,13 +437,16 @@ impl ServerRuntime {
         Ok(())
     }
 
-    pub(crate) fn drive_notification(self: &Arc<Self>, mut attempt: NotificationAttempt) {
+    pub(crate) fn drive_notification(
+        &self,
+        mut attempt: NotificationAttempt<crate::rtd::RtdNotifier>,
+    ) {
         loop {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
             }
-            let res = catch_unwind(AssertUnwindSafe(|| (attempt.callback)()));
+            let res = catch_unwind(AssertUnwindSafe(|| attempt.notifier.notify()));
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
@@ -413,9 +482,9 @@ impl ServerRuntime {
         &self,
         ticket: u64,
         outcome: XllResult<()>,
-    ) -> NotificationCompletion {
+    ) -> NotificationCompletion<crate::rtd::RtdNotifier> {
         let mut refresh = self.refresh.lock();
-        let callback = refresh.callback.clone();
+        let notifier = refresh.notifier.clone();
         let Some(signal) = refresh.signal_for_ticket_mut(ticket) else {
             return NotificationCompletion::Finished;
         };
@@ -441,8 +510,8 @@ impl ServerRuntime {
                             attempt: next_attempt,
                         };
                     }
-                    if let Some(callback) = callback {
-                        NotificationCompletion::Retry(NotificationAttempt { ticket, callback })
+                    if let Some(notifier) = notifier {
+                        NotificationCompletion::Retry(NotificationAttempt { ticket, notifier })
                     } else {
                         if let DeliveryPhase::BetweenRefreshes {
                             signal: signal @ SignalState::Suppressed { .. },
@@ -467,7 +536,7 @@ impl ServerRuntime {
         refresh_id: u64,
         _delivered_updates: &[RtdUpdate],
         outcome: RefreshOutcome,
-    ) -> XllResult<Option<NotificationAttempt>> {
+    ) -> XllResult<Option<NotificationAttempt<crate::rtd::RtdNotifier>>> {
         let mut refresh = self.refresh.lock();
         let DeliveryPhase::Refreshing {
             refresh_id: active_id,
@@ -573,9 +642,9 @@ impl ServerRuntime {
                 self.lifecycle
                     .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
-                let callback = {
+                let notifier = {
                     let mut refresh = self.refresh.lock();
-                    refresh.detach_callback()
+                    refresh.detach_notifier()
                 };
 
                 let mut initial_subscriptions = Vec::new();
@@ -594,7 +663,7 @@ impl ServerRuntime {
                 TerminationAdmission::Owner(ServerTermination {
                     server: Arc::clone(self),
                     wait,
-                    callback,
+                    notifier,
                     initial_subscriptions,
                 })
             }
@@ -712,8 +781,12 @@ impl Drop for TerminationCompletionGuard<'_> {
     }
 }
 
-pub(crate) fn drop_callback_no_unwind(callback: Option<NotificationCallback>) -> XllResult<()> {
-    catch_unwind(AssertUnwindSafe(|| drop(callback))).map_err(|_| XllError::Panic)
+#[allow(
+    clippy::drop_non_drop,
+    reason = "RtdNotifier contains drop types on Windows/test configurations but may be uninhabited on non-Windows production"
+)]
+pub(crate) fn drop_notifier_no_unwind(notifier: Option<crate::rtd::RtdNotifier>) -> XllResult<()> {
+    catch_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::Panic)
 }
 
 pub(crate) struct TerminatedTopic {
@@ -729,7 +802,7 @@ thread_local! {
 pub(crate) struct ServerTermination<'a> {
     pub(crate) server: Arc<ServerRuntime>,
     pub(crate) wait: TerminationWaitGuard<'a>,
-    pub(crate) callback: Option<NotificationCallback>,
+    pub(crate) notifier: Option<crate::rtd::RtdNotifier>,
     pub(crate) initial_subscriptions: Vec<Box<dyn RtdSubscription>>,
 }
 
@@ -760,7 +833,7 @@ impl<'a> ServerTermination<'a> {
 
         let mut first_error = cancel_result.err();
 
-        if let Err(err) = drop_callback_no_unwind(self.callback.take())
+        if let Err(err) = drop_notifier_no_unwind(self.notifier.take())
             && first_error.is_none()
         {
             first_error = Some(err);
@@ -771,8 +844,8 @@ impl<'a> ServerTermination<'a> {
             first_error = Some(XllError::Panic);
         }
 
-        let (late_callback, active_entries) = {
-            let late_callback = self.server.refresh.lock().detach_callback();
+        let (late_notifier, active_entries) = {
+            let late_notifier = self.server.refresh.lock().detach_notifier();
             let mut active_entries = Vec::new();
             for shard_mutex in self.server.shards.iter() {
                 let mut shard = shard_mutex.lock();
@@ -792,7 +865,7 @@ impl<'a> ServerTermination<'a> {
                 .lifecycle
                 .store(SERVER_LIFECYCLE_TERMINATED, Ordering::Release);
 
-            (late_callback, active_entries)
+            (late_notifier, active_entries)
         };
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -803,7 +876,7 @@ impl<'a> ServerTermination<'a> {
             }
         }
 
-        if let Err(err) = drop_callback_no_unwind(late_callback)
+        if let Err(err) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()
         {
             first_error = Some(err);
@@ -896,20 +969,28 @@ impl<'a> ServerTermination<'a> {
 
 #[must_use]
 pub(crate) struct RtdRefreshBatch {
-    pub(crate) server: Arc<ServerRuntime>,
-    pub(crate) operation: Option<ServerOperation>,
+    pub(crate) operation: Option<OwnedServerOperation>,
     pub(crate) refresh_id: u64,
     pub(crate) updates: Vec<RtdUpdate>,
     pub(crate) completed: bool,
 }
 
 impl RtdRefreshBatch {
+    #[inline]
+    fn server(&self) -> &Arc<ServerRuntime> {
+        &self
+            .operation
+            .as_ref()
+            .expect("active refresh operation")
+            .server
+    }
+
     pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
         let attempt =
-            self.server
+            self.server()
                 .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
         if let Some(attempt) = attempt {
-            self.server.drive_notification(attempt);
+            self.server().drive_notification(attempt);
         }
         self.completed = true;
         self.operation.take();
@@ -922,7 +1003,9 @@ impl Drop for RtdRefreshBatch {
         if self.completed {
             return;
         }
-        self.server.abort_refresh_no_unwind(self.refresh_id);
+        if let Some(operation) = &self.operation {
+            operation.server.abort_refresh_no_unwind(self.refresh_id);
+        }
     }
 }
 

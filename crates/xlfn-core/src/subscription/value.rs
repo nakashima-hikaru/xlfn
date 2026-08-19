@@ -10,6 +10,16 @@ pub enum RtdValue {
     Empty,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum StoredRtdValue {
+    Number(f64),
+    Boolean(bool),
+    Integer(i32),
+    String(Arc<String>),
+    Error(ExcelErrorValue),
+    Empty,
+}
+
 impl RtdValue {
     pub(crate) fn validate(&self) -> XllResult<()> {
         match self {
@@ -22,6 +32,18 @@ impl RtdValue {
             }
             _ => Ok(()),
         }
+    }
+
+    pub(crate) fn into_stored(self) -> XllResult<StoredRtdValue> {
+        self.validate()?;
+        Ok(match self {
+            Self::Number(value) => StoredRtdValue::Number(value),
+            Self::Boolean(value) => StoredRtdValue::Boolean(value),
+            Self::Integer(value) => StoredRtdValue::Integer(value),
+            Self::String(value) => StoredRtdValue::String(Arc::new(value)),
+            Self::Error(value) => StoredRtdValue::Error(value),
+            Self::Empty => StoredRtdValue::Empty,
+        })
     }
 }
 

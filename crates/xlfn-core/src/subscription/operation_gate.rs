@@ -8,16 +8,23 @@ pub(crate) struct OperationGate {
 
 pub(crate) const CLOSING_BIT: usize = usize::MAX / 2 + 1;
 
+impl Default for OperationGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OperationGate {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new() -> Self {
+        Self {
             state: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
-        })
+        }
     }
 
-    pub(crate) fn enter(self: &Arc<Self>) -> XllResult<OperationGuard> {
+    #[inline]
+    pub(crate) fn acquire(&self) -> XllResult<()> {
         self.state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
                 if (val & CLOSING_BIT) != 0 {
@@ -26,11 +33,14 @@ impl OperationGate {
                     Some(val + 1)
                 }
             })
-            .map_err(|_| XllError::Closing)?;
+            .map(|_| ())
+            .map_err(|_| XllError::Closing)
+    }
 
-        Ok(OperationGuard {
-            gate: Arc::clone(self),
-        })
+    #[inline]
+    pub(crate) fn enter(&self) -> XllResult<OperationGuard<'_>> {
+        self.acquire()?;
+        Ok(OperationGuard { gate: self })
     }
 
     pub(crate) fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
@@ -38,6 +48,7 @@ impl OperationGate {
         TerminationWaitGuard { gate: self }
     }
 
+    #[inline]
     pub(crate) fn leave(&self) {
         let prev = self.state.fetch_sub(1, Ordering::AcqRel);
         let active_count = (prev & !CLOSING_BIT) - 1;
@@ -48,11 +59,12 @@ impl OperationGate {
     }
 }
 
-pub(crate) struct OperationGuard {
-    pub(crate) gate: Arc<OperationGate>,
+pub(crate) struct OperationGuard<'a> {
+    pub(crate) gate: &'a OperationGate,
 }
 
-impl Drop for OperationGuard {
+impl Drop for OperationGuard<'_> {
+    #[inline]
     fn drop(&mut self) {
         self.gate.leave();
     }
