@@ -40,7 +40,7 @@ pub(crate) struct ExecutorShared {
     /// Lifecycle transitions are authoritative under `control`;
     /// spawn reads only this atomic.
     pub(crate) closing: AtomicBool,
-    pub(crate) current: ArcSwap<GenerationState>,
+    pub(crate) current: ArcSwapAny<triomphe::Arc<GenerationState>>,
     /// Cold lifecycle state. Never acquired by spawn/completion.
     pub(crate) control: Mutex<ExecutorControl>,
     pub(crate) wait_lock: Mutex<()>,
@@ -76,7 +76,7 @@ impl Executor {
     ) -> XllResult<Self> {
         let worker_count = worker_count.clamp(1, 32);
         let (sender, receiver) = async_channel::unbounded::<Runnable>();
-        let initial_generation = Arc::new(GenerationState::new(generation));
+        let initial_generation = triomphe::Arc::new(GenerationState::new(generation));
         let shared = Arc::new(ExecutorShared {
             sender,
             next_id: AtomicU64::new(1),
@@ -84,7 +84,7 @@ impl Executor {
             live_workers: AtomicUsize::new(0),
             fatal_worker_failure: AtomicBool::new(false),
             closing: AtomicBool::new(false),
-            current: ArcSwap::from(Arc::clone(&initial_generation)),
+            current: ArcSwapAny::new(triomphe::Arc::clone(&initial_generation)),
             control: Mutex::new(ExecutorControl {
                 phase: ControlPhase::Running,
                 generations: [(generation, initial_generation)].into_iter().collect(),
@@ -299,7 +299,7 @@ impl ExecutorShared {
             unused_mut,
             reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
         )]
-        let mut completion = reservation.commit(self, Arc::clone(&*current), id);
+        let mut completion = reservation.commit(self, triomphe::Arc::clone(&*current), id);
 
         drop(admission);
 
@@ -349,7 +349,7 @@ impl ExecutorShared {
             };
             debug_assert_eq!(state.id, generation);
             state.admission.close();
-            Arc::clone(state)
+            triomphe::Arc::clone(state)
         };
         generation_arc.admission.wait_for_idle();
         generation_arc.drain_tasks()
@@ -391,10 +391,10 @@ impl ExecutorShared {
         let next_generation = control
             .generations
             .entry(next)
-            .or_insert_with(|| Arc::new(GenerationState::new(next)))
+            .or_insert_with(|| triomphe::Arc::new(GenerationState::new(next)))
             .clone();
 
-        self.current.store(Arc::clone(&next_generation));
+        self.current.store(triomphe::Arc::clone(&next_generation));
 
         control.generations.retain(|generation, state| {
             *generation == next || state.task_count.load(Ordering::Acquire) != 0

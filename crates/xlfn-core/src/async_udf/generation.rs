@@ -144,5 +144,5 @@ impl GenerationState {
 
 pub(crate) struct ExecutorControl {
     pub(crate) phase: ControlPhase,
-    pub(crate) generations: FxHashMap<u64, Arc<GenerationState>>,
+    pub(crate) generations: FxHashMap<u64, triomphe::Arc<GenerationState>>,
 }

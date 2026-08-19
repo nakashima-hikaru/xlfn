@@ -1,4 +1,5 @@
 use super::*;
+use triomphe::Arc;
 
 pub(crate) struct Quota {
     pub(crate) used: AtomicUsize,
@@ -13,15 +14,15 @@ impl Quota {
         }
     }
 
-    pub(crate) fn try_acquire(self: &Arc<Self>) -> XllResult<QuotaPermit> {
-        self.used
+    pub(crate) fn try_acquire(this: &Arc<Self>) -> XllResult<QuotaPermit> {
+        this.used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < self.limit).then_some(used + 1)
+                (used < this.limit).then_some(used + 1)
             })
             .map_err(|_| XllError::Overloaded)?;
 
         Ok(QuotaPermit {
-            quota: Arc::clone(self),
+            quota: Arc::clone(this),
         })
     }
 }

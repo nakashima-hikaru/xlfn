@@ -16,7 +16,7 @@ pub(crate) struct Topic {
     pub(crate) binding: FormulaBinding,
     pub(crate) token: String,
     pub(crate) rtd_key: Arc<str>,
-    pub(crate) publication: Arc<PublishedTopic>,
+    pub(crate) publication: triomphe::Arc<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) server_generation: Option<u64>,
     pub(crate) excel_topic: Option<HandleTopicOwner>,

@@ -4,9 +4,9 @@ use std::future::Future;
 #[cfg(any(feature = "async", test))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use triomphe::Arc;
 
 #[cfg(any(feature = "async", test))]
 const STATE_RUNNING: u8 = 0;
@@ -187,12 +187,13 @@ impl Drop for Cancelled<'_> {
 mod tests {
     use super::*;
     use futures_util::task::{ArcWake, noop_waker, waker};
+    use std::sync::Arc as StdArc;
     use std::sync::atomic::AtomicUsize;
 
     struct WakeCount(AtomicUsize);
 
     impl ArcWake for WakeCount {
-        fn wake_by_ref(arc_self: &Arc<Self>) {
+        fn wake_by_ref(arc_self: &StdArc<Self>) {
             arc_self.0.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -200,7 +201,7 @@ mod tests {
     struct PanicFirstWake(AtomicUsize);
 
     impl ArcWake for PanicFirstWake {
-        fn wake_by_ref(arc_self: &Arc<Self>) {
+        fn wake_by_ref(arc_self: &StdArc<Self>) {
             if arc_self.0.fetch_add(1, Ordering::AcqRel) == 0 {
                 panic!("injected cancellation waker panic");
             }
@@ -224,10 +225,10 @@ mod tests {
     #[test]
     fn cancellation_wakes_every_registered_waiter() {
         let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-        let first_count = Arc::new(WakeCount(AtomicUsize::new(0)));
-        let second_count = Arc::new(WakeCount(AtomicUsize::new(0)));
-        let first_waker = waker(Arc::clone(&first_count));
-        let second_waker = waker(Arc::clone(&second_count));
+        let first_count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let second_count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let first_waker = waker(StdArc::clone(&first_count));
+        let second_waker = waker(StdArc::clone(&second_count));
         let mut first = std::pin::pin!(token.cancelled());
         let second_token = token.clone();
         let mut second = std::pin::pin!(second_token.cancelled());
@@ -262,8 +263,8 @@ mod tests {
     #[test]
     fn panicking_waker_does_not_stop_later_cancellation_notifications() {
         let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-        let wake_state = Arc::new(PanicFirstWake(AtomicUsize::new(0)));
-        let panic_first_waker = waker(Arc::clone(&wake_state));
+        let wake_state = StdArc::new(PanicFirstWake(AtomicUsize::new(0)));
+        let panic_first_waker = waker(StdArc::clone(&wake_state));
         let mut waiters = [
             Box::pin(token.cancelled()),
             Box::pin(token.cancelled()),

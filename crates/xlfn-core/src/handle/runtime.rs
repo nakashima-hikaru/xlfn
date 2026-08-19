@@ -1,5 +1,5 @@
 use super::*;
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapAny;
 use rustc_hash::FxHasher;
 use std::cell::OnceCell;
 use std::hash::{Hash, Hasher};
@@ -50,16 +50,18 @@ impl PublishedTopic {
     }
 }
 
-pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, Arc<PublishedTopic>>;
+pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, triomphe::Arc<PublishedTopic>>;
+pub(crate) type PublishedTopicMapArc = triomphe::Arc<PublishedTopicMap>;
 
 pub(crate) struct PublishedTopics {
-    shards: [ArcSwap<PublishedTopicMap>; PUBLISHED_TOPIC_SHARD_COUNT],
+    shards: [ArcSwapAny<PublishedTopicMapArc>; PUBLISHED_TOPIC_SHARD_COUNT],
 }
 
 impl PublishedTopics {
     fn new() -> Self {
+        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
         Self {
-            shards: std::array::from_fn(|_| ArcSwap::from_pointee(PublishedTopicMap::default())),
+            shards: std::array::from_fn(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_map))),
         }
     }
 
@@ -69,17 +71,17 @@ impl PublishedTopics {
         (hasher.finish() as usize) & (PUBLISHED_TOPIC_SHARD_COUNT - 1)
     }
 
-    pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<Arc<PublishedTopicMap>> {
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<PublishedTopicMapArc> {
         self.shards[Self::shard_index(key)].load()
     }
 
     /// Update the publication snapshot while holding the canonical topic lock.
-    fn insert(&self, key: HandleTopicKey, topic: Arc<PublishedTopic>) {
+    fn insert(&self, key: HandleTopicKey, topic: triomphe::Arc<PublishedTopic>) {
         let shard = &self.shards[Self::shard_index(&key)];
         let current = shard.load_full();
         let mut next = current.as_ref().clone();
         next.insert(key, topic);
-        shard.store(Arc::new(next));
+        shard.store(triomphe::Arc::new(next));
     }
 
     /// Update the publication snapshot while holding the canonical topic lock.
@@ -91,13 +93,14 @@ impl PublishedTopics {
         }
         let mut next = current.as_ref().clone();
         next.remove(&key);
-        shard.store(Arc::new(next));
+        shard.store(triomphe::Arc::new(next));
     }
 
     /// Clear all publication snapshots while holding the canonical topic lock.
     fn clear(&self) {
+        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
         for shard in &self.shards {
-            shard.store(Arc::new(PublishedTopicMap::default()));
+            shard.store(triomphe::Arc::clone(&empty_map));
         }
     }
 }
@@ -338,7 +341,7 @@ impl HandleRuntime {
         key: HandleTopicKey,
         generation: u64,
         initialization: &Arc<Initialization>,
-        publication: &Arc<PublishedTopic>,
+        publication: &triomphe::Arc<PublishedTopic>,
     ) -> XllResult<()> {
         let mut topics = self.topics.write();
 
@@ -349,7 +352,7 @@ impl HandleRuntime {
         let valid_topic = topics.by_key.get(&key).is_some_and(|topic| {
             topic.binding == publication.binding
                 && topic.token == publication.token
-                && Arc::ptr_eq(&topic.publication, publication)
+                && triomphe::Arc::ptr_eq(&topic.publication, publication)
         });
         if !valid_topic {
             return Err(XllError::StaleHandle);
@@ -370,7 +373,8 @@ impl HandleRuntime {
         let token_wire = self.refinement_token(&publication.token);
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let mut linearization = self.refinement.linearize();
-        self.published.insert(key, Arc::clone(publication));
+        self.published
+            .insert(key, triomphe::Arc::clone(publication));
         topics.initializing.remove(&key);
         publication
             .state
@@ -745,7 +749,7 @@ impl HandleRuntime {
                 diagnostic_id: crate::DiagnosticId::HANDLE_TOPIC_COLLISION,
             });
         }
-        let publication = Arc::new(PublishedTopic::new(
+        let publication = triomphe::Arc::new(PublishedTopic::new(
             binding,
             token.clone(),
             Arc::clone(&rtd_key),
@@ -756,7 +760,7 @@ impl HandleRuntime {
                 binding,
                 token: token.clone(),
                 rtd_key: Arc::clone(&rtd_key),
-                publication: Arc::clone(&publication),
+                publication: triomphe::Arc::clone(&publication),
                 #[cfg(any(target_os = "windows", test))]
                 server_generation: None,
                 excel_topic: None,
@@ -983,7 +987,7 @@ impl HandleRuntime {
             let Some(publication) = topics
                 .by_key
                 .get(&key)
-                .map(|topic| Arc::clone(&topic.publication))
+                .map(|topic| triomphe::Arc::clone(&topic.publication))
             else {
                 return;
             };
@@ -1022,7 +1026,7 @@ impl HandleRuntime {
             let Some(publication) = topics
                 .by_key
                 .get(&key)
-                .map(|topic| Arc::clone(&topic.publication))
+                .map(|topic| triomphe::Arc::clone(&topic.publication))
             else {
                 return;
             };
@@ -1184,7 +1188,7 @@ impl HandleRuntime {
                     let publication = topics
                         .by_key
                         .get(&key)
-                        .map(|topic| Arc::clone(&topic.publication))?;
+                        .map(|topic| triomphe::Arc::clone(&topic.publication))?;
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
                     let was_provisional = publication.state() == PublishedTopicState::Provisional;
                     #[cfg(any(test, feature = "handle-refinement-trace"))]

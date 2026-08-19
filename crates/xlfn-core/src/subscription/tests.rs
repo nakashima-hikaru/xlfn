@@ -1608,7 +1608,7 @@ fn runtime_close_and_publish_race() {
 #[test]
 fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let runtime = Arc::new(SubscriptionRuntime::new());
-    let quota = Arc::clone(&runtime.queued_update_quota);
+    let quota = triomphe::Arc::clone(&runtime.queued_update_quota);
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
     let (source, sink_slot, _) = publishing_source(Some(0.0f64));
     let prep = runtime
@@ -1665,7 +1665,7 @@ impl RtdSource for SinkCapturingSource {
 fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
-    let publish_weak = Arc::downgrade(&server.inner.publish);
+    assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
 
     let prep = runtime
         .prepare(
@@ -1681,14 +1681,13 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
         .unwrap();
     conn.commit().unwrap();
 
-    // While active, publish_weak should be upgradeable
-    assert!(publish_weak.upgrade().is_some());
+    // While active, subscription holds a sink reference to PublishCore
+    assert_eq!(triomphe::Arc::count(&server.inner.publish), 2);
 
     // Terminate server, closing and dropping subscriptions
     server.terminate().unwrap();
-    drop(server);
-    drop(runtime);
 
-    // After termination and drops, PublishCore must be completely dropped (no cycle!)
-    assert!(publish_weak.upgrade().is_none());
+    // After termination, subscription sink is dropped, restoring unique ownership to ServerRuntime
+    assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
+    assert!(triomphe::Arc::is_unique(&server.inner.publish));
 }

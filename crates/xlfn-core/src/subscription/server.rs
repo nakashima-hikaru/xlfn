@@ -61,7 +61,7 @@ impl RtdServerHandle {
 pub(crate) struct PublishCore {
     pub(crate) runtime_gate: Arc<OperationGate>,
     pub(crate) server_gate: Arc<OperationGate>,
-    pub(crate) queued_update_quota: Arc<Quota>,
+    pub(crate) queued_update_quota: triomphe::Arc<Quota>,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(crate) lifecycle: AtomicU8,
     pub(crate) publish_epoch: AtomicU64,
@@ -96,7 +96,7 @@ impl std::fmt::Debug for PublishCore {
 
 pub(crate) struct ServerRuntime {
     pub(crate) generation: ServerGeneration,
-    pub(crate) publish: Arc<PublishCore>,
+    pub(crate) publish: triomphe::Arc<PublishCore>,
     pub(crate) subscriptions: Mutex<FxHashMap<TopicId, Box<dyn RtdSubscription>>>,
     pub(crate) parent: Weak<SubscriptionRuntime>,
     pub(crate) termination_coordinator: TerminationCoordinator,
@@ -330,7 +330,7 @@ impl PublishCore {
             let is_new_update = !shard.pending[buffer].contains_key(&topic_id);
 
             let permit = if is_new_update {
-                Some(self.queued_update_quota.try_acquire()?)
+                Some(Quota::try_acquire(&self.queued_update_quota)?)
             } else {
                 None
             };
@@ -518,7 +518,7 @@ impl PublishCore {
         Ok(attempt)
     }
 
-    pub(crate) fn abort_refresh_no_unwind(self: &Arc<Self>, refresh_id: u64) {
+    pub(crate) fn abort_refresh_no_unwind(&self, refresh_id: u64) {
         let attempt = {
             let mut refresh = self.refresh.lock();
             if let DeliveryPhase::Refreshing {

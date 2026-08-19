@@ -35,7 +35,7 @@ impl<'a> ActiveReservation<'a> {
     pub(crate) fn commit(
         mut self,
         shared: &Arc<ExecutorShared>,
-        generation: Arc<GenerationState>,
+        generation: triomphe::Arc<GenerationState>,
         id: u64,
     ) -> CompletionGuard {
         self.armed = false;
@@ -62,7 +62,7 @@ impl<'a> Drop for ActiveReservation<'a> {
 
 pub(crate) struct CompletionGuard {
     pub(crate) shared: Arc<ExecutorShared>,
-    pub(crate) generation: Arc<GenerationState>,
+    pub(crate) generation: triomphe::Arc<GenerationState>,
     pub(crate) id: u64,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) completion: Mutex<crate::shutdown_refinement::Completion>,

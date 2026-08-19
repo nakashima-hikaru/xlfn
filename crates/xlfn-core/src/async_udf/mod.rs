@@ -7,7 +7,7 @@ use crate::{
     CallId, CallMetadata, CallOutcome, CancellationGuarantee, CancellationToken, ExcelReturn,
     ReturnContext, Runtime, UdfResultKind, XllError, XllResult,
 };
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::{ArcSwapAny, ArcSwapOption};
 use async_channel::{Receiver, Sender};
 use async_task::Runnable;
 use futures_util::FutureExt;

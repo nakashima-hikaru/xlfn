@@ -11,8 +11,8 @@ pub(crate) struct SubscriptionRuntime {
     pub(crate) runtime_gate: Arc<OperationGate>,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<ServerRuntime>>>,
-    pub(crate) active_quota: Arc<Quota>,
-    pub(crate) queued_update_quota: Arc<Quota>,
+    pub(crate) active_quota: triomphe::Arc<Quota>,
+    pub(crate) queued_update_quota: triomphe::Arc<Quota>,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
     pub(crate) next_preparation_id: AtomicU64,
     pub(crate) next_connection_generation: AtomicU64,
@@ -57,8 +57,8 @@ impl SubscriptionRuntime {
                 next_subscription_id: 1,
             }),
             servers: Mutex::new(FxHashMap::default()),
-            active_quota: Arc::new(Quota::new(limits.max_active)),
-            queued_update_quota: Arc::new(Quota::new(limits.max_queued_updates)),
+            active_quota: triomphe::Arc::new(Quota::new(limits.max_active)),
+            queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates)),
             cleanup_failure: Mutex::new(None),
             next_preparation_id: AtomicU64::new(1),
             next_connection_generation: AtomicU64::new(1),
@@ -120,10 +120,10 @@ impl SubscriptionRuntime {
         for _ in 0..TOPIC_SHARDS {
             shards.push(Mutex::new(TopicShard::default()));
         }
-        let publish = Arc::new(PublishCore {
+        let publish = triomphe::Arc::new(PublishCore {
             runtime_gate: Arc::clone(&self.runtime_gate),
             server_gate: Arc::new(OperationGate::new()),
-            queued_update_quota: Arc::clone(&self.queued_update_quota),
+            queued_update_quota: triomphe::Arc::clone(&self.queued_update_quota),
             module_ingress: self.module_ingress,
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
@@ -410,7 +410,7 @@ impl SubscriptionRuntime {
             } else if shard.topic_by_key.contains_key(key) {
                 Err(ServerReservationFailure::DuplicateKey)
             } else {
-                match self.active_quota.try_acquire() {
+                match Quota::try_acquire(&self.active_quota) {
                     Ok(permit) => {
                         shard.topic_by_key.insert(key.clone(), topic_id);
                         shard.active_by_topic.insert(
@@ -436,7 +436,7 @@ impl SubscriptionRuntime {
         }
 
         let erased_sink = ErasedSink {
-            publish: Arc::clone(&server_handle.inner.publish),
+            publish: triomphe::Arc::clone(&server_handle.inner.publish),
             topic_id,
             connection_generation: conn_gen,
         };

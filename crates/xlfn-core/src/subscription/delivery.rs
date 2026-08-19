@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ErasedSink {
-    pub(crate) publish: Arc<PublishCore>,
+    pub(crate) publish: triomphe::Arc<PublishCore>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
