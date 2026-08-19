@@ -18,7 +18,7 @@ const DIAGNOSTIC_TEXT_MAX_BYTES: usize = 16 * 1024;
 const DIAGNOSTIC_TRUNCATION_SUFFIX: &str = "…[truncated]";
 
 /// Receives detailed failures while Excel continues to receive only safe error values.
-pub trait DiagnosticSink: Send + Sync + 'static {
+pub trait DiagnosticSink: Send + 'static {
     /// Records one event and returns in bounded time.
     ///
     /// Delivery already occurs on a bounded framework worker, but XLL shutdown
@@ -495,7 +495,6 @@ pub fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), DiagnosticIn
     if !admitted {
         return Err(DiagnosticInitError::RouterClosed);
     }
-    let sink: Arc<dyn DiagnosticSink> = Arc::new(sink);
     router.replace_with(
         || {
             let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
@@ -601,7 +600,7 @@ struct OwnedDiagnosticEvent {
 }
 
 impl OwnedDiagnosticEvent {
-    fn deliver(self, sink: &dyn DiagnosticSink) {
+    fn deliver<S: DiagnosticSink>(self, sink: &S) {
         let event = DiagnosticEvent {
             udf_id: self.udf_id,
             argument: self.argument,
@@ -624,12 +623,12 @@ struct AsyncDiagnosticSink {
 }
 
 impl AsyncDiagnosticSink {
-    fn new(sink: Arc<dyn DiagnosticSink>) -> Result<Self, DiagnosticInitError> {
+    fn new<S: DiagnosticSink>(sink: S) -> Result<Self, DiagnosticInitError> {
         Self::new_named(sink, "xlfn-diagnostics")
     }
 
-    fn new_named(
-        sink: Arc<dyn DiagnosticSink>,
+    fn new_named<S: DiagnosticSink>(
+        sink: S,
         worker_name: &str,
     ) -> Result<Self, DiagnosticInitError> {
         if worker_name.as_bytes().contains(&0) {
@@ -652,7 +651,7 @@ impl AsyncDiagnosticSink {
             .name(worker_name.to_owned())
             .spawn(move || {
                 while let Ok(event) = receiver.recv() {
-                    event.deliver(&*sink);
+                    event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
                         #[cfg(any(test, feature = "shutdown-refinement"))]
                         if let Some(ghost) = worker_ghost.lock().as_ref().cloned() {
@@ -1009,7 +1008,7 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
     diagnostic_id
 }
 
-fn deliver_no_unwind(sink: &dyn DiagnosticSink, event: &DiagnosticEvent<'_>) {
+fn deliver_no_unwind<S: DiagnosticSink>(sink: &S, event: &DiagnosticEvent<'_>) {
     let _ = catch_unwind(AssertUnwindSafe(|| sink.report(event)));
 }
 
@@ -1193,10 +1192,7 @@ mod tests {
             ghost: Mutex::new(Some(Arc::clone(&ghost))),
         };
         let result = router.replace_with(
-            || {
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                    .map(Arc::new)
-            },
+            || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new),
             |had_sink| admit_published_sink(&router, &ingress, had_sink),
         );
 
@@ -1225,7 +1221,7 @@ mod tests {
 
     #[test]
     fn worker_spawn_failure_is_returned_instead_of_panicking() {
-        let error = AsyncDiagnosticSink::new_named(Arc::new(PanickingSink), "invalid\0name")
+        let error = AsyncDiagnosticSink::new_named(PanickingSink, "invalid\0name")
             .err()
             .unwrap();
         assert!(matches!(error, DiagnosticInitError::WorkerSpawn(_)));
@@ -1269,10 +1265,7 @@ mod tests {
         };
         router
             .replace_with(
-                || {
-                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&first))))
-                        .map(Arc::new)
-                },
+                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&first))).map(Arc::new),
                 |_| Ok(()),
             )
             .unwrap();
@@ -1285,10 +1278,7 @@ mod tests {
         });
         router
             .replace_with(
-                || {
-                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&second))))
-                        .map(Arc::new)
-                },
+                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&second))).map(Arc::new),
                 |_| Ok(()),
             )
             .unwrap();
@@ -1331,12 +1321,12 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let old = Arc::new(
-            AsyncDiagnosticSink::new(Arc::new(RetiringReentrySink {
+            AsyncDiagnosticSink::new(RetiringReentrySink {
                 router: Arc::clone(&router),
                 started: started_tx,
                 release: Mutex::new(release_rx),
                 result: result_tx,
-            }))
+            })
             .unwrap(),
         );
         router.replace_with(|| Ok(old), |_| Ok(())).unwrap();
@@ -1350,8 +1340,7 @@ mod tests {
         started_rx.recv().unwrap();
 
         let replacement = Arc::new(
-            AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                .unwrap(),
+            AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).unwrap(),
         );
         let expected = Arc::clone(&replacement);
         let replacing_router = Arc::clone(&router);
@@ -1403,9 +1392,8 @@ mod tests {
             ghost: Arc::new(Mutex::new(None)),
         });
         let delivered = Arc::new(AtomicUsize::new(0));
-        let replacement = Arc::new(
-            AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::clone(&delivered)))).unwrap(),
-        );
+        let replacement =
+            Arc::new(AsyncDiagnosticSink::new(CountingSink(Arc::clone(&delivered))).unwrap());
         let router = DiagnosticRouter {
             sink: RwLock::new(Some(terminal)),
             transition: Mutex::new(DiagnosticPhase::Open),
@@ -1634,11 +1622,11 @@ mod tests {
         router
             .replace_with(
                 || {
-                    AsyncDiagnosticSink::new(Arc::new(BlockingSink {
+                    AsyncDiagnosticSink::new(BlockingSink {
                         first: AtomicBool::new(true),
                         started: started_tx,
                         release: Mutex::new(release_rx),
-                    }))
+                    })
                     .map(Arc::new)
                 },
                 |_| Ok(()),
@@ -1668,7 +1656,7 @@ mod tests {
             installing_router.replace_with(
                 || {
                     factory_calls_for_install.fetch_add(1, Ordering::AcqRel);
-                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                    AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
                         .map(Arc::new)
                 },
                 |_| Ok(()),
@@ -1710,7 +1698,7 @@ mod tests {
                 || {
                     factory_entered_tx.send(()).unwrap();
                     release_factory_rx.recv().unwrap();
-                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                    AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
                         .map(Arc::new)
                 },
                 |_| Ok(()),
@@ -1748,8 +1736,7 @@ mod tests {
         let result = router.replace_with(
             || {
                 factory_calls.fetch_add(1, Ordering::AcqRel);
-                AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
-                    .map(Arc::new)
+                AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new)
             },
             |_| Ok(()),
         );
@@ -1760,7 +1747,7 @@ mod tests {
         router
             .replace_with(
                 || {
-                    AsyncDiagnosticSink::new(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))))
+                    AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
                         .map(Arc::new)
                 },
                 |_| Ok(()),
@@ -1804,11 +1791,11 @@ mod tests {
     fn full_diagnostic_queue_drops_instead_of_blocking_the_caller() {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let sink = AsyncDiagnosticSink::new(Arc::new(BlockingSink {
+        let sink = AsyncDiagnosticSink::new(BlockingSink {
             first: AtomicBool::new(true),
             started: started_tx,
             release: Mutex::new(release_rx),
-        }))
+        })
         .unwrap();
         let before = dropped_diagnostic_events();
 
@@ -1901,5 +1888,28 @@ mod tests {
 
         assert!(AddinId::parse("valid-addin-id_123").is_ok());
         assert!(AddinId::parse(" valid-addin-id_123").is_ok());
+    }
+
+    #[test]
+    fn non_sync_sink_can_be_installed() {
+        use std::cell::RefCell;
+
+        struct NonSyncSink {
+            _events: RefCell<Vec<DiagnosticId>>,
+        }
+
+        // RefCell is Send + !Sync
+        impl DiagnosticSink for NonSyncSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                self._events.borrow_mut().push(event.diagnostic_id);
+            }
+        }
+
+        let _router_guard = prepare_global_router();
+        set_diagnostic_sink(NonSyncSink {
+            _events: RefCell::new(Vec::new()),
+        })
+        .unwrap();
+        clear_diagnostic_sink().unwrap();
     }
 }
