@@ -439,11 +439,11 @@ impl SubscriptionRuntime {
         let subscription = match sub_res {
             Ok(Ok(sub)) => sub,
             Ok(Err(err)) => {
-                let _ = self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let _ = self.rollback_connection(&server_handle.inner, topic_id, conn_gen, key);
                 return Err(err);
             }
             Err(panic_payload) => {
-                let _ = self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let _ = self.rollback_connection(&server_handle.inner, topic_id, conn_gen, key);
                 self.record_cleanup_result(Err(XllError::Internal {
                     diagnostic_id: crate::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
@@ -479,7 +479,8 @@ impl SubscriptionRuntime {
             Ok(res) => res,
             Err(sub) => {
                 let cleanup_res = disconnect_one_no_unwind(sub);
-                let rollback_res = self.rollback_connection(server_handle, topic_id, conn_gen, key);
+                let rollback_res =
+                    self.rollback_connection(&server_handle.inner, topic_id, conn_gen, key);
                 let first_error = cleanup_res.err().or_else(|| rollback_res.err());
                 if let Some(error) = first_error {
                     self.record_cleanup_result(Err(error.clone()));
@@ -619,14 +620,14 @@ impl SubscriptionRuntime {
 
     pub(crate) fn rollback_connection(
         &self,
-        server_handle: &RtdServerHandle,
+        server: &ServerRuntime,
         topic_id: TopicId,
         generation: ConnectionGeneration,
         key: &SubscriptionKey,
     ) -> XllResult<()> {
         let (subscription, _removed_update) = {
             let shard_index = shard_index(topic_id);
-            let mut shard = server_handle.inner.shards[shard_index].lock();
+            let mut shard = server.shards[shard_index].lock();
             let sub = shard
                 .active_by_topic
                 .get_mut(&topic_id)
@@ -954,9 +955,8 @@ impl SubscriptionConnection {
             return Ok(());
         }
         let result = if self.created {
-            let server = Arc::clone(self.server());
             self.runtime.commit_connection(
-                &server,
+                self.server(),
                 self.topic_id,
                 self.generation,
                 &self.key,
@@ -981,11 +981,8 @@ impl SubscriptionConnection {
         if self.created
             && let Some(operation) = &self.operation
         {
-            let handle = RtdServerHandle {
-                inner: Arc::clone(&operation.server),
-            };
             let _ = self.runtime.rollback_connection(
-                &handle,
+                operation.server.as_ref(),
                 self.topic_id,
                 self.generation,
                 &self.key,
