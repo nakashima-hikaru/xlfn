@@ -1076,8 +1076,8 @@ fn cloned_arc_and_same_topic_reuse_pending_identity() {
     let second = runtime.prepare(&source, topic).unwrap();
 
     assert_eq!(first.key(), second.key());
-    assert_eq!(first.ownership, PreparationOwnership::CreatedPending);
-    assert_eq!(second.ownership, PreparationOwnership::ExistingPending);
+    assert!(first.has_reservation());
+    assert!(second.has_reservation());
 
     second.rollback();
     first.rollback();
@@ -1122,7 +1122,7 @@ fn cloned_arc_reuses_active_subscription_identity() {
     let second = runtime.prepare(&source, topic).unwrap();
 
     assert_eq!(second.key(), &key);
-    assert_eq!(second.ownership, PreparationOwnership::ExistingActive);
+    assert!(!second.has_reservation());
 
     // ExistingActiveに対するrollbackは既存subscriptionを壊さない。
     second.rollback();
@@ -1690,15 +1690,12 @@ fn prepare_warm_path_does_not_increment_source_strong_count() {
 
     // 1. Initial prepare: creates PendingSubscription -> strong count becomes 2 (local + PendingSubscription)
     let first = runtime.prepare(&source, topic.clone()).unwrap();
-    assert_eq!(first.ownership, PreparationOwnership::CreatedPending);
+    assert!(first.has_reservation());
     assert_eq!(Arc::strong_count(&source), 2);
 
     // 2. ExistingPending prepare: reuses existing pending -> strong count remains 2 (0 clones)
     let second_pending = runtime.prepare(&source, topic.clone()).unwrap();
-    assert_eq!(
-        second_pending.ownership,
-        PreparationOwnership::ExistingPending
-    );
+    assert!(second_pending.has_reservation());
     assert_eq!(Arc::strong_count(&source), 2);
     second_pending.rollback();
 
@@ -1716,11 +1713,40 @@ fn prepare_warm_path_does_not_increment_source_strong_count() {
 
     // 3. ExistingActive prepare: warm path lookup -> strong count remains 1 (0 clones)
     let warm_prepared = runtime.prepare(&source, topic).unwrap();
-    assert_eq!(
-        warm_prepared.ownership,
-        PreparationOwnership::ExistingActive
-    );
+    assert!(!warm_prepared.has_reservation());
     assert_eq!(Arc::strong_count(&source), 1);
     warm_prepared.rollback();
     assert_eq!(Arc::strong_count(&source), 1);
+}
+
+#[test]
+fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+    let (source, _, _) = publishing_source(Some(1.0_f64));
+    let topic = RtdTopic::single("existing-active-noop").unwrap();
+
+    let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let key = first.key().clone();
+    first.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+
+    // Record baseline weak count of runtime (from server, etc.)
+    let baseline_weak = Arc::weak_count(&runtime);
+
+    // Prepare on existing active: must NOT downgrade runtime (no weak count bump)
+    let warm = runtime.prepare(&source, topic).unwrap();
+    assert!(!warm.has_reservation());
+    assert_eq!(Arc::weak_count(&runtime), baseline_weak);
+
+    // Rollback is a no-op: catalog active keys and pending are untouched
+    warm.rollback();
+    assert_eq!(Arc::weak_count(&runtime), baseline_weak);
+    assert!(runtime.catalog.lock().active_keys.contains_key(&key));
+    assert!(runtime.catalog.lock().pending.is_empty());
 }

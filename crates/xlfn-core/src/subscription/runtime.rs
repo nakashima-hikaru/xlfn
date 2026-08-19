@@ -186,10 +186,8 @@ impl SubscriptionRuntime {
         if let Some(existing_key) = catalog.identities.get_key(&identity).cloned() {
             if catalog.active_keys.contains_key(&existing_key) {
                 return Ok(PreparedSubscription {
-                    runtime: Arc::downgrade(self),
                     key: existing_key,
-                    reservation_id: None,
-                    ownership: PreparationOwnership::ExistingActive,
+                    reservation: None,
                 });
             }
 
@@ -205,10 +203,11 @@ impl SubscriptionRuntime {
                         })?;
 
                 return Ok(PreparedSubscription {
-                    runtime: Arc::downgrade(self),
                     key: existing_key,
-                    reservation_id: Some(reservation_id),
-                    ownership: PreparationOwnership::ExistingPending,
+                    reservation: Some(PreparationReservation {
+                        runtime: Arc::downgrade(self),
+                        id: reservation_id,
+                    }),
                 });
             }
 
@@ -250,10 +249,11 @@ impl SubscriptionRuntime {
         );
 
         Ok(PreparedSubscription {
-            runtime: Arc::downgrade(self),
             key,
-            reservation_id: Some(reservation_id),
-            ownership: PreparationOwnership::CreatedPending,
+            reservation: Some(PreparationReservation {
+                runtime: Arc::downgrade(self),
+                id: reservation_id,
+            }),
         })
     }
 
@@ -900,22 +900,20 @@ impl SubscriptionRuntime {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PreparationOwnership {
-    CreatedPending,
-    ExistingPending,
-    ExistingActive,
+#[derive(Debug)]
+struct PreparationReservation {
+    runtime: Weak<SubscriptionRuntime>,
+    id: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct PreparedSubscription {
-    pub(crate) runtime: Weak<SubscriptionRuntime>,
-    pub(crate) key: SubscriptionKey,
-    pub(crate) reservation_id: Option<u64>,
-    pub(crate) ownership: PreparationOwnership,
+    key: SubscriptionKey,
+    reservation: Option<PreparationReservation>,
 }
 
 impl PreparedSubscription {
+    #[inline]
     pub(crate) fn key(&self) -> &SubscriptionKey {
         &self.key
     }
@@ -928,17 +926,18 @@ impl PreparedSubscription {
         self.finish(false);
     }
 
-    pub(crate) fn finish(&mut self, committed: bool) {
-        if self.ownership == PreparationOwnership::ExistingActive {
-            debug_assert!(self.reservation_id.is_none());
-            return;
-        }
-        let Some(reservation_id) = self.reservation_id.take() else {
+    fn finish(&mut self, committed: bool) {
+        let Some(reservation) = self.reservation.take() else {
             return;
         };
-        if let Some(runtime) = self.runtime.upgrade() {
-            runtime.finish_preparation(&self.key, reservation_id, committed);
+        if let Some(runtime) = reservation.runtime.upgrade() {
+            runtime.finish_preparation(&self.key, reservation.id, committed);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_reservation(&self) -> bool {
+        self.reservation.is_some()
     }
 }
 

@@ -576,10 +576,7 @@ mod tests {
 
         let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
         assert_eq!(repeated.key(), &key_obj);
-        assert_eq!(
-            repeated.ownership,
-            crate::subscription::PreparationOwnership::ExistingActive
-        );
+        assert!(!repeated.has_reservation());
         repeated.rollback();
 
         let state = ();
