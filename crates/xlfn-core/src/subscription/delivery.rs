@@ -3,22 +3,22 @@ use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ErasedSink {
-    pub(crate) server: Weak<ServerRuntime>,
+    pub(crate) publish: Arc<PublishCore>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
 
 impl ErasedSink {
+    #[inline]
     pub(crate) fn publish(&self, value: RtdValue) -> XllResult<()> {
-        let server = self.server.upgrade().ok_or(XllError::Closing)?;
-        server.publish(self.topic_id, self.connection_generation, value)
+        self.publish
+            .publish(self.topic_id, self.connection_generation, value)
     }
 }
 
 pub(crate) struct ActiveSubscription {
     pub(crate) key: SubscriptionKey,
     pub(crate) generation: ConnectionGeneration,
-    pub(crate) subscription: Option<Box<dyn RtdSubscription>>,
     pub(crate) committed: bool,
     pub(crate) latest: StoredRtdValue,
     pub(crate) _permit: QuotaPermit,

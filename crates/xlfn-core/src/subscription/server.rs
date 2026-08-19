@@ -11,134 +11,24 @@ impl RtdServerHandle {
         &self,
         notifier: crate::rtd::RtdNotifier,
     ) -> XllResult<Option<crate::rtd::RtdNotifier>> {
-        let _operation = self.inner.enter_operation()?;
-        let (retired, attempt) = {
-            self.inner.ensure_open()?;
-            let mut refresh = self.inner.refresh.lock();
-            let retired = refresh.attach_notifier(notifier);
-            let has_updates = self.inner.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
-            let attempt = prepared.map(|p| {
-                self.inner.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            });
-            (retired, attempt)
-        };
-        if let Some(attempt) = attempt {
-            self.inner.drive_notification(attempt);
-        }
-        Ok(retired)
+        self.inner.attach_update_notifier(notifier)
     }
 
     pub(crate) fn detach_update_notifier(&self) -> Option<crate::rtd::RtdNotifier> {
-        let mut refresh = self.inner.refresh.lock();
-        refresh.detach_notifier()
+        self.inner.detach_update_notifier()
     }
 
     pub(crate) fn pulse_notification(&self) -> XllResult<()> {
-        let _operation = self.inner.enter_operation()?;
-        let attempt = {
-            self.inner.ensure_open()?;
-            let mut refresh = self.inner.refresh.lock();
-            let has_updates = self.inner.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
-            prepared.map(|p| {
-                self.inner.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            })
-        };
-        if let Some(attempt) = attempt {
-            self.inner.drive_notification(attempt);
-        }
-        Ok(())
+        self.inner.pulse_notification()
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch> {
-        let operation = self.inner.enter_owned_operation()?;
-        let (refresh_id, updates) = {
-            self.inner.ensure_open()?;
-            let mut refresh = self.inner.refresh.lock();
-            if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::OVERLAPPED_REFERENCE,
-                });
-            }
-            let refresh_id = refresh.next_refresh_id;
-            refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::REFERENCE_OVERFLOW,
-            })?;
-
-            self.inner.publish_epoch.fetch_add(1, Ordering::AcqRel);
-
-            let mut by_topic: FxHashMap<i32, (u64, StoredRtdValue)> = FxHashMap::default();
-            for shard_mutex in self.inner.shards.iter() {
-                let shard = shard_mutex.lock();
-                for buf in [0, 1] {
-                    for (topic_id, queued) in &shard.pending[buf] {
-                        if shard
-                            .active_by_topic
-                            .get(topic_id)
-                            .is_some_and(|active| active.committed)
-                        {
-                            match by_topic.entry(topic_id.0) {
-                                std::collections::hash_map::Entry::Vacant(slot) => {
-                                    slot.insert((queued.sequence, queued.value.clone()));
-                                }
-                                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                                    if queued.sequence > slot.get().0 {
-                                        slot.insert((queued.sequence, queued.value.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut updates_vec: Vec<RtdUpdate> = by_topic
-                .into_iter()
-                .map(|(topic_id, (sequence, value))| RtdUpdate {
-                    sequence,
-                    topic_id,
-                    value,
-                })
-                .collect();
-            updates_vec.sort_unstable_by_key(|u| u.sequence);
-
-            refresh.phase = DeliveryPhase::Refreshing { refresh_id };
-            (refresh_id, updates_vec)
-        };
-        Ok(RtdRefreshBatch {
-            operation: Some(operation),
-            refresh_id,
-            updates,
-            completed: false,
-        })
+        self.inner.begin_refresh()
     }
 
     #[cfg(test)]
     pub(crate) fn pending_update_count(&self) -> usize {
-        let epoch = self.inner.publish_epoch.load(Ordering::Acquire);
-        let buf0 = (epoch & 1) as usize;
-        let buf1 = 1 - buf0;
-        let mut count = 0;
-        for shard_mutex in self.inner.shards.iter() {
-            let shard = shard_mutex.lock();
-            let keys0 = shard.pending[buf0].keys();
-            let keys1 = shard.pending[buf1].keys();
-            for topic_id in keys0.chain(keys1) {
-                if shard
-                    .active_by_topic
-                    .get(topic_id)
-                    .is_some_and(|a| a.committed)
-                {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.inner.pending_update_count()
     }
 
     pub(crate) fn claim(&self, key: &SubscriptionKey) -> XllResult<()> {
@@ -168,12 +58,11 @@ impl RtdServerHandle {
     }
 }
 
-pub(crate) struct ServerRuntime {
-    pub(crate) generation: ServerGeneration,
-    pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    pub(crate) operation_gate: OperationGate,
+pub(crate) struct PublishCore {
     pub(crate) runtime_gate: Arc<OperationGate>,
+    pub(crate) server_gate: Arc<OperationGate>,
     pub(crate) queued_update_quota: Arc<Quota>,
+    pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(crate) lifecycle: AtomicU8,
     pub(crate) publish_epoch: AtomicU64,
     pub(crate) next_update_sequence: AtomicU64,
@@ -182,7 +71,44 @@ pub(crate) struct ServerRuntime {
     pub(crate) shards: Box<[Mutex<TopicShard>]>,
     pub(crate) refresh: Mutex<RefreshState<crate::rtd::RtdNotifier>>,
     pub(crate) parent: Weak<SubscriptionRuntime>,
+}
+
+impl std::fmt::Debug for PublishCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishCore")
+            .field("lifecycle", &self.lifecycle.load(Ordering::Relaxed))
+            .field("publish_epoch", &self.publish_epoch.load(Ordering::Relaxed))
+            .field(
+                "next_update_sequence",
+                &self.next_update_sequence.load(Ordering::Relaxed),
+            )
+            .field(
+                "notified_epoch",
+                &self.notified_epoch.load(Ordering::Relaxed),
+            )
+            .field(
+                "pending_updates",
+                &self.pending_updates.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct ServerRuntime {
+    pub(crate) generation: ServerGeneration,
+    pub(crate) publish: Arc<PublishCore>,
+    pub(crate) subscriptions: Mutex<FxHashMap<TopicId, Box<dyn RtdSubscription>>>,
+    pub(crate) parent: Weak<SubscriptionRuntime>,
     pub(crate) termination_coordinator: TerminationCoordinator,
+}
+
+impl std::fmt::Debug for ServerRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerRuntime")
+            .field("generation", &self.generation)
+            .field("publish", &self.publish)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) struct ScopedServerOperation<'a> {
@@ -210,7 +136,7 @@ pub(crate) struct OwnedServerOperation {
 
 impl Drop for OwnedServerOperation {
     fn drop(&mut self) {
-        self.server.operation_gate.leave();
+        self.server.publish.server_gate.leave();
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if let Some(parent) = self.parent.upgrade() {
             parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
@@ -218,7 +144,8 @@ impl Drop for OwnedServerOperation {
     }
 }
 
-impl ServerRuntime {
+impl PublishCore {
+    #[inline]
     pub(crate) fn ensure_open(&self) -> XllResult<()> {
         if self.lifecycle.load(Ordering::Acquire) == SERVER_LIFECYCLE_OPEN {
             Ok(())
@@ -272,19 +199,18 @@ impl ServerRuntime {
         if let Some(ingress) = self.module_ingress {
             let mut gate_guard = None;
             let mut gate_error = None;
-            let (ingress_guard, accepted) =
-                ingress.enter_with(|| match self.operation_gate.enter() {
-                    Ok(guard) => {
-                        gate_guard = Some(guard);
-                        #[cfg(any(test, feature = "shutdown-refinement"))]
-                        if let Some(parent) = self.parent.upgrade() {
-                            parent.record_ghost_event(
-                                crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
-                            );
-                        }
+            let (ingress_guard, accepted) = ingress.enter_with(|| match self.server_gate.enter() {
+                Ok(guard) => {
+                    gate_guard = Some(guard);
+                    #[cfg(any(test, feature = "shutdown-refinement"))]
+                    if let Some(parent) = self.parent.upgrade() {
+                        parent.record_ghost_event(
+                            crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
+                        );
                     }
-                    Err(err) => gate_error = Some(err),
-                });
+                }
+                Err(err) => gate_error = Some(err),
+            });
             if !accepted {
                 return Err(XllError::Closing);
             }
@@ -299,7 +225,7 @@ impl ServerRuntime {
                 parent: self.parent.clone(),
             })
         } else {
-            let gate_guard = self.operation_gate.enter()?;
+            let gate_guard = self.server_gate.enter()?;
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
@@ -314,7 +240,10 @@ impl ServerRuntime {
         }
     }
 
-    pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation> {
+    pub(crate) fn enter_owned_operation(
+        &self,
+        server: Arc<ServerRuntime>,
+    ) -> XllResult<OwnedServerOperation> {
         if self.runtime_gate.is_closing() {
             return Err(XllError::Closing);
         }
@@ -323,7 +252,7 @@ impl ServerRuntime {
             let mut acquired = false;
             let mut gate_error = None;
             let (ingress_guard, accepted) =
-                ingress.enter_with(|| match self.operation_gate.acquire() {
+                ingress.enter_with(|| match self.server_gate.acquire() {
                     Ok(()) => {
                         acquired = true;
                         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -344,20 +273,20 @@ impl ServerRuntime {
             }
             assert!(acquired, "gate guard must be acquired");
             Ok(OwnedServerOperation {
-                server: Arc::clone(self),
+                server,
                 _ingress_guard: Some(ingress_guard),
                 #[cfg(any(test, feature = "shutdown-refinement"))]
                 parent: self.parent.clone(),
             })
         } else {
-            self.operation_gate.acquire()?;
+            self.server_gate.acquire()?;
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
                     .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
             }
             Ok(OwnedServerOperation {
-                server: Arc::clone(self),
+                server,
                 _ingress_guard: None,
                 #[cfg(any(test, feature = "shutdown-refinement"))]
                 parent: self.parent.clone(),
@@ -615,6 +544,157 @@ impl ServerRuntime {
             self.drive_notification(attempt);
         }
     }
+}
+
+impl ServerRuntime {
+    #[inline]
+    pub(crate) fn ensure_open(&self) -> XllResult<()> {
+        self.publish.ensure_open()
+    }
+
+    #[inline]
+    pub(crate) fn enter_operation(&self) -> XllResult<ScopedServerOperation<'_>> {
+        self.publish.enter_operation()
+    }
+
+    #[inline]
+    pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation> {
+        self.publish.enter_owned_operation(Arc::clone(self))
+    }
+
+    pub(crate) fn attach_update_notifier(
+        &self,
+        notifier: crate::rtd::RtdNotifier,
+    ) -> XllResult<Option<crate::rtd::RtdNotifier>> {
+        let _operation = self.publish.enter_operation()?;
+        let (retired, attempt) = {
+            self.publish.ensure_open()?;
+            let mut refresh = self.publish.refresh.lock();
+            let retired = refresh.attach_notifier(notifier);
+            let has_updates = self.publish.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            let epoch = self.publish.publish_epoch.load(Ordering::Acquire);
+            let attempt = prepared.map(|p| {
+                self.publish.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            });
+            (retired, attempt)
+        };
+        if let Some(attempt) = attempt {
+            self.publish.drive_notification(attempt);
+        }
+        Ok(retired)
+    }
+
+    pub(crate) fn detach_update_notifier(&self) -> Option<crate::rtd::RtdNotifier> {
+        let mut refresh = self.publish.refresh.lock();
+        refresh.detach_notifier()
+    }
+
+    pub(crate) fn pulse_notification(&self) -> XllResult<()> {
+        let _operation = self.publish.enter_operation()?;
+        let attempt = {
+            self.publish.ensure_open()?;
+            let mut refresh = self.publish.refresh.lock();
+            let has_updates = self.publish.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            let epoch = self.publish.publish_epoch.load(Ordering::Acquire);
+            prepared.map(|p| {
+                self.publish.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            })
+        };
+        if let Some(attempt) = attempt {
+            self.publish.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_refresh(self: &Arc<Self>) -> XllResult<RtdRefreshBatch> {
+        let operation = self.enter_owned_operation()?;
+        let (refresh_id, updates) = {
+            self.publish.ensure_open()?;
+            let mut refresh = self.publish.refresh.lock();
+            if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::OVERLAPPED_REFERENCE,
+                });
+            }
+            let refresh_id = refresh.next_refresh_id;
+            refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::REFERENCE_OVERFLOW,
+            })?;
+
+            self.publish.publish_epoch.fetch_add(1, Ordering::AcqRel);
+
+            let mut by_topic: FxHashMap<i32, (u64, StoredRtdValue)> = FxHashMap::default();
+            for shard_mutex in self.publish.shards.iter() {
+                let shard = shard_mutex.lock();
+                for buf in [0, 1] {
+                    for (topic_id, queued) in &shard.pending[buf] {
+                        if shard
+                            .active_by_topic
+                            .get(topic_id)
+                            .is_some_and(|active| active.committed)
+                        {
+                            match by_topic.entry(topic_id.0) {
+                                std::collections::hash_map::Entry::Vacant(slot) => {
+                                    slot.insert((queued.sequence, queued.value.clone()));
+                                }
+                                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                    if queued.sequence > slot.get().0 {
+                                        slot.insert((queued.sequence, queued.value.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut updates_vec: Vec<RtdUpdate> = by_topic
+                .into_iter()
+                .map(|(topic_id, (sequence, value))| RtdUpdate {
+                    sequence,
+                    topic_id,
+                    value,
+                })
+                .collect();
+            updates_vec.sort_unstable_by_key(|u| u.sequence);
+
+            refresh.phase = DeliveryPhase::Refreshing { refresh_id };
+            (refresh_id, updates_vec)
+        };
+        Ok(RtdRefreshBatch {
+            operation: Some(operation),
+            refresh_id,
+            updates,
+            completed: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_update_count(&self) -> usize {
+        let epoch = self.publish.publish_epoch.load(Ordering::Acquire);
+        let buf0 = (epoch & 1) as usize;
+        let buf1 = 1 - buf0;
+        let mut count = 0;
+        for shard_mutex in self.publish.shards.iter() {
+            let shard = shard_mutex.lock();
+            let keys0 = shard.pending[buf0].keys();
+            let keys1 = shard.pending[buf1].keys();
+            for topic_id in keys0.chain(keys1) {
+                if shard
+                    .active_by_topic
+                    .get(topic_id)
+                    .is_some_and(|a| a.committed)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
 
     pub(crate) fn remove_from_registry(&self) {
         if let Some(parent) = self.parent.upgrade() {
@@ -635,29 +715,31 @@ impl ServerRuntime {
                 })
             }
             ServerTerminationPhase::Open => {
-                let wait = self.operation_gate.close_and_wait_begin();
+                let wait = self.publish.server_gate.close_and_wait_begin();
                 term_state.phase = ServerTerminationPhase::Terminating;
 
-                self.lifecycle
+                self.publish
+                    .lifecycle
                     .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
                 let notifier = {
-                    let mut refresh = self.refresh.lock();
+                    let mut refresh = self.publish.refresh.lock();
                     refresh.detach_notifier()
                 };
 
-                let mut initial_subscriptions = Vec::new();
-                for shard_mutex in self.shards.iter() {
+                for shard_mutex in self.publish.shards.iter() {
                     let mut shard = shard_mutex.lock();
                     shard.pending[0].clear();
                     shard.pending[1].clear();
-                    for active in shard.active_by_topic.values_mut() {
-                        if let Some(sub) = active.subscription.take() {
-                            initial_subscriptions.push(sub);
-                        }
-                    }
                 }
-                self.pending_updates.store(0, Ordering::Release);
+                self.publish.pending_updates.store(0, Ordering::Release);
+
+                let initial_subscriptions: Vec<_> = self
+                    .subscriptions
+                    .lock()
+                    .drain()
+                    .map(|(_, sub)| sub)
+                    .collect();
 
                 TerminationAdmission::Owner(ServerTermination {
                     server: Arc::clone(self),
@@ -686,6 +768,20 @@ impl ServerRuntime {
             TerminationAdmission::Waiter(waiter) => waiter.wait(),
             TerminationAdmission::Complete => self.termination_result(),
         }
+    }
+}
+
+impl Drop for ServerRuntime {
+    fn drop(&mut self) {
+        self.publish
+            .lifecycle
+            .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
+        for shard_mutex in self.publish.shards.iter() {
+            let mut shard = shard_mutex.lock();
+            shard.pending[0].clear();
+            shard.pending[1].clear();
+        }
+        self.publish.pending_updates.store(0, Ordering::Release);
     }
 }
 
@@ -791,7 +887,6 @@ pub(crate) fn drop_notifier_no_unwind(notifier: Option<crate::rtd::RtdNotifier>)
 pub(crate) struct TerminatedTopic {
     pub(crate) key: SubscriptionKey,
     pub(crate) generation: ConnectionGeneration,
-    pub(crate) subscription: Option<Box<dyn RtdSubscription>>,
 }
 
 thread_local! {
@@ -844,9 +939,9 @@ impl<'a> ServerTermination<'a> {
         }
 
         let (late_notifier, active_entries) = {
-            let late_notifier = self.server.refresh.lock().detach_notifier();
+            let late_notifier = self.server.publish.refresh.lock().detach_notifier();
             let mut active_entries = Vec::new();
-            for shard_mutex in self.server.shards.iter() {
+            for shard_mutex in self.server.publish.shards.iter() {
                 let mut shard = shard_mutex.lock();
                 shard.pending[0].clear();
                 shard.pending[1].clear();
@@ -854,13 +949,16 @@ impl<'a> ServerTermination<'a> {
                     active_entries.push(TerminatedTopic {
                         key: active.key,
                         generation: active.generation,
-                        subscription: active.subscription,
                     });
                 }
                 shard.topic_by_key.clear();
             }
-            self.server.pending_updates.store(0, Ordering::Release);
             self.server
+                .publish
+                .pending_updates
+                .store(0, Ordering::Release);
+            self.server
+                .publish
                 .lifecycle
                 .store(SERVER_LIFECYCLE_TERMINATED, Ordering::Release);
 
@@ -943,10 +1041,11 @@ impl<'a> ServerTermination<'a> {
             }
         }
 
-        let all_subscriptions = self
+        let all_subscriptions: Vec<Box<dyn RtdSubscription>> = self
             .initial_subscriptions
             .drain(..)
-            .chain(active_entries.into_iter().filter_map(|e| e.subscription));
+            .chain(self.server.subscriptions.lock().drain().map(|(_, s)| s))
+            .collect();
 
         if let Err(error) = disconnect_all_no_unwind(all_subscriptions)
             && first_error.is_none()
@@ -985,11 +1084,13 @@ impl RtdRefreshBatch {
     }
 
     pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
-        let attempt =
-            self.server()
-                .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
+        let attempt = self.server().publish.complete_refresh_inner(
+            self.refresh_id,
+            &self.updates,
+            outcome,
+        )?;
         if let Some(attempt) = attempt {
-            self.server().drive_notification(attempt);
+            self.server().publish.drive_notification(attempt);
         }
         self.completed = true;
         self.operation.take();
@@ -1003,7 +1104,10 @@ impl Drop for RtdRefreshBatch {
             return;
         }
         if let Some(operation) = &self.operation {
-            operation.server.abort_refresh_no_unwind(self.refresh_id);
+            operation
+                .server
+                .publish
+                .abort_refresh_no_unwind(self.refresh_id);
         }
     }
 }

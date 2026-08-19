@@ -109,7 +109,7 @@ fn server_publish_isolation() {
     let _sink_a = sink_a.lock().clone().unwrap();
     let sink_b = sink_b.lock().clone().unwrap();
 
-    let lock_guard = server_a.inner.shards[0].lock();
+    let lock_guard = server_a.inner.publish.shards[0].lock();
 
     let b_published = Arc::new(AtomicBool::new(false));
     let b_published_clone = Arc::clone(&b_published);
@@ -208,7 +208,7 @@ fn server_locality_refresh_lock_independence() {
     sink_b.publish(42.0).unwrap();
 
     // server A の shard mutex を保持した状態で server B.begin_refresh を実行
-    let _guard_a = server_a.inner.shards[0].lock();
+    let _guard_a = server_a.inner.publish.shards[0].lock();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let server_b_clone = server_b.clone();
@@ -760,6 +760,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
 
     server
         .inner
+        .publish
         .lifecycle
         .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
@@ -808,9 +809,11 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     conn.commit().unwrap();
 
     {
-        let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
-        let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
-        active.subscription = Some(Box::new(FailingDisconnectSubscription));
+        server
+            .inner
+            .subscriptions
+            .lock()
+            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
     }
 
     let server_clone = server.clone();
@@ -901,9 +904,11 @@ fn disconnect_propagates_subscription_cleanup_error() {
     conn.commit().unwrap();
 
     {
-        let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
-        let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
-        active.subscription = Some(Box::new(FailingDisconnectSubscription));
+        server
+            .inner
+            .subscriptions
+            .lock()
+            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
     }
 
     let error = server.disconnect(TopicId(1)).unwrap_err();
@@ -932,9 +937,11 @@ fn rollback_records_subscription_cleanup_error() {
         .unwrap();
 
     {
-        let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
-        let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
-        active.subscription = Some(Box::new(FailingDisconnectSubscription));
+        server
+            .inner
+            .subscriptions
+            .lock()
+            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
     }
 
     conn.rollback();
@@ -976,9 +983,11 @@ fn request_cancel_panic_propagates_to_termination() {
     conn.commit().unwrap();
 
     {
-        let mut shard = server.inner.shards[shard_index(TopicId(1))].lock();
-        let active = shard.active_by_topic.get_mut(&TopicId(1)).unwrap();
-        active.subscription = Some(Box::new(PanickingCancelSubscription));
+        server
+            .inner
+            .subscriptions
+            .lock()
+            .insert(TopicId(1), Box::new(PanickingCancelSubscription));
     }
 
     let res = server.terminate();
@@ -1036,6 +1045,7 @@ fn install_failure_during_closing_propagates_cleanup_error() {
 
     server
         .inner
+        .publish
         .lifecycle
         .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
 
@@ -1530,6 +1540,7 @@ fn parent_runtime_drop_causes_fail_closed_on_server() {
     assert!(matches!(
         server
             .inner
+            .publish
             .publish(TopicId(1), ConnectionGeneration(1), RtdValue::Number(1.0)),
         Err(XllError::Closing)
     ));
@@ -1595,7 +1606,7 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let quota = Arc::clone(&runtime.queued_update_quota);
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
-    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let (source, sink_slot, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(source, RtdTopic::single("quota_test").unwrap())
         .unwrap();
@@ -1606,7 +1617,7 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
         .connect_transaction(&server, TopicId(1), &key)
         .unwrap();
     conn.commit().unwrap();
-    let sink = sink.lock().clone().unwrap();
+    let sink = sink_slot.lock().clone().unwrap();
 
     sink.publish(42.0).unwrap();
     assert_eq!(quota.used.load(Ordering::Acquire), 1);
@@ -1615,6 +1626,64 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     assert_eq!(quota.used.load(Ordering::Acquire), 1);
 
     drop(sink);
+    drop(sink_slot);
     drop(server);
     assert_eq!(quota.used.load(Ordering::Acquire), 0);
+}
+
+struct SinkHoldingSubscription<T> {
+    _sink: RtdSink<T>,
+}
+
+// SAFETY: SinkHoldingSubscription does not perform thread work.
+unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
+    fn request_cancel(&self) {}
+    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+        Ok(())
+    }
+}
+
+struct SinkCapturingSource;
+
+impl RtdSource for SinkCapturingSource {
+    type Value = f64;
+    fn subscribe(
+        &self,
+        _topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Box<dyn RtdSubscription>> {
+        Ok(Box::new(SinkHoldingSubscription { _sink: sink }))
+    }
+}
+
+#[test]
+fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+    let publish_weak = Arc::downgrade(&server.inner.publish);
+
+    let prep = runtime
+        .prepare(
+            Arc::new(SinkCapturingSource),
+            RtdTopic::single("cycle_test").unwrap(),
+        )
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+
+    // While active, publish_weak should be upgradeable
+    assert!(publish_weak.upgrade().is_some());
+
+    // Terminate server, closing and dropping subscriptions
+    server.terminate().unwrap();
+    drop(server);
+    drop(runtime);
+
+    // After termination and drops, PublishCore must be completely dropped (no cycle!)
+    assert!(publish_weak.upgrade().is_none());
 }

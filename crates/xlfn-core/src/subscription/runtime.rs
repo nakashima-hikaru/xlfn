@@ -120,12 +120,11 @@ impl SubscriptionRuntime {
         for _ in 0..TOPIC_SHARDS {
             shards.push(Mutex::new(TopicShard::default()));
         }
-        let server = Arc::new(ServerRuntime {
-            generation,
-            module_ingress: self.module_ingress,
-            operation_gate: OperationGate::new(),
+        let publish = Arc::new(PublishCore {
             runtime_gate: Arc::clone(&self.runtime_gate),
+            server_gate: Arc::new(OperationGate::new()),
             queued_update_quota: Arc::clone(&self.queued_update_quota),
+            module_ingress: self.module_ingress,
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
             next_update_sequence: AtomicU64::new(0),
@@ -133,6 +132,12 @@ impl SubscriptionRuntime {
             pending_updates: AtomicUsize::new(0),
             shards: shards.into_boxed_slice(),
             refresh: Mutex::new(RefreshState::default()),
+            parent: Arc::downgrade(self),
+        });
+        let server = Arc::new(ServerRuntime {
+            generation,
+            publish,
+            subscriptions: Mutex::new(FxHashMap::default()),
             parent: Arc::downgrade(self),
             termination_coordinator: TerminationCoordinator::default(),
         });
@@ -396,9 +401,9 @@ impl SubscriptionRuntime {
 
         let shard_index = shard_index(topic_id);
         let reservation_result = {
-            let mut shard = server_handle.inner.shards[shard_index].lock();
+            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
 
-            if let Err(err) = server_handle.inner.ensure_open() {
+            if let Err(err) = server_handle.inner.publish.ensure_open() {
                 Err(ServerReservationFailure::Overloaded(err))
             } else if shard.active_by_topic.contains_key(&topic_id) {
                 Err(ServerReservationFailure::DuplicateTopicId)
@@ -413,7 +418,6 @@ impl SubscriptionRuntime {
                             ActiveSubscription {
                                 key: key.clone(),
                                 generation: conn_gen,
-                                subscription: None,
                                 committed: false,
                                 latest: StoredRtdValue::Empty,
                                 _permit: permit,
@@ -432,7 +436,7 @@ impl SubscriptionRuntime {
         }
 
         let erased_sink = ErasedSink {
-            server: Arc::downgrade(&server_handle.inner),
+            publish: Arc::clone(&server_handle.inner.publish),
             topic_id,
             connection_generation: conn_gen,
         };
@@ -455,15 +459,23 @@ impl SubscriptionRuntime {
         };
 
         let install_result = {
-            let mut shard = server_handle.inner.shards[shard_index].lock();
-            if server_handle.inner.ensure_open().is_err() {
+            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
+            if server_handle.inner.publish.ensure_open().is_err() {
                 Err(subscription)
             } else {
                 match shard.active_by_topic.get_mut(&topic_id) {
                     Some(active) if active.generation == conn_gen => {
-                        active.subscription = Some(subscription);
+                        server_handle
+                            .inner
+                            .subscriptions
+                            .lock()
+                            .insert(topic_id, subscription);
                         let latest = active.latest.clone();
-                        let epoch = server_handle.inner.publish_epoch.load(Ordering::Acquire);
+                        let epoch = server_handle
+                            .inner
+                            .publish
+                            .publish_epoch
+                            .load(Ordering::Acquire);
                         let buf0 = (epoch & 1) as usize;
                         let buf1 = 1 - buf0;
                         let observed = shard.pending[buf0]
@@ -516,8 +528,8 @@ impl SubscriptionRuntime {
     ) -> XllResult<()> {
         let attempt = {
             let shard_index = shard_index(topic_id);
-            let mut shard = server.shards[shard_index].lock();
-            server.ensure_open()?;
+            let mut shard = server.publish.shards[shard_index].lock();
+            server.publish.ensure_open()?;
             let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
                 return Err(XllError::Closing);
             };
@@ -532,18 +544,24 @@ impl SubscriptionRuntime {
                     .is_some_and(|u| u.sequence <= obs)
                 {
                     shard.pending[0].remove(&topic_id);
-                    server.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                    server
+                        .publish
+                        .pending_updates
+                        .fetch_sub(1, Ordering::Relaxed);
                 }
                 if shard.pending[1]
                     .get(&topic_id)
                     .is_some_and(|u| u.sequence <= obs)
                 {
                     shard.pending[1].remove(&topic_id);
-                    server.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                    server
+                        .publish
+                        .pending_updates
+                        .fetch_sub(1, Ordering::Relaxed);
                 }
             }
 
-            let epoch = server.publish_epoch.load(Ordering::Acquire);
+            let epoch = server.publish.publish_epoch.load(Ordering::Acquire);
             let buf0 = (epoch & 1) as usize;
             let buf1 = 1 - buf0;
             let has_pending = shard.pending[buf0]
@@ -554,11 +572,14 @@ impl SubscriptionRuntime {
                         && observed_sequence.is_none_or(|seq| u.sequence > seq)
                 });
             if has_pending {
-                let mut refresh = server.refresh.lock();
-                let has_updates = server.has_deliverable_updates();
+                let mut refresh = server.publish.refresh.lock();
+                let has_updates = server.publish.has_deliverable_updates();
                 let prepared = refresh.prepare_notification(has_updates)?;
                 prepared.map(|p| {
-                    server.notified_epoch.store(epoch, Ordering::Release);
+                    server
+                        .publish
+                        .notified_epoch
+                        .store(epoch, Ordering::Release);
                     refresh.commit_notification(p)
                 })
             } else {
@@ -612,7 +633,7 @@ impl SubscriptionRuntime {
         }
 
         if let Some(attempt) = attempt {
-            server.drive_notification(attempt);
+            server.publish.drive_notification(attempt);
         }
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -628,14 +649,10 @@ impl SubscriptionRuntime {
         generation: ConnectionGeneration,
         key: &SubscriptionKey,
     ) -> XllResult<()> {
-        let (subscription, _removed_update) = {
+        let subscription = server.subscriptions.lock().remove(&topic_id);
+        let _removed_update = {
             let shard_index = shard_index(topic_id);
-            let mut shard = server.shards[shard_index].lock();
-            let sub = shard
-                .active_by_topic
-                .get_mut(&topic_id)
-                .filter(|a| a.generation == generation)
-                .and_then(|a| a.subscription.take());
+            let mut shard = server.publish.shards[shard_index].lock();
 
             if shard
                 .active_by_topic
@@ -653,7 +670,7 @@ impl SubscriptionRuntime {
                 shard.topic_by_key.remove(key);
             }
 
-            let rem_update = if shard.pending[0]
+            if shard.pending[0]
                 .get(&topic_id)
                 .is_some_and(|u| u.connection_generation == generation)
             {
@@ -665,8 +682,7 @@ impl SubscriptionRuntime {
                 shard.pending[1].remove(&topic_id)
             } else {
                 None
-            };
-            (sub, rem_update)
+            }
         };
 
         let removed_source = {
@@ -734,17 +750,18 @@ impl SubscriptionRuntime {
         server_handle: &RtdServerHandle,
         topic_id: TopicId,
     ) -> XllResult<()> {
-        let (subscription, key_to_clean, conn_gen) = {
+        let subscription = server_handle.inner.subscriptions.lock().remove(&topic_id);
+        let (key_to_clean, conn_gen) = {
             let shard_index = shard_index(topic_id);
-            let mut shard = server_handle.inner.shards[shard_index].lock();
-            server_handle.inner.ensure_open()?;
+            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
+            server_handle.inner.publish.ensure_open()?;
             let Some((tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
                 return Ok(());
             };
             shard.topic_by_key.remove(&active.key);
             shard.pending[0].remove(&tid);
             shard.pending[1].remove(&tid);
-            (active.subscription, active.key, active.generation)
+            (active.key, active.generation)
         };
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
