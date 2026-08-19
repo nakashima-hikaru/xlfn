@@ -1233,8 +1233,8 @@ fn dead_entry_at_same_address_is_replaced_with_fresh_id() {
     let address = SourceAddress::of(&source);
 
     let dead_anchor = {
-        let old = Arc::new(());
-        let erased: Arc<dyn SourceIdentityAnchor> = old;
+        let (old, _, _) = publishing_source::<f64>(None);
+        let erased: Arc<dyn ErasedRtdSource> = old;
         Arc::downgrade(&erased)
     };
 
@@ -1247,6 +1247,7 @@ fn dead_entry_at_same_address_is_replaced_with_fresh_id() {
     );
     registry.next_id = 101;
 
+    let source: Arc<dyn ErasedRtdSource> = source;
     let resolved = registry.resolve(&source, 1).unwrap();
 
     assert_eq!(resolved.id, 101);

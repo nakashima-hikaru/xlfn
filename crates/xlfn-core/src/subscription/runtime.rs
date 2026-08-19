@@ -160,6 +160,7 @@ impl SubscriptionRuntime {
         }
         topic.validate_with_limits(&self.limits)?;
 
+        let source: Arc<dyn ErasedRtdSource> = source;
         let mut catalog = self.catalog.lock();
 
         let source_identity = catalog

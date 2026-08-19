@@ -11,21 +11,9 @@ impl SourceAddress {
     }
 }
 
-pub(crate) trait SourceIdentityAnchor: Send + Sync + 'static {}
-
-impl<T> SourceIdentityAnchor for T where T: Send + Sync + 'static {}
-
 pub(crate) struct SourceIdentityEntry {
     pub(crate) id: u64,
-    pub(crate) anchor: Weak<dyn SourceIdentityAnchor>,
-}
-
-fn weak_source_anchor<S>(source: &Arc<S>) -> Weak<dyn SourceIdentityAnchor>
-where
-    S: RtdSource,
-{
-    let erased: Arc<dyn SourceIdentityAnchor> = Arc::clone(source) as _;
-    Arc::downgrade(&erased)
+    pub(crate) anchor: Weak<dyn ErasedRtdSource>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,14 +44,11 @@ impl SourceIdentityRegistry {
         Ok(id)
     }
 
-    pub(crate) fn resolve<S>(
+    pub(crate) fn resolve(
         &mut self,
-        source: &Arc<S>,
+        source: &Arc<dyn ErasedRtdSource>,
         limit: usize,
-    ) -> XllResult<ResolvedSourceIdentity>
-    where
-        S: RtdSource,
-    {
+    ) -> XllResult<ResolvedSourceIdentity> {
         let address = SourceAddress::of(source);
 
         if let Some(entry) = self.by_address.get(&address)
@@ -87,7 +72,7 @@ impl SourceIdentityRegistry {
         }
 
         let id = self.allocate_id()?;
-        let anchor = weak_source_anchor(source);
+        let anchor = Arc::downgrade(source);
 
         self.by_address
             .insert(address, SourceIdentityEntry { id, anchor });
