@@ -2409,6 +2409,10 @@ fn resolver_does_not_initialize_slot_when_unused() {
 
 #[test]
 fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
+    let _callback_guard = crate::test_callback::lock();
+    crate::test_callback::install();
+    crate::test_callback::reset();
+
     struct TestObj(u32);
     impl ExcelHandleObject for TestObj {}
 

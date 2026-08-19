@@ -238,7 +238,13 @@ pub(crate) struct RtdNotifier {
 
 #[cfg(test)]
 #[derive(Clone)]
-pub(crate) enum RtdNotifier {
+pub(crate) struct RtdNotifier {
+    inner: RtdNotifierKind,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+enum RtdNotifierKind {
     Production(Arc<RtdNotifierInner>),
     Test(Arc<crate::rtd::test_support::TestNotifierState>),
 }
@@ -259,7 +265,7 @@ impl RtdNotifierInner {
 }
 
 impl RtdNotifier {
-    pub(crate) fn new(
+    pub(super) fn new(
         callback: Arc<RetainedUpdateCallback>,
         operations: Arc<ServerOperationBarrier>,
     ) -> Self {
@@ -273,13 +279,17 @@ impl RtdNotifier {
         }
         #[cfg(test)]
         {
-            Self::Production(inner)
+            Self {
+                inner: RtdNotifierKind::Production(inner),
+            }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(state: Arc<crate::rtd::test_support::TestNotifierState>) -> Self {
-        Self::Test(state)
+        Self {
+            inner: RtdNotifierKind::Test(state),
+        }
     }
 
     pub(crate) fn notify(&self) -> XllResult<()> {
@@ -289,9 +299,9 @@ impl RtdNotifier {
         }
         #[cfg(test)]
         {
-            match self {
-                Self::Production(inner) => inner.notify(),
-                Self::Test(state) => state.notify(),
+            match &self.inner {
+                RtdNotifierKind::Production(inner) => inner.notify(),
+                RtdNotifierKind::Test(state) => state.notify(),
             }
         }
     }

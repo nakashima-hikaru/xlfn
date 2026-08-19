@@ -2548,11 +2548,8 @@ fn existing_server_attaches_each_backend_without_replacement() {
 
 #[test]
 fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
-    use std::sync::atomic::AtomicUsize;
-
     let _guard = TEST_LOCK.lock().unwrap();
     let subscriptions = Arc::new(SubscriptionRuntime::new());
-    let notifications = Arc::new(AtomicUsize::new(0));
 
     let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;

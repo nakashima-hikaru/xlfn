@@ -405,11 +405,7 @@ impl<'state, 'scope, A: Addin> MainThreadContext<'state, 'scope, A> {
     {
         let subscriptions = self.runtime.subscriptions();
         let prepared = subscriptions.prepare(source, topic)?;
-        match crate::rtd::observe_subscription(
-            &subscriptions,
-            prepared.key(),
-            self.callbacks,
-        ) {
+        match crate::rtd::observe_subscription(&subscriptions, prepared.key(), self.callbacks) {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)

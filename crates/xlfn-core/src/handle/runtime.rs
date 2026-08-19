@@ -1412,11 +1412,9 @@ impl HandleRuntimeSlot {
         drop(state);
 
         // Mutex released — only this thread constructs the runtime.
-        let candidate = HandleRuntime::try_new_with_ingress(
-            16_384,
-            Some(crate::ingress::global_ingress()),
-        )
-        .map(Arc::new);
+        let candidate =
+            HandleRuntime::try_new_with_ingress(16_384, Some(crate::ingress::global_ingress()))
+                .map(Arc::new);
 
         let mut state = self.state.lock();
 
