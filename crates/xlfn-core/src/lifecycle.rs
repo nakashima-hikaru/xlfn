@@ -1667,6 +1667,7 @@ mod tests {
         let notifier_state =
             std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
         let subscriptions = runtime.subscriptions();
+        let subscriptions = subscriptions.as_arc();
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(1))
             .unwrap();
@@ -2312,6 +2313,7 @@ mod tests {
             })
             .unwrap();
         let subscriptions = runtime.subscriptions();
+        let subscriptions = subscriptions.as_arc();
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(1))
             .unwrap();

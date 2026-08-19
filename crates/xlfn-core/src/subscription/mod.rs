@@ -18,6 +18,7 @@ mod operation_gate;
 mod quota;
 mod runtime;
 mod server;
+mod slot;
 mod source;
 mod topic;
 mod value;
@@ -33,6 +34,7 @@ pub(crate) use operation_gate::*;
 pub(crate) use quota::*;
 pub(crate) use runtime::*;
 pub(crate) use server::*;
+pub(crate) use slot::*;
 pub(crate) use source::ErasedRtdSource;
 pub(crate) use topic::{
     ConnectionGeneration, ServerGeneration, SourceId, SubscriptionIdentity, SubscriptionKey,

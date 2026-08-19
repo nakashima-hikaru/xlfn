@@ -126,7 +126,7 @@ pub struct Runtime<A: crate::Addin> {
     close_attempt_active: AtomicBool,
     registration_state_unknown: AtomicBool,
     handles: crate::handle::HandleRuntimeSlot,
-    subscriptions: Mutex<Option<Arc<crate::subscription::SubscriptionRuntime>>>,
+    subscriptions: crate::subscription::SubscriptionRuntimeSlot,
     rtd_limits: crate::subscription::RtdLimits,
     #[cfg(feature = "async")]
     async_manager: crate::async_udf::AsyncManager,
@@ -166,7 +166,7 @@ impl<A: crate::Addin> Runtime<A> {
             close_attempt_active: AtomicBool::new(false),
             registration_state_unknown: AtomicBool::new(false),
             handles: crate::handle::HandleRuntimeSlot::new(),
-            subscriptions: Mutex::new(None),
+            subscriptions: crate::subscription::SubscriptionRuntimeSlot::new(),
             rtd_limits,
             #[cfg(feature = "async")]
             async_manager: crate::async_udf::AsyncManager::new(),
@@ -484,9 +484,7 @@ impl<A: crate::Addin> Runtime<A> {
                         crate::rtd::set_ghost(Arc::clone(&ghost));
                         self.returns.set_ghost(Arc::clone(&ghost));
                         self.handles.set_ghost(Arc::clone(&ghost));
-                        if let Some(subscriptions) = self.subscriptions.lock().as_ref() {
-                            subscriptions.set_ghost(Arc::clone(&ghost));
-                        }
+                        self.subscriptions.set_ghost(Arc::clone(&ghost));
                         #[cfg(feature = "async")]
                         self.async_manager.set_ghost(Arc::clone(&ghost));
                         Ok::<(), XllError>(())
@@ -1113,7 +1111,7 @@ impl<A: crate::Addin> Runtime<A> {
         prerequisites: OpenRollbackPrerequisites,
     ) -> XllResult<OpenRollbackCertificate> {
         let _wait_guard = self.wait_lock.lock();
-        let services_stopped = self.handles.is_none() && self.subscriptions.lock().is_none();
+        let services_stopped = self.handles.is_none() && self.subscriptions.is_none();
         #[cfg(feature = "async")]
         let async_stopped = self.async_manager.is_stopped();
         #[cfg(not(feature = "async"))]
@@ -1205,7 +1203,7 @@ impl<A: crate::Addin> Runtime<A> {
         prerequisites: ClosePrerequisites,
     ) -> XllResult<CloseCertificate> {
         let _wait_guard = self.wait_lock.lock();
-        let services_stopped = self.handles.is_none() && self.subscriptions.lock().is_none();
+        let services_stopped = self.handles.is_none() && self.subscriptions.is_none();
         #[cfg(feature = "async")]
         let async_stopped = self.async_manager.is_stopped();
         #[cfg(not(feature = "async"))]
@@ -1348,20 +1346,13 @@ impl<A: crate::Addin> Runtime<A> {
         self.handles.close()
     }
 
-    pub(crate) fn subscriptions(&self) -> Arc<crate::subscription::SubscriptionRuntime> {
-        let mut slot = self.subscriptions.lock();
-        let subscriptions = slot.get_or_insert_with(|| {
-            Arc::new(crate::subscription::SubscriptionRuntime::with_module_ingress(self.rtd_limits))
-        });
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        if let Some(ghost) = self.ghost.get() {
-            subscriptions.set_ghost(Arc::clone(ghost));
-        }
-        Arc::clone(subscriptions)
+    #[inline]
+    pub(crate) fn subscriptions(&self) -> crate::subscription::SubscriptionRuntimeRead {
+        self.subscriptions.read(self.rtd_limits)
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        let subscriptions = self.subscriptions.lock().take();
+        let subscriptions = self.subscriptions.take();
         let result = if let Some(subscriptions) = subscriptions {
             crate::rtd::shutdown_subscriptions(subscriptions)
         } else {

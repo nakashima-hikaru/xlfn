@@ -404,8 +404,9 @@ impl<'state, 'scope, A: Addin> MainThreadContext<'state, 'scope, A> {
         Source: crate::RtdSource,
     {
         let subscriptions = self.runtime.subscriptions();
+        let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
-        match crate::rtd::observe_subscription(&subscriptions, prepared.key(), self.callbacks) {
+        match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.callbacks) {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)
@@ -553,6 +554,7 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions();
+        let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
         let source = Arc::new(TestSource {
             disconnected: Arc::clone(&disconnected),
