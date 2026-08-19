@@ -24,6 +24,16 @@ impl OperationGate {
     }
 
     #[inline]
+    pub(crate) fn is_closing(&self) -> bool {
+        (self.state.load(Ordering::Acquire) & CLOSING_BIT) != 0
+    }
+
+    #[inline]
+    pub(crate) fn begin_close(&self) {
+        self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+    }
+
+    #[inline]
     pub(crate) fn acquire(&self) -> XllResult<()> {
         self.state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
@@ -44,7 +54,7 @@ impl OperationGate {
     }
 
     pub(crate) fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
-        self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+        self.begin_close();
         TerminationWaitGuard { gate: self }
     }
 

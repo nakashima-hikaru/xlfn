@@ -8,7 +8,7 @@ pub(crate) struct SubscriptionRuntime {
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    pub(crate) runtime_gate: OperationGate,
+    pub(crate) runtime_gate: Arc<OperationGate>,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<ServerRuntime>>>,
     pub(crate) active_quota: Arc<Quota>,
@@ -47,7 +47,7 @@ impl SubscriptionRuntime {
             runtime_id,
             limits,
             module_ingress,
-            runtime_gate: OperationGate::new(),
+            runtime_gate: Arc::new(OperationGate::new()),
             catalog: Mutex::new(SubscriptionCatalog {
                 pending: HashMap::new(),
                 pending_topic_bytes: 0,
@@ -124,6 +124,8 @@ impl SubscriptionRuntime {
             generation,
             module_ingress: self.module_ingress,
             operation_gate: OperationGate::new(),
+            runtime_gate: Arc::clone(&self.runtime_gate),
+            queued_update_quota: Arc::clone(&self.queued_update_quota),
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
             next_update_sequence: AtomicU64::new(0),
@@ -996,5 +998,11 @@ impl SubscriptionConnection {
 impl Drop for SubscriptionConnection {
     fn drop(&mut self) {
         self.rollback();
+    }
+}
+
+impl Drop for SubscriptionRuntime {
+    fn drop(&mut self) {
+        self.runtime_gate.begin_close();
     }
 }

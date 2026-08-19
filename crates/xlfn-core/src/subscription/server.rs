@@ -172,6 +172,8 @@ pub(crate) struct ServerRuntime {
     pub(crate) generation: ServerGeneration,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(crate) operation_gate: OperationGate,
+    pub(crate) runtime_gate: Arc<OperationGate>,
+    pub(crate) queued_update_quota: Arc<Quota>,
     pub(crate) lifecycle: AtomicU8,
     pub(crate) publish_epoch: AtomicU64,
     pub(crate) next_update_sequence: AtomicU64,
@@ -263,8 +265,7 @@ impl ServerRuntime {
     }
 
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedServerOperation<'_>> {
-        let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
-        if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
+        if self.runtime_gate.is_closing() {
             return Err(XllError::Closing);
         }
 
@@ -314,8 +315,7 @@ impl ServerRuntime {
     }
 
     pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation> {
-        let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
-        if (parent.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) != 0 {
+        if self.runtime_gate.is_closing() {
             return Err(XllError::Closing);
         }
 
@@ -400,9 +400,8 @@ impl ServerRuntime {
 
             let is_new_update = !shard.pending[buffer].contains_key(&topic_id);
 
-            let parent = self.parent.upgrade().ok_or(XllError::Closing)?;
             let permit = if is_new_update {
-                Some(parent.queued_update_quota.try_acquire()?)
+                Some(self.queued_update_quota.try_acquire()?)
             } else {
                 None
             };

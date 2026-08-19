@@ -580,7 +580,7 @@ fn runtime_close_waits_for_inflight() {
         cf.store(true, Ordering::Release);
     });
 
-    while (runtime.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) == 0 {
+    while !runtime.runtime_gate.is_closing() {
         std::thread::yield_now();
     }
     assert!(!closed_flag.load(Ordering::Acquire));
@@ -616,7 +616,7 @@ fn inflight_register_waits_for_close() {
         cf.store(true, Ordering::Release);
     });
 
-    while (runtime.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) == 0 {
+    while !runtime.runtime_gate.is_closing() {
         std::thread::yield_now();
     }
     assert!(!closed_flag.load(Ordering::Acquire));
@@ -680,7 +680,7 @@ fn inflight_prepare_waits_for_close() {
         cf.store(true, Ordering::Release);
     });
 
-    while (runtime.runtime_gate.state.load(Ordering::Acquire) & CLOSING_BIT) == 0 {
+    while !runtime.runtime_gate.is_closing() {
         std::thread::yield_now();
     }
     assert!(!closed_flag.load(Ordering::Acquire));
@@ -1510,4 +1510,111 @@ fn server_notification_panic_records_cleanup_failure() {
     }));
     assert!(res.is_err());
     assert!(runtime.cleanup_result().is_err());
+}
+
+#[test]
+fn parent_runtime_drop_causes_fail_closed_on_server() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+
+    drop(runtime);
+
+    assert!(matches!(
+        server.inner.enter_operation(),
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(
+        server.inner.enter_owned_operation(),
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(
+        server
+            .inner
+            .publish(TopicId(1), ConnectionGeneration(1), RtdValue::Number(1.0)),
+        Err(XllError::Closing)
+    ));
+}
+
+#[test]
+fn runtime_close_and_publish_race() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let prep = runtime
+        .prepare(source, RtdTopic::single("race_test").unwrap())
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    let sink_clone = sink.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+    let start_rx = Arc::new(Mutex::new(start_rx));
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let sink = sink_clone.clone();
+        let ready_tx = ready_tx.clone();
+        let start_rx = Arc::clone(&start_rx);
+        handles.push(std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _ = start_rx.lock().recv();
+            for j in 0..100 {
+                let _ = sink.publish((i * 100 + j) as f64);
+            }
+        }));
+    }
+    drop(ready_tx);
+    for _ in 0..8 {
+        ready_rx.recv().unwrap();
+    }
+
+    let runtime_close = Arc::clone(&runtime);
+    let close_handle = std::thread::spawn(move || {
+        runtime_close.close().unwrap();
+    });
+
+    drop(start_tx);
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    close_handle.join().unwrap();
+
+    assert!(matches!(sink.publish(999.0), Err(XllError::Closing)));
+}
+
+#[test]
+fn quota_permit_survives_parent_drop_and_releases_on_drain() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let quota = Arc::clone(&runtime.queued_update_quota);
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+    let (source, sink, _) = publishing_source(Some(0.0f64));
+    let prep = runtime
+        .prepare(source, RtdTopic::single("quota_test").unwrap())
+        .unwrap();
+    let key = prep.key().clone();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), &key)
+        .unwrap();
+    conn.commit().unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(42.0).unwrap();
+    assert_eq!(quota.used.load(Ordering::Acquire), 1);
+
+    drop(runtime);
+    assert_eq!(quota.used.load(Ordering::Acquire), 1);
+
+    drop(sink);
+    drop(server);
+    assert_eq!(quota.used.load(Ordering::Acquire), 0);
 }
