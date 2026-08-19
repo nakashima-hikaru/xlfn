@@ -7,7 +7,7 @@ const WORKERS: usize = 4;
 const ITERATIONS_PER_THREAD: usize = 128;
 
 fn concurrent_spawns(c: &mut Criterion) {
-    let mut group = c.benchmark_group("async_spawn/concurrent");
+    let mut group = c.benchmark_group("async_spawn/per_iteration");
     group.measurement_time(Duration::from_secs(10));
 
     for threads in [1_usize, 4, 16, 32] {
