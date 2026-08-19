@@ -91,15 +91,13 @@ pub struct CacheEndpoint<Marker, K, V> {
 }
 
 pub struct BoundCacheEndpoint<Marker, K, V> {
-    cache: Arc<CalculationCache<K, V>>,
-    _marker: PhantomData<fn() -> Marker>,
+    cache: Arc<StoredCache<Marker, K, V>>,
 }
 
 impl<Marker, K, V> Clone for BoundCacheEndpoint<Marker, K, V> {
     fn clone(&self) -> Self {
         Self {
             cache: Arc::clone(&self.cache),
-            _marker: PhantomData,
         }
     }
 }
@@ -138,42 +136,74 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        self.cache.get_or_try_insert_with(key, weight, compute)
+        self.cache
+            .cache
+            .get_or_try_insert_with(key, weight, compute)
     }
 
     #[must_use]
     pub fn get(&self, key: &K) -> Option<Arc<V>> {
-        self.cache.get(key)
+        self.cache.cache.get(key)
     }
 }
 
-trait ErasedCache: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn advance_generation(&self) -> u64;
-    fn invalidate_before(&self, epoch: u64);
+struct StoredCache<Marker, K, V> {
+    cache: CalculationCache<K, V>,
+    _marker: PhantomData<fn() -> Marker>,
 }
 
-struct StoredCache<K, V>(Arc<CalculationCache<K, V>>);
+type ErasedCache = dyn Any + Send + Sync;
 
-impl<K, V> ErasedCache for StoredCache<K, V>
+#[derive(Clone, Copy)]
+struct CacheOps {
+    advance_generation: fn(&ErasedCache) -> u64,
+    invalidate_before: fn(&ErasedCache, u64),
+}
+
+fn advance_generation<Marker, K, V>(erased: &ErasedCache) -> u64
 where
+    Marker: 'static,
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+    let stored = erased
+        .downcast_ref::<StoredCache<Marker, K, V>>()
+        .expect("cache entry type invariant violated");
+    stored.cache.generation.advance()
+}
 
-    fn advance_generation(&self) -> u64 {
-        self.0.generation.advance()
-    }
+fn invalidate_before<Marker, K, V>(erased: &ErasedCache, epoch: u64)
+where
+    Marker: 'static,
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    let stored = erased
+        .downcast_ref::<StoredCache<Marker, K, V>>()
+        .expect("cache entry type invariant violated");
+    stored.cache.invalidate_before(epoch);
+}
 
-    fn invalidate_before(&self, epoch: u64) {
-        self.0.invalidate_before(epoch);
+impl CacheOps {
+    fn of<Marker, K, V>() -> Self
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        Self {
+            advance_generation: advance_generation::<Marker, K, V>,
+            invalidate_before: invalidate_before::<Marker, K, V>,
+        }
     }
 }
 
-type CacheMap = HashMap<(TypeId, &'static str), Arc<dyn ErasedCache>>;
+struct CacheEntry {
+    cache: Arc<ErasedCache>,
+    ops: CacheOps,
+}
+
+type CacheMap = HashMap<(TypeId, &'static str), CacheEntry>;
 
 pub struct CacheRegistry {
     weight_budget_per_endpoint: usize,
@@ -201,35 +231,37 @@ impl CacheRegistry {
         let cache_key = endpoint.key();
         let cache = {
             let caches = self.caches.read();
-            if let Some(stored) = caches.get(&cache_key) {
-                Self::downcast_cache::<K, V>(stored)?
+            if let Some(entry) = caches.get(&cache_key) {
+                Self::downcast_cache::<Marker, K, V>(entry)?
             } else {
                 drop(caches);
                 let mut caches = self.caches.write();
-                let stored = caches.entry(cache_key).or_insert_with(|| {
-                    Arc::new(StoredCache(Arc::new(CalculationCache::<K, V>::new(
-                        self.weight_budget_per_endpoint,
-                    )))) as Arc<dyn ErasedCache>
+                let entry = caches.entry(cache_key).or_insert_with(|| {
+                    let cache = Arc::new(StoredCache::<Marker, K, V> {
+                        cache: CalculationCache::new(self.weight_budget_per_endpoint),
+                        _marker: PhantomData,
+                    });
+                    let erased: Arc<ErasedCache> = cache;
+                    CacheEntry {
+                        cache: erased,
+                        ops: CacheOps::of::<Marker, K, V>(),
+                    }
                 });
-                Self::downcast_cache::<K, V>(stored)?
+                Self::downcast_cache::<Marker, K, V>(entry)?
             }
         };
-        Ok(BoundCacheEndpoint {
-            cache,
-            _marker: PhantomData,
-        })
+        Ok(BoundCacheEndpoint { cache })
     }
 
-    fn downcast_cache<K, V>(stored: &Arc<dyn ErasedCache>) -> XllResult<Arc<CalculationCache<K, V>>>
+    fn downcast_cache<Marker, K, V>(entry: &CacheEntry) -> XllResult<Arc<StoredCache<Marker, K, V>>>
     where
+        Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        stored
-            .as_any()
-            .downcast_ref::<StoredCache<K, V>>()
-            .map(|stored| Arc::clone(&stored.0))
-            .ok_or(XllError::Internal {
+        Arc::clone(&entry.cache)
+            .downcast::<StoredCache<Marker, K, V>>()
+            .map_err(|_| XllError::Internal {
                 diagnostic_id: crate::DiagnosticId::CACHE_TYPE,
             })
     }
@@ -239,11 +271,14 @@ impl CacheRegistry {
             let caches = self.caches.write();
             caches
                 .values()
-                .map(|cache| (Arc::clone(cache), cache.advance_generation()))
+                .map(|entry| {
+                    let epoch = (entry.ops.advance_generation)(entry.cache.as_ref());
+                    (Arc::clone(&entry.cache), entry.ops.invalidate_before, epoch)
+                })
                 .collect::<Vec<_>>()
         };
-        for (cache, epoch) in caches {
-            cache.invalidate_before(epoch);
+        for (cache, invalidate_before, epoch) in caches {
+            invalidate_before(cache.as_ref(), epoch);
         }
     }
 
@@ -970,5 +1005,57 @@ mod tests {
                 "stale stored epoch {stored:?}, current epoch {current}"
             );
         });
+    }
+
+    #[test]
+    fn same_endpoint_bound_twice_shares_single_arc_allocation() {
+        enum Marker {}
+        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SAME_ENDPOINT");
+        let registry = CacheRegistry::new(64);
+        let a = registry.bind(&ENDPOINT).unwrap();
+        let b = registry.bind(&ENDPOINT).unwrap();
+        assert!(Arc::ptr_eq(&a.cache, &b.cache));
+    }
+
+    #[test]
+    fn different_marker_types_create_distinct_storage_allocations() {
+        enum MarkerA {}
+        enum MarkerB {}
+        static ENDPOINT_A: CacheEndpoint<MarkerA, u32, u32> = CacheEndpoint::new("SHARED_ID");
+        static ENDPOINT_B: CacheEndpoint<MarkerB, u32, u32> = CacheEndpoint::new("SHARED_ID");
+        let registry = CacheRegistry::new(64);
+        let a = registry.bind(&ENDPOINT_A).unwrap();
+        let b = registry.bind(&ENDPOINT_B).unwrap();
+        assert_eq!(registry.endpoint_count(), 2);
+        a.get_or_try_insert(1, |_| 1, || Ok(10)).unwrap();
+        b.get_or_try_insert(1, |_| 1, || Ok(20)).unwrap();
+        assert_eq!(*a.get(&1).unwrap(), 10);
+        assert_eq!(*b.get(&1).unwrap(), 20);
+    }
+
+    #[test]
+    fn bound_endpoint_remains_usable_across_registry_clear() {
+        enum Marker {}
+        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SURVIVE_CLEAR");
+        let registry = CacheRegistry::new(64);
+        let endpoint = registry.bind(&ENDPOINT).unwrap();
+
+        assert_eq!(
+            *endpoint.get_or_try_insert(1, |_| 1, || Ok(100)).unwrap(),
+            100
+        );
+        assert_eq!(*endpoint.get(&1).unwrap(), 100);
+
+        registry.clear();
+
+        // Old generation value is missed
+        assert!(endpoint.get(&1).is_none());
+
+        // New value can be inserted in the new generation
+        assert_eq!(
+            *endpoint.get_or_try_insert(1, |_| 1, || Ok(200)).unwrap(),
+            200
+        );
+        assert_eq!(*endpoint.get(&1).unwrap(), 200);
     }
 }
