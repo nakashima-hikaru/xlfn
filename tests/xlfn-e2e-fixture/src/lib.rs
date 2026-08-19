@@ -104,12 +104,13 @@ impl RtdFixture {
 
 impl RtdSource for RtdFixture {
     type Value = i32;
+    type Subscription = RtdFixtureSubscription;
 
     fn subscribe(
         &self,
         topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
+    ) -> XllResult<Self::Subscription> {
         let key = topic
             .parts()
             .first()
@@ -121,10 +122,10 @@ impl RtdSource for RtdFixture {
             diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
             })?
             .insert(key.clone(), sink);
-        Ok(Box::new(RtdFixtureSubscription {
+        Ok(RtdFixtureSubscription {
             sinks: Arc::clone(&self.sinks),
             key,
-        }))
+        })
     }
 }
 

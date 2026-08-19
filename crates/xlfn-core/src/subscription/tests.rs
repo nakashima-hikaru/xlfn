@@ -4,7 +4,7 @@ use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-struct TestSubscription {
+pub(crate) struct TestSubscription {
     canceled: Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
 }
@@ -35,12 +35,13 @@ where
     F: Fn() -> XllResult<()> + Send + Sync + 'static,
 {
     type Value = T;
+    type Subscription = TestSubscription;
 
     fn subscribe(
         &self,
         _topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
+    ) -> XllResult<Self::Subscription> {
         if let Some(on_sub) = &self.on_subscribe {
             on_sub()?;
         }
@@ -48,10 +49,10 @@ where
             sink.publish(initial)?;
         }
         *self.sink_slot.lock() = Some(sink);
-        Ok(Box::new(TestSubscription {
+        Ok(TestSubscription {
             canceled: Arc::clone(&self.canceled),
             disconnected: Arc::clone(&self.disconnected),
-        }))
+        })
     }
 }
 
@@ -652,15 +653,16 @@ fn inflight_prepare_waits_for_close() {
     }
     impl RtdSource for DroppingSource {
         type Value = RtdValue;
+        type Subscription = TestSubscription;
         fn subscribe(
             &self,
             _: &RtdTopic,
             _: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            Ok(Box::new(TestSubscription {
+        ) -> XllResult<Self::Subscription> {
+            Ok(TestSubscription {
                 canceled: Arc::new(AtomicBool::new(false)),
                 disconnected: Arc::new(AtomicBool::new(false)),
-            }))
+            })
         }
     }
 
@@ -718,15 +720,16 @@ fn reentrant_drop_safety() {
 
     impl RtdSource for ReentrantSource {
         type Value = RtdValue;
+        type Subscription = TestSubscription;
         fn subscribe(
             &self,
             _: &RtdTopic,
             _: RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn RtdSubscription>> {
-            Ok(Box::new(TestSubscription {
+        ) -> XllResult<Self::Subscription> {
+            Ok(TestSubscription {
                 canceled: Arc::new(AtomicBool::new(false)),
                 disconnected: Arc::new(AtomicBool::new(false)),
-            }))
+            })
         }
     }
 
@@ -780,7 +783,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
     ));
 }
 
-struct FailingDisconnectSubscription;
+pub(crate) struct FailingDisconnectSubscription;
 // SAFETY: FailingDisconnectSubscription has no unsafe invariants to uphold.
 unsafe impl RtdSubscription for FailingDisconnectSubscription {
     fn request_cancel(&self) {}
@@ -1000,17 +1003,18 @@ struct DelayedSubscribeFailingSource {
 }
 impl RtdSource for DelayedSubscribeFailingSource {
     type Value = f64;
+    type Subscription = FailingDisconnectSubscription;
     fn subscribe(
         &self,
         _topic: &RtdTopic,
         _sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
+    ) -> XllResult<Self::Subscription> {
         if let Some(tx) = self.tx_entered.lock().unwrap().take() {
             let _ = tx.send(());
         }
         let rx = self.rx_close.lock();
         let _ = rx.recv();
-        Ok(Box::new(FailingDisconnectSubscription))
+        Ok(FailingDisconnectSubscription)
     }
 }
 
@@ -1631,7 +1635,7 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     assert_eq!(quota.used.load(Ordering::Acquire), 0);
 }
 
-struct SinkHoldingSubscription<T> {
+pub(crate) struct SinkHoldingSubscription<T> {
     _sink: RtdSink<T>,
 }
 
@@ -1647,12 +1651,13 @@ struct SinkCapturingSource;
 
 impl RtdSource for SinkCapturingSource {
     type Value = f64;
+    type Subscription = SinkHoldingSubscription<Self::Value>;
     fn subscribe(
         &self,
         _topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
-        Ok(Box::new(SinkHoldingSubscription { _sink: sink }))
+    ) -> XllResult<Self::Subscription> {
+        Ok(SinkHoldingSubscription { _sink: sink })
     }
 }
 

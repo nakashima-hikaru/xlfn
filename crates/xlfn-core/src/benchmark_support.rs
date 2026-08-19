@@ -1390,14 +1390,15 @@ impl<T: crate::IntoRtdValue + Clone + Send + Sync + 'static> crate::RtdSource
     for BenchmarkRtdSource<T>
 {
     type Value = T;
+    type Subscription = BenchmarkSubscription;
 
     fn subscribe(
         &self,
         _topic: &crate::RtdTopic,
         sink: crate::RtdSink<Self::Value>,
-    ) -> crate::XllResult<Box<dyn crate::RtdSubscription>> {
+    ) -> crate::XllResult<Self::Subscription> {
         *self.sink.lock() = Some(sink);
-        Ok(Box::new(BenchmarkSubscription))
+        Ok(BenchmarkSubscription)
     }
 }
 

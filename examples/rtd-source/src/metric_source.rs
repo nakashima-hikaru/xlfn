@@ -20,12 +20,13 @@ pub(crate) struct MetricSource {
 
 impl RtdSource for MetricSource {
     type Value = RtdValue;
+    type Subscription = MetricSubscription;
 
     fn subscribe(
         &self,
         topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
+    ) -> XllResult<Self::Subscription> {
         let [kind, symbol] = topic.parts() else {
             return Err(XllError::input(
                 "RTD topic",
@@ -61,9 +62,9 @@ impl RtdSource for MetricSource {
             }
         });
 
-        Ok(Box::new(MetricSubscription {
+        Ok(MetricSubscription {
             cancelled,
             worker: Some(worker),
-        }))
+        })
     }
 }

@@ -534,16 +534,17 @@ mod tests {
 
         impl crate::RtdSource for TestSource {
             type Value = f64;
+            type Subscription = TestSubscription;
 
             fn subscribe(
                 &self,
                 _topic: &crate::RtdTopic,
                 sink: crate::RtdSink<Self::Value>,
-            ) -> crate::XllResult<Box<dyn crate::RtdSubscription>> {
+            ) -> crate::XllResult<Self::Subscription> {
                 sink.publish(17.5)?;
-                Ok(Box::new(TestSubscription {
+                Ok(TestSubscription {
                     disconnected: Arc::clone(&self.disconnected),
-                }))
+                })
             }
         }
 

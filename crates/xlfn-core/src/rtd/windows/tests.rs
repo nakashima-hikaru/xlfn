@@ -1218,17 +1218,18 @@ impl DispatchTestSource {
 
 impl RtdSource for DispatchTestSource {
     type Value = f64;
+    type Subscription = DispatchTestSubscription;
 
     fn subscribe(
         &self,
         _topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>> {
+    ) -> XllResult<Self::Subscription> {
         sink.publish(12.5)?;
         self.sink.lock().replace(sink);
-        Ok(Box::new(DispatchTestSubscription {
+        Ok(DispatchTestSubscription {
             disconnected: Arc::clone(&self.disconnected),
-        }))
+        })
     }
 }
 

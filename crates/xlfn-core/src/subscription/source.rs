@@ -7,13 +7,26 @@ pub unsafe trait RtdSubscription: Send + 'static {
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
 }
 
+// SAFETY: Box<dyn RtdSubscription> forwards directly to the inner RtdSubscription implementation.
+unsafe impl RtdSubscription for Box<dyn RtdSubscription> {
+    fn request_cancel(&self) {
+        (**self).request_cancel();
+    }
+
+    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+        (*self).disconnect_and_wait()
+    }
+}
+
 pub trait RtdSource: Send + Sync + 'static {
     type Value: IntoRtdValue + Send + 'static;
+    type Subscription: RtdSubscription;
+
     fn subscribe(
         &self,
         topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
-    ) -> XllResult<Box<dyn RtdSubscription>>;
+    ) -> XllResult<Self::Subscription>;
 }
 
 pub struct RtdSink<T> {
@@ -50,13 +63,14 @@ where
     S: RtdSource,
 {
     fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>> {
-        RtdSource::subscribe(
+        let sub = RtdSource::subscribe(
             self,
             topic,
             RtdSink {
                 sink,
                 _value: PhantomData,
             },
-        )
+        )?;
+        Ok(Box::new(sub))
     }
 }

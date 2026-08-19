@@ -1589,14 +1589,15 @@ mod tests {
 
     impl crate::RtdSource for TraceSource {
         type Value = f64;
+        type Subscription = TraceSubscription;
 
         fn subscribe(
             &self,
             _topic: &crate::RtdTopic,
             sink: crate::RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn crate::RtdSubscription>> {
+        ) -> XllResult<Self::Subscription> {
             self.sink.lock().unwrap().replace(sink);
-            Ok(Box::new(TraceSubscription))
+            Ok(TraceSubscription)
         }
     }
 
@@ -2252,15 +2253,16 @@ mod tests {
 
     impl crate::RtdSource for OrderedSource {
         type Value = f64;
+        type Subscription = OrderedSubscription;
 
         fn subscribe(
             &self,
             _topic: &crate::RtdTopic,
             _sink: crate::RtdSink<Self::Value>,
-        ) -> XllResult<Box<dyn crate::RtdSubscription>> {
-            Ok(Box::new(OrderedSubscription {
+        ) -> XllResult<Self::Subscription> {
+            Ok(OrderedSubscription {
                 events: std::sync::Arc::clone(&self.events),
-            }))
+            })
         }
     }
 
