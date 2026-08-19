@@ -94,7 +94,8 @@ pub use error::{
     DiagnosticId, DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError, XllResult,
 };
 pub use execution::{
-    CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
+    CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers,
+    UdfResultKind,
 };
 pub use handle::{ExcelHandleObject, Handle, HandleAlias};
 #[doc(hidden)]

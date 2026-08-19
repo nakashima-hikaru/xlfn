@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: xlfn_core::value::ExcelParameter<'_>` is not satisfied
- --> tests/ui/fail/context_attribute_missing.rs:8:17
+error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, ()>: xlfn_core::value::ExcelParameter<'_>` is not satisfied
+ --> tests/ui/fail/context_attribute_missing.rs:7:17
   |
-8 | fn bad(context: MainThreadContext<'_, '_, State>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, State>`
+7 | fn bad(context: MainThreadContext<'_, '_, ()>) -> f64 {
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::context::MainThreadContext<'_, '_, ()>`
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             BoundedVarArgs<T, MAX>
@@ -14,7 +14,7 @@ error[E0277]: the trait bound `xlfn::context::MainThreadContext<'_, '_, State>: 
             Matrix<T>
             Option<T>
           and $N others
-  = note: required for `xlfn::context::MainThreadContext<'_, '_, State>` to implement `xlfn_core::value::ExcelParameter<'_>`
+  = note: required for `xlfn::context::MainThreadContext<'_, '_, ()>` to implement `xlfn_core::value::ExcelParameter<'_>`
 note: required by a bound in `xlfn::__private::assert_excel_parameter`
  --> $WORKSPACE/crates/xlfn-core/src/macro_support.rs
   |

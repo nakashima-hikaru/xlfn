@@ -42,10 +42,13 @@ pub struct ExampleAddin;
 impl Addin for ExampleAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<State, XllError> {
         Ok(State)
     }
+
+    fn udf_layers(_state: &State) -> Self::Layers {}
 }
 
 /// Adds two finite numbers.

@@ -8,10 +8,13 @@ pub struct TestAddin;
 impl Addin for TestAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(State)
     }
+
+    fn udf_layers(_: &Self::State) -> Self::Layers {}
 }
 
 #[derive(ExcelHandleObject)]
@@ -20,7 +23,7 @@ pub struct Dataset;
 type DatasetHandle<'call> = Handle<'call, Dataset>;
 type DatasetObject = Dataset;
 type FunctionResult<T> = XllResult<T>;
-type MainContext<'state, 'scope> = MainThreadContext<'state, 'scope, State>;
+type MainContext<'state, 'scope> = MainThreadContext<'state, 'scope, TestAddin>;
 
 mod reexported {
     pub use xlfn::context::ThreadSafeContext as WorkerContext;
@@ -80,7 +83,7 @@ fn alias_context(#[excel_context(main_thread)] context: MainContext<'_, '_>) -> 
 
 #[excel_function(name = "TEST.CONTEXT.REEXPORT", thread_safe)]
 fn reexported_context(
-    #[excel_context(thread_safe)] context: reexported::WorkerContext<'_, State>,
+    #[excel_context(thread_safe)] context: reexported::WorkerContext<'_, TestAddin>,
 ) -> f64 {
     let _ = context.state();
     1.0

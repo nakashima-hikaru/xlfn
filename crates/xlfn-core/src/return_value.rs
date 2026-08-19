@@ -374,8 +374,8 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     /// Creates return services for one generated synchronous UDF call.
     ///
-    pub fn for_call<S>(
-        runtime: &'call Runtime<S>,
+    pub fn for_call<A: crate::Addin>(
+        runtime: &'call Runtime<A>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
         scope: &'scope crate::CallScope<'scope>,
@@ -854,8 +854,9 @@ impl Drop for AsyncReturnPointer {
 /// return-admission gate.
 #[doc(hidden)]
 #[must_use]
-pub fn ffi_boundary<S, F, T>(runtime: &Runtime<S>, operation: F) -> *mut XLOPER12
+pub fn ffi_boundary<A, F, T>(runtime: &Runtime<A>, operation: F) -> *mut XLOPER12
 where
+    A: crate::Addin,
     F: FnOnce() -> XllResult<T>,
     T: ExcelReturn,
 {
@@ -904,7 +905,7 @@ where
 /// wrappers, async calculation lifecycle exports, and similar void-returning
 /// Excel callbacks.
 #[doc(hidden)]
-pub fn ffi_boundary_void<S>(runtime: &Runtime<S>, operation: impl FnOnce()) {
+pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
@@ -927,14 +928,15 @@ pub fn ffi_boundary_void<S>(runtime: &Runtime<S>, operation: impl FnOnce()) {
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
 #[must_use]
-pub fn udf_boundary_named<S, F, T>(
-    runtime: &Runtime<S>,
+pub fn udf_boundary_named<A, F, T>(
+    runtime: &Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
 ) -> *mut XLOPER12
 where
-    F: FnOnce(&S) -> XllResult<T>,
+    A: crate::Addin,
+    F: FnOnce(&A::State) -> XllResult<T>,
     T: ExcelReturn,
 {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
@@ -975,16 +977,17 @@ where
     result
 }
 
-fn udf_boundary_named_inner<S, F, T>(
-    runtime: &Runtime<S>,
-    guard: &crate::runtime::CallGuard<'_, S>,
+fn udf_boundary_named_inner<A, F, T>(
+    runtime: &Runtime<A>,
+    guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
 ) -> *mut XLOPER12
 where
-    F: FnOnce(&S) -> XllResult<T>,
+    A: crate::Addin,
+    F: FnOnce(&A::State) -> XllResult<T>,
     T: ExcelReturn,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
@@ -1010,14 +1013,15 @@ where
 }
 
 #[inline]
-fn udf_boundary_uninstrumented<S, F, T>(
-    guard: &crate::runtime::CallGuard<'_, S>,
+fn udf_boundary_uninstrumented<A, F, T>(
+    guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     operation: F,
 ) -> *mut XLOPER12
 where
-    F: FnOnce(&S) -> XllResult<T>,
+    A: crate::Addin,
+    F: FnOnce(&A::State) -> XllResult<T>,
     T: ExcelReturn,
 {
     let prepared = catch_unwind(AssertUnwindSafe(|| {
@@ -1036,24 +1040,27 @@ where
     }
 }
 
-struct InstrumentedUdfContext<'a> {
-    instrumentation: crate::execution::InstrumentationPlan<'a>,
+struct InstrumentedUdfContext<A: crate::Addin> {
+    instrumentation: crate::execution::InstrumentationPlan<A>,
     concurrent_calls: usize,
 }
 
-fn udf_boundary_instrumented<'a, S, F, T>(
-    runtime: &Runtime<S>,
-    guard: &'a crate::runtime::CallGuard<'_, S>,
+fn udf_boundary_instrumented<A, F, T>(
+    runtime: &Runtime<A>,
+    guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
-    context: InstrumentedUdfContext<'a>,
+    context: InstrumentedUdfContext<A>,
 ) -> *mut XLOPER12
 where
-    F: FnOnce(&S) -> XllResult<T>,
+    A: crate::Addin,
+    F: FnOnce(&A::State) -> XllResult<T>,
     T: ExcelReturn,
 {
+    use crate::execution::{UdfLayerGuard, UdfLayers};
+
     let InstrumentedUdfContext {
         instrumentation,
         concurrent_calls,
@@ -1070,7 +1077,7 @@ where
         concurrent_calls,
     };
 
-    let layers = if !instrumentation.layers().is_empty() {
+    let layers = if instrumentation.has_layers() {
         let layer_metadata = CallMetadata {
             udf_id,
             excel_name,
@@ -1079,7 +1086,7 @@ where
             started_at: std::time::SystemTime::now(),
             concurrent_calls,
         };
-        match crate::execution::EnteredLayers::enter(instrumentation.layers(), &layer_metadata) {
+        match guard.layers().enter(&layer_metadata) {
             Ok(layers) => Some(layers),
             Err(error) => {
                 crate::diagnostics::report_no_unwind(udf_id, &error);
@@ -1288,7 +1295,7 @@ pub(crate) fn live_return_blocks() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExcelError, Matrix};
+    use crate::{Addin, ExcelError, Matrix, OpenContext};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
@@ -1319,7 +1326,7 @@ mod tests {
     fn open_test_runtime() -> Runtime<()> {
         let runtime = Runtime::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
         runtime
@@ -1619,9 +1626,9 @@ mod tests {
         }
 
         let _test = test_lock();
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime::<()>::new());
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let (converting_tx, converting_rx) = mpsc::sync_channel(1);
@@ -1656,9 +1663,9 @@ mod tests {
     #[test]
     fn close_waits_until_excel_releases_a_framework_return() {
         let _test = test_lock();
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime::<()>::new());
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let pointer = ffi_boundary(&runtime, || Ok(7.0));
@@ -1684,9 +1691,9 @@ mod tests {
     #[test]
     fn closed_return_admission_never_publishes_another_dll_free_block() {
         let _test = test_lock();
-        let runtime = Runtime::new();
+        let runtime = Runtime::<()>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert!(runtime.begin_close());
 
@@ -1714,20 +1721,19 @@ mod tests {
         }
 
         impl crate::UdfLayer for Recorder {
-            fn enter(
-                &self,
-                metadata: &crate::CallMetadata,
-            ) -> XllResult<Box<dyn crate::UdfLayerGuard>> {
-                Ok(Box::new(RecorderGuard {
+            type Guard = RecorderGuard;
+
+            fn enter(&self, metadata: &crate::CallMetadata) -> XllResult<Self::Guard> {
+                Ok(RecorderGuard {
                     events: Arc::clone(&self.0),
                     udf_id: metadata.udf_id.to_owned(),
                     concurrent_calls: metadata.concurrent_calls,
-                }))
+                })
             }
         }
 
         impl crate::UdfLayerGuard for RecorderGuard {
-            fn exit(self: Box<Self>, outcome: &crate::CallOutcome<'_>) {
+            fn exit(self, outcome: &crate::CallOutcome<'_>) {
                 self.events.lock().unwrap().push((
                     self.udf_id.clone(),
                     outcome.result,
@@ -1736,11 +1742,26 @@ mod tests {
             }
         }
 
+        struct LayerTestAddin;
+        impl Addin for LayerTestAddin {
+            type State = ();
+            type Error = XllError;
+            type Layers = (Recorder,);
+
+            fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+                unreachable!()
+            }
+
+            fn udf_layers(_: &Self::State) -> Self::Layers {
+                unreachable!()
+            }
+        }
+
         let _test = test_lock();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runtime = Runtime::new();
+        let runtime = Runtime::<LayerTestAddin>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), vec![Box::new(Recorder(Arc::clone(&events)))]);
+        runtime.publish((), (Recorder(Arc::clone(&events)),));
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let pointer = udf_boundary_named(&runtime, "test_conversion", "TEST.CONVERSION", |_| {

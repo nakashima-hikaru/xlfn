@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn forgetting_a_borrowed_context_does_not_keep_callbacks_open() {
         let escaped = crate::with_excel_call_scope(|scope| {
-            let context = crate::MacroSheetContext::new(&(), scope);
+            let context = crate::MacroSheetContext::<()>::new(&(), scope);
             std::mem::forget(context);
             scope.callbacks().shared_handle()
         });

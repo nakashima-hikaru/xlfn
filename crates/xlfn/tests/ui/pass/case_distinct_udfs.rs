@@ -8,10 +8,13 @@ struct CaseAddin;
 impl Addin for CaseAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(State)
     }
+
+    fn udf_layers(_: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(id = "lower_foo", name = "TEST.LOWER")]

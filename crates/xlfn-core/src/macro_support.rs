@@ -50,28 +50,28 @@ pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallFrame<'ca
 
 /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
 #[doc(hidden)]
-pub fn thread_safe_context<'state, S>(
-    state: &'state S,
-) -> crate::addin::ThreadSafeContext<'state, S> {
+pub fn thread_safe_context<'state, A: Addin>(
+    state: &'state A::State,
+) -> crate::addin::ThreadSafeContext<'state, A> {
     crate::addin::ThreadSafeContext::new(state)
 }
 
 /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
 #[doc(hidden)]
-pub fn main_thread_context<'state, 'call, S>(
+pub fn main_thread_context<'state, 'call, A: Addin>(
     frame: &CallFrame<'call>,
-    state: &'state S,
-    runtime: &'state MacroRuntime<S>,
-) -> crate::addin::MainThreadContext<'state, 'call, S> {
+    state: &'state A::State,
+    runtime: &'state MacroRuntime<A>,
+) -> crate::addin::MainThreadContext<'state, 'call, A> {
     crate::addin::MainThreadContext::new(state, runtime.runtime(), frame.scope)
 }
 
 /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
 #[doc(hidden)]
-pub fn macro_sheet_context<'state, 'call, S>(
+pub fn macro_sheet_context<'state, 'call, A: Addin>(
     frame: &CallFrame<'call>,
-    state: &'state S,
-) -> crate::addin::MacroSheetContext<'state, 'call, S> {
+    state: &'state A::State,
+) -> crate::addin::MacroSheetContext<'state, 'call, A> {
     crate::addin::MacroSheetContext::new(state, frame.scope)
 }
 
@@ -81,20 +81,20 @@ pub use crate::runtime::GenerationLease;
 /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
 #[cfg(feature = "async")]
 #[doc(hidden)]
-pub fn async_context<S>(
-    lease: crate::runtime::GenerationLease<S>,
+pub fn async_context<A: Addin>(
+    lease: crate::runtime::GenerationLease<A>,
     cancellation: &CancellationToken,
-) -> crate::addin::AsyncContext<S> {
+) -> crate::addin::AsyncContext<A> {
     crate::addin::AsyncContext::new(lease, cancellation.clone())
 }
 
 /// Opaque wrapper around the add-in [`Runtime`] for generated code.
 #[doc(hidden)]
-pub struct MacroRuntime<S> {
-    runtime: Runtime<S>,
+pub struct MacroRuntime<A: Addin> {
+    runtime: Runtime<A>,
 }
 
-impl<S> MacroRuntime<S> {
+impl<A: Addin> MacroRuntime<A> {
     #[doc(hidden)]
     pub const fn new() -> Self {
         Self {
@@ -103,12 +103,12 @@ impl<S> MacroRuntime<S> {
     }
 
     #[doc(hidden)]
-    pub const fn runtime(&self) -> &Runtime<S> {
+    pub const fn runtime(&self) -> &Runtime<A> {
         &self.runtime
     }
 }
 
-impl<S> Default for MacroRuntime<S> {
+impl<A: Addin> Default for MacroRuntime<A> {
     fn default() -> Self {
         Self::new()
     }
@@ -217,7 +217,7 @@ impl FunctionRegistration {
 /// Opens the add-in by registering all collected functions and initializing state.
 #[doc(hidden)]
 pub fn open_generated_addin<A: Addin>(
-    runtime: &'static MacroRuntime<A::State>,
+    runtime: &'static MacroRuntime<A>,
     addin_id: &'static str,
     _display_name: &'static str,
     default_category: &'static str,
@@ -241,7 +241,7 @@ pub fn open_generated_addin<A: Addin>(
 
 /// Closes the add-in and unregisters all functions.
 #[doc(hidden)]
-pub fn close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A::State>) -> i32 {
+pub fn close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
     close_addin::<A>(runtime.runtime())
 }
 
@@ -257,8 +257,8 @@ pub unsafe fn free_generated_return(pointer: *mut xlfn_sys::XLOPER12) {
 /// Supplies Add-in metadata to Excel's Add-in Manager.
 #[doc(hidden)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub unsafe fn addin_manager_info<S>(
-    runtime: &'static MacroRuntime<S>,
+pub unsafe fn addin_manager_info<A: Addin>(
+    runtime: &'static MacroRuntime<A>,
     display_name: &'static str,
     action: *mut xlfn_sys::XLOPER12,
 ) -> *mut xlfn_sys::XLOPER12 {
@@ -284,20 +284,20 @@ pub struct CallFrame<'call> {
 
 impl<'call> CallFrame<'call> {
     #[doc(hidden)]
-    pub fn new<R: ExcelReturn, S>(
-        runtime: &'call Runtime<S>,
+    pub fn new<R: ExcelReturn, A: Addin>(
+        runtime: &'call Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
-            arguments: ArgumentContext::for_return::<R, S>(runtime, scope),
+            arguments: ArgumentContext::for_return::<R, A>(runtime, scope),
             scope,
         }
     }
 
     #[doc(hidden)]
-    pub fn return_context<S>(
+    pub fn return_context<A: Addin>(
         &mut self,
-        runtime: &'call MacroRuntime<S>,
+        runtime: &'call MacroRuntime<A>,
         udf_id: &'static str,
     ) -> ReturnContext<'call, 'call> {
         let inputs = self.arguments.finish();
@@ -391,18 +391,18 @@ pub unsafe fn argument_presence(
 
 /// Top-level synchronous UDF execution boundary.
 #[doc(hidden)]
-pub fn sync_udf<S: 'static, R: ExcelReturn, F>(
-    runtime: &'static MacroRuntime<S>,
+pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
+    runtime: &'static MacroRuntime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
     execute: F,
 ) -> *mut xlfn_sys::XLOPER12
 where
-    F: for<'call> FnOnce(&S, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
+    F: for<'call> FnOnce(&A::State, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
 {
     udf_boundary_named(runtime.runtime(), udf_id, excel_name, |state| {
         with_excel_call_scope(|scope| {
-            let mut frame = CallFrame::new::<R, S>(runtime.runtime(), scope);
+            let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
             execute(state, &mut frame)
         })
     })
@@ -412,17 +412,17 @@ where
 #[cfg(feature = "async")]
 #[doc(hidden)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub unsafe fn async_udf<S, R, F, Fut>(
-    runtime: &'static MacroRuntime<S>,
+pub unsafe fn async_udf<A, R, F, Fut>(
+    runtime: &'static MacroRuntime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
     async_handle: *mut xlfn_sys::XLOPER12,
     execute: F,
 ) where
-    S: Send + Sync + 'static,
+    A: Addin,
     R: ExcelReturn + Send + 'static,
     F: for<'call> FnOnce(
-        crate::runtime::GenerationLease<S>,
+        crate::runtime::GenerationLease<A>,
         &CancellationToken,
         &mut CallFrame<'call>,
     ) -> XllResult<Fut>,
@@ -437,7 +437,7 @@ pub unsafe fn async_udf<S, R, F, Fut>(
             async_handle,
             |lease, cancellation| {
                 with_excel_call_scope(|scope| {
-                    let mut frame = CallFrame::new::<R, S>(runtime.runtime(), scope);
+                    let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
                     let future = execute(lease, &cancellation, &mut frame)?;
                     let _ = frame.arguments.finish();
                     Ok(future)
@@ -450,7 +450,7 @@ pub unsafe fn async_udf<S, R, F, Fut>(
 /// Cancels calculation in the async runtime.
 #[cfg(feature = "async")]
 #[doc(hidden)]
-pub fn cancel_async_calculation<S>(runtime: &'static MacroRuntime<S>) {
+pub fn cancel_async_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
     ffi_boundary_void(runtime.runtime(), || {
         crate::async_udf::cancel_async_calculation(runtime.runtime());
     });
@@ -459,7 +459,7 @@ pub fn cancel_async_calculation<S>(runtime: &'static MacroRuntime<S>) {
 /// Ends calculation in the async runtime.
 #[cfg(feature = "async")]
 #[doc(hidden)]
-pub fn end_async_calculation<S>(runtime: &'static MacroRuntime<S>) {
+pub fn end_async_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
     ffi_boundary_void(runtime.runtime(), || {
         crate::async_udf::end_async_calculation(runtime.runtime());
     });

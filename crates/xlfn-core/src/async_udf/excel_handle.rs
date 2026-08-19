@@ -111,22 +111,22 @@ impl Drop for OwnedAsyncHandle {
     }
 }
 
-pub(crate) struct AsyncCompletionTracker {
+pub(crate) struct AsyncCompletionTracker<G: crate::execution::UdfLayerGuard> {
     pub(crate) udf_id: &'static str,
     pub(crate) excel_name: &'static str,
     pub(crate) call_id: CallId,
     pub(crate) calculation_id: crate::execution::CalculationId,
     pub(crate) concurrent_calls: usize,
     pub(crate) timer: crate::execution::CallTimer,
-    pub(crate) layers: Option<crate::execution::EnteredLayers>,
+    pub(crate) layers: Option<G>,
     pub(crate) completed: bool,
 }
 
-impl AsyncCompletionTracker {
+impl<G: crate::execution::UdfLayerGuard> AsyncCompletionTracker<G> {
     pub(crate) fn new(
         metadata: &CallMetadata,
         timer: crate::execution::CallTimer,
-        layers: crate::execution::EnteredLayers,
+        layers: Option<G>,
     ) -> Self {
         Self {
             udf_id: metadata.udf_id,
@@ -135,7 +135,7 @@ impl AsyncCompletionTracker {
             calculation_id: metadata.calculation_id,
             concurrent_calls: metadata.concurrent_calls,
             timer,
-            layers: Some(layers),
+            layers,
             completed: false,
         }
     }
@@ -166,7 +166,7 @@ impl AsyncCompletionTracker {
     }
 }
 
-impl Drop for AsyncCompletionTracker {
+impl<G: crate::execution::UdfLayerGuard> Drop for AsyncCompletionTracker<G> {
     fn drop(&mut self) {
         if !self.completed {
             let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);

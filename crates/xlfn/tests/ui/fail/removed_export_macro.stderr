@@ -3,3 +3,12 @@ error[E0433]: cannot find `export` in `xlfn`
    |
 16 | xlfn::export!(OldExportAddin);
    |       ^^^^^^ could not find `export` in `xlfn`
+
+error[E0046]: not all trait items implemented, missing: `Layers`, `udf_layers`
+ --> tests/ui/fail/removed_export_macro.rs:7:1
+  |
+7 | impl Addin for OldExportAddin {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `Layers`, `udf_layers` in implementation
+  |
+  = help: implement the missing item: `type Layers = /* Type */;`
+  = help: implement the missing item: `fn udf_layers(_: &<Self as xlfn::addin::Addin>::State) -> <Self as xlfn::addin::Addin>::Layers { todo!() }`

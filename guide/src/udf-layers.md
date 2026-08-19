@@ -6,14 +6,13 @@ Import from:
 
 ```rust
 use xlfn::advanced::execution::{
-    CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfResultKind,
+    CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers, UdfResultKind,
 };
 ```
 
 ## Implement a layer
 
 ```rust
-use std::sync::Arc;
 use std::time::Instant;
 
 struct MetricsLayer;
@@ -24,16 +23,18 @@ struct MetricsGuard {
 }
 
 impl UdfLayer for MetricsLayer {
-    fn enter(&self, metadata: &CallMetadata) -> XllResult<Box<dyn UdfLayerGuard>> {
-        Ok(Box::new(MetricsGuard {
+    type Guard = MetricsGuard;
+
+    fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guard> {
+        Ok(MetricsGuard {
             udf_id: metadata.udf_id,
             started: Instant::now(),
-        }))
+        })
     }
 }
 
 impl UdfLayerGuard for MetricsGuard {
-    fn exit(self: Box<Self>, outcome: &CallOutcome<'_>) {
+    fn exit(self, outcome: &CallOutcome<'_>) {
         tracing::info!(
             udf = self.udf_id,
             result = ?outcome.result,
@@ -45,24 +46,41 @@ impl UdfLayerGuard for MetricsGuard {
 }
 ```
 
-Register layers from the add-in:
+Register layers from the add-in using static tuple composition:
 
 ```rust
 impl Addin for DeskTools {
     type State = State;
     type Error = XllError;
+    type Layers = (MetricsLayer,);
 
     fn open(_: &OpenContext) -> XllResult<State> {
         Ok(State::new())
     }
 
-    fn udf_layers(_: &State) -> Vec<Box<dyn UdfLayer>> {
-        vec![Box::new(MetricsLayer)]
+    fn udf_layers(_: &State) -> Self::Layers {
+        (MetricsLayer,)
     }
 }
 ```
 
-The vector order is enter order. Guards exit in reverse order, like nested middleware.
+Add-ins without layers specify `type Layers = ();`:
+
+```rust
+impl Addin for SimpleAddin {
+    type State = State;
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_: &OpenContext) -> XllResult<State> {
+        Ok(State::new())
+    }
+
+    fn udf_layers(_: &State) -> Self::Layers {}
+}
+```
+
+Multiple layers are composed as tuples `(LayerA, LayerB, LayerC)` (up to 16 layers). The tuple element order is enter order (left-to-right). Guards exit in reverse order (right-to-left), like nested middleware, with static dispatch and zero heap allocations.
 
 ## Metadata
 
@@ -100,15 +118,17 @@ struct ConcurrencyLimit {
 struct NoopGuard;
 
 impl UdfLayerGuard for NoopGuard {
-    fn exit(self: Box<Self>, _: &CallOutcome<'_>) {}
+    fn exit(self, _: &CallOutcome<'_>) {}
 }
 
 impl UdfLayer for ConcurrencyLimit {
-    fn enter(&self, metadata: &CallMetadata) -> XllResult<Box<dyn UdfLayerGuard>> {
+    type Guard = NoopGuard;
+
+    fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guard> {
         if metadata.concurrent_calls > self.maximum {
             return Err(XllError::Overloaded);
         }
-        Ok(Box::new(NoopGuard))
+        Ok(NoopGuard)
     }
 }
 ```

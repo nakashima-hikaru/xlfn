@@ -20,12 +20,15 @@ pub struct FixtureAddin;
 impl Addin for FixtureAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(State {
             rtd: Arc::new(RtdFixture::default()),
         })
     }
+
+    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[derive(ExcelHandleObject)]
@@ -148,7 +151,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
 
 #[excel_function(name = "FRAMEWORK.RTD.FIXTURE")]
 pub fn rtd_fixture(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, FixtureAddin>,
     topic_id: i32,
 ) -> XllResult<RtdValue> {
     if !(1..=3).contains(&topic_id) {
@@ -165,7 +168,7 @@ pub fn rtd_fixture(
 
 #[excel_function(name = "FRAMEWORK.RTD.PUBLISH", thread_safe, volatile)]
 pub fn rtd_publish(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
     topic_count: i32,
 ) -> XllResult<i32> {
     context.state().rtd.publish_batch(topic_count)
@@ -173,7 +176,7 @@ pub fn rtd_publish(
 
 #[excel_function(name = "FRAMEWORK.RTD.ACTIVE", thread_safe, volatile)]
 pub fn rtd_active(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
 ) -> XllResult<i32> {
     context.state().rtd.active_topics()
 }

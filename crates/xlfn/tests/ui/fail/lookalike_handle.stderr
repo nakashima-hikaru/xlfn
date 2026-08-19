@@ -23,8 +23,8 @@ help: the trait `IntoExcel` is not implemented for `Handle`
 note: required by a bound in `xlfn::__private::sync_udf`
  --> $WORKSPACE/crates/xlfn-core/src/macro_support.rs
   |
-  | pub fn sync_udf<S: 'static, R: ExcelReturn, F>(
-  |                                ^^^^^^^^^^^ required by this bound in `sync_udf`
+  | pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
+  |                              ^^^^^^^^^^^ required by this bound in `sync_udf`
 
 error[E0277]: the trait bound `Handle: xlfn::__private::ExcelReturn` is not satisfied
  --> tests/ui/fail/lookalike_handle.rs:7:1

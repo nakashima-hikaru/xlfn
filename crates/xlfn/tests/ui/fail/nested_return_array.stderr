@@ -12,8 +12,8 @@ help: the trait `xlfn::__private::ExcelReturn` is implemented for `xlfn::value::
 note: required by a bound in `xlfn::__private::sync_udf`
  --> $WORKSPACE/crates/xlfn-core/src/macro_support.rs
   |
-  | pub fn sync_udf<S: 'static, R: ExcelReturn, F>(
-  |                                ^^^^^^^^^^^ required by this bound in `sync_udf`
+  | pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
+  |                              ^^^^^^^^^^^ required by this bound in `sync_udf`
 
 error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::__private::MainThreadReturn` is not satisfied
  --> tests/ui/fail/nested_return_array.rs:6:13

@@ -1014,7 +1014,7 @@ fn expand_excel_addin(
         #gating
         #[doc(hidden)]
         static __XLFN_RUNTIME: #krate::__private::MacroRuntime<
-            <#ident as #krate::addin::Addin>::State,
+            #ident,
         > = #krate::__private::MacroRuntime::new();
 
         #gating

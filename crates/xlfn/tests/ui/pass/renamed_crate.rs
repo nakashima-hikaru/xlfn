@@ -20,10 +20,13 @@ pub struct RenamedAddin;
 impl Addin for RenamedAddin {
     type State = ();
     type Error = XllError;
+    type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(())
     }
+
+    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(crate = "my_xlfn")]

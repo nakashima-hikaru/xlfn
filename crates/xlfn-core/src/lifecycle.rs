@@ -8,7 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[must_use]
 pub fn open_addin<A>(
-    runtime: &Runtime<A::State>,
+    runtime: &Runtime<A>,
     addin_id: &AddinId,
     version: &'static str,
     target: &'static str,
@@ -103,8 +103,8 @@ fn write_startup_log(addin_id: &AddinId, message: &str) {
     let _ = (addin_id, message);
 }
 
-fn retry_metadata_debt<S>(
-    runtime: &Runtime<S>,
+fn retry_metadata_debt<A: Addin>(
+    runtime: &Runtime<A>,
     callbacks: &mut HostCallbackSession,
 ) -> XllResult<()> {
     let debts = runtime.metadata_debt();
@@ -134,7 +134,7 @@ fn retry_metadata_debt<S>(
 }
 
 fn open_addin_inner<A>(
-    runtime: &Runtime<A::State>,
+    runtime: &Runtime<A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     callbacks: &mut HostCallbackSession,
@@ -176,8 +176,8 @@ where
 }
 
 fn rollback_active_open<A>(
-    runtime: &Runtime<A::State>,
-    attempt: Option<&mut crate::runtime::OpenAttemptGuard<'_, A::State>>,
+    runtime: &Runtime<A>,
+    attempt: Option<&mut crate::runtime::OpenAttemptGuard<'_, A>>,
     callbacks: &mut HostCallbackSession,
 ) where
     A: Addin,
@@ -209,7 +209,7 @@ fn rollback_active_open<A>(
     }
 }
 
-fn initialize_addin<A>(runtime: &Runtime<A::State>, context: &OpenContext) -> XllResult<()>
+fn initialize_addin<A>(runtime: &Runtime<A>, context: &OpenContext) -> XllResult<()>
 where
     A: Addin,
 {
@@ -229,7 +229,7 @@ where
 
     let layers_result = catch_unwind(AssertUnwindSafe(|| A::udf_layers(opening.state())));
     let layers = match layers_result {
-        Ok(layers) => layers.into_boxed_slice(),
+        Ok(layers) => layers,
         Err(payload) => {
             if let Err((_, opening)) = runtime.restore_opening_generation(opening) {
                 std::mem::forget(opening);
@@ -247,7 +247,7 @@ where
 }
 
 #[cfg(feature = "async")]
-fn async_worker_count<A>(runtime: &Runtime<A::State>) -> XllResult<usize>
+fn async_worker_count<A>(runtime: &Runtime<A>) -> XllResult<usize>
 where
     A: Addin,
 {
@@ -275,8 +275,8 @@ where
     Ok(count)
 }
 
-fn retain_transaction_error<S>(
-    runtime: &Runtime<S>,
+fn retain_transaction_error<A: Addin>(
+    runtime: &Runtime<A>,
     error: crate::registration::RegistrationTransactionError,
 ) -> XllError {
     runtime.retain_registration_debt(error.pending_registrations);
@@ -322,7 +322,7 @@ impl OpenRollbackOutcome {
 }
 
 fn rollback_open<A>(
-    runtime: &Runtime<A::State>,
+    runtime: &Runtime<A>,
     callbacks: &mut HostCallbackSession,
 ) -> OpenRollbackOutcome
 where
@@ -584,7 +584,7 @@ where
 }
 
 #[must_use]
-pub fn close_addin<A>(runtime: &Runtime<A::State>) -> i32
+pub fn close_addin<A>(runtime: &Runtime<A>) -> i32
 where
     A: Addin,
 {
@@ -646,7 +646,7 @@ where
     }
 }
 
-fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession) {
+fn emergency_close<A: Addin>(runtime: &Runtime<A>, _callbacks: &mut HostCallbackSession) {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_close_attempt) = runtime.begin_final_close() else {
@@ -699,18 +699,18 @@ fn emergency_close<S>(runtime: &Runtime<S>, _callbacks: &mut HostCallbackSession
     }
 }
 
-enum CloseSuccess<'runtime, S> {
+enum CloseSuccess<'runtime, A: Addin> {
     AlreadyClosed,
     Closed {
         witness: crate::runtime::ClosedWitness,
-        close_attempt: crate::runtime::CloseAttemptGuard<'runtime, S>,
+        close_attempt: crate::runtime::CloseAttemptGuard<'runtime, A>,
     },
 }
 
 fn close_addin_inner<'runtime, A>(
-    runtime: &'runtime Runtime<A::State>,
+    runtime: &'runtime Runtime<A>,
     callbacks: &mut HostCallbackSession,
-) -> CloseSuccess<'runtime, A::State>
+) -> CloseSuccess<'runtime, A>
 where
     A: Addin,
 {
@@ -935,6 +935,7 @@ where
                                 &error,
                             );
                         }
+                        drop(generation.layers);
                         addin_state = Some(generation.state);
                     }
                     Err(generation) => {
@@ -978,27 +979,29 @@ where
         // before advancing the state milestone.
     }
 
+    let addin_quiesced = crate::shutdown::AddinQuiesced::new();
+    let generation_reclaimed = crate::shutdown::GenerationReclaimed::new();
+
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_generation_unique();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_addin_quiesced();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
+    {
+        runtime.record_ghost_generation_unique();
+        runtime.record_ghost_addin_quiesced();
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
+    }
 
     let handles_quiescent = runtime.close_handles().unwrap_or_else(|error| {
         fatal_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
-            "xlAutoClose handle shutdown",
+            "xlAutoClose handle table shutdown",
             &error,
         )
     });
+
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HandlesDrained);
 
-    let addin_quiesced = crate::shutdown::AddinQuiesced::new();
-    let generation_reclaimed = crate::shutdown::GenerationReclaimed::new();
-    if let Some(mut state) = addin_state {
+    if let Some(mut state) = addin_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             let mut reporter = crate::CleanupReporter::new(&mut report);
             A::cleanup(&mut state, &mut reporter);
@@ -1018,28 +1021,31 @@ where
             );
         }
     }
-
     for issue in report.issues() {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
         report_cleanup_issue(issue);
     }
 
-    let diagnostics = crate::diagnostics::close_diagnostic_router().unwrap_or_else(|error| {
-        let error = error.into_xll_error();
-        fatal_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
-            "xlAutoClose diagnostic shutdown",
-            &error,
-        )
-    });
-    for issue in &diagnostics.issues {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
-        report_cleanup_issue(issue);
-    }
-    let diagnostics_stopped = diagnostics.certificate;
+    let diagnostics_stopped = crate::diagnostics::close_diagnostic_router()
+        .map(|outcome| {
+            for issue in outcome.issues {
+                #[cfg(any(test, feature = "shutdown-refinement"))]
+                runtime
+                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
+                report_cleanup_issue(&issue);
+            }
+            outcome.certificate
+        })
+        .unwrap_or_else(|error| {
+            let error = error.into_xll_error();
+            fatal_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
+                "xlAutoClose diagnostic refinement",
+                &error,
+            )
+        });
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime
@@ -1098,10 +1104,11 @@ where
         fatal_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::CloseInvariantViolation,
-            "xlAutoClose finalization",
+            "xlAutoClose close completion",
             &error,
         )
     });
+
     CloseSuccess::Closed {
         witness: closed_witness,
         close_attempt,
@@ -1114,15 +1121,15 @@ fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
             component = issue.component,
             kind = ?issue.kind,
             error = %issue.error,
-            "xlAutoClose completed with a cleanup issue"
+            "cleanup issue during shutdown"
         );
     }));
     report_boundary_error(issue.component, &issue.error);
 }
 
 #[cold]
-fn fatal_unload_hazard<S>(
-    runtime: &Runtime<S>,
+fn fatal_unload_hazard<A: Addin>(
+    runtime: &Runtime<A>,
     hazard: crate::shutdown::UnloadHazard,
     boundary: &'static str,
     error: &XllError,
@@ -1265,12 +1272,13 @@ mod tests {
     impl Addin for LayersPanic {
         type State = ();
         type Error = XllError;
+        type Layers = ();
 
         fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
             Ok(())
         }
 
-        fn udf_layers(_: &Self::State) -> Vec<Box<dyn crate::UdfLayer>> {
+        fn udf_layers(_: &Self::State) -> Self::Layers {
             panic!("injected udf_layers panic")
         }
 
@@ -1287,7 +1295,7 @@ mod tests {
 
     #[test]
     fn xl_auto_close_on_closed_runtime_invalidates_a_pending_open_epoch() {
-        let runtime = Runtime::<()>::new();
+        let runtime = Runtime::<LayersPanic>::new();
         let stale_epoch = runtime.close_epoch();
 
         assert_eq!(close_addin::<LayersPanic>(&runtime), 1);
@@ -1297,14 +1305,14 @@ mod tests {
 
     #[test]
     fn failed_concurrent_open_does_not_rollback_the_owner_attempt() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<LayersPanic>::new();
         let mut owner = runtime.begin_open().unwrap();
         let mut callbacks = HostCallbackSession::new();
 
         rollback_active_open::<LayersPanic>(&runtime, None, &mut callbacks);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Opening);
 
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut owner, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
     }
@@ -1313,7 +1321,7 @@ mod tests {
     fn udf_layers_panic_rolls_published_state_back_through_close() {
         LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
-        let runtime = Runtime::new();
+        let runtime = Runtime::<LayersPanic>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
         let panic = catch_unwind(AssertUnwindSafe(|| {
             let _ = initialize_addin::<LayersPanic>(&runtime, &test_open_context());
@@ -1336,10 +1344,13 @@ mod tests {
     impl Addin for WorkersPanic {
         type State = ();
         type Error = XllError;
+        type Layers = ();
 
         fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
             Ok(())
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn async_worker_count(_: &Self::State) -> usize {
             panic!("injected async_worker_count panic")
@@ -1354,7 +1365,7 @@ mod tests {
     #[test]
     fn async_worker_count_panic_rolls_published_state_back_through_close() {
         WORKERS_PANIC_CLOSES.store(0, Ordering::Release);
-        let runtime = Runtime::new();
+        let runtime = Runtime::<WorkersPanic>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
         let panic = catch_unwind(AssertUnwindSafe(|| {
             initialize_addin::<WorkersPanic>(&runtime, &test_open_context()).unwrap();
@@ -1370,10 +1381,13 @@ mod tests {
     impl Addin for RetryClose {
         type State = RetryState;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!("the close retry test publishes state directly")
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn cleanup(state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
             state
@@ -1391,14 +1405,14 @@ mod tests {
 
     #[test]
     fn addin_cleanup_issue_does_not_prevent_finalizing_runtime() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(
             RetryState {
                 attempts: std::sync::Arc::clone(&attempts),
             },
-            Vec::new(),
+            (),
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
@@ -1425,10 +1439,13 @@ mod tests {
     impl Addin for CleanupPanic {
         type State = DropObserved;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
             panic!("injected cleanup panic");
@@ -1437,10 +1454,10 @@ mod tests {
 
     #[test]
     fn cleanup_panic_leaks_state_and_still_finalizes_safe_unload() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<CleanupPanic>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
+        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let mut callbacks = HostCallbackSession::new();
@@ -1455,10 +1472,13 @@ mod tests {
     impl Addin for QuiesceFailure {
         type State = DropObserved;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
             Err(XllError::Internal {
@@ -1469,10 +1489,10 @@ mod tests {
 
     #[test]
     fn quiesce_failure_enters_fatal_path_without_dropping_state() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
+        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let fatal = catch_unwind(AssertUnwindSafe(|| {
@@ -1487,14 +1507,14 @@ mod tests {
 
     #[test]
     fn open_rollback_cleanup_issue_still_finalizes_without_reinstalling_state() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(
             RetryState {
                 attempts: std::sync::Arc::clone(&attempts),
             },
-            Vec::new(),
+            (),
         );
 
         assert!(open_attempt.fail());
@@ -1515,10 +1535,13 @@ mod tests {
     impl Addin for CleanClose {
         type State = ();
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
     }
 
     struct TraceCleanup;
@@ -1526,10 +1549,13 @@ mod tests {
     impl Addin for TraceCleanup {
         type State = ();
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn cleanup(_state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
             reporter.warn(
@@ -1614,9 +1640,9 @@ mod tests {
             );
         };
 
-        let runtime = Runtime::new();
+        let runtime = Runtime::<TraceCleanup>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         crate::diagnostics::reset_diagnostic_router().unwrap();
@@ -1744,17 +1770,17 @@ mod tests {
         check("resourceful", trace);
 
         crate::diagnostics::reset_diagnostic_router().unwrap();
-        let clean_runtime = Runtime::new();
+        let clean_runtime = Runtime::<CleanClose>::new();
         let mut opening = clean_runtime.begin_open().unwrap();
-        clean_runtime.publish((), Vec::new());
+        clean_runtime.publish((), ());
         clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
         assert_eq!(close_addin::<CleanClose>(&clean_runtime), 1);
         check("clean", clean_runtime.ghost_trace_json());
 
-        let failure_runtime = Runtime::new();
+        let failure_runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = failure_runtime.begin_open().unwrap();
-        failure_runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), Vec::new());
+        failure_runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
         failure_runtime
             .finish_open(&mut opening, Vec::new())
             .unwrap();
@@ -1778,9 +1804,9 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
-        let runtime = Runtime::new();
+        let runtime = Runtime::<CleanClose>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
         crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
@@ -1822,9 +1848,9 @@ mod tests {
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let runtime = Runtime::<()>::new();
+        let runtime = Runtime::<CleanClose>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveCall);
@@ -1841,7 +1867,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
-        let runtime = Runtime::<()>::new();
+        let runtime = Runtime::<CleanClose>::new();
 
         assert_eq!(close_addin::<CleanClose>(&runtime), 1);
         check_composition_trace_with_lean(
@@ -1860,12 +1886,12 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
-        let runtime = Runtime::<()>::new();
+        let runtime = Runtime::<CleanClose>::new();
 
         for label in ["first", "second"] {
             crate::diagnostics::reset_diagnostic_router().unwrap();
             let mut opening = runtime.begin_open().unwrap();
-            runtime.publish((), Vec::new());
+            runtime.publish((), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
             crate::diagnostics::report_no_unwind(label, &XllError::Panic);
@@ -1893,9 +1919,9 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
-        let runtime = Runtime::new();
+        let runtime = Runtime::<CleanClose>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
         crate::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
@@ -1977,7 +2003,7 @@ mod tests {
             );
         };
 
-        let uncommitted = std::sync::Arc::new(Runtime::new());
+        let uncommitted = std::sync::Arc::new(Runtime::<CleanClose>::new());
         let mut opening = uncommitted.begin_open().unwrap();
         let closing_runtime = std::sync::Arc::clone(&uncommitted);
         let (owner_tx, owner_rx) = std::sync::mpsc::channel();
@@ -2008,7 +2034,7 @@ mod tests {
             "rust-composition-uncommitted-trace.json",
         );
 
-        let rollback = Runtime::new();
+        let rollback = Runtime::<CleanClose>::new();
         let mut opening = rollback.begin_open().unwrap();
         assert!(opening.fail());
         let mut callbacks = HostCallbackSession::new();
@@ -2023,9 +2049,9 @@ mod tests {
 
     #[test]
     fn close_owner_is_held_until_the_success_boundary_finishes() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<CleanClose>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let success = close_addin_inner::<CleanClose>(&runtime, &mut HostCallbackSession::new());
@@ -2041,7 +2067,7 @@ mod tests {
         drop(close_attempt);
 
         let mut reopened = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut reopened, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
     }
@@ -2051,10 +2077,13 @@ mod tests {
     impl Addin for AlwaysFailClose {
         type State = ();
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn cleanup(_state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
             reporter.warn(
@@ -2069,9 +2098,9 @@ mod tests {
 
     #[test]
     fn failing_open_rollback_is_finalized_by_xl_auto_close() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<AlwaysFailClose>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
@@ -2084,9 +2113,9 @@ mod tests {
 
     #[test]
     fn xl_auto_close_waits_for_active_call_and_returns_one_after_clean_close() {
-        let runtime = std::sync::Arc::new(Runtime::new());
+        let runtime = std::sync::Arc::new(Runtime::<CleanClose>::new());
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let (_export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {});
         assert!(accepted);
@@ -2125,9 +2154,9 @@ mod tests {
             XLOPER12BigDataHandle, XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
         };
 
-        let runtime = Box::leak(Box::new(Runtime::new()));
+        let runtime = Box::leak(Box::new(Runtime::<CleanClose>::new()));
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
         runtime.retain_registration_debt(vec![
@@ -2248,10 +2277,13 @@ mod tests {
     impl Addin for OrderedClose {
         type State = OrderedState;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
             state.events.lock().unwrap().push("state");
@@ -2260,14 +2292,14 @@ mod tests {
 
     #[test]
     fn runtime_owned_subscriptions_and_handles_drop_before_addin_state_closes() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<OrderedClose>::new();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(
             OrderedState {
                 events: std::sync::Arc::clone(&events),
             },
-            Vec::new(),
+            (),
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime
@@ -2320,10 +2352,13 @@ mod tests {
     impl Addin for StagedRaceAddin {
         type State = StagedRaceState;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
 
         fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
             state.quiesced.fetch_add(1, Ordering::SeqCst);
@@ -2337,7 +2372,7 @@ mod tests {
 
     #[test]
     fn close_reclaims_staged_opening_generation_when_finish_open_loses_race() {
-        let runtime = std::sync::Arc::new(Runtime::new());
+        let runtime = std::sync::Arc::new(Runtime::<StagedRaceAddin>::new());
         let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
         let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
         let dropped = std::sync::Arc::new(AtomicUsize::new(0));
@@ -2350,7 +2385,7 @@ mod tests {
         };
         assert!(runtime.stage_opening_state(state).is_ok());
         let opening = runtime.take_opening_generation().unwrap();
-        let opening = opening.attach_layers(Vec::new().into_boxed_slice());
+        let opening = opening.attach_layers(());
         assert!(runtime.restore_opening_generation(opening).is_ok());
 
         let closer_runtime = std::sync::Arc::clone(&runtime);
@@ -2408,12 +2443,13 @@ mod tests {
     impl Addin for PanicLayersAddin {
         type State = PanicLayersState;
         type Error = XllError;
+        type Layers = ();
 
         fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
             unreachable!()
         }
 
-        fn udf_layers(_state: &Self::State) -> Vec<Box<dyn crate::UdfLayer>> {
+        fn udf_layers(_state: &Self::State) -> Self::Layers {
             panic!("udf_layers intentionally panicked");
         }
 
@@ -2429,7 +2465,7 @@ mod tests {
 
     #[test]
     fn udf_layers_panic_restores_opening_generation_for_rollback() {
-        let runtime = Runtime::new();
+        let runtime = Runtime::<PanicLayersAddin>::new();
         let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
         let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
         let dropped = std::sync::Arc::new(AtomicUsize::new(0));
@@ -2449,7 +2485,7 @@ mod tests {
             }));
             match layers_result {
                 Ok(layers) => {
-                    let opening = opening.attach_layers(layers.into_boxed_slice());
+                    let opening = opening.attach_layers(layers);
                     assert!(runtime.restore_opening_generation(opening).is_ok());
                 }
                 Err(payload) => {

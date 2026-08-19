@@ -1,7 +1,7 @@
 use crate::host_callback::HostCallbackSession;
 use crate::{
     AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, ExcelValue,
-    FromExcel, IntoXllError, Matrix, UdfLayer, XllError, XllResult,
+    FromExcel, IntoXllError, Matrix, XllError, XllResult,
 };
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -64,6 +64,7 @@ impl OpenContext {
 pub trait Addin: Send + Sync + 'static {
     type State: Send + Sync + 'static;
     type Error: IntoXllError;
+    type Layers: crate::UdfLayers;
 
     /// Creates Add-in state on Excel's main lifecycle thread.
     fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
@@ -83,9 +84,7 @@ pub trait Addin: Send + Sync + 'static {
         Ok(())
     }
 
-    fn udf_layers(_state: &Self::State) -> Vec<Box<dyn UdfLayer>> {
-        Vec::new()
-    }
+    fn udf_layers(_state: &Self::State) -> Self::Layers;
 
     /// Number of worker threads used by native async worksheet functions.
     /// Values are clamped to `1..=32`; the default is at most four threads.
@@ -103,6 +102,18 @@ pub trait Addin: Send + Sync + 'static {
     fn cleanup(_state: &mut Self::State, _reporter: &mut CleanupReporter<'_>) {}
 }
 
+impl Addin for () {
+    type State = ();
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
+        Ok(())
+    }
+
+    fn udf_layers(_state: &Self::State) -> Self::Layers {}
+}
+
 /// Static metadata and lifecycle configuration supplied by `#[excel_addin]`.
 #[doc(hidden)]
 pub trait AddinMetadata {
@@ -111,23 +122,30 @@ pub trait AddinMetadata {
     const DEFAULT_CATEGORY: &'static str;
 }
 
-impl<S> Deref for ThreadSafeContext<'_, S> {
-    type Target = S;
+impl<A: Addin> Deref for ThreadSafeContext<'_, A> {
+    type Target = A::State;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-impl<S> AsRef<S> for ThreadSafeContext<'_, S> {
-    fn as_ref(&self) -> &S {
+impl<A: Addin> AsRef<A::State> for ThreadSafeContext<'_, A> {
+    fn as_ref(&self) -> &A::State {
         self.state
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct ThreadSafeContext<'call, S> {
-    state: &'call S,
+pub struct ThreadSafeContext<'call, A: Addin> {
+    state: &'call A::State,
 }
+
+impl<A: Addin> Clone for ThreadSafeContext<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 
 /// Owned Add-in state available to an asynchronous worksheet function.
 ///
@@ -138,17 +156,17 @@ pub struct ThreadSafeContext<'call, S> {
 /// and terminates the process rather than returning with executable XLL code
 /// still reachable.
 #[cfg(feature = "async")]
-pub struct AsyncContext<S> {
-    lease: crate::runtime::GenerationLease<S>,
+pub struct AsyncContext<A: Addin> {
+    lease: crate::runtime::GenerationLease<A>,
     cancellation: crate::CancellationToken,
 }
 
 #[cfg(feature = "async")]
-impl<S> AsyncContext<S> {
+impl<A: Addin> AsyncContext<A> {
     #[doc(hidden)]
     #[must_use]
     pub fn new(
-        lease: crate::runtime::GenerationLease<S>,
+        lease: crate::runtime::GenerationLease<A>,
         cancellation: crate::CancellationToken,
     ) -> Self {
         Self {
@@ -158,7 +176,7 @@ impl<S> AsyncContext<S> {
     }
 
     #[must_use]
-    pub fn state(&self) -> &S {
+    pub fn state(&self) -> &A::State {
         self.lease.state()
     }
 
@@ -182,8 +200,8 @@ impl<S> AsyncContext<S> {
 }
 
 #[cfg(feature = "async")]
-impl<S> Deref for AsyncContext<S> {
-    type Target = S;
+impl<A: Addin> Deref for AsyncContext<A> {
+    type Target = A::State;
 
     fn deref(&self) -> &Self::Target {
         self.lease.state()
@@ -191,70 +209,89 @@ impl<S> Deref for AsyncContext<S> {
 }
 
 #[cfg(feature = "async")]
-impl<S> AsRef<S> for AsyncContext<S> {
-    fn as_ref(&self) -> &S {
+impl<A: Addin> AsRef<A::State> for AsyncContext<A> {
+    fn as_ref(&self) -> &A::State {
         self.lease.state()
     }
 }
 
-impl<S> Deref for MainThreadContext<'_, '_, S> {
-    type Target = S;
+impl<A: Addin> Deref for MainThreadContext<'_, '_, A> {
+    type Target = A::State;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-impl<S> AsRef<S> for MainThreadContext<'_, '_, S> {
-    fn as_ref(&self) -> &S {
+impl<A: Addin> AsRef<A::State> for MainThreadContext<'_, '_, A> {
+    fn as_ref(&self) -> &A::State {
         self.state
     }
 }
 
-impl<'call, S> ThreadSafeContext<'call, S> {
+impl<'call, A: Addin> ThreadSafeContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call S) -> Self {
+    pub const fn new(state: &'call A::State) -> Self {
         Self { state }
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'call S {
+    pub const fn state(&self) -> &'call A::State {
         self.state
     }
 }
 
-#[derive(Clone)]
-pub struct MainThreadContext<'state, 'scope, S> {
-    state: &'state S,
-    runtime: &'state crate::Runtime<S>,
+pub struct MainThreadContext<'state, 'scope, A: Addin> {
+    state: &'state A::State,
+    runtime: &'state crate::Runtime<A>,
     callbacks: &'scope HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-#[derive(Clone)]
-pub struct MacroSheetContext<'state, 'scope, S> {
-    state: &'state S,
+impl<A: Addin> Clone for MainThreadContext<'_, '_, A> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state,
+            runtime: self.runtime,
+            callbacks: self.callbacks,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+pub struct MacroSheetContext<'state, 'scope, A: Addin> {
+    state: &'state A::State,
     callbacks: &'scope HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl<S> Deref for MacroSheetContext<'_, '_, S> {
-    type Target = S;
+impl<A: Addin> Clone for MacroSheetContext<'_, '_, A> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state,
+            callbacks: self.callbacks,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl<A: Addin> Deref for MacroSheetContext<'_, '_, A> {
+    type Target = A::State;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-impl<S> AsRef<S> for MacroSheetContext<'_, '_, S> {
-    fn as_ref(&self) -> &S {
+impl<A: Addin> AsRef<A::State> for MacroSheetContext<'_, '_, A> {
+    fn as_ref(&self) -> &A::State {
         self.state
     }
 }
 
-impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
+impl<'state, 'scope, A: Addin> MacroSheetContext<'state, 'scope, A> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new(state: &'state S, scope: &'scope CallScope<'scope>) -> Self {
+    pub fn new(state: &'state A::State, scope: &'scope CallScope<'scope>) -> Self {
         Self {
             state,
             callbacks: scope.callbacks(),
@@ -263,7 +300,7 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'state S {
+    pub const fn state(&self) -> &'state A::State {
         self.state
     }
 
@@ -337,12 +374,12 @@ impl<'state, 'scope, S> MacroSheetContext<'state, 'scope, S> {
     }
 }
 
-impl<'state, 'scope, S> MainThreadContext<'state, 'scope, S> {
+impl<'state, 'scope, A: Addin> MainThreadContext<'state, 'scope, A> {
     #[doc(hidden)]
     #[must_use]
     pub fn new(
-        state: &'state S,
-        runtime: &'state crate::Runtime<S>,
+        state: &'state A::State,
+        runtime: &'state crate::Runtime<A>,
         scope: &'scope CallScope<'scope>,
     ) -> Self {
         Self {
@@ -354,7 +391,7 @@ impl<'state, 'scope, S> MainThreadContext<'state, 'scope, S> {
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'state S {
+    pub const fn state(&self) -> &'state A::State {
         self.state
     }
 
@@ -400,14 +437,28 @@ mod tests {
     assert_not_impl_any!(MainThreadContext<'static, 'static, ()>: Send, Sync);
     assert_not_impl_any!(MacroSheetContext<'static, 'static, ()>: Send, Sync);
 
+    struct TestU32Addin;
+
+    impl crate::Addin for TestU32Addin {
+        type State = u32;
+        type Error = crate::XllError;
+        type Layers = ();
+
+        fn open(_: &crate::OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+
+        fn udf_layers(_: &Self::State) -> Self::Layers {}
+    }
+
     #[test]
     fn synchronous_contexts_expose_their_state_by_value() {
         let state = 17_u32;
-        let runtime = crate::Runtime::new();
-        let thread_safe = ThreadSafeContext::new(&state);
+        let runtime = crate::Runtime::<TestU32Addin>::new();
+        let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
         crate::with_excel_call_scope(|scope| {
-            let main_thread = MainThreadContext::new(&state, &runtime, scope);
-            let macro_sheet = MacroSheetContext::new(&state, scope);
+            let main_thread = MainThreadContext::<TestU32Addin>::new(&state, &runtime, scope);
+            let macro_sheet = MacroSheetContext::<TestU32Addin>::new(&state, scope);
 
             assert_eq!(thread_safe.state(), &17);
             assert_eq!(main_thread.state(), &17);
@@ -451,7 +502,7 @@ mod tests {
         let state = ();
 
         crate::with_excel_call_scope(|scope| {
-            let context = MacroSheetContext::new(&state, scope);
+            let context = MacroSheetContext::<()>::new(&state, scope);
             assert!(context.sheet_name(&reference).is_err());
             let _ = context.coerce(&reference);
             assert_eq!(crate::test_callback::total_calls(), 2);
@@ -468,14 +519,15 @@ mod tests {
     fn failed_rtd_observation_preserves_the_existing_shared_subscription() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        struct TestSubscription(Arc<AtomicBool>);
+        struct TestSubscription {
+            disconnected: Arc<AtomicBool>,
+        }
 
-        // SAFETY: disconnect_and_wait ensures no background work accesses module code.
+        // SAFETY: disconnect_and_wait ensures safety
         unsafe impl crate::RtdSubscription for TestSubscription {
             fn request_cancel(&self) {}
-
             fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
-                self.0.store(true, Ordering::Release);
+                self.disconnected.store(true, Ordering::Release);
                 Ok(())
             }
         }
@@ -493,13 +545,15 @@ mod tests {
                 sink: crate::RtdSink<Self::Value>,
             ) -> crate::XllResult<Box<dyn crate::RtdSubscription>> {
                 sink.publish(17.5)?;
-                Ok(Box::new(TestSubscription(Arc::clone(&self.disconnected))))
+                Ok(Box::new(TestSubscription {
+                    disconnected: Arc::clone(&self.disconnected),
+                }))
             }
         }
 
         let runtime = crate::Runtime::<()>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions();
         let disconnected = Arc::new(AtomicBool::new(false));
@@ -555,15 +609,31 @@ mod tests {
     }
 
     #[cfg(feature = "async")]
+    struct AsyncTestAddin;
+
+    #[cfg(feature = "async")]
+    impl crate::Addin for AsyncTestAddin {
+        type State = u32;
+        type Error = crate::XllError;
+        type Layers = ();
+
+        fn open(_context: &crate::OpenContext) -> Result<Self::State, Self::Error> {
+            Ok(23)
+        }
+
+        fn udf_layers(_state: &Self::State) -> Self::Layers {}
+    }
+
+    #[cfg(feature = "async")]
     #[test]
     fn async_context_checks_and_exposes_cancellation() {
         let (source, token) = crate::cancellation::CancellationSource::new(
             crate::CancellationGuarantee::CalculationScoped,
         );
-        let lease = crate::runtime::GenerationLease {
+        let lease = crate::runtime::GenerationLease::<AsyncTestAddin> {
             generation: Arc::new(crate::runtime::OpenGeneration {
                 state: 23_u32,
-                layers: Box::new([]),
+                layers: (),
             }),
         };
         let context = AsyncContext::new(lease, token);

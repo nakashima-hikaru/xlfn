@@ -573,7 +573,7 @@ pub(crate) trait HandleRuntimeProvider {
     fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>>;
 }
 
-impl<S> HandleRuntimeProvider for crate::Runtime<S> {
+impl<A: crate::Addin> HandleRuntimeProvider for crate::Runtime<A> {
     fn handle_runtime(&self) -> XllResult<std::sync::Arc<crate::handle::HandleRuntime>> {
         self.handles()
     }
@@ -590,8 +590,8 @@ pub struct CallContext<'call> {
 }
 
 impl<'call> CallContext<'call> {
-    pub(crate) fn new<S: 'call>(
-        runtime: &'call crate::Runtime<S>,
+    pub(crate) fn new<A: crate::Addin>(
+        runtime: &'call crate::Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
@@ -636,8 +636,8 @@ pub struct ArgumentContext<'call> {
 
 impl<'call> ArgumentContext<'call> {
     #[doc(hidden)]
-    pub fn for_return<R, S>(
-        runtime: &'call crate::Runtime<S>,
+    pub fn for_return<R, A: crate::Addin>(
+        runtime: &'call crate::Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self
     where
@@ -863,13 +863,14 @@ where
 }
 
 #[doc(hidden)]
-pub unsafe fn argument_from_raw_with_context<'call, S, T>(
+pub unsafe fn argument_from_raw_with_context<'call, A, T>(
     _scope: &'call CallScope<'call>,
-    runtime: &'call crate::Runtime<S>,
+    runtime: &'call crate::Runtime<A>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
 where
+    A: crate::Addin,
     T: ExcelParameter<'call>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.

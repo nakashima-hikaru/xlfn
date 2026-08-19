@@ -42,40 +42,35 @@ impl LifecyclePhase {
 }
 
 /// The published root of an open Add-in generation.
-pub struct OpenGeneration<S> {
-    pub(crate) state: S,
-    pub(crate) layers: Box<[Box<dyn crate::UdfLayer>]>,
+pub struct OpenGeneration<A: crate::Addin> {
+    pub(crate) state: A::State,
+    pub(crate) layers: A::Layers,
 }
 
 /// Unique Add-in state staged during `OPENING`.
-pub enum OpeningGeneration<S> {
-    StateOnly {
-        state: S,
-    },
-    Ready {
-        state: S,
-        layers: Box<[Box<dyn crate::UdfLayer>]>,
-    },
+pub enum OpeningGeneration<A: crate::Addin> {
+    StateOnly { state: A::State },
+    Ready { state: A::State, layers: A::Layers },
 }
 
-impl<S> OpeningGeneration<S> {
+impl<A: crate::Addin> OpeningGeneration<A> {
     #[must_use]
-    pub(crate) fn state(&self) -> &S {
+    pub(crate) fn state(&self) -> &A::State {
         match self {
             Self::StateOnly { state } | Self::Ready { state, .. } => state,
         }
     }
 
     #[must_use]
-    pub(crate) fn into_parts(self) -> (S, Box<[Box<dyn crate::UdfLayer>]>) {
+    pub(crate) fn into_parts(self) -> (A::State, Option<A::Layers>) {
         match self {
-            Self::StateOnly { state } => (state, Box::new([])),
-            Self::Ready { state, layers } => (state, layers),
+            Self::StateOnly { state } => (state, None),
+            Self::Ready { state, layers } => (state, Some(layers)),
         }
     }
 
     #[must_use]
-    pub(crate) fn attach_layers(self, layers: Box<[Box<dyn crate::UdfLayer>]>) -> Self {
+    pub(crate) fn attach_layers(self, layers: A::Layers) -> Self {
         match self {
             Self::StateOnly { state } | Self::Ready { state, .. } => Self::Ready { state, layers },
         }
@@ -83,25 +78,30 @@ impl<S> OpeningGeneration<S> {
 }
 
 /// Generation reclaimed during shutdown.
-pub(crate) enum ShutdownGeneration<S> {
-    Opening(OpeningGeneration<S>),
-    Open(Arc<OpenGeneration<S>>),
+pub(crate) enum ShutdownGeneration<A: crate::Addin> {
+    Opening(OpeningGeneration<A>),
+    Open(Arc<OpenGeneration<A>>),
 }
 
 /// Explicit open-generation lifetime lease for asynchronous UDF executions.
 #[derive(Clone)]
-pub struct GenerationLease<S> {
-    pub(crate) generation: Arc<OpenGeneration<S>>,
+pub struct GenerationLease<A: crate::Addin> {
+    pub(crate) generation: Arc<OpenGeneration<A>>,
 }
 
-impl<S> GenerationLease<S> {
+impl<A: crate::Addin> GenerationLease<A> {
     #[must_use]
-    pub fn state(&self) -> &S {
+    pub fn state(&self) -> &A::State {
         &self.generation.state
+    }
+
+    #[must_use]
+    pub fn layers(&self) -> &A::Layers {
+        &self.generation.layers
     }
 }
 
-pub struct Runtime<S> {
+pub struct Runtime<A: crate::Addin> {
     phase: AtomicU8,
     next_lifecycle_attempt: AtomicU64,
     generation: AtomicU64,
@@ -109,8 +109,8 @@ pub struct Runtime<S> {
     // Invalidates opens that sampled an earlier lifecycle boundary. Close
     // owner exclusivity is tracked separately by `close_attempt_active`.
     close_epoch: AtomicU64,
-    opening: Mutex<Option<OpeningGeneration<S>>>,
-    current: ArcSwapOption<OpenGeneration<S>>,
+    opening: Mutex<Option<OpeningGeneration<A>>>,
+    current: ArcSwapOption<OpenGeneration<A>>,
     registrations: Mutex<Vec<crate::registration::PendingRegistration>>,
     metadata_debt:
         Mutex<BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>>>,
@@ -136,7 +136,7 @@ pub struct Runtime<S> {
     test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
 
-impl<S> Runtime<S> {
+impl<A: crate::Addin> Runtime<A> {
     #[must_use]
     pub const fn new() -> Self {
         Self::new_with_rtd_limits(crate::subscription::RtdLimits::standard())
@@ -240,7 +240,7 @@ impl<S> Runtime<S> {
     pub(crate) fn begin_open_if_epoch(
         &self,
         expected_close_epoch: u64,
-    ) -> XllResult<OpenAttemptGuard<'_, S>> {
+    ) -> XllResult<OpenAttemptGuard<'_, A>> {
         #[cfg(test)]
         let test_module_lease = crate::ingress::acquire_test_module_lease();
         let _wait_guard = self.wait_lock.lock();
@@ -278,7 +278,7 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpenAttemptGuard<'_, S>> {
+    pub(crate) fn begin_open(&self) -> XllResult<OpenAttemptGuard<'_, A>> {
         self.begin_open_if_epoch(self.close_epoch())
     }
 
@@ -323,14 +323,11 @@ impl<S> Runtime<S> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn publish(&self, state: S, layers: Vec<Box<dyn crate::UdfLayer>>) {
-        *self.opening.lock() = Some(OpeningGeneration::Ready {
-            state,
-            layers: layers.into_boxed_slice(),
-        });
+    pub(crate) fn publish(&self, state: A::State, layers: A::Layers) {
+        *self.opening.lock() = Some(OpeningGeneration::Ready { state, layers });
     }
 
-    pub(crate) fn stage_opening_state(&self, state: S) -> Result<(), (XllError, S)> {
+    pub(crate) fn stage_opening_state(&self, state: A::State) -> Result<(), (XllError, A::State)> {
         let mut slot = self.opening.lock();
         if slot.is_some() || self.current.load().is_some() {
             return Err((
@@ -346,8 +343,8 @@ impl<S> Runtime<S> {
 
     pub(crate) fn restore_opening_generation(
         &self,
-        opening: OpeningGeneration<S>,
-    ) -> Result<(), (XllError, OpeningGeneration<S>)> {
+        opening: OpeningGeneration<A>,
+    ) -> Result<(), (XllError, OpeningGeneration<A>)> {
         let mut slot = self.opening.lock();
         if slot.is_some() {
             return Err((
@@ -389,15 +386,15 @@ impl<S> Runtime<S> {
         self.current.load().is_some()
     }
 
-    pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<S>> {
+    pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
         self.opening.lock().take()
     }
 
-    pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<S>>> {
+    pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<A>>> {
         self.current.swap(None)
     }
 
-    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<S>> {
+    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {
         debug_assert!(
             !(self.has_opening_generation() && self.has_current_generation()),
             "Runtime cannot have both opening and current generations simultaneously"
@@ -411,7 +408,7 @@ impl<S> Runtime<S> {
 
     pub(crate) fn finish_open(
         &self,
-        attempt: &mut OpenAttemptGuard<'_, S>,
+        attempt: &mut OpenAttemptGuard<'_, A>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
         let _wait_guard = self.wait_lock.lock();
@@ -550,7 +547,7 @@ impl<S> Runtime<S> {
         self.registration_state_unknown.load(Ordering::Acquire)
     }
 
-    fn reject_open_attempt(&self, attempt: &mut OpenAttemptGuard<'_, S>) {
+    fn reject_open_attempt(&self, attempt: &mut OpenAttemptGuard<'_, A>) {
         self.open_attempt_id.store(0, Ordering::Release);
         attempt.active = false;
     }
@@ -602,7 +599,7 @@ impl<S> Runtime<S> {
         should_rollback
     }
 
-    pub fn enter(&self) -> XllResult<CallGuard<'_, S>> {
+    pub fn enter(&self) -> XllResult<CallGuard<'_, A>> {
         crate::ingress::global_ingress().with_linearization(|| {
             if self.phase() != LifecyclePhase::Open {
                 return Err(XllError::Closing);
@@ -643,7 +640,7 @@ impl<S> Runtime<S> {
         })
     }
 
-    pub(crate) fn begin_final_close(&self) -> Option<CloseAttemptGuard<'_, S>> {
+    pub(crate) fn begin_final_close(&self) -> Option<CloseAttemptGuard<'_, A>> {
         let mut wait_guard = self.wait_lock.lock();
         // Every final-close invocation invalidates open operations that started
         // before it, including an operation that is between rollback recovery
@@ -724,7 +721,7 @@ impl<S> Runtime<S> {
         }
     }
 
-    pub(crate) fn acquire_open_rollback(&self) -> Option<CloseAttemptGuard<'_, S>> {
+    pub(crate) fn acquire_open_rollback(&self) -> Option<CloseAttemptGuard<'_, A>> {
         let mut wait_guard = self.wait_lock.lock();
         loop {
             match self.phase() {
@@ -1113,7 +1110,7 @@ fn composition_resources_from_open_rollback_prerequisites(
     crate::shutdown_refinement::GhostResources::quiescent_snapshot()
 }
 
-impl<S> Runtime<S> {
+impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn certify_open_rollback(
         &self,
         prerequisites: OpenRollbackPrerequisites,
@@ -1449,14 +1446,14 @@ impl<S> Runtime<S> {
     }
 }
 
-impl<S> Default for Runtime<S> {
+impl<A: crate::Addin> Default for Runtime<A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(test)]
-impl<S> Drop for Runtime<S> {
+impl<A: crate::Addin> Drop for Runtime<A> {
     fn drop(&mut self) {
         if !matches!(self.phase(), LifecyclePhase::Closed) {
             let ingress = crate::ingress::global_ingress();
@@ -1474,11 +1471,11 @@ impl<S> Drop for Runtime<S> {
     }
 }
 
-pub(crate) struct CloseAttemptGuard<'runtime, S> {
-    runtime: &'runtime Runtime<S>,
+pub(crate) struct CloseAttemptGuard<'runtime, A: crate::Addin> {
+    runtime: &'runtime Runtime<A>,
 }
 
-impl<S> Drop for CloseAttemptGuard<'_, S> {
+impl<A: crate::Addin> Drop for CloseAttemptGuard<'_, A> {
     fn drop(&mut self) {
         let _wait_guard = self.runtime.wait_lock.lock();
         self.runtime
@@ -1496,13 +1493,13 @@ impl<S> Drop for CloseAttemptGuard<'_, S> {
     }
 }
 
-pub(crate) struct OpenAttemptGuard<'runtime, S> {
-    runtime: &'runtime Runtime<S>,
+pub(crate) struct OpenAttemptGuard<'runtime, A: crate::Addin> {
+    runtime: &'runtime Runtime<A>,
     attempt_id: u64,
     active: bool,
 }
 
-impl<S> OpenAttemptGuard<'_, S> {
+impl<A: crate::Addin> OpenAttemptGuard<'_, A> {
     pub(crate) const fn is_active(&self) -> bool {
         self.active
     }
@@ -1517,7 +1514,7 @@ impl<S> OpenAttemptGuard<'_, S> {
     }
 }
 
-impl<S> Drop for OpenAttemptGuard<'_, S> {
+impl<A: crate::Addin> Drop for OpenAttemptGuard<'_, A> {
     fn drop(&mut self) {
         if !self.active {
             return;
@@ -1528,26 +1525,26 @@ impl<S> Drop for OpenAttemptGuard<'_, S> {
     }
 }
 
-pub struct CallGuard<'runtime, S> {
+pub struct CallGuard<'runtime, A: crate::Addin> {
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime: &'runtime Runtime<S>,
+    runtime: &'runtime Runtime<A>,
     #[cfg(not(any(test, feature = "shutdown-refinement")))]
-    _runtime: std::marker::PhantomData<&'runtime Runtime<S>>,
-    generation: arc_swap::Guard<Option<Arc<OpenGeneration<S>>>>,
+    _runtime: std::marker::PhantomData<&'runtime Runtime<A>>,
+    generation: arc_swap::Guard<Option<Arc<OpenGeneration<A>>>>,
 }
 
-impl<S> CallGuard<'_, S> {
+impl<A: crate::Addin> CallGuard<'_, A> {
     #[must_use]
-    pub fn state(&self) -> &S {
+    pub fn state(&self) -> &A::State {
         &self.generation().state
     }
 
     #[must_use]
-    pub(crate) fn layers(&self) -> &[Box<dyn crate::UdfLayer>] {
+    pub(crate) fn layers(&self) -> &A::Layers {
         &self.generation().layers
     }
 
-    fn generation(&self) -> &OpenGeneration<S> {
+    fn generation(&self) -> &OpenGeneration<A> {
         self.generation
             .as_ref()
             .expect("a live CallGuard always observes published runtime generation")
@@ -1555,7 +1552,7 @@ impl<S> CallGuard<'_, S> {
 
     #[cfg(feature = "async")]
     #[must_use]
-    pub(crate) fn lease(&self) -> GenerationLease<S> {
+    pub(crate) fn lease(&self) -> GenerationLease<A> {
         GenerationLease {
             generation: Arc::clone(
                 self.generation
@@ -1566,7 +1563,7 @@ impl<S> CallGuard<'_, S> {
     }
 }
 
-impl<S> Drop for CallGuard<'_, S> {
+impl<A: crate::Addin> Drop for CallGuard<'_, A> {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.runtime
@@ -1581,7 +1578,22 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn finish_test_close<S>(runtime: &Runtime<S>) {
+    #[derive(Clone)]
+    struct TestU32Addin;
+
+    impl crate::Addin for TestU32Addin {
+        type State = u32;
+        type Error = XllError;
+        type Layers = ();
+
+        fn open(_context: &crate::addin::OpenContext) -> Result<Self::State, Self::Error> {
+            Ok(0)
+        }
+
+        fn udf_layers(_state: &Self::State) -> Self::Layers {}
+    }
+
+    fn finish_test_close<A: crate::Addin>(runtime: &Runtime<A>) {
         let ingress = crate::ingress::global_ingress();
         if matches!(
             ingress.phase(),
@@ -1617,7 +1629,7 @@ pub(crate) mod tests {
         runtime.release_test_module_lease();
     }
 
-    fn finish_test_open_rollback<S>(runtime: &Runtime<S>) {
+    fn finish_test_open_rollback<A: crate::Addin>(runtime: &Runtime<A>) {
         let ingress = crate::ingress::global_ingress();
         if matches!(
             ingress.phase(),
@@ -1651,9 +1663,9 @@ pub(crate) mod tests {
         struct TestHandle(u32);
         impl crate::ExcelHandleObject for TestHandle {}
 
-        let runtime = Runtime::new();
+        let runtime = Runtime::<TestU32Addin>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(1_u32, Vec::new());
+        runtime.publish(1_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &1);
         let old_handles = runtime.handles().unwrap();
@@ -1668,7 +1680,7 @@ pub(crate) mod tests {
         drop(close_attempt);
 
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(2_u32, Vec::new());
+        runtime.publish(2_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &2);
         let new_handles = runtime.handles().unwrap();
@@ -1704,7 +1716,7 @@ pub(crate) mod tests {
         assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
 
         let mut current = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut current, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
     }
@@ -1712,13 +1724,13 @@ pub(crate) mod tests {
     #[test]
     fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Runtime::new();
+        let runtime = Runtime::<TestU32Addin>::new();
         let mut first = runtime.begin_open().unwrap();
 
         assert!(runtime.begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
 
-        runtime.publish(11_u32, Vec::new());
+        runtime.publish(11_u32, ());
         runtime.finish_open(&mut first, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         assert_eq!(runtime.enter().unwrap().state(), &11);
@@ -1748,9 +1760,9 @@ pub(crate) mod tests {
     #[test]
     fn final_close_cancels_an_in_flight_open_commit() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime::<TestU32Addin>::new());
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish(17_u32, Vec::new());
+        runtime.publish(17_u32, ());
 
         let close_epoch = runtime.close_epoch();
         let closing_runtime = Arc::clone(&runtime);
@@ -1792,9 +1804,9 @@ pub(crate) mod tests {
     #[test]
     fn close_certificate_survives_a_concurrent_close_epoch_bump() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime::<()>::new());
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let close_attempt = runtime.begin_final_close().unwrap();
@@ -1885,7 +1897,7 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let first = runtime.begin_final_close().unwrap();
@@ -1912,9 +1924,9 @@ pub(crate) mod tests {
     #[test]
     fn close_certificate_refuses_to_publish_closed_before_state_is_released() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Runtime::new();
+        let runtime = Runtime::<()>::new();
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish((), Vec::new());
+        runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let close_attempt = runtime.begin_final_close().unwrap();
@@ -1956,9 +1968,9 @@ pub(crate) mod tests {
     #[test]
     fn close_rejects_new_calls_and_waits_for_existing_call() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Arc::new(Runtime::new());
+        let runtime = Arc::new(Runtime::<TestU32Addin>::new());
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(7_u32, Vec::new());
+        runtime.publish(7_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let (_export_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {});

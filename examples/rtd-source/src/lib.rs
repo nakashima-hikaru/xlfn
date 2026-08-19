@@ -30,6 +30,7 @@ pub struct RtdSourceExample;
 impl Addin for RtdSourceExample {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(State {
@@ -38,11 +39,13 @@ impl Addin for RtdSourceExample {
             }),
         })
     }
+
+    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(name = "METRIC.LAST")]
 pub fn last_metric(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, RtdSourceExample>,
     symbol: String,
 ) -> XllResult<RtdValue> {
     let topic = RtdTopic::new(["last", symbol.as_str()])?;

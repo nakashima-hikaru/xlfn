@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::{Addin, OpenContext};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -34,11 +35,25 @@ fn test_lock() -> AsyncTestGuard {
     }
 }
 
-fn test_lock_for_runtime<S: 'static>(runtime: &'static Runtime<S>) -> AsyncTestGuard {
+fn test_lock_for_runtime<A: Addin>(runtime: &'static Runtime<A>) -> AsyncTestGuard {
     AsyncTestGuard {
         _lock: TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
         cleanup: Some(Box::new(move || runtime.release_test_module_lease())),
     }
+}
+
+struct TestU32Addin;
+
+impl Addin for TestU32Addin {
+    type State = u32;
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+        unreachable!()
+    }
+
+    fn udf_layers(_: &Self::State) -> Self::Layers {}
 }
 
 fn stop_after_async_evaluation() {
@@ -451,43 +466,51 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
 
 #[test]
 fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
+    struct ReentrantTestAddin;
+    impl Addin for ReentrantTestAddin {
+        type State = u32;
+        type Error = XllError;
+        type Layers = (ReentrantLayer,);
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+        fn udf_layers(_: &Self::State) -> Self::Layers {
+            unreachable!()
+        }
+    }
+
     struct ReentrantLayer {
-        runtime: &'static Runtime<u32>,
-        exited: std::sync::mpsc::Sender<()>,
+        on_exit: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
     }
     struct ReentrantLayerGuard {
-        runtime: &'static Runtime<u32>,
-        exited: std::sync::mpsc::Sender<()>,
+        on_exit: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
     }
 
     impl crate::UdfLayer for ReentrantLayer {
-        fn enter(&self, _: &crate::CallMetadata) -> XllResult<Box<dyn crate::UdfLayerGuard>> {
-            Ok(Box::new(ReentrantLayerGuard {
-                runtime: self.runtime,
-                exited: self.exited.clone(),
-            }))
+        type Guard = ReentrantLayerGuard;
+        fn enter(&self, _: &crate::CallMetadata) -> XllResult<Self::Guard> {
+            Ok(ReentrantLayerGuard {
+                on_exit: std::sync::Arc::clone(&self.on_exit),
+            })
         }
     }
 
     impl crate::UdfLayerGuard for ReentrantLayerGuard {
-        fn exit(self: Box<Self>, _: &crate::CallOutcome<'_>) {
-            cancel_async_calculation(self.runtime);
-            end_async_calculation(self.runtime);
-            self.exited.send(()).unwrap();
+        fn exit(self, _: &crate::CallOutcome<'_>) {
+            (self.on_exit)();
         }
     }
 
-    let runtime: &'static Runtime<u32> = Box::leak(Box::new(Runtime::new()));
+    let runtime: &'static Runtime<ReentrantTestAddin> = Box::leak(Box::new(Runtime::new()));
     let _guard = test_lock_for_runtime(runtime);
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
+    let on_exit = std::sync::Arc::new(move || {
+        cancel_async_calculation(runtime);
+        end_async_calculation(runtime);
+        exited_tx.send(()).unwrap();
+    });
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(
-        7_u32,
-        vec![Box::new(ReentrantLayer {
-            runtime,
-            exited: exited_tx,
-        })],
-    );
+    runtime.publish(7_u32, (ReentrantLayer { on_exit },));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
@@ -847,10 +870,10 @@ fn async_handle_payload_is_deep_copied() {
 
 #[test]
 fn async_boundary_returns_completed_value_through_callback() {
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, Vec::new());
+    runtime.publish(7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -893,29 +916,40 @@ fn async_boundary_reports_handler_failures_to_layers() {
         concurrent_calls: usize,
     }
     impl crate::UdfLayer for Recorder {
-        fn enter(
-            &self,
-            metadata: &crate::CallMetadata,
-        ) -> XllResult<Box<dyn crate::UdfLayerGuard>> {
-            Ok(Box::new(RecorderGuard {
+        type Guard = RecorderGuard;
+        fn enter(&self, metadata: &crate::CallMetadata) -> XllResult<Self::Guard> {
+            Ok(RecorderGuard {
                 sender: self.0.clone(),
                 concurrent_calls: metadata.concurrent_calls,
-            }))
+            })
         }
     }
     impl crate::UdfLayerGuard for RecorderGuard {
-        fn exit(self: Box<Self>, outcome: &crate::CallOutcome<'_>) {
+        fn exit(self, outcome: &crate::CallOutcome<'_>) {
             self.sender
                 .send((outcome.result, outcome.vendor_code, self.concurrent_calls))
                 .unwrap();
         }
     }
 
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    struct HandlerFailAddin;
+    impl Addin for HandlerFailAddin {
+        type State = u32;
+        type Error = XllError;
+        type Layers = (Recorder,);
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+        fn udf_layers(_: &Self::State) -> Self::Layers {
+            unreachable!()
+        }
+    }
+
+    let runtime = Box::leak(Box::new(Runtime::<HandlerFailAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, vec![Box::new(Recorder(event_sender))]);
+    runtime.publish(7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -964,22 +998,36 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     struct RecorderGuard(std::sync::mpsc::Sender<UdfResultKind>);
 
     impl crate::UdfLayer for Recorder {
-        fn enter(&self, _: &crate::CallMetadata) -> XllResult<Box<dyn crate::UdfLayerGuard>> {
-            Ok(Box::new(RecorderGuard(self.0.clone())))
+        type Guard = RecorderGuard;
+        fn enter(&self, _: &crate::CallMetadata) -> XllResult<Self::Guard> {
+            Ok(RecorderGuard(self.0.clone()))
         }
     }
 
     impl crate::UdfLayerGuard for RecorderGuard {
-        fn exit(self: Box<Self>, outcome: &crate::CallOutcome<'_>) {
+        fn exit(self, outcome: &crate::CallOutcome<'_>) {
             self.0.send(outcome.result).unwrap();
         }
     }
 
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    struct DeliveryRejectionAddin;
+    impl Addin for DeliveryRejectionAddin {
+        type State = u32;
+        type Error = XllError;
+        type Layers = (Recorder,);
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+        fn udf_layers(_: &Self::State) -> Self::Layers {
+            unreachable!()
+        }
+    }
+
+    let runtime = Box::leak(Box::new(Runtime::<DeliveryRejectionAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, vec![Box::new(Recorder(event_sender))]);
+    runtime.publish(7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
@@ -1018,10 +1066,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 
 #[test]
 fn async_boundary_returns_error_on_cancellation() {
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, Vec::new());
+    runtime.publish(7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -1065,10 +1113,10 @@ fn async_boundary_returns_error_on_cancellation() {
 
 #[test]
 fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, Vec::new());
+    runtime.publish(7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
@@ -1129,10 +1177,10 @@ fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
 
 #[test]
 fn cancellation_after_evaluation_does_not_leak_the_return_block() {
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(7_u32, Vec::new());
+    runtime.publish(7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
@@ -1714,17 +1762,36 @@ fn close_preempts_in_progress_advance_generation() {
 #[test]
 fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
     struct PanickingLayer;
+    struct PanickingGuard;
 
     impl crate::execution::UdfLayer for PanickingLayer {
-        fn enter(&self, _: &CallMetadata) -> XllResult<Box<dyn crate::execution::UdfLayerGuard>> {
+        type Guard = PanickingGuard;
+        fn enter(&self, _: &CallMetadata) -> XllResult<Self::Guard> {
             panic!("injected layer panic in outer boundary");
         }
     }
 
-    let runtime = Box::leak(Box::new(Runtime::new()));
+    impl crate::execution::UdfLayerGuard for PanickingGuard {
+        fn exit(self, _: &CallOutcome<'_>) {}
+    }
+
+    struct PanickingAddin;
+    impl Addin for PanickingAddin {
+        type State = u32;
+        type Error = XllError;
+        type Layers = (PanickingLayer,);
+        fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
+            unreachable!()
+        }
+        fn udf_layers(_: &Self::State) -> Self::Layers {
+            unreachable!()
+        }
+    }
+
+    let runtime = Box::leak(Box::new(Runtime::<PanickingAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
-    runtime.publish(1_u32, vec![Box::new(PanickingLayer)]);
+    runtime.publish(1_u32, (PanickingLayer,));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 

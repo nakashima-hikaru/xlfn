@@ -7,15 +7,22 @@ use super::*;
 /// `raw_handle` must point to a valid, aligned, Excel-owned `XLOPER12` async
 /// handle that remains live for the duration of this call.
 #[doc(hidden)]
-pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
-    runtime: &'static Runtime<S>,
+/// Runs the synchronous launch portion of a native Excel async UDF.
+///
+/// # Safety
+///
+/// `raw_handle` must point to a valid, aligned, Excel-owned `XLOPER12` async
+/// handle that remains live for the duration of this call.
+#[doc(hidden)]
+pub unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
+    runtime: &'static Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
     start: Start,
 ) where
-    S: Send + Sync + 'static,
-    Start: FnOnce(crate::runtime::GenerationLease<S>, CancellationToken) -> XllResult<Fut>,
+    A: crate::Addin,
+    Start: FnOnce(crate::runtime::GenerationLease<A>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
@@ -54,19 +61,21 @@ pub unsafe fn async_udf_boundary_named<S, Start, Fut, T>(
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
 }
 
-pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
-    runtime: &'static Runtime<S>,
-    guard: &crate::runtime::CallGuard<'_, S>,
+pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
+    runtime: &'static Runtime<A>,
+    guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
     start: Start,
 ) where
-    S: Send + Sync + 'static,
-    Start: FnOnce(crate::runtime::GenerationLease<S>, CancellationToken) -> XllResult<Fut>,
+    A: crate::Addin,
+    Start: FnOnce(crate::runtime::GenerationLease<A>, CancellationToken) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
+    use crate::execution::UdfLayers;
+
     let call_id = runtime.next_call_id();
     let timer = crate::execution::CallTimer::start();
     let started_at = std::time::SystemTime::now();
@@ -80,14 +89,18 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<S, Start, Fut, T>(
         started_at,
         concurrent_calls,
     };
-    let layers = match crate::execution::EnteredLayers::enter(guard.layers(), &metadata) {
-        Ok(layers) => layers,
-        Err(error) => {
-            crate::diagnostics::report_no_unwind(udf_id, &error);
-            // SAFETY: forwarded from this function's raw-handle contract.
-            unsafe { return_error(udf_id, raw_handle, &error) };
-            return;
+    let layers = if <A::Layers as UdfLayers>::HAS_LAYERS {
+        match guard.layers().enter(&metadata) {
+            Ok(layers) => Some(layers),
+            Err(error) => {
+                crate::diagnostics::report_no_unwind(udf_id, &error);
+                // SAFETY: forwarded from this function's raw-handle contract.
+                unsafe { return_error(udf_id, raw_handle, &error) };
+                return;
+            }
         }
+    } else {
+        None
     };
     let tracker = Arc::new(Mutex::new(AsyncCompletionTracker::new(
         &metadata, timer, layers,
@@ -240,10 +253,10 @@ pub(crate) unsafe fn async_return(
 #[cfg(test)]
 pub(crate) static AFTER_ASYNC_EVALUATION_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
-pub fn cancel_async_calculation<S>(runtime: &Runtime<S>) {
+pub fn cancel_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
     runtime.cancel_async();
 }
 
-pub fn end_async_calculation<S>(runtime: &Runtime<S>) {
+pub fn end_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
     runtime.finish_calculation();
 }

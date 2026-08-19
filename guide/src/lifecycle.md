@@ -6,9 +6,10 @@ The `Addin` trait defines one open generation of the XLL:
 pub trait Addin: Send + Sync + 'static {
     type State: Send + Sync + 'static;
     type Error: IntoXllError;
+    type Layers: UdfLayers;
 
     fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
-    fn udf_layers(state: &Self::State) -> Vec<Box<dyn UdfLayer>>;
+    fn udf_layers(state: &Self::State) -> Self::Layers;
     fn quiesce(state: &mut Self::State) -> Result<(), Self::Error>;
     fn cleanup(state: &mut Self::State, reporter: &mut CleanupReporter<'_>);
 }

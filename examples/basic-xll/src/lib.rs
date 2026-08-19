@@ -11,10 +11,13 @@ pub struct ExampleAddin;
 impl Addin for ExampleAddin {
     type State = ExampleState;
     type Error = XllError;
+    type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
         Ok(ExampleState)
     }
+
+    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(name = "EXAMPLE.ADD", thread_safe)]
@@ -27,7 +30,7 @@ pub fn add(
 
 #[excel_function(name = "EXAMPLE.GREET", thread_safe)]
 pub fn greet(
-    #[excel_context(thread_safe)] _context: ThreadSafeContext<'_, ExampleState>,
+    #[excel_context(thread_safe)] _context: ThreadSafeContext<'_, ExampleAddin>,
     name: String,
 ) -> XllResult<String> {
     Ok(format!("Hello, {name}!"))
@@ -40,7 +43,7 @@ pub fn one() -> i32 {
 
 #[excel_function(name = "EXAMPLE.REF.AREAS")]
 pub fn reference_area_count(
-    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, '_, ExampleState>,
+    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, '_, ExampleAddin>,
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
     i32::try_from(reference.areas().count()).map_err(|_| XllError::Domain {

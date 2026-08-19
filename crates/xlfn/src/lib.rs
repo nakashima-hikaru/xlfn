@@ -59,7 +59,9 @@ macro_rules! __xlfn_async_exports {
 
 /// Add-in lifecycle types.
 pub mod addin {
-    pub use xlfn_core::{Addin, BuildInfo, CleanupIssueKind, CleanupReporter, OpenContext};
+    pub use xlfn_core::{
+        Addin, BuildInfo, CleanupIssueKind, CleanupReporter, OpenContext, UdfLayers,
+    };
 }
 
 /// Capabilities supplied to exported functions by the generated Excel boundary.
@@ -127,7 +129,7 @@ pub mod advanced {
     /// Exported-function execution metadata and instrumentation.
     pub mod execution {
         pub use xlfn_core::{
-            CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard,
+            CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers,
             UdfResultKind,
         };
     }
@@ -142,7 +144,7 @@ pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function}
 
 /// Common imports for authoring an add-in.
 pub mod prelude {
-    pub use crate::addin::{Addin, CleanupIssueKind, CleanupReporter, OpenContext};
+    pub use crate::addin::{Addin, CleanupIssueKind, CleanupReporter, OpenContext, UdfLayers};
     #[cfg(feature = "async")]
     pub use crate::context::AsyncContext;
     pub use crate::context::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
