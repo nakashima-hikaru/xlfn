@@ -305,9 +305,10 @@ pub trait Addin: Send + Sync + 'static {
     /// other source that could execute XLL code after unload.
     ///
     /// Returning `Ok(())` certifies that every such execution resource is
-    /// quiescent. A panic or `Err` leaves unload safety unknown, so the
-    /// framework fail-stops rather than returning from `xlAutoClose` while code
-    /// from this XLL may still run. The hook is terminal and is never retried.
+    /// quiescent. A panic or `Err` leaves teardown incomplete, so the runtime
+    /// enters `Quarantined`, retains the module residency lease, and rejects
+    /// further opens or UDF calls. The hook is terminal for that generation
+    /// and is never retried.
     ///
     /// Handle values are call-scoped and cannot be stored in `State`. Vendor
     /// operations must be canceled cooperatively; unload waits rather than
@@ -363,10 +364,9 @@ impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 ///
 /// The context holds an explicit open-generation lifetime lease. Moving it
 /// into a detached thread or task that can outlive the returned future violates
-/// the XLL shutdown contract: Excel may unload the module immediately after
-/// `xlAutoClose`. The runtime detects an escaped lease during shutdown
-/// and terminates the process rather than returning with executable XLL code
-/// still reachable.
+/// the XLL shutdown contract. The runtime detects an escaped lease during
+/// explicit removal, enters `Quarantined`, and keeps the DLL resident rather
+/// than returning with executable XLL code still reachable.
 #[cfg(feature = "async")]
 pub struct AsyncContext<A: Addin> {
     lease: crate::runtime::GenerationLease<A>,

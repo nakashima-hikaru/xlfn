@@ -43,6 +43,7 @@ pub(crate) enum GhostPhase {
     Open,
     Closing(GhostStage),
     Closed,
+    Quarantined(GhostFailure),
     FailStopped(GhostFailure),
 }
 
@@ -279,6 +280,7 @@ pub(crate) enum GhostEvent {
     DiagnosticsDrained,
     RtdDrained,
     FinishClose,
+    Quarantine(GhostFailure),
     FailStop(GhostFailure),
 }
 
@@ -286,6 +288,7 @@ pub(crate) enum GhostEvent {
 pub(crate) enum GhostOutcome {
     InProgress,
     ReturnedSuccess,
+    Quarantined,
     FailStopped,
 }
 
@@ -294,6 +297,7 @@ impl GhostOutcome {
         match self {
             Self::InProgress => "in_progress",
             Self::ReturnedSuccess => "returned_success",
+            Self::Quarantined => "quarantined",
             Self::FailStopped => "fail_stopped",
         }
     }
@@ -806,6 +810,12 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             }
             target.phase = GhostPhase::Closed;
         }
+        GhostEvent::Quarantine(reason) => {
+            if !live(&source.phase) {
+                return Err(GhostViolation::Terminal);
+            }
+            target.phase = GhostPhase::Quarantined(*reason);
+        }
         GhostEvent::FailStop(reason) => {
             if !live(&source.phase) {
                 return Err(GhostViolation::Terminal);
@@ -886,7 +896,7 @@ impl GhostMachine {
         }
         if matches!(
             self.state.phase,
-            GhostPhase::Closed | GhostPhase::FailStopped(_)
+            GhostPhase::Closed | GhostPhase::Quarantined(_) | GhostPhase::FailStopped(_)
         ) {
             return Err(GhostViolation::Terminal);
         }
@@ -930,10 +940,23 @@ impl GhostMachine {
         result
     }
 
+    pub(crate) fn quarantine(&mut self, reason: GhostFailure) -> Result<(), GhostViolation> {
+        if !self.active {
+            return Ok(());
+        }
+        let result = self.apply(GhostEvent::Quarantine(reason));
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+
     #[cfg(any(test, feature = "shutdown-trace"))]
     pub(crate) fn trace(&self) -> GhostTrace {
         let outcome = if self.returned_success {
             GhostOutcome::ReturnedSuccess
+        } else if matches!(self.state.phase, GhostPhase::Quarantined(_)) {
+            GhostOutcome::Quarantined
         } else if matches!(self.state.phase, GhostPhase::FailStopped(_)) {
             GhostOutcome::FailStopped
         } else {
@@ -1011,6 +1034,24 @@ impl ShutdownGhost {
             return Ok(());
         }
         self.apply(GhostEvent::FailStop(reason))
+    }
+
+    pub(crate) fn quarantine(&self, reason: GhostFailure) -> Result<(), GhostViolation> {
+        if !self.active() {
+            return Ok(());
+        }
+        let mut machine = self.inner.lock();
+        let result = machine.quarantine(reason);
+        if result.is_ok()
+            && let Some(composition) = self.composition.lock().as_ref().cloned()
+        {
+            composition.record(
+                crate::composition_refinement::CompositionEvent::LiftShutdown(
+                    GhostEvent::Quarantine(reason),
+                ),
+            );
+        }
+        result
     }
 
     pub(crate) fn record_returned_success(&self) -> Result<(), GhostViolation> {

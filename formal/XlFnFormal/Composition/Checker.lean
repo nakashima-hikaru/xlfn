@@ -57,7 +57,7 @@ def apply? (s : State) (event : Event) : Option State :=
             some
               { lifecycle := lifecycle'
                 currentShutdown := none
-                unloadCertified := false }
+                logicalQuiescenceCertified := false }
         | none => none
       else none
   | .finishOpenRejectedByClose attempt =>
@@ -68,7 +68,7 @@ def apply? (s : State) (event : Event) : Option State :=
             some
               { lifecycle := lifecycle'
                 currentShutdown := none
-                unloadCertified := false }
+                logicalQuiescenceCertified := false }
         | none => none
       else none
   | .failOpen attempt =>
@@ -78,7 +78,7 @@ def apply? (s : State) (event : Event) : Option State :=
             some
               { lifecycle := lifecycle'
                 currentShutdown := none
-                unloadCertified := false }
+                logicalQuiescenceCertified := false }
         | none => none
       else none
   | .requestFinalClose =>
@@ -105,7 +105,7 @@ def apply? (s : State) (event : Event) : Option State :=
                 currentShutdown := some
                   { generation := attempt
                     state := Shutdown.State.opened resources }
-                unloadCertified := false }
+                logicalQuiescenceCertified := false }
         | none => none
       else none
   | .liftShutdown shutdownEvent =>
@@ -141,7 +141,7 @@ def apply? (s : State) (event : Event) : Option State :=
               session.state.phase = .closed then
             some { s with
               lifecycle := { s.lifecycle with phase := .closed }
-              unloadCertified := true }
+              logicalQuiescenceCertified := true }
           else none
   | .retireCommittedShutdown =>
       match s.currentShutdown with
@@ -159,7 +159,7 @@ def apply? (s : State) (event : Event) : Option State :=
         some { s with
           lifecycle := { s.lifecycle with phase := .closed }
           currentShutdown := none
-          unloadCertified := true }
+          logicalQuiescenceCertified := true }
       else none
   | .finishOpenRollback resources =>
       if s.currentShutdown = none ∧
@@ -167,7 +167,7 @@ def apply? (s : State) (event : Event) : Option State :=
         some { s with
           lifecycle := { s.lifecycle with phase := .closed }
           currentShutdown := none
-          unloadCertified := true }
+          logicalQuiescenceCertified := true }
       else none
   | .releaseCleanupOwner =>
       if s.currentShutdown = none ∨ s.lifecycle.phase = .closing then

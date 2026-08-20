@@ -2,7 +2,7 @@
 
 **ABI (Application Binary Interface)** — The binary contract between compiled components: calling convention, symbol names, parameter widths, structure layout, alignment, ownership, and error protocol.
 
-**Add-in generation** — One successful `xlAutoOpen` through the matching terminal `xlAutoClose`. State, handle tokens, async calculations, and RTD ownership are scoped to a generation.
+**Add-in generation** — One successful `xlAutoOpen` through the matching explicit `xlAutoRemove` teardown. State, handle tokens, async calculations, and RTD ownership are scoped to a generation; an ordinary `xlAutoClose` hint does not end it.
 
 **Async UDF** — An Excel native asynchronous worksheet function that returns control promptly and later supplies one final result through Excel's async handle.
 
@@ -54,7 +54,7 @@
 
 **PE (Portable Executable)** — The Windows executable format used by XLLs and DLLs. `cargo xlfn` inspects PE architecture, exports, imports, and delay imports.
 
-**Quiescence** — The state in which no operation can still execute code or callbacks belonging to a subsystem. `xlAutoClose` must establish quiescence before Excel can unload the XLL.
+**Quiescence** — The state in which no operation can still execute code or callbacks belonging to a subsystem. `xlAutoRemove` must establish logical quiescence before the module residency lease can eventually be released.
 
 **RTD (Real-Time Data)** — Excel's streaming update mechanism. A source creates a subscription, publishes repeated scalar values through a sink, and synchronously disconnects during shutdown.
 

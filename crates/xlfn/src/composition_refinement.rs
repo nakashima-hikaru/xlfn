@@ -46,7 +46,7 @@ struct TraceDocument {
 
 struct Machine {
     // Composition history belongs to the Runtime lifetime, not to one
-    // xlAutoClose transaction. A later beginOpen therefore replays after the
+    // explicit removal transaction. A later beginOpen therefore replays after the
     // closeEpoch and generation transitions emitted by earlier cycles.
     events: Vec<CompositionEvent>,
     trace_truncated: bool,

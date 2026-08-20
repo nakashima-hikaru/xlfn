@@ -93,7 +93,29 @@ fn quiesce(state: &mut State) -> Result<(), Error> {
 }
 ```
 
-`xlAutoClose` cannot reject DLL unload. If `quiesce` fails or panics, the framework fail-stops because unload safety is unknown. It also fail-stops when an Excel callback remains registered, a framework producer cannot be stopped, an RTD/COM object remains live, a handle runtime is not quiescent, or an open-generation lease escaped.
+Excel's `xlAutoClose` export is an ambiguous deactivation or shutdown hint. It
+does not tear down the runtime and does not release the DLL's physical
+residency lease. UDFs remain callable after the hint while the generation is
+still `Open`.
+
+`xlAutoRemove` is the explicit terminal-removal boundary. It is the only
+boundary that runs `quiesce`, unregisters Excel callbacks, stops framework
+producers, closes RTD/COM state, reclaims the generation, and publishes the
+logical `Closed` phase. After a successful removal, the following
+`xlAutoClose` releases the module residency lease. `DllCanUnloadNow` remains
+`S_FALSE` while that lease is held.
+
+If `quiesce` fails or panics, or any other teardown hazard prevents a complete
+certificate, the runtime enters `Quarantined`. It rejects new UDF calls and
+opens, retains the module residency lease, and retains resources whose
+destruction was not proven safe. Ordinary `xlAutoClose` hints never clear this
+state.
+
+If Excel requests `xlAutoOpen` while a generation is still open, xlfn performs
+a controlled terminal teardown of the old generation and then opens a new
+generation. A failed reload is quarantined. Normal Excel process termination
+does not provide the same `quiesce` guarantee; process exit is therefore not
+used as the logical lifecycle boundary.
 
 For application-owned concurrent or thread-affine resources, a safe shutdown sequence is:
 

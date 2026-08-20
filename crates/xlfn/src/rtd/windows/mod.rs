@@ -101,7 +101,7 @@ pub(super) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
-    if crate::rtd::module_unload_certified() && COM_MODULE_LIFETIME.can_unload_now() {
+    if crate::rtd::logical_quiescence_certified() && COM_MODULE_LIFETIME.can_unload_now() {
         S_OK
     } else {
         1 // S_FALSE

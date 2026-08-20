@@ -63,6 +63,7 @@ mod input_identity;
 mod lifecycle;
 #[doc(hidden)]
 pub mod macro_support;
+mod module_residency;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
@@ -110,7 +111,7 @@ pub use shutdown::{CleanupIssueKind, CleanupReporter};
 pub mod ingress;
 pub use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
 #[doc(hidden)]
-pub use lifecycle::{close_addin, open_addin};
+pub use lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
 #[doc(hidden)]
 pub use reference::reference_from_raw;
 pub use reference::{ExcelReference, FromExcelReference, ReferenceArea, ReferenceAreas, SheetId};
@@ -127,7 +128,7 @@ pub use return_value::{
     free_return, free_return_boundary, udf_boundary_named,
 };
 #[doc(hidden)]
-pub use rtd::{dll_can_unload_now, dll_get_class_object};
+pub use rtd::dll_get_class_object;
 
 inventory::collect!(RegistrationDescriptor);
 
@@ -586,10 +587,11 @@ pub mod __private {
         FunctionRegistration, InputIdentityEncoder, MacroRuntime, MainThreadReturn, ReturnContext,
         addin_manager_info, argument_presence, assert_async_parameter, assert_async_return,
         assert_excel_parameter, assert_macro_sheet_return, assert_main_thread_return,
-        assert_thread_safe_return, assert_volatile_return, close_generated_addin, convert_argument,
-        convert_reference, dll_can_unload_now, dll_get_class_object, free_generated_return,
-        macro_sheet_context, main_thread_context, open_generated_addin, publish_new_handle,
-        submit_registration, sync_udf, thread_safe_context, utf16_eq_ignore_ascii_case,
+        assert_thread_safe_return, assert_volatile_return, auto_close_generated_addin,
+        auto_remove_generated_addin, convert_argument, convert_reference, dll_can_unload_now,
+        dll_get_class_object, free_generated_return, macro_sheet_context, main_thread_context,
+        open_generated_addin, publish_new_handle, submit_registration, sync_udf,
+        thread_safe_context, utf16_eq_ignore_ascii_case,
     };
     #[cfg(feature = "async")]
     pub use crate::macro_support::{

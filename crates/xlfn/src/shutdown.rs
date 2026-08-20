@@ -83,8 +83,6 @@ pub(crate) enum UnloadHazard {
     AddinQuiesceFailed,
     DiagnosticWorkerStillRunning,
     RegistrationStateUnknown,
-    OpenRollbackFailed,
-    UnhandledClosePanic,
     CloseInvariantViolation,
     RtdGitCallbackStillRegistered,
     RtdGitRevocationDebt,
@@ -117,8 +115,7 @@ impl UnloadHazard {
             Self::DiagnosticWorkerStillRunning => {
                 crate::shutdown_refinement::GhostFailure::DiagnosticsShutdownFailed
             }
-            Self::UnhandledClosePanic => crate::shutdown_refinement::GhostFailure::BoundaryPanic,
-            Self::CloseInvariantViolation | Self::OpenRollbackFailed => {
+            Self::CloseInvariantViolation => {
                 crate::shutdown_refinement::GhostFailure::InvariantViolation
             }
         }

@@ -28,6 +28,7 @@ pub enum LifecyclePhase {
     Open = 2,
     Closing = 3,
     OpenRollbackPending = 4,
+    Quarantined = 5,
 }
 
 impl LifecyclePhase {
@@ -38,6 +39,26 @@ impl LifecyclePhase {
             2 => Self::Open,
             3 => Self::Closing,
             4 => Self::OpenRollbackPending,
+            5 => Self::Quarantined,
+            _ => std::process::abort(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum HostLifecycleIntent {
+    None = 0,
+    ExplicitRemovalRequested = 1,
+    ExplicitRemovalComplete = 2,
+}
+
+impl HostLifecycleIntent {
+    fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::ExplicitRemovalRequested,
+            2 => Self::ExplicitRemovalComplete,
             _ => std::process::abort(),
         }
     }
@@ -106,6 +127,7 @@ impl<A: crate::Addin> GenerationLease<A> {
 
 pub struct Runtime<A: crate::Addin> {
     phase: AtomicU8,
+    host_intent: AtomicU8,
     next_lifecycle_attempt: AtomicU64,
     generation: AtomicU64,
     open_attempt_id: AtomicU64,
@@ -129,6 +151,7 @@ pub struct Runtime<A: crate::Addin> {
     handles: crate::handle::HandleRuntimeSlot,
     subscriptions: crate::subscription::SubscriptionRuntimeSlot,
     rtd_limits: parking_lot::RwLock<crate::subscription::RtdLimits>,
+    module_residency: Mutex<Option<crate::module_residency::ModuleResidencyLease>>,
     #[cfg(feature = "async")]
     async_manager: crate::async_udf::AsyncManager,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -149,6 +172,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub const fn new_with_rtd_limits(rtd_limits: crate::subscription::RtdLimits) -> Self {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
+            host_intent: AtomicU8::new(HostLifecycleIntent::None as u8),
             next_lifecycle_attempt: AtomicU64::new(1),
             generation: AtomicU64::new(0),
             open_attempt_id: AtomicU64::new(0),
@@ -169,6 +193,7 @@ impl<A: crate::Addin> Runtime<A> {
             handles: crate::handle::HandleRuntimeSlot::new(),
             subscriptions: crate::subscription::SubscriptionRuntimeSlot::new(),
             rtd_limits: parking_lot::RwLock::new(rtd_limits),
+            module_residency: Mutex::new(None),
             #[cfg(feature = "async")]
             async_manager: crate::async_udf::AsyncManager::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -217,9 +242,9 @@ impl<A: crate::Addin> Runtime<A> {
         self.composition_trace().finish_return();
     }
 
-    // This is called by the xlAutoClose boundary after close_addin_inner has
-    // returned AlreadyClosed; begin_final_close only records its lifecycle
-    // request and does not claim the host call returned successfully.
+    // This is called by the explicit removal boundary after the terminal
+    // teardown has returned AlreadyClosed; begin_final_close only records its
+    // lifecycle request and does not claim the host call returned successfully.
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) fn record_composition_already_closed_return(&self) {
         self.mark_composition_return_pending();
@@ -234,6 +259,69 @@ impl<A: crate::Addin> Runtime<A> {
     #[must_use]
     pub fn phase(&self) -> LifecyclePhase {
         LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn host_intent(&self) -> HostLifecycleIntent {
+        HostLifecycleIntent::from_raw(self.host_intent.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn request_explicit_removal(&self) {
+        self.host_intent.store(
+            HostLifecycleIntent::ExplicitRemovalRequested as u8,
+            Ordering::Release,
+        );
+    }
+
+    pub(crate) fn complete_explicit_removal(&self) {
+        self.host_intent.store(
+            HostLifecycleIntent::ExplicitRemovalComplete as u8,
+            Ordering::Release,
+        );
+    }
+
+    pub(crate) fn clear_host_intent(&self) {
+        self.host_intent
+            .store(HostLifecycleIntent::None as u8, Ordering::Release);
+    }
+
+    /// Acquires the DLL's self-reference before a generated `xlAutoOpen`
+    /// enters the logical opening transaction.
+    pub(crate) fn ensure_module_residency(&self, anchor: *const ()) -> XllResult<bool> {
+        let mut lease = self.module_residency.lock();
+        if lease.is_some() {
+            return Ok(false);
+        }
+        *lease = Some(crate::module_residency::ModuleResidencyLease::acquire(
+            anchor,
+        )?);
+        Ok(true)
+    }
+
+    /// Releases the physical residency reference after explicit removal has
+    /// completed. Ordinary host shutdown hints never call this method.
+    pub(crate) fn release_module_residency(&self) -> XllResult<()> {
+        let mut lease = self.module_residency.lock();
+        let Some(residency) = lease.as_mut() else {
+            return Ok(());
+        };
+        residency.try_release()?;
+        drop(lease.take());
+        Ok(())
+    }
+
+    pub(crate) fn module_residency_held(&self) -> bool {
+        self.module_residency.lock().is_some()
+    }
+
+    /// Publishes the fail-safe terminal state. A quarantined runtime rejects
+    /// new opens and calls while retaining the module residency lease and any
+    /// resources whose destruction was not proven safe.
+    pub(crate) fn quarantine(&self) {
+        let _wait_guard = self.wait_lock.lock();
+        self.returns.close_admission();
+        self.phase
+            .store(LifecyclePhase::Quarantined as u8, Ordering::Release);
+        self.lifecycle_changed.notify_all();
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -256,6 +344,9 @@ impl<A: crate::Addin> Runtime<A> {
                 diagnostic_id: crate::DiagnosticId::OPEN_PHASE,
             });
         }
+
+        self.host_intent
+            .store(HostLifecycleIntent::None as u8, Ordering::Release);
 
         let attempt_id = self.next_lifecycle_attempt_id()?;
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -581,7 +672,10 @@ impl<A: crate::Addin> Runtime<A> {
                 true
             }
             LifecyclePhase::OpenRollbackPending => true,
-            LifecyclePhase::Closed | LifecyclePhase::Open | LifecyclePhase::Closing => false,
+            LifecyclePhase::Closed
+            | LifecyclePhase::Open
+            | LifecyclePhase::Closing
+            | LifecyclePhase::Quarantined => false,
         };
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
@@ -670,9 +764,9 @@ impl<A: crate::Addin> Runtime<A> {
                 match self.phase() {
                     LifecyclePhase::Closed => {
                         // A cleanup owner publishes Closed before its guard leaves
-                        // the callback stack. A concurrent xlAutoClose must not
-                        // return until that owner has fully exited, because Excel
-                        // may unload the XLL immediately afterwards.
+                        // the callback stack. A concurrent explicit removal must
+                        // not return until that owner has fully exited, because
+                        // the host may immediately continue with residency release.
                         if !self.close_attempt_active.load(Ordering::Acquire)
                             && self.returns_are_quiescent()
                         {
@@ -697,6 +791,7 @@ impl<A: crate::Addin> Runtime<A> {
                         self.phase
                             .store(LifecyclePhase::Closing as u8, Ordering::Release);
                     }
+                    LifecyclePhase::Quarantined => return Some(false),
                 }
 
                 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -739,7 +834,10 @@ impl<A: crate::Addin> Runtime<A> {
             match self.phase() {
                 LifecyclePhase::Closed => return None,
                 LifecyclePhase::OpenRollbackPending => {}
-                LifecyclePhase::Closing | LifecyclePhase::Opening | LifecyclePhase::Open => {
+                LifecyclePhase::Closing
+                | LifecyclePhase::Opening
+                | LifecyclePhase::Open
+                | LifecyclePhase::Quarantined => {
                     return None;
                 }
             }
@@ -888,6 +986,13 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn ghost_fail_stop(&self, reason: crate::shutdown_refinement::GhostFailure) {
         if let Err(violation) = self.ghost_handle().fail_stop(reason) {
             tracing::error!(%violation, "shutdown ghost fail-stop recording failed");
+        }
+    }
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    pub(crate) fn ghost_quarantine(&self, reason: crate::shutdown_refinement::GhostFailure) {
+        if let Err(violation) = self.ghost_handle().quarantine(reason) {
+            tracing::error!(%violation, "shutdown ghost quarantine recording failed");
         }
     }
 
@@ -1208,7 +1313,7 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.mark_composition_terminal_pending();
         self.lifecycle_changed.notify_all();
-        crate::rtd::certify_module_unload();
+        crate::rtd::certify_logical_quiescence();
         #[cfg(test)]
         drop(self.test_module_lease.lock().take());
         Ok(())
@@ -1313,7 +1418,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
         }
         self.lifecycle_changed.notify_all();
-        crate::rtd::certify_module_unload();
+        crate::rtd::certify_logical_quiescence();
         #[cfg(test)]
         drop(self.test_module_lease.lock().take());
         Ok(ClosedWitness {
@@ -2004,6 +2109,22 @@ pub(crate) mod tests {
                 },
             ));
         assert_eq!(runtime.registrations().len(), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn module_residency_is_independent_from_logical_close() {
+        let runtime = Runtime::<()>::new();
+        assert!(!runtime.module_residency_held());
+        assert!(runtime.ensure_module_residency(std::ptr::null()).unwrap());
+        assert!(runtime.module_residency_held());
+        assert!(!runtime.ensure_module_residency(std::ptr::null()).unwrap());
+
+        runtime.quarantine();
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.module_residency_held());
+        runtime.release_module_residency().unwrap();
+        assert!(!runtime.module_residency_held());
     }
 
     #[test]

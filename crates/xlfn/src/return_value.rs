@@ -333,7 +333,7 @@ struct ReturnFreeGuard {
     obligation: ReturnObligation<'static>,
 }
 
-/// Keeps one generated `xlAutoFree12` callback visible to terminal shutdown.
+/// Keeps one generated `xlAutoFree12` callback visible to terminal removal.
 #[doc(hidden)]
 pub struct ReturnFreeBoundaryGuard {
     _operation: Option<ReturnFreeGuard>,

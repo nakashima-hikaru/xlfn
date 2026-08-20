@@ -64,4 +64,4 @@ xlfn = { version = "0.2", features = ["async"] }
 
 ## Project shape
 
-An XLL package must contain exactly one `cdylib` target and exactly one crate-root type attributed with `#[excel_addin]`. The generated lifecycle and COM exports are part of that definition. Do not hand-write competing `xlAutoOpen`, `xlAutoClose`, `xlAutoFree12`, `DllGetClassObject`, or related exports.
+An XLL package must contain exactly one `cdylib` target and exactly one crate-root type attributed with `#[excel_addin]`. The generated lifecycle and COM exports are part of that definition. Do not hand-write competing `xlAutoOpen`, `xlAutoClose`, `xlAutoRemove`, `xlAutoFree12`, `DllGetClassObject`, or related exports.

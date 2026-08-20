@@ -11,7 +11,7 @@ abstract shutdown protocol.
 
 The Rust integration is expected to emit one `Event` at each linearization
 point.  `stepSound` proves that every concrete event is admitted by `Step`;
-`successIsClosed` proves that a successful `xlAutoClose` return is represented
+`successIsClosed` proves that a successful `xlAutoRemove` return is represented
 by the abstract successful terminal phase rather than by `failStopped`. -/
 structure ShutdownRefinement (Concrete : Type u) where
   abstract : Concrete → State

@@ -5,7 +5,7 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Composition
 
-/-! The three successful close paths expose the same resource-level safety
+/-! The three successful removal paths expose the same resource-level safety
     result, but they differ in whether a committed Shutdown session exists. -/
 
 theorem successful_committed_close_is_quiescent
@@ -75,11 +75,11 @@ theorem returnSafe_reachable_state_has_no_active_shutdown
   exact returnSafe_has_no_active_shutdown
     (Reachable.valid hInitial hReachable) hSafe
 
-theorem reachable_returnSafe_is_unloadCertified
+theorem reachable_returnSafe_is_logicalQuiescenceCertified
     {final : State}
     (hReachable : Reachable State.initialState final)
     (hSafe : final.lifecycle.ReturnSafe) :
-    final.unloadCertified = true := by
+    final.logicalQuiescenceCertified = true := by
   have hConsistent := Reachable.unloadCertificationConsistent
     State.initialState_unloadCertificationConsistent hReachable
   have hPhase := hSafe.1
@@ -87,23 +87,23 @@ theorem reachable_returnSafe_is_unloadCertified
   simp [State.UnloadCertificationConsistent, hPhase] at h
   exact h
 
-/-- A successful abstract `xlAutoClose` return is represented by a reachable
+/-- A successful abstract `xlAutoRemove` return is represented by a reachable
     state whose lifecycle has reached the return-safe point.  The ghost fact
     is retained in the result even after the committed Shutdown session is
     retired. -/
 def SuccessfulReturn (final : State) : Prop :=
   Reachable State.initialState final ∧ final.lifecycle.ReturnSafe
 
-theorem successful_xlAutoClose_is_safe
+theorem successful_xlAutoRemove_is_safe
     {final : State}
     (hSuccess : SuccessfulReturn final) :
     final.lifecycle.ReturnSafe ∧
     final.currentShutdown = none ∧
-    final.unloadCertified = true := by
+    final.logicalQuiescenceCertified = true := by
   rcases hSuccess with ⟨hReachable, hSafe⟩
   have hNoShutdown := returnSafe_reachable_state_has_no_active_shutdown
     State.initialState_valid hReachable hSafe
-  have hCertified := reachable_returnSafe_is_unloadCertified
+  have hCertified := reachable_returnSafe_is_logicalQuiescenceCertified
     hReachable hSafe
   exact ⟨hSafe, hNoShutdown, hCertified⟩
 

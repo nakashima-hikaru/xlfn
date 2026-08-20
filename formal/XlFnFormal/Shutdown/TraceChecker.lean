@@ -153,6 +153,9 @@ private def parseEvent : Json → Except String Event
       | some "endAsyncTask" => do
           let payload ← json.getObjVal? "endAsyncTask"
           return .endAsyncTask (← parseCompletion payload)
+      | some "quarantine" => do
+          let payload ← json.getObjVal? "quarantine"
+          return .quarantine (← parseFailure payload)
       | some "failStop" => do
           let payload ← json.getObjVal? "failStop"
           return .failStop (← parseFailure payload)
@@ -169,6 +172,7 @@ private def parsePhase : Json → Except String Phase
       match json.getTag? with
       | some "Closing" => return .closing (← parseStage (← json.getObjVal? "Closing"))
       | some "FailStopped" => return .failStopped (← parseFailure (← json.getObjVal? "FailStopped"))
+      | some "Quarantined" => return .quarantined (← parseFailure (← json.getObjVal? "Quarantined"))
       | some tag => throw s!"unknown shutdown phase: {tag}"
       | none => throw s!"shutdown phase must be a tagged value: {json}"
   | json => throw s!"unknown shutdown phase: {json}"
@@ -304,6 +308,10 @@ private def checkTrace (json : Json) : Except String Unit := do
         match final.state.phase with
         | .failStopped _ => return ()
         | _ => throw "fail-stopped trace does not end in a fail-stopped phase"
+    | "quarantined" =>
+        match final.state.phase with
+        | .quarantined _ => return ()
+        | _ => throw "quarantine trace does not end in a quarantined phase"
     | outcome => throw s!"unknown shutdown trace outcome: {outcome}"
   else
     throw "shutdown trace initial state must be open"

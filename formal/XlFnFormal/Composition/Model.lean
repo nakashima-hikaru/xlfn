@@ -29,7 +29,7 @@ structure State where
       current lifecycle publication.  It is intentionally retained after a
       successful close so the return theorem does not depend on a retired
       Shutdown session remaining in memory. -/
-  unloadCertified : Bool
+  logicalQuiescenceCertified : Bool
   deriving DecidableEq, Repr
 
 namespace State
@@ -41,6 +41,7 @@ def ShutdownSessionPublished : Shutdown.Phase → Prop
   | .open => True
   | .closing _ => True
   | .closed => True
+  | .quarantined _ => True
   | .failStopped _ => True
 
 def SessionConsistent (s : State) : Prop :=
@@ -79,12 +80,12 @@ def Valid (s : State) : Prop :=
   s.CurrentShutdownCertified
 
 def UnloadCertificationConsistent (s : State) : Prop :=
-  s.unloadCertified = true ↔ s.lifecycle.phase = .closed
+  s.logicalQuiescenceCertified = true ↔ s.lifecycle.phase = .closed
 
 def initialState : State :=
   { lifecycle := Lifecycle.State.initialState
     currentShutdown := none
-    unloadCertified := true }
+    logicalQuiescenceCertified := true }
 
 theorem initialState_wellFormed : initialState.WellFormed := by
   exact ⟨Lifecycle.State.initialState_wellFormed, by
@@ -100,7 +101,7 @@ theorem initialState_unloadCertificationConsistent :
     initialState.UnloadCertificationConsistent := by
   simp [initialState, UnloadCertificationConsistent, Lifecycle.State.initialState]
 
-theorem initialState_unloadCertified : initialState.unloadCertified = true := by
+theorem initialState_logicalQuiescenceCertified : initialState.logicalQuiescenceCertified = true := by
   rfl
 
 theorem committed_session_phase_is_open

@@ -54,6 +54,7 @@ inductive Phase where
   | open
   | closing (stage : CloseStage)
   | closed
+  | quarantined (reason : Failure)
   | failStopped (reason : Failure)
   deriving DecidableEq, Repr
 
@@ -63,6 +64,7 @@ def rank : Phase → Nat
   | .open => 0
   | .closing stage => stage.rank
   | .closed => 11
+  | .quarantined _ => 11
   | .failStopped _ => 11
 
 theorem rank_le_terminal (phase : Phase) : phase.rank ≤ 11 := by
@@ -70,12 +72,14 @@ theorem rank_le_terminal (phase : Phase) : phase.rank ≤ 11 := by
   | «open» => simp [rank]
   | closing stage => cases stage <;> simp [rank, CloseStage.rank]
   | closed => simp [rank]
+  | quarantined reason => simp [rank]
   | failStopped reason => simp [rank]
 
 def IsLive : Phase → Prop
   | .open => True
   | .closing _ => True
   | .closed => False
+  | .quarantined _ => False
   | .failStopped _ => False
 
 def AllowsReturnCreation : Phase → Prop

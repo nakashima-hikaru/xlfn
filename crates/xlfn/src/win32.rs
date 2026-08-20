@@ -17,7 +17,9 @@ windows_link::link!("ole32.dll" "system" fn CoUninitialize());
 windows_link::link!("ole32.dll" "system" fn CoWaitForMultipleHandles(dwflags : u32, dwtimeout : u32, chandles : u32, phandles : *const HANDLE, lpdwindex : *mut u32) -> HRESULT);
 windows_link::link!("kernel32.dll" "system" fn CreateEventW(lpeventattributes : *const SECURITY_ATTRIBUTES, bmanualreset : BOOL, binitialstate : BOOL, lpname : PCWSTR) -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn CreateMutexW(lpmutexattributes : *const SECURITY_ATTRIBUTES, binitialowner : BOOL, lpname : PCWSTR) -> HANDLE);
+windows_link::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> WIN32_ERROR);
+windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(dwflags : u32, lpmodulename : PCWSTR, phmodule : *mut HMODULE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn OutputDebugStringW(lpoutputstring : PCWSTR));
 windows_link::link!("advapi32.dll" "system" fn RegCloseKey(hkey : HKEY) -> WIN32_ERROR);
 windows_link::link!("advapi32.dll" "system" fn RegCreateKeyExW(hkey : HKEY, lpsubkey : PCWSTR, reserved : u32, lpclass : PCWSTR, dwoptions : REG_OPEN_CREATE_OPTIONS, samdesired : REG_SAM_FLAGS, lpsecurityattributes : *const SECURITY_ATTRIBUTES, phkresult : *mut HKEY, lpdwdisposition : *mut REG_CREATE_KEY_DISPOSITION) -> WIN32_ERROR);
@@ -246,6 +248,7 @@ impl Default for FUNCDESC {
 }
 pub type FUNCFLAGS = u16;
 pub type FUNCKIND = i32;
+pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 4u32;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GUID {
@@ -265,8 +268,10 @@ impl GUID {
     }
 }
 pub type HANDLE = *mut core::ffi::c_void;
+pub type HINSTANCE = *mut core::ffi::c_void;
 pub type HKEY = *mut core::ffi::c_void;
 pub const HKEY_CURRENT_USER: HKEY = -2147483647i32 as _;
+pub type HMODULE = *mut core::ffi::c_void;
 pub type HRESULT = i32;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

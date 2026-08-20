@@ -1032,8 +1032,8 @@ fn expand_excel_addin(
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0".len()] =
-            *b"xlAutoOpen\0xlAutoClose\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
+        static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0".len()] =
+            *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
 
         #gating
         #krate::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
@@ -1048,13 +1048,20 @@ fn expand_excel_addin(
                 #category,
                 env!("CARGO_PKG_VERSION"),
                 #krate::__private::BUILD_TARGET,
+                xlAutoOpen as *const (),
             )
         }
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
-            #krate::__private::close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+        }
+
+        #gating
+        #[unsafe(no_mangle)]
+        pub extern "system" fn xlAutoRemove() -> i32 {
+            #krate::__private::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -1110,7 +1117,7 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn DllCanUnloadNow() -> i32 {
-            #krate::__private::dll_can_unload_now()
+            #krate::__private::dll_can_unload_now(&crate::__XLFN_RUNTIME)
         }
     })
 }
@@ -1850,7 +1857,9 @@ mod tests {
         assert!(expanded.contains("fn xlAutoOpen"));
         assert!(expanded.contains("open_generated_addin"));
         assert!(expanded.contains("fn xlAutoClose"));
-        assert!(expanded.contains("close_generated_addin"));
+        assert!(expanded.contains("auto_close_generated_addin"));
+        assert!(expanded.contains("fn xlAutoRemove"));
+        assert!(expanded.contains("auto_remove_generated_addin"));
         assert!(expanded.contains("fn xlAutoFree12"));
         assert!(expanded.contains("free_generated_return"));
         assert!(expanded.contains("fn xlAddInManagerInfo12"));

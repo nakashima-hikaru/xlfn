@@ -318,10 +318,10 @@ impl AsyncManager {
 
         // Excel owns the XLL module lifetime. Returning while a worker can
         // still execute this module is unsound, so shutdown deliberately has
-        // no timeout: a non-cooperative poll keeps xlAutoClose blocked.
+        // no timeout: a non-cooperative poll keeps xlAutoRemove blocked.
         if !executor.wait_for_idle() && !executor.drain_after_worker_failure() {
             // No worker remains that can release the outstanding task guards.
-            // Returning an AsyncStopped certificate would permit unsafe unload.
+            // Returning an AsyncStopped certificate would permit unsafe removal.
             std::process::abort();
         }
         let issues = executor.finish_close();

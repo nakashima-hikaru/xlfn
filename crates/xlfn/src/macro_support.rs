@@ -10,7 +10,7 @@ use std::future::Future;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationToken;
 use crate::error::{InputError, XllError, XllResult};
-use crate::lifecycle::{close_addin, open_addin};
+use crate::lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
 use crate::reference::{ExcelReference, reference_from_raw};
 use crate::registration::{
     FunctionVisibility, RegistrationDescriptor, RegistrationFlags, RegistrationSignature, ResultAbi,
@@ -34,7 +34,16 @@ pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
 #[doc(hidden)]
 pub use crate::return_value::ReturnContext;
 #[doc(hidden)]
-pub use crate::rtd::{dll_can_unload_now, dll_get_class_object};
+pub use crate::rtd::dll_get_class_object;
+
+#[doc(hidden)]
+pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    if runtime.runtime().module_residency_held() {
+        1 // COM S_FALSE: the XLL still owns its physical residency lease.
+    } else {
+        crate::rtd::dll_can_unload_now()
+    }
+}
 #[doc(hidden)]
 pub use crate::utf16::utf16_eq_ignore_ascii_case;
 #[doc(hidden)]
@@ -215,6 +224,21 @@ impl FunctionRegistration {
     }
 }
 
+/// Retains the quarantine if a newly acquired self-reference cannot be
+/// released after an opening transaction fails.
+fn release_open_residency_after_failure<A: Addin>(
+    runtime: &'static MacroRuntime<A>,
+    newly_acquired: bool,
+) {
+    if !newly_acquired {
+        return;
+    }
+    if let Err(error) = runtime.runtime().release_module_residency() {
+        crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
+        runtime.runtime().quarantine();
+    }
+}
+
 /// Opens the add-in by registering all collected functions and initializing state.
 #[doc(hidden)]
 pub fn open_generated_addin<A: Addin>(
@@ -224,26 +248,50 @@ pub fn open_generated_addin<A: Addin>(
     default_category: &'static str,
     version: &'static str,
     target: &'static str,
+    module_anchor: *const (),
 ) -> i32 {
+    let newly_acquired = match runtime.runtime().ensure_module_residency(module_anchor) {
+        Ok(newly_acquired) => newly_acquired,
+        Err(error) => crate::lifecycle::fail_stop_module_residency(&error),
+    };
     let parsed_id = match crate::AddinId::parse(addin_id) {
         Ok(id) => id,
-        Err(_) => return 0,
+        Err(_) => {
+            release_open_residency_after_failure(runtime, newly_acquired);
+            return 0;
+        }
     };
     let mut descriptors = Vec::new();
     for registration in inventory::iter::<FunctionRegistration> {
         match registration.descriptor(default_category) {
             Ok(descriptor) => descriptors.push(descriptor),
-            Err(_) => return 0,
+            Err(_) => {
+                release_open_residency_after_failure(runtime, newly_acquired);
+                return 0;
+            }
         }
     }
     descriptors.sort_unstable_by_key(|descriptor| descriptor.excel_name);
-    open_addin::<A>(runtime.runtime(), &parsed_id, version, target, &descriptors)
+    let result = host_auto_open::<A>(runtime.runtime(), &parsed_id, version, target, &descriptors);
+    if result == 0
+        && newly_acquired
+        && runtime.runtime().phase() != crate::LifecyclePhase::Quarantined
+    {
+        release_open_residency_after_failure(runtime, true);
+    }
+    result
 }
 
-/// Closes the add-in and unregisters all functions.
+/// Reports Excel's ambiguous close/deactivation hint without tearing down the runtime.
 #[doc(hidden)]
-pub fn close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
-    close_addin::<A>(runtime.runtime())
+pub fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    host_auto_close::<A>(runtime.runtime())
+}
+
+/// Performs explicit terminal removal and unregisters all functions.
+#[doc(hidden)]
+pub fn auto_remove_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    host_auto_remove::<A>(runtime.runtime())
 }
 
 /// Releases a return value pointer returned to Excel.

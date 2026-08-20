@@ -7,6 +7,7 @@ import XlFnFormal.Shutdown.Safety
 import XlFnFormal.Shutdown.Checker
 import XlFnFormal.Shutdown.Counterexample
 import XlFnFormal.Shutdown.Refinement
+import XlFnFormal.Residency
 import XlFnFormal.Lifecycle.Model
 import XlFnFormal.Lifecycle.Transition
 import XlFnFormal.Lifecycle.Trace

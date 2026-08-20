@@ -126,6 +126,8 @@ private def parseShutdownEvent : Json → Except String Shutdown.Event
             (← parseCompletion (← json.getObjVal? "endAsyncTask"))
       | some "failStop" => do
           return .failStop (← parseFailure (← json.getObjVal? "failStop"))
+      | some "quarantine" => do
+          return .quarantine (← parseFailure (← json.getObjVal? "quarantine"))
       | some tag =>
           match simpleShutdownEvent tag with
           | some event => return event
@@ -269,7 +271,7 @@ private def checkReturnedSuccess
       if hNoOwner : final.lifecycle.cleanupOwner = none then
         have hSafe : final.lifecycle.ReturnSafe :=
           ⟨hPhase, hNoAttempt, hNoOwner⟩
-        let _hSafety := concrete_successful_xlAutoClose_is_safe
+        let _hSafety := concrete_successful_xlAutoRemove_is_safe
           hInitial hSteps hSafe
         exact .ok ()
       else

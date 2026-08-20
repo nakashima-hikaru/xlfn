@@ -12,7 +12,7 @@ namespace XlFnFormal.Shutdown
 private def live (phase : Phase) : Bool :=
   match phase with
   | .open | .closing _ => true
-  | .closed | .failStopped _ => false
+  | .closed | .quarantined _ | .failStopped _ => false
 
 private def decrement (value : Nat) : Nat :=
   value - 1
@@ -129,6 +129,7 @@ private theorem allows_return_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsReturnCreation, Phase.AllowsReturnCreation]
   | closed => simp [allowsReturnCreation, Phase.AllowsReturnCreation]
+  | quarantined reason => simp [allowsReturnCreation, Phase.AllowsReturnCreation]
   | failStopped reason => simp [allowsReturnCreation, Phase.AllowsReturnCreation]
 
 private theorem allows_return_free_iff (phase : Phase) :
@@ -138,6 +139,7 @@ private theorem allows_return_free_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsReturnFree, Phase.AllowsReturnFree]
   | closed => simp [allowsReturnFree, Phase.AllowsReturnFree]
+  | quarantined reason => simp [allowsReturnFree, Phase.AllowsReturnFree]
   | failStopped reason => simp [allowsReturnFree, Phase.AllowsReturnFree]
 
 private theorem allows_async_creation_iff (phase : Phase) :
@@ -147,6 +149,7 @@ private theorem allows_async_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsAsyncCreation, Phase.AllowsAsyncCreation]
   | closed => simp [allowsAsyncCreation, Phase.AllowsAsyncCreation]
+  | quarantined reason => simp [allowsAsyncCreation, Phase.AllowsAsyncCreation]
   | failStopped reason => simp [allowsAsyncCreation, Phase.AllowsAsyncCreation]
 
 private theorem allows_subscription_creation_iff (phase : Phase) :
@@ -156,6 +159,7 @@ private theorem allows_subscription_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsSubscriptionCreation, Phase.AllowsSubscriptionCreation]
   | closed => simp [allowsSubscriptionCreation, Phase.AllowsSubscriptionCreation]
+  | quarantined reason => simp [allowsSubscriptionCreation, Phase.AllowsSubscriptionCreation]
   | failStopped reason => simp [allowsSubscriptionCreation, Phase.AllowsSubscriptionCreation]
 
 private theorem allows_rtd_creation_iff (phase : Phase) :
@@ -165,6 +169,7 @@ private theorem allows_rtd_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsRtdCreation, Phase.AllowsRtdCreation]
   | closed => simp [allowsRtdCreation, Phase.AllowsRtdCreation]
+  | quarantined reason => simp [allowsRtdCreation, Phase.AllowsRtdCreation]
   | failStopped reason => simp [allowsRtdCreation, Phase.AllowsRtdCreation]
 
 private theorem allows_handle_creation_iff (phase : Phase) :
@@ -174,6 +179,7 @@ private theorem allows_handle_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsHandleCreation, Phase.AllowsHandleCreation]
   | closed => simp [allowsHandleCreation, Phase.AllowsHandleCreation]
+  | quarantined reason => simp [allowsHandleCreation, Phase.AllowsHandleCreation]
   | failStopped reason => simp [allowsHandleCreation, Phase.AllowsHandleCreation]
 
 private theorem allows_diagnostic_creation_iff (phase : Phase) :
@@ -183,6 +189,7 @@ private theorem allows_diagnostic_creation_iff (phase : Phase) :
   | closing stage =>
       cases stage <;> simp [allowsDiagnosticCreation, Phase.AllowsDiagnosticCreation]
   | closed => simp [allowsDiagnosticCreation, Phase.AllowsDiagnosticCreation]
+  | quarantined reason => simp [allowsDiagnosticCreation, Phase.AllowsDiagnosticCreation]
   | failStopped reason => simp [allowsDiagnosticCreation, Phase.AllowsDiagnosticCreation]
 
 def apply? (s : State) (event : Event) : Option State :=
@@ -445,6 +452,8 @@ def apply? (s : State) (event : Event) : Option State :=
       if s.phase = .closing .finalize ∧ quiescent s.resources = true then
         some { s with phase := .closed }
       else none
+  | .quarantine reason =>
+      if live s.phase then some { s with phase := .quarantined reason } else none
   | .failStop reason =>
       if live s.phase then some { s with phase := .failStopped reason } else none
 
@@ -512,6 +521,7 @@ theorem apply?_sound
     | apply Step.diagnosticsDrained
     | apply Step.rtdDrained
     | apply Step.finishClose
+    | apply Step.quarantine
     | apply Step.failStop
     all_goals
       simp_all [live_iff, decrement, producer_alive_bool_iff,

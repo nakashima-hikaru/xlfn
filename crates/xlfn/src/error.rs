@@ -153,6 +153,7 @@ impl DiagnosticId {
     pub(crate) const GHOST_GENERATION: Self = Self::from_ascii8(*b"GHOSTGEN");
     pub(crate) const MISSING_STATE: Self = Self::from_ascii8(*b"MISSSTAT");
     pub(crate) const OPEN_PHASE: Self = Self::from_ascii8(*b"OPENPHAS");
+    pub(crate) const MODULE_RESIDENCY: Self = Self::from_ascii8(*b"MODRESID");
     pub(crate) const OPEN_ROLLBACK_CERTIFICATE: Self = Self::from_ascii8(*b"OPRBCERT");
     pub(crate) const OPEN_ROLLBACK_CERT_UNKNOWN: Self = Self::from_ascii8(*b"OPRBCERU");
     pub(crate) const OPEN_ROLLBACK_PHASE: Self = Self::from_ascii8(*b"OPRBPHAS");

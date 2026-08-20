@@ -62,7 +62,7 @@ end ConcreteSteps
 /-- The abstract composition safety theorem lifted through a concrete
     refinement.  The initial-state equality is the refinement boundary's
     explicit bridge to the executable model's initial state. -/
-theorem concrete_successful_xlAutoClose_is_safe
+theorem concrete_successful_xlAutoRemove_is_safe
     {Concrete : Type u}
     {refinement : CompositionRefinement Concrete}
     {initial final : Concrete}
@@ -72,12 +72,12 @@ theorem concrete_successful_xlAutoClose_is_safe
     (hSuccess : refinement.returnedSuccess final) :
     (refinement.abstract final).lifecycle.ReturnSafe ∧
     (refinement.abstract final).currentShutdown = none ∧
-    (refinement.abstract final).unloadCertified = true := by
+    (refinement.abstract final).logicalQuiescenceCertified = true := by
   have hAbstractSteps := hSteps.sound
   have hReachable : Reachable State.initialState (refinement.abstract final) := by
     have hReachable' := hAbstractSteps.reachable
     simpa [hInitial] using hReachable'
-  exact successful_xlAutoClose_is_safe ⟨
+  exact successful_xlAutoRemove_is_safe ⟨
     hReachable,
     refinement.successIsReturnSafe hSuccess
   ⟩

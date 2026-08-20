@@ -78,6 +78,9 @@
     Windows.Win32.System.Ole.PARAMFLAGS
     Windows.Win32.System.Ole.PARAMDESC
     Windows.Win32.System.Diagnostics.Debug.OutputDebugStringW
+    Windows.Win32.Foundation.FreeLibrary
+    Windows.Win32.System.LibraryLoader.GetModuleHandleExW
+    Windows.Win32.System.LibraryLoader.GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
     Windows.Win32.System.Ole.DISPID_UNKNOWN
     Windows.Win32.System.Ole.SafeArrayCreate
     Windows.Win32.System.Ole.SafeArrayDestroy

@@ -9,8 +9,9 @@ theorem Step.phaseRank_mono
     {s t : State} {event : Event}
     (hStep : Step s event t) :
     s.phase.rank ≤ t.phase.rank := by
-  cases hStep <;> simp_all [Phase.rank, CloseStage.rank]
-  exact Phase.rank_le_terminal _
+  cases hStep <;>
+    simp_all [Phase.rank, CloseStage.rank] <;>
+    exact Phase.rank_le_terminal _
 
 theorem Step.externalAdmission_requires_open
     {s t : State} {event : Event}
@@ -181,6 +182,7 @@ theorem Steps.never_reopens
     | «open» => exact False.elim (hNotOpen hPhase)
     | closing stage => cases stage <;> simp [Phase.rank, CloseStage.rank]
     | closed => simp [Phase.rank]
+    | quarantined reason => simp [Phase.rank]
     | failStopped reason => simp [Phase.rank]
   have hTargetZero : t.phase.rank = 0 := by simp [hOpen, Phase.rank]
   omega

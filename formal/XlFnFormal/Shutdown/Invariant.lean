@@ -66,6 +66,7 @@ def Certified (s : State) : Prop :=
       s.resources.Quiescent
   | .closed =>
       s.resources.Quiescent
+  | .quarantined _ => True
   | .failStopped _ => True
 
 /-- Every open state satisfies the initial, vacuous shutdown certificate. -/
@@ -141,6 +142,18 @@ theorem Step.certified_preserved
         Phase.AllowsReturnFree, Phase.AllowsAsyncCreation,
         Phase.AllowsSubscriptionCreation, Phase.AllowsRtdCreation,
         Phase.AllowsHandleCreation, Phase.AllowsDiagnosticCreation]
+  | quarantined reason =>
+      cases hStep <;>
+        simp_all [State.Certified,
+        Resources.HostDetached, Resources.CallsDrained,
+        Resources.ReturnsDrained, Resources.AsyncDrained,
+        Resources.SubscriptionsDrained, Resources.RtdDrained,
+        Resources.HandlesDrained, Resources.GenerationReclaimed,
+        Resources.DiagnosticsDrained, Resources.Quiescent,
+        Phase.IsLive, Phase.AllowsReturnCreation, Phase.AllowsReturnFree,
+        Phase.AllowsAsyncCreation, Phase.AllowsSubscriptionCreation,
+        Phase.AllowsRtdCreation, Phase.AllowsHandleCreation,
+        Phase.AllowsDiagnosticCreation]
   | failStopped reason =>
       cases hStep <;>
         simp_all [State.Certified,

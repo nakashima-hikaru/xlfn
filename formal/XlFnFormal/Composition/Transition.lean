@@ -31,7 +31,7 @@ inductive Step : State → Event → State → Prop where
       (hStep : Lifecycle.Step s.lifecycle
         (.beginOpen sampledEpoch attempt) t) :
       Step s (.beginOpen sampledEpoch attempt)
-        { lifecycle := t, currentShutdown := none, unloadCertified := false }
+        { lifecycle := t, currentShutdown := none, logicalQuiescenceCertified := false }
 
   | finishOpenRejectedByClose
       {s : State}
@@ -41,7 +41,7 @@ inductive Step : State → Event → State → Prop where
       (hStep : Lifecycle.Step s.lifecycle
         (.finishOpenRejectedByClose attempt) t) :
       Step s (.finishOpenRejectedByClose attempt)
-        { lifecycle := t, currentShutdown := none, unloadCertified := false }
+        { lifecycle := t, currentShutdown := none, logicalQuiescenceCertified := false }
 
   | failOpen
       {s : State}
@@ -50,7 +50,7 @@ inductive Step : State → Event → State → Prop where
       (hNoSession : s.currentShutdown = none)
       (hStep : Lifecycle.Step s.lifecycle (.failOpen attempt) t) :
       Step s (.failOpen attempt)
-        { s with lifecycle := t, currentShutdown := none, unloadCertified := false }
+        { s with lifecycle := t, currentShutdown := none, logicalQuiescenceCertified := false }
 
   | requestFinalClose
       {s : State}
@@ -89,7 +89,7 @@ inductive Step : State → Event → State → Prop where
           currentShutdown := some
             { generation := attempt
               state := Shutdown.State.opened resources }
-          unloadCertified := false }
+          logicalQuiescenceCertified := false }
 
   | liftShutdown
       {s : State}
@@ -125,7 +125,7 @@ inductive Step : State → Event → State → Prop where
       Step s .publishCommittedClosed
         { s with
             lifecycle := { s.lifecycle with phase := .closed }
-            unloadCertified := true }
+            logicalQuiescenceCertified := true }
 
   | retireCommittedShutdown
       {s : State}
@@ -147,7 +147,7 @@ inductive Step : State → Event → State → Prop where
         { s with
             lifecycle := { s.lifecycle with phase := .closed }
             currentShutdown := none
-            unloadCertified := true }
+            logicalQuiescenceCertified := true }
 
   | finishOpenRollback
       {s : State}
@@ -159,7 +159,7 @@ inductive Step : State → Event → State → Prop where
         { s with
             lifecycle := { s.lifecycle with phase := .closed }
             currentShutdown := none
-            unloadCertified := true }
+            logicalQuiescenceCertified := true }
 
   | releaseCleanupOwner
       {s : State}

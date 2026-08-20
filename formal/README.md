@@ -9,8 +9,9 @@ concurrency protocols.
 The formal model specifies and verifies the critical lifecycle and
 concurrency protocols implemented in `xlfn`:
 
-- **Lifecycle synchronization**: Opening, closing, open-rollback, and final-close coordination.
-- **Resource shutdown**: Deterministic staged teardown and certificate-based quiescence.
+- **Lifecycle synchronization**: Opening, explicit removal, controlled reload, open-rollback, and terminal coordination.
+- **Resource shutdown**: Deterministic staged teardown, quarantine, and certificate-based quiescence.
+- **Physical residency**: A separate module self-reference that remains held across logical `closed` and is releasable only after the quiescence certificate.
 - **Composition**: Verified composition of lifecycle states and resource shutdown sessions.
 - **Handle safety**:
   - Handle registry slot allocation, generation monotonicity, and ABA protection.
@@ -38,15 +39,19 @@ closed ──beginOpen──> opening ──finishOpen──> open
    │                                            │
    └────────────finishOpenRollback─────────────┘
 
-open / opening / openRollbackPending ──requestFinalClose──> closing
+open / opening / openRollbackPending ──requestExplicitRemoval──> closing
                                                                │
-                                                        finishFinalClose
+                                                        finishFinalRemoval
                                                                ↓
                                                              closed
+
+Any live phase ──teardown hazard──> quarantined
 ```
 
-`requestFinalClose` on `closed` only advances the close epoch; it does not
-acquire a cleanup owner or perform another close.
+An ordinary `xlAutoClose` is not represented as a terminal transition: it is a
+host hint and leaves an open generation open. `xlAutoRemove` requests the
+terminal transition. A second `xlAutoOpen` while open performs controlled
+reload by completing the old removal and beginning a new generation.
 
 `finishOpenRejectedByClose` and the closing form of `failOpen` clear the
 uncommitted open attempt without publishing a generation. A final-close or
@@ -69,12 +74,13 @@ non-zero open-attempt and committed-generation identifiers, and
 
 `Lifecycle/Certificate.lean` records the three cleanup certificate shapes. A
 committed generation requires a quiescent Shutdown state at `finalize`; an
-uncommitted final close and an open rollback carry only a resource-quiescence
+uncommitted final removal and an open rollback carry only a resource-quiescence
 witness because no Shutdown ghost generation exists on those paths.
 
 ### Shutdown
 
-The successful path has one order in both the model and the Rust close path:
+The successful explicit-removal path has one order in both the model and the
+Rust teardown path:
 
 ```text
 open
@@ -147,7 +153,7 @@ structure ShutdownSession where
 structure State where
   lifecycle : Lifecycle.State
   currentShutdown : Option ShutdownSession
-  unloadCertified : Bool
+  logicalQuiescenceCertified : Bool
 ```
 
 The option is a current-session marker, not a test of historical
@@ -155,9 +161,10 @@ The option is a current-session marker, not a test of historical
 leaves the historical generation unchanged while the current marker remains
 `none`. A committed open stores the concrete resource snapshot supplied by
 the transition; it does not use a fixed empty resource value. The
-`unloadCertified` ghost fact is cleared when opening begins and is set only by
-the successful close publication paths; it remains available after a
-committed session is retired.
+`logicalQuiescenceCertified` is cleared when opening begins and is set only by
+the successful explicit-removal publication paths; it remains available after
+a committed session is retired. It is a logical quiescence certificate, not a
+claim that the DLL's physical residency lease has already been released.
 
 `Composition/Transition.lean` keeps the Rust linearization points separate:
 `commitOpen` creates a generation, `finishCommittedShutdown` moves the
@@ -172,15 +179,15 @@ session-free.
 
 `Composition/Invariant.lean` proves `Valid` preservation and reachable-trace
 validity, including lifecycle/Shutdown generation equality and preservation of
-the unload-certification ghost invariant. `Composition/Safety.lean` proves
-the quiescence result for all three successful close paths, that a `ReturnSafe`
+the logical-quiescence ghost invariant. `Composition/Safety.lean` proves the
+quiescence result for all three successful removal paths, that a `ReturnSafe`
 state cannot retain an active Shutdown session, and that a successful return
-is unload-certified. `Composition/Checker.lean` provides the executable
+is logically quiescence-certified. `Composition/Checker.lean` provides the executable
 `apply?` together with soundness and completeness against the relational
 `Step` model.
 
 `Composition/Refinement.lean` lifts those results across a concrete state
-machine, establishing `concrete_successful_xlAutoClose_is_safe`.
+machine, establishing `concrete_successful_xlAutoRemove_is_safe`.
 
 ---
 

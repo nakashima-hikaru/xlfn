@@ -61,6 +61,7 @@ inductive Event where
   | diagnosticsDrained
   | rtdDrained
   | finishClose
+  | quarantine (reason : Failure)
   | failStop (reason : Failure)
   deriving DecidableEq, Repr
 
@@ -393,6 +394,10 @@ inductive Step : State → Event → State → Prop where
       (hStage : s.phase = .closing .finalize)
       (hQuiescent : s.resources.Quiescent) :
       Step s .finishClose { s with phase := .closed }
+
+  | quarantine {s : State} {reason : Failure}
+      (hLive : s.phase.IsLive) :
+      Step s (.quarantine reason) { s with phase := .quarantined reason }
 
   | failStop {s : State} {reason : Failure}
       (hLive : s.phase.IsLive) :

@@ -47,14 +47,14 @@ impl RtdNotifier {
     }
 }
 
-static MODULE_UNLOAD_CERTIFIED: AtomicBool = AtomicBool::new(false);
+static LOGICAL_QUIESCENCE_CERTIFIED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn begin_module_open() {
-    MODULE_UNLOAD_CERTIFIED.store(false, Ordering::Release);
+    LOGICAL_QUIESCENCE_CERTIFIED.store(false, Ordering::Release);
 }
 
 pub(crate) fn begin_module_close() {
-    MODULE_UNLOAD_CERTIFIED.store(false, Ordering::Release);
+    LOGICAL_QUIESCENCE_CERTIFIED.store(false, Ordering::Release);
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -65,12 +65,12 @@ pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
     let _ = ghost;
 }
 
-pub(crate) fn certify_module_unload() {
-    MODULE_UNLOAD_CERTIFIED.store(true, Ordering::Release);
+pub(crate) fn certify_logical_quiescence() {
+    LOGICAL_QUIESCENCE_CERTIFIED.store(true, Ordering::Release);
 }
 
-pub(crate) fn module_unload_certified() -> bool {
-    MODULE_UNLOAD_CERTIFIED.load(Ordering::Acquire)
+pub(crate) fn logical_quiescence_certified() -> bool {
+    LOGICAL_QUIESCENCE_CERTIFIED.load(Ordering::Acquire)
         && crate::ingress::global_ingress().phase() == crate::ingress::PHASE_CLOSED
 }
 

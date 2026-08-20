@@ -455,7 +455,7 @@ impl Drop for RtdTestGuard {
         clear_test_shutdown_ghost();
         cleanup_test_active_server();
         close_test_ingress();
-        crate::rtd::certify_module_unload();
+        crate::rtd::certify_logical_quiescence();
     }
 }
 
@@ -501,7 +501,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     let ingress = crate::ingress::global_ingress();
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_module_unload();
+    crate::rtd::certify_logical_quiescence();
     let baseline = COM_MODULE_LIFETIME.snapshot();
     assert!(baseline.is_quiescent());
     assert_eq!(dll_can_unload_now(), S_OK);
@@ -568,7 +568,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 
     assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_module_unload();
+    crate::rtd::certify_logical_quiescence();
     assert_eq!(dll_can_unload_now(), S_OK);
 
     let server = ComObjectLease::new(ComObjectKind::Server);
@@ -610,7 +610,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     *COM_MODULE_LIFETIME.ghost.lock() = None;
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_module_unload();
+    crate::rtd::certify_logical_quiescence();
 
     for event in [
         "beginRtdOperation",

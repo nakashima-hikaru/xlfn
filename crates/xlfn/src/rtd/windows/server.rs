@@ -1288,7 +1288,7 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
         }
 
         // Deferred cleanup intentionally retains ACTIVE_SERVER. The next
-        // xlAutoClose or ensure_server joins this worker before removing that
+        // xlAutoRemove or ensure_server joins this worker before removing that
         // final module-lifetime reference.
         // SAFETY: `reference` and `termination` keep the server live/quiescent.
         let status = unsafe { teardown_server_resources(this, false) };

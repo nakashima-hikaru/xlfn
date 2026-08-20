@@ -5,6 +5,7 @@ pub const SYSTEM_IMPORT_POLICY_VERSION: &str = "windows-system-v1";
 pub const REQUIRED_XLL_EXPORTS: &[&str] = &[
     "xlAutoOpen",
     "xlAutoClose",
+    "xlAutoRemove",
     "xlAutoFree12",
     "xlAddInManagerInfo12",
     "DllGetClassObject",
