@@ -63,6 +63,10 @@ mod input_identity;
 mod lifecycle;
 #[doc(hidden)]
 pub mod macro_support;
+#[allow(
+    unsafe_code,
+    reason = "Win32 module residency management requires raw FFI calls"
+)]
 mod module_residency;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;

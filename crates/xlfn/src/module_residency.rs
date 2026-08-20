@@ -44,9 +44,9 @@ impl ModuleResidencyLease {
                 });
             }
 
-            return Ok(Self {
+            Ok(Self {
                 module: module as usize,
-            });
+            })
         }
 
         #[cfg(not(target_os = "windows"))]

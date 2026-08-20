@@ -77,11 +77,6 @@ impl<S: RtdSource> RtdSourceHandle<S> {
             })?;
         Ok(Self { id, source })
     }
-
-    #[must_use]
-    pub(crate) fn source(&self) -> &Arc<S> {
-        &self.source
-    }
 }
 
 pub(crate) trait RtdSourceRef {
