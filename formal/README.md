@@ -7,7 +7,7 @@ concurrency protocols.
 ## Scope
 
 The formal model specifies and verifies the critical lifecycle and
-concurrency protocols implemented in `xlfn-core`:
+concurrency protocols implemented in `xlfn`:
 
 - **Lifecycle synchronization**: Opening, closing, open-rollback, and final-close coordination.
 - **Resource shutdown**: Deterministic staged teardown and certificate-based quiescence.

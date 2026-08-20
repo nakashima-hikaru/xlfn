@@ -9,9 +9,10 @@ struct BorrowedAsyncAliasAddin;
 impl Addin for BorrowedAsyncAliasAddin {
     type State = ();
     type Error = XllError;
+    type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(())
+    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new((), ()))
     }
 }
 

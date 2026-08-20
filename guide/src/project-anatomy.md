@@ -34,12 +34,13 @@ pub struct DeskTools;
 impl Addin for DeskTools {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
-    fn open(context: &OpenContext) -> XllResult<State> {
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
         let configuration = load_configuration(context.module_directory())?;
-        Ok(State {
+        Ok(Opened::new(State {
             configuration: Arc::new(configuration),
-        })
+        }, ()))
     }
 }
 

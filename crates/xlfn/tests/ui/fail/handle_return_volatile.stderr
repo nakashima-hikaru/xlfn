@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Dataset: xlfn_core::value::VolatileReturn` is not satisfied
+error[E0277]: the trait bound `Dataset: xlfn::VolatileReturn` is not satisfied
   --> tests/ui/fail/handle_return_volatile.rs:10:13
    |
 10 | fn bad() -> Dataset {
@@ -19,9 +19,9 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i32
              i64
              std::string::String
-   = note: required for `Dataset` to implement `xlfn_core::value::VolatileReturn`
-note: required by a bound in `xlfn::__private::assert_volatile_return`
-  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+   = note: required for `Dataset` to implement `xlfn::VolatileReturn`
+note: required by a bound in `xlfn::value::assert_volatile_return`
+  --> src/value.rs
    |
    | pub fn assert_volatile_return<T: VolatileReturn>() {}
    |                                  ^^^^^^^^^^^^^^ required by this bound in `assert_volatile_return`

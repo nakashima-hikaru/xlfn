@@ -1,83 +1,74 @@
-error[E0046]: not all trait items implemented, missing: `Layers`, `udf_layers`
- --> tests/ui/fail_async/async_handle_input.rs:8:1
-  |
-8 | impl Addin for AsyncTestAddin {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `Layers`, `udf_layers` in implementation
-  |
-  = help: implement the missing item: `type Layers = /* Type */;`
-  = help: implement the missing item: `fn udf_layers(_: &<Self as xlfn::addin::Addin>::State) -> <Self as xlfn::addin::Addin>::Layers { todo!() }`
-
-error[E0277]: the trait bound `State: xlfn::addin::Addin` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:24:45
+error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
+  --> tests/ui/fail_async/async_handle_input.rs:25:45
    |
-24 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
+25 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
    |                                             ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `xlfn::addin::Addin` is not implemented for `State`
+help: the trait `xlfn::Addin` is not implemented for `State`
   --> tests/ui/fail_async/async_handle_input.rs:3:1
    |
  3 | struct State;
    | ^^^^^^^^^^^^
-help: the following other types implement trait `xlfn::addin::Addin`
+help: the following other types implement trait `xlfn::Addin`
   --> tests/ui/fail_async/async_handle_input.rs:8:1
    |
  8 | impl Addin for AsyncTestAddin {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncTestAddin`
    |
-  ::: $WORKSPACE/crates/xlfn-core/src/addin.rs
+  ::: src/addin.rs
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::context::AsyncContext`
-  --> $WORKSPACE/crates/xlfn-core/src/addin.rs
+note: required by a bound in `xlfn::AsyncContext`
+  --> src/addin.rs
    |
    | pub struct AsyncContext<A: Addin> {
    |                            ^^^^^ required by this bound in `AsyncContext`
 
-error[E0599]: the method `state` exists for struct `xlfn::context::AsyncContext<State>`, but its trait bounds were not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:27:21
+error[E0599]: the method `state` exists for struct `xlfn::AsyncContext<State>`, but its trait bounds were not satisfied
+  --> tests/ui/fail_async/async_handle_input.rs:28:21
    |
  3 | struct State;
-   | ------------ doesn't satisfy `State: xlfn::addin::Addin`
+   | ------------ doesn't satisfy `State: xlfn::Addin`
 ...
-27 |     let _ = context.state();
-   |                     ^^^^^ method cannot be called on `xlfn::context::AsyncContext<State>` due to unsatisfied trait bounds
+28 |     let _ = context.state();
+   |                     ^^^^^ method cannot be called on `xlfn::AsyncContext<State>` due to unsatisfied trait bounds
    |
    = note: the following trait bounds were not satisfied:
-           `State: xlfn::addin::Addin`
-note: the trait `xlfn::addin::Addin` must be implemented
-  --> $WORKSPACE/crates/xlfn-core/src/addin.rs
+           `State: xlfn::Addin`
+note: the trait `xlfn::Addin` must be implemented
+  --> src/addin.rs
    |
    | pub trait Addin: Send + Sync + 'static {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0308]: mismatched types
-  --> tests/ui/fail_async/async_handle_input.rs:22:1
+  --> tests/ui/fail_async/async_handle_input.rs:23:1
    |
-22 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
+23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AsyncContext<State>`, found `AsyncContext<AsyncTestAddin>`
-23 | async fn async_handle_input(
-24 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
+24 | async fn async_handle_input(
+25 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
    |                                             ------------------- expected due to this
    |
-   = note: expected struct `xlfn::context::AsyncContext<State>`
-              found struct `xlfn::context::AsyncContext<AsyncTestAddin>`
+   = note: expected struct `xlfn::AsyncContext<State>`
+              found struct `xlfn::AsyncContext<AsyncTestAddin>`
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:25:14
+  --> tests/ui/fail_async/async_handle_input.rs:26:14
    |
-25 |     dataset: Handle<'_, Dataset>,
+26 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
-   = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
-note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
-  --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+   = help: within `xlfn::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
+note: required because it appears within the type `xlfn::Handle<'_, Dataset>`
+  --> src/handle/typed.rs
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
-  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+note: required by a bound in `xlfn::value::assert_async_parameter`
+  --> src/value.rs
    |
    | pub fn assert_async_parameter<T>()
    |        ---------------------- required by a bound in this function
@@ -85,36 +76,36 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call> + Send + 'static,
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
-error[E0277]: `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:25:14
+error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
+  --> tests/ui/fail_async/async_handle_input.rs:26:14
    |
-25 |     dataset: Handle<'_, Dataset>,
-   |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn_core::host_callback::HostCallbackShared>` cannot be shared between threads safely
+26 |     dataset: Handle<'_, Dataset>,
+   |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
    |
-   = help: within `xlfn_core::value::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn_core::host_callback::HostCallbackShared>`
-note: required because it appears within the type `xlfn_core::host_callback::HostCallbackSession`
-  --> $WORKSPACE/crates/xlfn-core/src/host_callback.rs
+   = help: within `xlfn::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
+note: required because it appears within the type `xlfn::host_callback::HostCallbackSession`
+  --> src/host_callback.rs
    |
    | pub(crate) struct HostCallbackSession {
    |                   ^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn_core::value::CallScope<'_>`
-  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+note: required because it appears within the type `xlfn::CallScope<'_>`
+  --> src/value.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn_core::value::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn_core::value::CallScope<'_>>`
+   = note: required for `&xlfn::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
    |            ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
-  --> $WORKSPACE/crates/xlfn-core/src/handle/typed.rs
+note: required because it appears within the type `xlfn::Handle<'_, Dataset>`
+  --> src/handle/typed.rs
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
-  --> $WORKSPACE/crates/xlfn-core/src/value.rs
+note: required by a bound in `xlfn::value::assert_async_parameter`
+  --> src/value.rs
    |
    | pub fn assert_async_parameter<T>()
    |        ---------------------- required by a bound in this function
@@ -122,29 +113,29 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call> + Send + 'static,
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
-error[E0277]: the trait bound `State: xlfn::addin::Addin` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:22:1
+error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
+  --> tests/ui/fail_async/async_handle_input.rs:23:1
    |
-22 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
+23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `xlfn::addin::Addin` is not implemented for `State`
+help: the trait `xlfn::Addin` is not implemented for `State`
   --> tests/ui/fail_async/async_handle_input.rs:3:1
    |
  3 | struct State;
    | ^^^^^^^^^^^^
-help: the following other types implement trait `xlfn::addin::Addin`
+help: the following other types implement trait `xlfn::Addin`
   --> tests/ui/fail_async/async_handle_input.rs:8:1
    |
  8 | impl Addin for AsyncTestAddin {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncTestAddin`
    |
-  ::: $WORKSPACE/crates/xlfn-core/src/addin.rs
+  ::: src/addin.rs
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::context::AsyncContext`
-  --> $WORKSPACE/crates/xlfn-core/src/addin.rs
+note: required by a bound in `xlfn::AsyncContext`
+  --> src/addin.rs
    |
    | pub struct AsyncContext<A: Addin> {
    |                            ^^^^^ required by this bound in `AsyncContext`

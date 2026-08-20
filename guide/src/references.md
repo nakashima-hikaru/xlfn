@@ -9,7 +9,7 @@ A raw reference must use `#[excel_arg(reference)]` and requires macro-sheet capa
 ```rust
 #[excel_function(name = "RANGE.AREA.COUNT")]
 fn area_count(
-    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, '_, State>,
+    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, DeskTools>,
     #[excel_arg(reference, description = "A cell or range reference.")]
     reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
@@ -67,7 +67,7 @@ Use `MacroSheetContext` before leaving the call:
 ```rust
 #[excel_function(name = "RANGE.SUM")]
 fn range_sum(
-    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, '_, State>,
+    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, DeskTools>,
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<f64> {
     let values: Matrix<f64> = context.coerce_matrix(&reference)?;

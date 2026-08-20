@@ -13,11 +13,9 @@ impl Addin for ExampleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(ExampleState)
+    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new(ExampleState, ()))
     }
-
-    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(name = "EXAMPLE.ADD", thread_safe)]
@@ -43,7 +41,7 @@ pub fn one() -> i32 {
 
 #[excel_function(name = "EXAMPLE.REF.AREAS")]
 pub fn reference_area_count(
-    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, '_, ExampleAddin>,
+    #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, ExampleAddin>,
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
     i32::try_from(reference.areas().count()).map_err(|_| XllError::Domain {

@@ -21,7 +21,7 @@ impl Client {
 }
 
 pub struct State {
-    metrics: Arc<MetricSource>,
+    metrics: RtdSourceHandle<MetricSource>,
 }
 
 #[excel_addin(name = "RTD Source Example", id = "rtd-source", category = "Examples")]
@@ -32,20 +32,18 @@ impl Addin for RtdSourceExample {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(State {
-            metrics: Arc::new(MetricSource {
+    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State {
+            metrics: context.rtd().register_source(MetricSource {
                 client: Arc::new(Client),
-            }),
-        })
+            })?,
+        }, ()))
     }
-
-    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(name = "METRIC.LAST")]
 pub fn last_metric(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, RtdSourceExample>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, RtdSourceExample>,
     symbol: String,
 ) -> XllResult<RtdValue> {
     let topic = RtdTopic::new(["last", symbol.as_str()])?;

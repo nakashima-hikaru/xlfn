@@ -1,6 +1,6 @@
 # xlfn
 
-The `xlfn` facade crate provides the public API for building native Rust Microsoft Excel XLL add-ins.
+The `xlfn` crate provides the framework for building native Rust Microsoft Excel XLL add-ins.
 
 Most add-in projects should depend on this crate. It exposes typed worksheet functions, execution-aware contexts, value conversion, handles, native async UDFs, RTD subscriptions, and packaging integration through the `cargo-xlfn` CLI.
 

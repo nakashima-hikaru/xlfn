@@ -38,7 +38,7 @@ jobs:
                   cargo run --locked --package xlfn-windows-bindings-gen
                   git diff --exit-code -- \
                     crates/xlfn-sys/src/win32.rs \
-                    crates/xlfn-core/src/win32.rs \
+                    crates/xlfn/src/win32.rs \
                     crates/xlfn-package/src/win32.rs \
                     crates/cargo-xlfn/src/win32.rs
 
@@ -87,7 +87,7 @@ jobs:
             - name: Model-check handle close race
               run: >-
                   cargo test
-                  --package xlfn-core
+                  --package xlfn
                   --all-features
                   shuttle_insert_racing_close_never_leaves_a_live_handle
                   --locked
@@ -363,7 +363,7 @@ jobs:
                   XLFN_SHUTDOWN_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/shutdown_trace_checker
               run: >-
                   cargo test
-                  --package xlfn-core
+                  --package xlfn
                   --lib
                   --features "async shutdown-refinement"
                   rust_shutdown_resource_traces_are_accepted_by_lean_checker
@@ -379,7 +379,7 @@ jobs:
                   XLFN_COMPOSITION_TRACE_DIR: ${{ github.workspace }}
               run: >-
                   cargo test
-                  --package xlfn-core
+                  --package xlfn
                   --lib
                   --features "async shutdown-refinement"
                   rust_composition

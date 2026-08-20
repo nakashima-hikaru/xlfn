@@ -7,7 +7,8 @@ use xlfn::prelude::*;
 use xlfn::rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
 
 pub struct State {
-    rtd: Arc<RtdFixture>,
+    rtd: RtdSourceHandle<RtdFixture>,
+    publisher: Arc<RtdFixture>,
 }
 
 #[excel_addin(
@@ -22,13 +23,15 @@ impl Addin for FixtureAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(State {
-            rtd: Arc::new(RtdFixture::default()),
-        })
+    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        let publisher = Arc::new(RtdFixture::default());
+        Ok(Opened::new(State {
+            rtd: context
+                .rtd()
+                .register_shared_source(Arc::clone(&publisher))?,
+            publisher,
+        }, ()))
     }
-
-    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[derive(ExcelHandleObject)]
@@ -72,9 +75,7 @@ impl RtdFixture {
                 xlfn::error::InputError::OutOfRange,
             ));
         }
-        let sinks = self.sinks.lock().map_err(|_| XllError::Internal {
-            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
-        })?;
+        let sinks = self.sinks.lock().map_err(|_| XllError::Panic)?;
         let batch = (1..=topic_count)
             .map(|topic_id| sinks.get(&format!("topic-{topic_id}")).cloned())
             .collect::<Option<Vec<_>>>()
@@ -92,9 +93,7 @@ impl RtdFixture {
         let count = self
             .sinks
             .lock()
-            .map_err(|_| XllError::Internal {
-            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
-            })?
+            .map_err(|_| XllError::Panic)?
             .len();
         i32::try_from(count).map_err(|_| XllError::Domain {
             code: xlfn::error::DomainErrorCode::Overflow,
@@ -118,9 +117,7 @@ impl RtdSource for RtdFixture {
             .ok_or(XllError::InvalidHandle)?;
         self.sinks
             .lock()
-            .map_err(|_| XllError::Internal {
-            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
-            })?
+            .map_err(|_| XllError::Panic)?
             .insert(key.clone(), sink);
         Ok(RtdFixtureSubscription {
             sinks: Arc::clone(&self.sinks),
@@ -142,9 +139,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         self.sinks
             .lock()
-            .map_err(|_| XllError::Internal {
-            diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDFIXLK"),
-            })?
+            .map_err(|_| XllError::Panic)?
             .remove(&self.key);
         Ok(())
     }
@@ -152,7 +147,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
 
 #[excel_function(name = "FRAMEWORK.RTD.FIXTURE")]
 pub fn rtd_fixture(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, FixtureAddin>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, FixtureAddin>,
     topic_id: i32,
 ) -> XllResult<RtdValue> {
     if !(1..=3).contains(&topic_id) {
@@ -172,14 +167,14 @@ pub fn rtd_publish(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
     topic_count: i32,
 ) -> XllResult<i32> {
-    context.state().rtd.publish_batch(topic_count)
+    context.state().publisher.publish_batch(topic_count)
 }
 
 #[excel_function(name = "FRAMEWORK.RTD.ACTIVE", thread_safe, volatile)]
 pub fn rtd_active(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
 ) -> XllResult<i32> {
-    context.state().rtd.active_topics()
+    context.state().publisher.active_topics()
 }
 
 #[excel_function(name = "FRAMEWORK.VERSION", thread_safe)]

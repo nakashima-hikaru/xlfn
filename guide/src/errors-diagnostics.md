@@ -39,16 +39,18 @@ A basic production setup installs the built-in bounded file sink during `Addin::
 impl Addin for DeskTools {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
-    fn open(context: &OpenContext) -> XllResult<State> {
-        let path = xlfn::diagnostics::install_file_diagnostic_sink(
-            &context.build_info().addin_id,
-        )
-            .map_err(|_| XllError::Internal {
-                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"DIAGINIT"),
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        let path = context
+            .diagnostics()
+            .install_file_sink()
+            .map_err(|error| XllError::Native {
+                code: -1,
+                message: error.to_string(),
             })?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
-        Ok(State::new())
+        Ok(Opened::new(State::new(), ()))
     }
 }
 ```
@@ -85,7 +87,28 @@ impl DiagnosticSink for Telemetry {
 }
 ```
 
-Install with `set_diagnostic_sink`. The runtime places a bounded asynchronous queue of 1,024 events in front of the sink. When producers outrun delivery, events are dropped rather than blocking worksheet execution. Monitor `dropped_diagnostic_events()` as an operational signal.
+Install the custom sink during `Addin::open`:
+
+```rust
+impl Addin for DeskTools {
+    type State = State;
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        context
+            .diagnostics()
+            .set_sink(Telemetry)
+            .map_err(|error| XllError::Native {
+                code: -1,
+                message: error.to_string(),
+            })?;
+        Ok(Opened::new(State::new(), ()))
+    }
+}
+```
+
+The runtime places a bounded asynchronous queue of 1,024 events in front of the sink. When producers outrun delivery, events are dropped rather than blocking worksheet execution. Monitor `xlfn::diagnostics::stats().dropped_events` as an operational signal.
 
 The sink itself must still be bounded and panic-free. A slow or reentrant sink can delay shutdown even though ordinary producers use a queue.
 
@@ -97,20 +120,18 @@ Do not assume a tracing subscriber is infallible. The runtime contains panics ar
 
 ## Diagnostic IDs
 
-Use stable, searchable IDs for internal failures:
+The runtime attaches a `DiagnosticId` to internal failures and emitted diagnostic events. Sinks can inspect this identifier via `.as_u64()` or format it as hexadecimal:
 
 ```rust
-const CONFIG_PARSE_FAILED: xlfn::error::DiagnosticId =
-    xlfn::error::DiagnosticId::from_ascii8(*b"CONFPARS");
+impl DiagnosticSink for Telemetry {
+    fn report(&self, event: &DiagnosticEvent<'_>) {
+        let numeric_id = event.diagnostic_id().as_u64();
+        tracing::error!(diagnostic = %format_args!("{numeric_id:016x}"), "UDF failure event");
+    }
+}
 ```
 
-Recommended practice:
-
-1. define IDs as named constants near the subsystem;
-2. never reuse an ID for a different failure;
-3. include the ID in operator documentation and issue reports;
-4. attach safe context such as function ID, package version, and path category;
-5. avoid secrets, full workbook contents, access tokens, and raw customer data.
+These IDs are framework-internal correlation codes rather than user-defined error types.
 
 ## User-facing error design
 

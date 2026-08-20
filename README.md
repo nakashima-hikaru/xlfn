@@ -44,11 +44,9 @@ impl Addin for ExampleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<State, XllError> {
-        Ok(State)
+    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, ()))
     }
-
-    fn udf_layers(_state: &State) -> Self::Layers {}
 }
 
 /// Adds two finite numbers.

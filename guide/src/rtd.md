@@ -6,7 +6,7 @@ Real-Time Data (RTD) is the appropriate model for a formula that should update r
 
 ```text
 worksheet formula
-    -> MainThreadContext::subscribe(source, topic)
+    -> MainThreadContext::subscribe(&source_handle, topic)
     -> RtdSource::subscribe(topic, sink)
     -> background producer calls sink.publish(value)
     -> framework batches RefreshData
@@ -33,7 +33,7 @@ let topic = RtdTopic::single("service-health")?;
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 
-The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `Runtime::new_with_rtd_limits` can choose lower limits for a deployment; exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
+The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `RuntimeConfig::with_rtd_limits` can choose lower limits during `Addin::open`; exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
 
 ## Implement a source
 
@@ -63,10 +63,18 @@ Do not implement a timeout that abandons an in-process callback and then permits
 Keep the source in add-in state and subscribe from a main-thread function:
 
 ```rust
-{{#include ../../examples/rtd-source/src/lib.rs:42:48}}
+{{#include ../../examples/rtd-source/src/lib.rs:30:50}}
 ```
 
-The source is typically an `Arc<S>`. Source sharing uses `Arc` allocation identity, equivalent to `Arc::ptr_eq`, combined with the logical RTD topic. Cloning the same `Arc` shares the subscription; constructing a new `Arc`, even around an equivalent value, creates a distinct source identity. Multiple formulas that observe the same active subscription share it; a failed new observation rolls back only the reservation created by that attempt, not an unrelated established subscriber. The complete compile-tested fixture, including the add-in state and `Client` placeholder, lives under `examples/rtd-source`.
+The source handle is the opaque RTD identity. Clone a handle when multiple
+functions should refer to the same source; registering a new source creates a
+distinct identity even when its value is equivalent. The handle keeps the
+source alive, while the runtime owns subscription identity and limits.
+Multiple formulas that observe the same active subscription share it; a failed
+new observation rolls back only the reservation created by that attempt, not
+an unrelated established subscriber. The complete compile-tested fixture,
+including the add-in state and `Client` placeholder, lives under
+`examples/rtd-source`.
 
 ## RTD value types
 

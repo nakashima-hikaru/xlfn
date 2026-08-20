@@ -6,21 +6,112 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Facade crate for building safe Rust Excel XLL add-ins"
+description = "Safe Rust framework for building Excel XLL add-ins"
 readme = "README.md"
 
 [features]
 default = []
-async = ["xlfn-core/async"]
+shutdown-refinement = []
+shutdown-trace = ["shutdown-refinement"]
+handle-refinement-trace = []
+async = [
+    "dep:async-channel",
+    "dep:async-task",
+    "dep:futures-util",
+]
+bench-internals = ["xlfn-sys/abi-probe"]
+unstable = []
+
+[[bench]]
+name = "async_spawn"
+harness = false
+required-features = ["bench-internals", "async"]
+
+[[bench]]
+name = "sync_boundary"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_prepare"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "formula_revision"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_lookup"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "input_identity"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "formula_caller"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "argument_ingress"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "rtd_publish"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_call_resolution"
+harness = false
+required-features = ["bench-internals"]
 
 [dependencies]
 xlfn-macros.workspace = true
-xlfn-core.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true
+arc-swap.workspace = true
+async-channel = { workspace = true, optional = true }
+async-task = { workspace = true, optional = true }
+blake3.workspace = true
+bumpalo.workspace = true
+constant_time_eq.workspace = true
+crossbeam-utils.workspace = true
+futures-util = { workspace = true, optional = true }
+getrandom.workspace = true
+moka.workspace = true
+parking_lot.workspace = true
+scopeguard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+triomphe.workspace = true
+xlfn-common.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-link.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+futures-util.workspace = true
+proptest.workspace = true
+static_assertions.workspace = true
+tempfile.workspace = true
 trybuild.workspace = true
+xlfn-sys = { workspace = true, features = ["abi-probe"] }
+
+[target.'cfg(not(all(target_os = "windows", target_arch = "x86")))'.dev-dependencies]
+loom.workspace = true
+shuttle.workspace = true
 
 [lints]
 workspace = true

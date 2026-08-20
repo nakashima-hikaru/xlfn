@@ -1,11 +1,11 @@
 # Calculation caches
 
-The advanced cache module provides concurrent, bounded memoization for application data. It is independent of formula-owned handles: a handle controls worksheet ownership, while a cache controls reuse of an internal computation.
+The unstable cache module provides concurrent, bounded memoization for application data. It is independent of formula-owned handles: a handle controls worksheet ownership, while a cache controls reuse of an internal computation. Enable the explicit `unstable` crate feature to use it.
 
 Import from:
 
 ```rust
-use xlfn::advanced::cache::{
+use xlfn::unstable::cache::{
     BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
 };
 ```

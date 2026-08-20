@@ -43,7 +43,7 @@ Do not convert this implementation target into an unqualified compatibility clai
 
 ## Rust crate features
 
-The facade crate has no default features:
+The `xlfn` crate has no default features:
 
 ```toml
 [dependencies]
@@ -60,6 +60,7 @@ xlfn = { version = "0.2", features = ["async"] }
 | Feature | Adds |
 |---|---|
 | `async` | native asynchronous UDF runtime, `AsyncContext`, cancellation tokens, and calculation-event exports |
+| `unstable` | lower-level cache, execution-layer, and array-output APIs with an explicitly unstable contract |
 
 ## Project shape
 

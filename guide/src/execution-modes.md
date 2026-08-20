@@ -7,13 +7,13 @@ xlfn separates Excel-visible arguments from injected capabilities. A context, wh
 ```rust
 #[excel_function(name = "APP.DESK")]
 fn desk(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, '_, State>,
+    #[excel_context(main_thread)] context: MainThreadContext<'_, DeskTools>,
 ) -> String {
     context.state().desk.clone()
 }
 ```
 
-`MainThreadContext` is neither `Send` nor `Sync`. Its two inferred lifetimes are the state borrow and the current Excel-call scope; the scope lifetime keeps callback capability tied to the invocation. It gives access to state and to `subscribe`, which establishes a streaming RTD dependency. Formula-owned object producers also use main-thread return semantics, even when they do not explicitly request a context.
+`MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps the open generation alive while exposing state and callback capability. It also provides `subscribe`, which establishes a streaming RTD dependency. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
 
 Do not combine a main-thread context with `thread_safe`.
 
@@ -22,7 +22,7 @@ Do not combine a main-thread context with `thread_safe`.
 ```rust
 #[excel_function(name = "APP.VERSION", thread_safe)]
 fn version(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, DeskTools>,
 ) -> String {
     context.state().version.clone()
 }
@@ -41,14 +41,14 @@ Do not move call-scoped Excel values, raw references, or callback capabilities t
 ```rust
 #[excel_function(name = "APP.RANGE.NAME")]
 fn range_name(
-    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, '_, State>,
+    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, DeskTools>,
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<String> {
     context.sheet_name(&reference)
 }
 ```
 
-A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; like `MainThreadContext`, its second inferred lifetime is the current Excel-call scope. It provides:
+A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; its one inferred lifetime is the current Excel-call scope. It provides:
 
 - `coerce` for an owned `ExcelValue`;
 - `coerce_matrix<T>` for an owned matrix;
@@ -61,7 +61,7 @@ The `macro_sheet` function flag selects the same registration capability without
 ```rust
 #[excel_function(name = "APP.SLOW")]
 async fn slow(
-    #[excel_context(asynchronous)] context: AsyncContext<State>,
+    #[excel_context(asynchronous)] context: AsyncContext<DeskTools>,
     input: String,
 ) -> XllResult<String> {
     context.check_cancelled()?;
@@ -69,7 +69,7 @@ async fn slow(
 }
 ```
 
-`AsyncContext` owns a lease on the current open generation (`GenerationLease<State>`) and a per-call cancellation token. It is available only with the `async` feature and only to `async fn`. An async function may omit the context if it does not need state or cancellation.
+`AsyncContext` owns a lease on the current open generation and a per-call cancellation token. It is available only with the `async` feature and only to `async fn`. An async function may omit the context if it does not need state or cancellation.
 
 ## Compatibility table
 

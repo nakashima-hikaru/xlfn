@@ -72,13 +72,17 @@ pub struct HelloXll;
 impl Addin for HelloXll {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
-    fn open(context: &OpenContext) -> Result<State, XllError> {
-        xlfn::diagnostics::install_file_diagnostic_sink(&context.build_info().addin_id)
-            .map_err(|_| XllError::Internal {
-                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"DIAGSINK"),
+    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        context
+            .diagnostics()
+            .install_file_sink()
+            .map_err(|error| XllError::Native {
+                code: -1,
+                message: error.to_string(),
             })?;
-        Ok(State)
+        Ok(Opened::new(State, ()))
     }
 }
 ```

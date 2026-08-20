@@ -22,11 +22,9 @@ impl Addin for RenamedAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(())
+    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new((), ()))
     }
-
-    fn udf_layers(_state: &Self::State) -> Self::Layers {}
 }
 
 #[excel_function(crate = "my_xlfn")]

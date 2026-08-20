@@ -42,7 +42,7 @@ fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
 }
 ```
 
-For large numeric outputs, explicitly import `xlfn::advanced::output::{XlArrayBuilder, XlArrayOutput}` and write directly into an `XlArrayBuilder`. The finished cell allocation is adopted by `ReturnBlock` without copying:
+For large numeric outputs, explicitly enable the `unstable` crate feature and import `xlfn::unstable::output::{XlArrayBuilder, XlArrayOutput}`. Write directly into an `XlArrayBuilder`; the finished cell allocation is adopted by `ReturnBlock` without copying:
 
 ```rust
 fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {

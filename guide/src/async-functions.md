@@ -16,7 +16,7 @@ The project uses Excel 2010 or later as the operational baseline for this capabi
 ```rust
 #[excel_function(name = "SERVICE.FETCH")]
 async fn fetch(
-    #[excel_context(asynchronous)] context: AsyncContext<State>,
+    #[excel_context(asynchronous)] context: AsyncContext<ServiceAddin>,
     symbol: String,
 ) -> XllResult<f64> {
     context.check_cancelled()?;
@@ -41,7 +41,7 @@ Async functions are registered as thread-safe by the generated boundary. They ca
 
 ## State and converted inputs
 
-`AsyncContext<State>` owns a `GenerationLease<State>` on the open generation. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
+`AsyncContext<ServiceAddin>` owns a lease on the open `ServiceAddin` generation. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
 
 The add-in controls executor size:
 
@@ -49,13 +49,12 @@ The add-in controls executor size:
 impl Addin for ServiceAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<State> {
-        Ok(State::new())
-    }
-
-    fn async_worker_count(_: &State) -> usize {
-        4
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        Ok(Opened::new(State::new(), ()).with_runtime_config(
+            RuntimeConfig::new().with_async_worker_count(4),
+        ))
     }
 }
 ```
@@ -93,7 +92,7 @@ A Rust `async fn` is not automatically non-blocking. This is poor:
 ```rust,ignore
 #[excel_function(name = "DATA.FETCH")]
 async fn fetch_data(
-    #[excel_context(asynchronous)] context: AsyncContext<State>,
+    #[excel_context(asynchronous)] context: AsyncContext<ServiceAddin>,
     query: String,
 ) -> XllResult<f64> {
     // Blocks an executor worker for the whole external call.

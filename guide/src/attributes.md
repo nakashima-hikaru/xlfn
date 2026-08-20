@@ -2,7 +2,7 @@
 
 This chapter is the compact reference for xlfn's procedural macros. The compiler validates incompatible combinations; prefer the smallest attribute set that accurately describes the Excel contract.
 
-> **Dependency name:** generated code currently refers to the facade crate as `xlfn`. In `Cargo.toml`, depend on the package under its canonical crate name (`xlfn`) rather than renaming it.
+> **Dependency name:** generated code currently refers to the framework crate as `xlfn`. In `Cargo.toml`, depend on the package under its canonical crate name (`xlfn`) rather than renaming it.
 
 ## `#[excel_addin(...)]`
 
@@ -78,7 +78,7 @@ A function may have at most one injected context. It must be the first parameter
 
 ```rust
 fn lookup(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, DeskTools>,
     key: String,
 ) -> XllResult<f64> {
     context.state().lookup(&key)
@@ -87,10 +87,10 @@ fn lookup(
 
 | Role | Rust context | Capability |
 |---|---|---|
-| `main_thread` | `MainThreadContext<'_, '_, State>` | main-thread Excel callbacks, handles, RTD |
-| `thread_safe` | `ThreadSafeContext<'_, State>` | shared state during MTR; no unsafe Excel callbacks |
-| `macro_sheet` | `MacroSheetContext<'_, '_, State>` | Excel references and macro-sheet registration |
-| `asynchronous` | `AsyncContext<State>` | cancellation and shared state for an async UDF |
+| `main_thread` | `MainThreadContext<'_, DeskTools>` | main-thread Excel callbacks, handles, RTD |
+| `thread_safe` | `ThreadSafeContext<'_, DeskTools>` | shared state during MTR; no unsafe Excel callbacks |
+| `macro_sheet` | `MacroSheetContext<'_, DeskTools>` | Excel references and macro-sheet registration |
+| `asynchronous` | `AsyncContext<DeskTools>` | cancellation and shared state for an async UDF |
 
 An `async fn` may omit a context. When it has one, the role must be `asynchronous`. A synchronous function cannot use the asynchronous role.
 

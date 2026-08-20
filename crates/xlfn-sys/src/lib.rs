@@ -1,12 +1,19 @@
 //! Raw, layout-stable definitions for the Excel 12 XLL ABI.
 //!
 //! This crate is the only framework crate that talks directly to Excel's
-//! `MdCallBack12` entry point. Higher layers should use `xlfn-core`.
+//! `MdCallBack12` entry point. Higher layers should use `xlfn`.
 //!
 //! The layout follows Microsoft's XLL SDK declarations in
 //! [`XLCALL.H`](https://learn.microsoft.com/en-us/office/client-developer/excel/xlcall-h).
 //! Enable `abi-probe` only for the repository's native ABI cross-check; normal
 //! add-ins resolve the callback from the Excel host at runtime.
+//!
+//! # Stability and Supported API Policy
+//!
+//! `xlfn-sys` is an implementation crate for the `xlfn` framework. The only
+//! supported public API for add-in authors is the `xlfn` facade crate.
+//! Direct use of `xlfn-sys` does not carry semantic versioning stability
+//! guarantees.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 

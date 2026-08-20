@@ -9,7 +9,7 @@ use std::{
 use xlfn::{
     error::InputError,
     prelude::*,
-    rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue},
+    rtd::{RtdSink, RtdSource, RtdTopic, RtdValue},
 };
 
 use super::{Client, MetricSubscription};

@@ -25,7 +25,7 @@ Verify that:
 - every packaged import resolves;
 - bundle files have unique case-insensitive basenames;
 - final staged bytes match the manifest records;
-- a consumer crate can use the published facade under both targets.
+- a consumer crate can use the published `xlfn` crate under both targets.
 
 Artifact tests do not start Excel. They complement, rather than replace, the
 add-in's own unit tests and real-Excel qualification.

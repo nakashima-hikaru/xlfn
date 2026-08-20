@@ -53,7 +53,7 @@ The following are direct scalar returns:
 - a type deriving `ExcelEnum`;
 - `RtdValue`.
 
-`Matrix<T>`, `Row<T>`, and `Column<T>` are owned array returns when every element implements `IntoExcel`. `xlfn::advanced::output::XlArrayBuilder::new` produces `XlArrayOutput` directly in the final `XLOPER12` cell buffer, avoiding an intermediate cell vector and a cell-buffer copy.
+`Matrix<T>`, `Row<T>`, and `Column<T>` are owned array returns when every element implements `IntoExcel`. With the explicit `unstable` crate feature, `xlfn::unstable::output::XlArrayBuilder::new` produces `XlArrayOutput` directly in the final `XLOPER12` cell buffer, avoiding an intermediate cell vector and a cell-buffer copy.
 
 `Result<T, E>` is supported whenever `T` is supported for the selected execution mode and `E: IntoXllError`. The wrapper converts the error exactly once at the Excel boundary.
 

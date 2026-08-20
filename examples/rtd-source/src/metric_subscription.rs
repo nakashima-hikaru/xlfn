@@ -22,9 +22,7 @@ unsafe impl RtdSubscription for MetricSubscription {
     fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
         self.request_cancel();
         if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| XllError::Internal {
-                diagnostic_id: xlfn::error::DiagnosticId::from_ascii8(*b"RTDWORKR"),
-            })?;
+            worker.join().map_err(|_| XllError::Panic)?;
         }
         Ok(())
     }

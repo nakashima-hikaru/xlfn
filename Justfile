@@ -47,7 +47,7 @@ features:
         --feature-powerset \
         --no-dev-deps
     cargo hack check \
-        --package xlfn-core \
+        --package xlfn \
         --feature-powerset \
         --depth 2 \
         --exclude-features bench-internals \
@@ -73,28 +73,28 @@ check: fmt clippy features test bench-check deny semver
 # --- Benchmark recipes ---
 
 bench:
-    cargo bench --package xlfn-core --features "bench-internals async" --locked
+    cargo bench --package xlfn --features "bench-internals async" --locked
 
 bench-async:
-    cargo bench --package xlfn-core --bench async_spawn --features "bench-internals async" --locked
+    cargo bench --package xlfn --bench async_spawn --features "bench-internals async" --locked
 
 bench-sync:
-    cargo bench --package xlfn-core --bench sync_boundary --features bench-internals --locked
+    cargo bench --package xlfn --bench sync_boundary --features bench-internals --locked
 
 bench-input-identity:
-    cargo bench --package xlfn-core --bench input_identity --features bench-internals --locked
+    cargo bench --package xlfn --bench input_identity --features bench-internals --locked
 
 bench-formula-caller:
-    cargo bench --package xlfn-core --bench formula_caller --features bench-internals --locked
+    cargo bench --package xlfn --bench formula_caller --features bench-internals --locked
 
 bench-handle-prepare:
-    cargo bench --package xlfn-core --bench handle_prepare --features bench-internals --locked
+    cargo bench --package xlfn --bench handle_prepare --features bench-internals --locked
 
 bench-handle-lookup:
-    cargo bench --package xlfn-core --bench handle_lookup --features bench-internals --locked
+    cargo bench --package xlfn --bench handle_lookup --features bench-internals --locked
 
 bench-formula-revision:
-    cargo bench --package xlfn-core --bench formula_revision --features bench-internals --locked
+    cargo bench --package xlfn --bench formula_revision --features bench-internals --locked
 
 bench-check:
-    cargo clippy --package xlfn-core --benches --features "bench-internals async" --locked -- -D warnings
+    cargo clippy --package xlfn --benches --features "bench-internals async" --locked -- -D warnings

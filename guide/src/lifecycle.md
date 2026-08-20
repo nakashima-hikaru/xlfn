@@ -8,14 +8,21 @@ pub trait Addin: Send + Sync + 'static {
     type Error: IntoXllError;
     type Layers: UdfLayers;
 
-    fn open(context: &OpenContext) -> Result<Self::State, Self::Error>;
-    fn udf_layers(state: &Self::State) -> Self::Layers;
+    fn open(
+        context: &OpenContext,
+    ) -> Result<Opened<Self::State, Self::Layers>, Self::Error>;
     fn quiesce(state: &mut Self::State) -> Result<(), Self::Error>;
     fn cleanup(state: &mut Self::State, reporter: &mut CleanupReporter<'_>);
 }
 ```
 
-With the `async` feature, it also exposes `async_worker_count`.
+`Opened` returns state, execution layers, and the runtime policy as one open
+transaction. `RuntimeConfig` can select RTD limits and, with the `async`
+feature, the async worker count.
+
+The stable default uses `type Layers = ();`. Custom UDF layers and other
+lower-level execution APIs require the explicit `unstable` feature and are
+documented separately in [UDF execution layers](udf-layers.md).
 
 ## Open
 
@@ -24,6 +31,7 @@ With the `async` feature, it also exposes `async_worker_count`.
 - `module_path()` — the full path reported for the loaded XLL;
 - `module_directory()` — the directory containing the XLL;
 - `build_info()` — add-in ID, crate version, and target triple.
+- `rtd().register_source(...)` — an opaque RTD source identity for later subscriptions.
 
 Use this hook to load bounded configuration, install diagnostics, and create application-owned resources needed by later calls. Return an error rather than panicking. The framework converts the error through `IntoXllError`, records diagnostics, and fails the open operation safely.
 
@@ -45,19 +53,31 @@ Prefer immutable snapshots or narrowly scoped locks. Never hold an application l
 
 ## UDF layers
 
-`Addin::udf_layers` returns process-local execution middleware. Layers are installed for the open generation and receive call metadata before argument conversion. See [UDF execution layers](udf-layers.md).
+`Opened` returns process-local execution middleware together with state. Layers
+are installed for the open generation and receive call metadata before
+argument conversion. See [UDF execution layers](udf-layers.md).
 
 ## Async worker count
 
 With the `async` feature:
 
 ```rust
-fn async_worker_count(_: &State) -> usize {
-    4
+impl Addin for ServiceAddin {
+    type State = State;
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        Ok(Opened::new(State::new(), ()).with_runtime_config(
+            RuntimeConfig::new().with_async_worker_count(4),
+        ))
+    }
 }
 ```
 
-The framework clamps the value to `1..=32`. The default is the available parallelism capped at four. This pool executes Rust futures; it is separate from any executor, worker, connection pool, or other runtime created by the application.
+The framework clamps the value to `1..=32`; the default is four. This pool
+executes Rust futures and is separate from any executor, worker, connection
+pool, or other runtime created by the application.
 
 ## Quiescence, cleanup, and unload safety
 

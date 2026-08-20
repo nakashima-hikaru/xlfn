@@ -3,7 +3,14 @@
 //! The macros generate the Excel ABI entry points, registration metadata, and
 //! add-in lifecycle exports consumed by `xlfn`. They intentionally keep raw
 //! pointer handling at the generated FFI boundary; user functions receive the
-//! safe values and contexts exposed by `xlfn-core`.
+//! safe values and contexts exposed by `xlfn`.
+//!
+//! # Stability and Supported API Policy
+//!
+//! `xlfn-macros` is an implementation crate for the `xlfn` framework. The only
+//! supported public API for add-in authors is the `xlfn` facade crate.
+//! Direct use of `xlfn-macros` does not carry semantic versioning stability
+//! guarantees.
 
 #![forbid(unsafe_code)]
 
@@ -727,7 +734,11 @@ fn expand_excel_function(
             &crate::__XLFN_RUNTIME,
         )),
         ContextKind::MacroSheet => {
-            quote!(#krate::__private::macro_sheet_context(__frame, __state))
+            quote!(#krate::__private::macro_sheet_context(
+                __frame,
+                __state,
+                &crate::__XLFN_RUNTIME,
+            ))
         }
         ContextKind::Async => {
             quote!(#krate::__private::async_context(__lease, __cancellation))

@@ -7,9 +7,10 @@ struct OldExportAddin;
 impl Addin for OldExportAddin {
     type State = State;
     type Error = XllError;
+    type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(State)
+    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, ()))
     }
 }
 

@@ -20,7 +20,7 @@ allow = [
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
-    { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.6 while xlfn-core uses constant_time_eq 0.5.0 directly." },
+    { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.6 while xlfn uses constant_time_eq 0.5.0 directly." },
 ]
 
 [sources]

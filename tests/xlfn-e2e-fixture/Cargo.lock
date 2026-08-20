@@ -645,20 +645,6 @@ dependencies = [
 name = "xlfn"
 version = "0.2.0"
 dependencies = [
- "inventory",
- "xlfn-core",
- "xlfn-macros",
- "xlfn-sys",
-]
-
-[[package]]
-name = "xlfn-common"
-version = "0.2.0"
-
-[[package]]
-name = "xlfn-core"
-version = "0.2.0"
-dependencies = [
  "arc-swap",
  "async-channel",
  "async-task",
@@ -681,8 +667,13 @@ dependencies = [
  "triomphe",
  "windows-link",
  "xlfn-common",
+ "xlfn-macros",
  "xlfn-sys",
 ]
+
+[[package]]
+name = "xlfn-common"
+version = "0.2.0"
 
 [[package]]
 name = "xlfn-e2e-fixture"

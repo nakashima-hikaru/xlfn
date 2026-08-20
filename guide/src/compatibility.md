@@ -48,13 +48,14 @@ Accordingly:
 
 Do not convert an intended target into a support claim without evidence.
 
-## Facade features
+## xlfn features
 
-The `xlfn` facade has no default features.
+The `xlfn` crate has no default features.
 
 | Feature | Adds | Use when |
 |---|---|---|
 | `async` | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel |
+| `unstable` | lower-level cache, execution-layer, and array-output APIs | the add-in explicitly accepts experimental API evolution |
 
 Examples:
 
@@ -73,7 +74,7 @@ bundle contents and application-adapter dependencies have separate packaging and
 
 ## Raw Excel ABI access
 
-The `xlfn` facade does not expose the raw Excel ABI. Applications that
+The `xlfn` crate does not expose the raw Excel ABI. Applications that
 intentionally need raw ABI types or calls should declare `xlfn-sys` directly:
 
 ```toml
@@ -101,7 +102,7 @@ Do not switch an add-in to `panic = "abort"`; a panic would terminate Excel rath
 
 ## Crate-name requirement
 
-Procedural macro output currently refers to the facade as `::xlfn`. Use the canonical dependency name:
+Procedural macro output currently refers to the framework as `::xlfn`. Use the canonical dependency name:
 
 ```toml
 [dependencies]

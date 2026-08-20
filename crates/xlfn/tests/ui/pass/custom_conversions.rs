@@ -11,11 +11,9 @@ impl Addin for CustomConversionAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Self::State, Self::Error> {
-        Ok(State)
+    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, ()))
     }
-
-    fn udf_layers(_: &Self::State) -> Self::Layers {}
 }
 
 struct Positive(f64);

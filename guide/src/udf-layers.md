@@ -2,10 +2,12 @@
 
 Execution layers provide bounded admission control and instrumentation around every exported UDF. They observe call metadata before argument conversion and receive a classified outcome after completion.
 
+This API is currently behind the explicit `unstable` crate feature.
+
 Import from:
 
 ```rust
-use xlfn::advanced::execution::{
+use xlfn::unstable::execution::{
     CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers, UdfResultKind,
 };
 ```
@@ -54,12 +56,8 @@ impl Addin for DeskTools {
     type Error = XllError;
     type Layers = (MetricsLayer,);
 
-    fn open(_: &OpenContext) -> XllResult<State> {
-        Ok(State::new())
-    }
-
-    fn udf_layers(_: &State) -> Self::Layers {
-        (MetricsLayer,)
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        Ok(Opened::new(State::new(), (MetricsLayer,)))
     }
 }
 ```
@@ -72,11 +70,8 @@ impl Addin for SimpleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<State> {
-        Ok(State::new())
-    }
-
-    fn udf_layers(_: &State) -> Self::Layers {}
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+        Ok(Opened::new(State::new(), ()))
 }
 ```
 

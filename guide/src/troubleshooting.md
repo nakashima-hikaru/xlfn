@@ -107,7 +107,7 @@ Test the object's behavior or expose a safe version field rather than using toke
 - Confirm the crate enabled the `async` feature.
 - Verify the linked async exports with `cargo xlfn check`.
 - Ensure blocking work is submitted to a dedicated worker rather than occupying all async executor threads.
-- Inspect `async_worker_count` and downstream queue capacity.
+- Inspect the `RuntimeConfig` async worker count and downstream queue capacity.
 - Check cancellation; a cancelled call deliberately suppresses late delivery.
 - Ensure the future retains every needed owned input and does not wait on a resource that requires the Excel thread.
 - Verify that an external client actually wakes the future.
