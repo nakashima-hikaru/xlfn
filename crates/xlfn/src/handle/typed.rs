@@ -1,7 +1,6 @@
 use super::*;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::ptr::NonNull;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 ///
@@ -18,13 +17,13 @@ type HandleAliasMarker<'call, T> = (&'call crate::CallScope<'call>, fn() -> T);
 /// scope. The call guard retains the runtime-local object arena and protects
 /// the pointed-to value from epoch reclamation for exactly that scope.
 pub struct Handle<'call, T: ExcelHandleObject> {
-    pub(crate) object: ObjectLocator,
-    pub(crate) value: TypedObjectRef<'call, T>,
+    pub(crate) object: LiveObjectRef,
+    pub(crate) value: BorrowedObject<'call, T>,
     pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(object: ObjectLocator, value: TypedObjectRef<'call, T>) -> Self {
+    pub(crate) fn new(object: LiveObjectRef, value: BorrowedObject<'call, T>) -> Self {
         Self {
             object,
             value,
@@ -37,27 +36,29 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
     /// Promotion is explicit because it changes the lifetime kind: the
     /// resulting value may outlive the Excel call and keeps the registry
     /// payload alive until it is dropped.
-    fn promote(self) -> XllResult<ObjectLease<T>> {
-        let (pin, value) = self.value.guard().pin(self.object)?;
-        Ok(ObjectLease::from_parts(pin, value))
+    fn promote(self) -> XllResult<PinnedObject<T>> {
+        self.value.guard().pin(self.object)
     }
 
     /// Promotes this capability to a long-lived synchronous handle.
     pub fn pin(self) -> XllResult<PinnedHandle<T>> {
-        self.promote().map(ObjectLease::into_pinned)
+        self.promote().map(|lease| PinnedHandle { lease })
     }
 
     /// Promotes this capability to the handle type intended for an async
     /// future. The returned value is `Send + Sync + 'static`.
     pub fn into_async(self) -> XllResult<AsyncHandle<T>> {
-        self.promote().map(ObjectLease::into_async)
+        self.promote().map(|lease| AsyncHandle { lease })
     }
 
     /// Converts this borrowed capability into an explicit republish
     /// capability. A handle itself is never an Excel return value.
     pub fn alias(self) -> HandleAlias<'call, T> {
         HandleAlias {
-            object: self.object,
+            object: ObjectLocator {
+                id: self.object.id,
+                key_hint: self.object.key,
+            },
             _call: PhantomData,
         }
     }
@@ -67,66 +68,14 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: lookup validated the concrete type while the call epoch was
-        // active. The epoch remains active for the lifetime of this handle, so
-        // the object registry cannot reclaim the allocation underneath it.
-        unsafe { self.value.as_ptr().as_ref() }
+        &self.value
     }
 }
-
-/// Internal ownership layer shared by the two public long-lived handle
-/// categories.
-///
-/// The lease owns a registry pin, not an `Arc<T>`: the registry remains the
-/// sole payload owner and the pin only controls when that owner may be
-/// retired.
-struct ObjectLease<T: ExcelHandleObject> {
-    value: NonNull<T>,
-    pin: ObjectPin,
-}
-
-impl<T: ExcelHandleObject> ObjectLease<T> {
-    fn from_parts(pin: ObjectPin, value: NonNull<T>) -> Self {
-        Self { value, pin }
-    }
-
-    /// Returns the stable runtime-local object identity.
-    pub fn object_id(&self) -> u64 {
-        self.pin.object_id().0
-    }
-
-    /// Changes the synchronous lifetime marker without changing ownership.
-    fn into_pinned(self) -> PinnedHandle<T> {
-        PinnedHandle { lease: self }
-    }
-
-    /// Changes the async lifetime marker without changing ownership.
-    fn into_async(self) -> AsyncHandle<T> {
-        AsyncHandle { lease: self }
-    }
-}
-
-impl<T: ExcelHandleObject> Deref for ObjectLease<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: `pin` keeps the registry's sole payload owner alive for the
-        // entire lifetime of this reference.
-        unsafe { self.value.as_ref() }
-    }
-}
-
-// SAFETY: the registry pin is Send + Sync and T is required to be Send + Sync;
-// the pointer is only dereferenced while the pin is held.
-unsafe impl<T: ExcelHandleObject> Send for ObjectLease<T> {}
-
-// SAFETY: same invariant as Send.
-unsafe impl<T: ExcelHandleObject> Sync for ObjectLease<T> {}
 
 /// A long-lived synchronous handle. Use this when a handle must cross Excel
 /// calls but remain in synchronous application code.
 pub struct PinnedHandle<T: ExcelHandleObject> {
-    lease: ObjectLease<T>,
+    lease: PinnedObject<T>,
 }
 
 impl<T: ExcelHandleObject> PinnedHandle<T> {
@@ -136,7 +85,7 @@ impl<T: ExcelHandleObject> PinnedHandle<T> {
     }
 
     pub fn into_async(self) -> AsyncHandle<T> {
-        self.lease.into_async()
+        AsyncHandle { lease: self.lease }
     }
 }
 
@@ -152,7 +101,7 @@ impl<T: ExcelHandleObject> Deref for PinnedHandle<T> {
 /// future. It owns the same registry pin as [`PinnedHandle`] but is a separate
 /// type so async APIs cannot accidentally capture [`Handle<'_, T>`].
 pub struct AsyncHandle<T: ExcelHandleObject> {
-    lease: ObjectLease<T>,
+    lease: PinnedObject<T>,
 }
 
 impl<T: ExcelHandleObject> AsyncHandle<T> {

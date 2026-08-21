@@ -848,7 +848,7 @@ where
     }
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.u64(self.object.id.0);
+        encoder.u64(self.object.id.0.0);
     }
 
     fn from_excel_with_identity(
@@ -859,7 +859,7 @@ where
     ) -> XllResult<Self> {
         let handle = Self::from_excel_with_context(value, argument, context)?;
         if let Some(identity) = identity {
-            identity.u64(handle.object.id.0);
+            identity.u64(handle.object.id.0.0);
         }
         Ok(handle)
     }

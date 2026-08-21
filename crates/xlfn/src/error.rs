@@ -159,6 +159,7 @@ impl DiagnosticId {
     pub(crate) const OPEN_ROLLBACK_CERT_UNKNOWN: Self = Self::from_ascii8(*b"OPRBCERU");
     pub(crate) const OPEN_ROLLBACK_PHASE: Self = Self::from_ascii8(*b"OPRBPHAS");
     pub(crate) const RTD_SUBSCRIPTION_OVERFLOW: Self = Self::from_ascii8(*b"RTDSUBOV");
+    pub(crate) const RTD_SLOTS: Self = Self::from_ascii8(*b"RTDSLOTS");
     pub(crate) const TICKET_OVERFLOW: Self = Self::from_ascii8(*b"TICKOVFL");
     pub(crate) const RTD_INDEX_DUPLICATE: Self = Self::from_ascii8(*b"RTDIDXDU");
     pub(crate) const RTD_RT_ID_OVERFLOW: Self = Self::from_ascii8(*b"RTDRTIDO");

@@ -74,7 +74,11 @@ impl Executor {
         generation: u64,
         fail_at: Option<usize>,
     ) -> XllResult<Self> {
-        let worker_count = worker_count.clamp(1, 32);
+        if !(1..=crate::AsyncWorkerCount::MAX).contains(&worker_count) {
+            return Err(XllError::Domain {
+                code: crate::DomainErrorCode::InvalidInput,
+            });
+        }
         let (sender, receiver) = async_channel::unbounded::<Runnable>();
         let initial_generation = triomphe::Arc::new(GenerationState::new(generation));
         let shared = Arc::new(ExecutorShared {

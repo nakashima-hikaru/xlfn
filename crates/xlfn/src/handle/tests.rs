@@ -1143,7 +1143,7 @@ fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
             .as_ref()
             .expect("resurrected alias must have a canonical record");
         assert_eq!(alias_record.object.id, object.id);
-        assert_ne!(alias_record.object.key, object.key);
+        assert_ne!(alias_record.object.key, object.key_hint);
         drop(state);
 
         (alias_token, object.id)
@@ -1202,7 +1202,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         assert_eq!(input_identity(&source), input_identity(&alias));
         assert_eq!(
             input_identity(&source),
-            reference_handle_identity(source.object.id.0)
+            reference_handle_identity(source.object.id.0.0)
         );
         assert_ne!(source.object.id, other.object.id);
         assert_ne!(input_identity(&source), input_identity(&other));
@@ -2412,7 +2412,7 @@ fn alias_preserves_pointer_and_object_identity() {
     let (token2, object_id1, ptr1) = crate::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
         let object = handle1.object;
-        let ptr = handle1.value.as_ptr();
+        let ptr = handle1.value.address();
         let alias = handle1.alias();
         let key2 = test_topic_key("alias_identity_2");
         let (token2, _) = runtime
@@ -2426,7 +2426,7 @@ fn alias_preserves_pointer_and_object_identity() {
     crate::with_excel_call_scope(|scope| {
         let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
         assert_eq!(handle2.object.id, object_id1);
-        assert_eq!(handle2.value.as_ptr(), ptr1);
+        assert_eq!(handle2.value.address(), ptr1);
         assert_eq!(*handle2, TrackedObj(12345));
     });
 }
@@ -2668,7 +2668,7 @@ fn alias_capability_does_not_extend_object_lifetime() {
         // The call epoch keeps the retired object readable until the scope
         // ends, but the borrowed alias is not an ownership extension.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(alias.object.id.0, 1);
+        assert_eq!(alias.object.id.0.0, 1);
     });
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

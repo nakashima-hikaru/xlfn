@@ -6,15 +6,13 @@
 //! Excel-owned return-obligation ownership and quiescence accounting.
 
 use crate::{XllError, XllResult};
+use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 const RETURN_STRIPE_COUNT: usize = 32;
 const RETURN_STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
 const RETURN_STRIPE_COUNT_MASK: usize = RETURN_STRIPE_SEALED - 1;
-const RETURN_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
-
 thread_local! {
     static RETURN_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
 }
@@ -68,11 +66,12 @@ impl ReturnStripe {
         }
     }
 
-    fn release(&self) {
+    fn release(&self) -> bool {
         let previous = self.state.fetch_sub(1, Ordering::AcqRel);
         if previous & RETURN_STRIPE_COUNT_MASK == 0 {
             std::process::abort();
         }
+        previous & RETURN_STRIPE_COUNT_MASK == 1
     }
 
     fn seal(&self) {
@@ -110,13 +109,14 @@ impl ReturnStripe {
 
 pub(crate) struct ReturnTracker {
     stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
+    wait_lock: Mutex<()>,
+    quiescent: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
 pub(crate) struct ReturnObligation<'tracker> {
     stripe: &'tracker ReturnStripe,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
     tracker: &'tracker ReturnTracker,
 }
 
@@ -129,7 +129,13 @@ impl<'tracker> ReturnObligation<'tracker> {
 
 impl Drop for ReturnObligation<'_> {
     fn drop(&mut self) {
-        self.stripe.release();
+        if self.stripe.release() {
+            // Synchronize the condition check and notification with the
+            // waiter. Without this lock, the final release could notify just
+            // before `wait_for_quiescence` goes to sleep.
+            let _wait = self.tracker.wait_lock.lock();
+            self.tracker.quiescent.notify_all();
+        }
     }
 }
 
@@ -137,6 +143,8 @@ impl ReturnTracker {
     pub(crate) const fn new_closed() -> Self {
         Self {
             stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
+            wait_lock: Mutex::new(()),
+            quiescent: Condvar::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
@@ -180,7 +188,6 @@ impl ReturnTracker {
         Some(ReturnProducerGuard {
             obligation: Some(ReturnObligation {
                 stripe: &self.stripes[stripe_index],
-                #[cfg(any(test, feature = "shutdown-refinement"))]
                 tracker: self,
             }),
         })
@@ -197,8 +204,9 @@ impl ReturnTracker {
     pub(crate) fn wait_for_quiescence(&self) {
         debug_assert!(self.admission_closed());
 
+        let mut wait = self.wait_lock.lock();
         while !self.is_quiescent() {
-            std::thread::sleep(RETURN_QUIESCENCE_RECHECK_INTERVAL);
+            self.quiescent.wait(&mut wait);
         }
     }
 

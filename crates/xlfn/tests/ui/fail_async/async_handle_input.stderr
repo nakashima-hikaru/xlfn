@@ -62,10 +62,10 @@ error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
    = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
-note: required because it appears within the type `handle::reclamation::TypedObjectRef<'_, Dataset>`
-  --> src/handle/reclamation.rs
+note: required because it appears within the type `handle::arena::BorrowedObject<'_, Dataset>`
+  --> src/handle/arena.rs
    |
-   | pub(crate) struct TypedObjectRef<'call, T> {
+   | pub(crate) struct BorrowedObject<'call, T> {
    |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
   --> src/handle/typed.rs

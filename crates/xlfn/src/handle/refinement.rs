@@ -3,6 +3,7 @@
     reason = "H4 handle traces are consumed by the feature-gated Lean checker"
 )]
 
+use super::refinement_wire::TokenWire;
 use super::{FormulaRevisionKey, HandleTopicKey, HandleTopicOwner};
 use crate::generation::ServerGeneration;
 use parking_lot::{Mutex, MutexGuard};
@@ -20,14 +21,6 @@ pub(crate) struct FormulaRevisionKeyWire {
     pub(crate) column: i32,
     pub(crate) udf_id: String,
     pub(crate) input_fingerprint: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TokenWire {
-    pub(crate) session: u64,
-    pub(crate) slot: u64,
-    pub(crate) generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -353,7 +346,7 @@ impl HandleRefinementTrace {
         self.inner.lock().push(Event::BeginPrepare);
     }
 
-    fn end_prepare(&self) {
+    pub(crate) fn end_prepare(&self) {
         self.inner.lock().push(Event::EndPrepare);
     }
 

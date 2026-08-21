@@ -1713,35 +1713,11 @@ mod tests {
     }
 
     #[cfg(feature = "async")]
-    static WORKERS_PANIC_CLOSES: AtomicUsize = AtomicUsize::new(0);
-
-    #[cfg(feature = "async")]
-    struct WorkersPanic;
-
-    #[cfg(feature = "async")]
-    impl Addin for WorkersPanic {
-        type State = ();
-        type Error = XllError;
-        type Layers = ();
-
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
-            Ok(crate::Opened::new((), ())
-                .with_runtime_config(crate::RuntimeConfig::new().with_async_worker_count(64)))
-        }
-
-        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
-            WORKERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    #[cfg(feature = "async")]
     #[test]
-    fn open_transaction_clamps_async_worker_policy() {
-        WORKERS_PANIC_CLOSES.store(0, Ordering::Release);
-        let runtime = Runtime::<WorkersPanic>::new();
-        let _open_attempt = runtime.begin_open().unwrap();
-        initialize_addin::<WorkersPanic>(&runtime, &test_open_context()).unwrap();
-        assert!(runtime.has_opening_generation());
+    fn async_worker_policy_is_bounded_before_open() {
+        assert!(crate::AsyncWorkerCount::new(0).is_none());
+        assert!(crate::AsyncWorkerCount::new(33).is_none());
+        assert_eq!(crate::AsyncWorkerCount::new(32).unwrap().get(), 32);
     }
 
     impl Addin for RetryClose {

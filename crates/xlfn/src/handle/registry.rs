@@ -163,13 +163,13 @@ impl Drop for ErasedObject {
 /// old snapshot does not own or extend the lifetime of the object payload.
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
-    pub(crate) object: ObjectLocator,
+    pub(crate) object: LiveObjectRef,
     pub(crate) object_ref: PublishedObjectPtr,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object: ObjectLocator, object_ref: PublishedObjectPtr) -> Self {
+    fn new(id: HandleId, object: LiveObjectRef, object_ref: PublishedObjectPtr) -> Self {
         Self {
             id,
             object,
@@ -312,11 +312,24 @@ pub(crate) struct ObjectKey {
     pub(crate) generation: ObjectGeneration,
 }
 
-/// The semantic object identity and its current generation-checked storage
-/// key travel together through every published binding and ownership escape.
+/// The stable semantic identity of a handle object.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ObjectIdentity(pub(crate) ObjectId);
+
+/// A caller-provided object reference. Its key is only a hint: resurrection
+/// may use the identity to recover the retired payload even when the hint is
+/// stale.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ObjectLocator {
-    pub(crate) id: ObjectId,
+    pub(crate) id: ObjectIdentity,
+    pub(crate) key_hint: ObjectKey,
+}
+
+/// A validated live reference. Unlike [`ObjectLocator`], its key is the
+/// authoritative storage generation for the current registry entry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct LiveObjectRef {
+    pub(crate) id: ObjectIdentity,
     pub(crate) key: ObjectKey,
 }
 
@@ -331,7 +344,7 @@ pub(crate) struct ObjectEntry {
 }
 
 pub(super) struct DetachedObject {
-    pub(super) object: ObjectLocator,
+    pub(super) object: LiveObjectRef,
     pub(super) pins: usize,
     pub(super) value: ErasedObject,
 }
@@ -422,9 +435,9 @@ impl ObjectRegistry {
         Ok(key)
     }
 
-    fn add_binding(&mut self, object: ObjectLocator) -> XllResult<()> {
+    fn add_binding(&mut self, object: LiveObjectRef) -> XllResult<()> {
         let entry = self.get_mut(object.key).ok_or(XllError::StaleHandle)?;
-        if entry.object_id != object.id {
+        if entry.object_id != object.id.0 {
             return Err(XllError::StaleHandle);
         }
         entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
@@ -433,9 +446,9 @@ impl ObjectRegistry {
         Ok(())
     }
 
-    fn add_pin(&mut self, object: ObjectLocator) -> XllResult<PublishedObjectPtr> {
+    fn add_pin(&mut self, object: LiveObjectRef) -> XllResult<PublishedObjectPtr> {
         let entry = self.get_mut(object.key).ok_or(XllError::StaleHandle)?;
-        if entry.object_id != object.id {
+        if entry.object_id != object.id.0 {
             return Err(XllError::StaleHandle);
         }
         entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
@@ -465,8 +478,8 @@ impl ObjectRegistry {
             self.free.push(index);
         }
         Some(DetachedObject {
-            object: ObjectLocator {
-                id: entry.object_id,
+            object: LiveObjectRef {
+                id: ObjectIdentity(entry.object_id),
                 key,
             },
             pins: 0,
@@ -474,7 +487,7 @@ impl ObjectRegistry {
         })
     }
 
-    fn release_pin(&mut self, object: ObjectLocator) -> Option<DetachedObject> {
+    fn release_pin(&mut self, object: LiveObjectRef) -> Option<DetachedObject> {
         let key = object.key;
         let index = key.slot as usize;
         let slot = self.slots.get_mut(index)?;
@@ -483,7 +496,7 @@ impl ObjectRegistry {
             return None;
         }
         let entry = slot.entry.as_mut()?;
-        if entry.object_id != object.id {
+        if entry.object_id != object.id.0 {
             debug_assert!(false, "pin references a different object identity");
             return None;
         }
@@ -503,8 +516,8 @@ impl ObjectRegistry {
             self.free.push(index);
         }
         Some(DetachedObject {
-            object: ObjectLocator {
-                id: entry.object_id,
+            object: LiveObjectRef {
+                id: ObjectIdentity(entry.object_id),
                 key,
             },
             pins: 0,
@@ -519,8 +532,8 @@ impl ObjectRegistry {
         for (index, slot) in self.slots.iter_mut().enumerate() {
             if let Some(entry) = slot.entry.take() {
                 values.push(DetachedObject {
-                    object: ObjectLocator {
-                        id: entry.object_id,
+                    object: LiveObjectRef {
+                        id: ObjectIdentity(entry.object_id),
                         key: ObjectKey {
                             namespace: self.namespace,
                             slot: u32::try_from(index)
@@ -638,8 +651,8 @@ impl ObjectStore {
     where
         T: ExcelHandleObject,
     {
-        let object_id = object.id;
-        let requested_object_key = object.key;
+        let object_id = object.id.0;
+        let requested_object_key = object.key_hint;
         let mut objects = self.live.lock();
         if self.sealed.load(Ordering::Acquire) {
             return Err(XllError::Closing);
@@ -664,8 +677,8 @@ impl ObjectStore {
                 }));
                 return Err(XllError::InvalidHandle);
             }
-            let object_ref = objects.add_pin(ObjectLocator {
-                id: object_id,
+            let object_ref = objects.add_pin(LiveObjectRef {
+                id: ObjectIdentity(object_id),
                 key: live_key,
             })?;
             (live_key, object_ref)
@@ -675,8 +688,8 @@ impl ObjectStore {
             else {
                 return Err(XllError::StaleHandle);
             };
-            let object_ref = objects.add_pin(ObjectLocator {
-                id: object_id,
+            let object_ref = objects.add_pin(LiveObjectRef {
+                id: ObjectIdentity(object_id),
                 key: new_key,
             })?;
             // `resurrect` uses the normal binding insertion path, so remove
@@ -699,8 +712,8 @@ impl ObjectStore {
         Ok((
             ObjectPin::new(
                 Arc::clone(self),
-                ObjectLocator {
-                    id: object_id,
+                LiveObjectRef {
+                    id: ObjectIdentity(object_id),
                     key: object_key,
                 },
             ),
@@ -708,7 +721,7 @@ impl ObjectStore {
         ))
     }
 
-    fn release_pin(&self, object: ObjectLocator) {
+    fn release_pin(&self, object: LiveObjectRef) {
         let (was_live, detached) = {
             let mut objects = self.live.lock();
             if objects.get(object.key).is_some() {
@@ -773,7 +786,7 @@ impl ObjectStore {
         }
 
         let mut value = Some(detached.value);
-        let result = objects.insert(object.id, &mut value);
+        let result = objects.insert(object.id.0, &mut value);
         let new_key = match result {
             Ok(new_key) => new_key,
             Err(error) => {
@@ -811,16 +824,16 @@ impl ObjectStore {
 /// releases them there.
 pub(crate) struct ObjectPin {
     store: Arc<ObjectStore>,
-    object: ObjectLocator,
+    object: LiveObjectRef,
 }
 
 impl ObjectPin {
-    fn new(store: Arc<ObjectStore>, object: ObjectLocator) -> Self {
+    fn new(store: Arc<ObjectStore>, object: LiveObjectRef) -> Self {
         Self { store, object }
     }
 
     pub(crate) fn object_id(&self) -> ObjectId {
-        self.object.id
+        self.object.id.0
     }
 }
 
@@ -841,7 +854,7 @@ pub(crate) struct RegistryState {
 
 /// Canonical binding ownership and its immutable read-side publication.
 /// Object lifetime is deliberately not part of this type; it is owned by
-/// [`ObjectStore`] and referenced through [`ObjectLocator`] in each record.
+/// [`ObjectStore`] and referenced through [`LiveObjectRef`] in each record.
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
@@ -985,7 +998,7 @@ pub(crate) struct BindingReservation<'table> {
 impl BindingReservation<'_> {
     fn publish(
         mut self,
-        object: ObjectLocator,
+        object: LiveObjectRef,
         object_ref: PublishedObjectPtr,
     ) -> (HandleId, bool) {
         let mut state = self
@@ -1030,13 +1043,13 @@ pub(crate) struct BindingRemoval<'table> {
     table: &'table BindingTable,
     state: Option<RwLockWriteGuard<'table, RegistryState>>,
     id: HandleId,
-    object: ObjectLocator,
+    object: LiveObjectRef,
     record: triomphe::Arc<BindingRecord>,
     active: bool,
 }
 
 impl BindingRemoval<'_> {
-    fn object(&self) -> ObjectLocator {
+    fn object(&self) -> LiveObjectRef {
         self.object
     }
 
@@ -1296,8 +1309,8 @@ impl HandleRegistry {
         };
         let (object_key, object_ref) = match existing_key {
             Some(existing_key) => {
-                objects.add_binding(ObjectLocator {
-                    id: object_id,
+                objects.add_binding(LiveObjectRef {
+                    id: ObjectIdentity(object_id),
                     key: existing_key,
                 })?;
                 (
@@ -1317,8 +1330,8 @@ impl HandleRegistry {
 
         drop(objects);
         let (id, reused) = reservation.publish(
-            ObjectLocator {
-                id: object_id,
+            LiveObjectRef {
+                id: ObjectIdentity(object_id),
                 key: object_key,
             },
             object_ref,
@@ -1335,8 +1348,8 @@ impl HandleRegistry {
     where
         T: ExcelHandleObject,
     {
-        let object_id = object.id;
-        let requested_object_key = object.key;
+        let object_id = object.id.0;
+        let requested_object_key = object.key_hint;
         if !self.is_open() {
             return Err(XllError::Closing);
         }
@@ -1368,8 +1381,8 @@ impl HandleRegistry {
                 code: DomainErrorCode::Overflow,
             })?;
             let object_ref = entry.value.published_ptr();
-            objects.add_binding(ObjectLocator {
-                id: object_id,
+            objects.add_binding(LiveObjectRef {
+                id: ObjectIdentity(object_id),
                 key: object_key,
             })?;
             (object_key, object_ref)
@@ -1377,8 +1390,8 @@ impl HandleRegistry {
             let Some((object_key, object_ref)) = self.objects.resurrect(
                 &mut objects,
                 ObjectLocator {
-                    id: object_id,
-                    key: requested_object_key,
+                    id: ObjectIdentity(object_id),
+                    key_hint: requested_object_key,
                 },
                 TypeId::of::<T>(),
                 type_name::<T>(),
@@ -1391,8 +1404,8 @@ impl HandleRegistry {
 
         drop(objects);
         let (id, reused) = reservation.publish(
-            ObjectLocator {
-                id: object_id,
+            LiveObjectRef {
+                id: ObjectIdentity(object_id),
                 key: object_key,
             },
             object_ref,
@@ -1582,7 +1595,7 @@ impl HandleRegistry {
         &self,
         token: &str,
         operation: &'static str,
-        #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
+        on_linearized: impl FnOnce(bool),
     ) -> XllResult<bool> {
         let verified = self
             .codec
@@ -1596,7 +1609,6 @@ impl HandleRegistry {
         let value = objects.release_binding(removal.object().key);
         drop(objects);
         let reusable = removal.commit();
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
         on_linearized(reusable);
         if let Some(value) = value {
             self.objects.retire(value, operation);
@@ -1612,24 +1624,10 @@ impl HandleRegistry {
 
     #[cfg(test)]
     pub(crate) fn remove_and_drop(&self, token: &str, operation: &'static str) {
-        let _ = self.remove_and_drop_with_kind(token, operation);
+        let _ = self.remove_and_drop_with_observer(token, operation, |_| {});
     }
 
-    #[cfg(any(test, not(feature = "handle-refinement-trace")))]
-    pub(crate) fn remove_and_drop_with_kind(
-        &self,
-        token: &str,
-        operation: &'static str,
-    ) -> Option<bool> {
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let result = self.remove_with_kind(token, operation, |_| {});
-        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-        let result = self.remove_with_kind(token, operation);
-        result.ok()
-    }
-
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) fn remove_and_drop_with_trace(
+    pub(crate) fn remove_and_drop_with_observer(
         &self,
         token: &str,
         operation: &'static str,

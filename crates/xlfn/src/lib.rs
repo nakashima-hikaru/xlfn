@@ -99,7 +99,7 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
-pub use addin::{Addin, HandleConfig, OpenContext, Opened, RuntimeConfig};
+pub use addin::{Addin, AsyncWorkerCount, HandleConfig, OpenContext, Opened, RuntimeConfig};
 pub use error::{ExcelError, XllError, XllResult};
 
 // These aliases are crate-internal only. Keeping implementation modules on

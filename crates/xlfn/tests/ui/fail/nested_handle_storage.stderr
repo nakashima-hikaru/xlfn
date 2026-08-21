@@ -5,10 +5,10 @@ error[E0277]: `NonNull<Inner>` cannot be shared between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be shared between threads safely
   |
   = help: within `Nested<'call>`, the trait `Sync` is not implemented for `NonNull<Inner>`
-note: required because it appears within the type `handle::reclamation::TypedObjectRef<'call, Inner>`
- --> src/handle/reclamation.rs
+note: required because it appears within the type `handle::arena::BorrowedObject<'call, Inner>`
+ --> src/handle/arena.rs
   |
-  | pub(crate) struct TypedObjectRef<'call, T> {
+  | pub(crate) struct BorrowedObject<'call, T> {
   |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
@@ -33,10 +33,10 @@ error[E0277]: `NonNull<Inner>` cannot be sent between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be sent between threads safely
   |
   = help: within `Nested<'call>`, the trait `Send` is not implemented for `NonNull<Inner>`
-note: required because it appears within the type `handle::reclamation::TypedObjectRef<'call, Inner>`
- --> src/handle/reclamation.rs
+note: required because it appears within the type `handle::arena::BorrowedObject<'call, Inner>`
+ --> src/handle/arena.rs
   |
-  | pub(crate) struct TypedObjectRef<'call, T> {
+  | pub(crate) struct BorrowedObject<'call, T> {
   |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs

@@ -4,6 +4,7 @@ use crate::{
     FromExcel, IntoXllError, Matrix, XllError, XllResult,
 };
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use xlfn_sys::{XL_COERCE, XL_SHEET_NM};
@@ -224,7 +225,7 @@ impl RuntimeConfig {
     }
 
     #[must_use]
-    pub const fn with_async_worker_count(mut self, worker_count: usize) -> Self {
+    pub const fn with_async_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
         self.async_runtime = self.async_runtime.with_worker_count(worker_count);
         self
     }
@@ -280,33 +281,64 @@ impl Default for RtdConfig {
     }
 }
 
+/// Bounded number of asynchronous executor workers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AsyncWorkerCount(NonZeroUsize);
+
+impl AsyncWorkerCount {
+    pub const MAX: usize = 32;
+    pub const DEFAULT: Self = Self(NonZeroUsize::new(4).expect("default worker count is non-zero"));
+
+    #[must_use]
+    pub const fn new(worker_count: usize) -> Option<Self> {
+        if worker_count == 0 || worker_count > Self::MAX {
+            None
+        } else {
+            Some(Self(
+                NonZeroUsize::new(worker_count).expect("worker count is non-zero"),
+            ))
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl TryFrom<usize> for AsyncWorkerCount {
+    type Error = crate::XllError;
+
+    fn try_from(worker_count: usize) -> Result<Self, Self::Error> {
+        Self::new(worker_count).ok_or(crate::XllError::Domain {
+            code: crate::DomainErrorCode::InvalidInput,
+        })
+    }
+}
+
 /// Async worker portion of [`RuntimeConfig`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AsyncRuntimeConfig {
-    worker_count: usize,
+    worker_count: AsyncWorkerCount,
 }
 
 impl AsyncRuntimeConfig {
     #[must_use]
     pub const fn new() -> Self {
-        Self { worker_count: 4 }
+        Self {
+            worker_count: AsyncWorkerCount::DEFAULT,
+        }
     }
 
     #[must_use]
-    pub const fn with_worker_count(mut self, worker_count: usize) -> Self {
-        self.worker_count = if worker_count < 1 {
-            1
-        } else if worker_count > 32 {
-            32
-        } else {
-            worker_count
-        };
+    pub const fn with_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
+        self.worker_count = worker_count;
         self
     }
 
     #[cfg(feature = "async")]
     pub(crate) const fn worker_count(self) -> usize {
-        self.worker_count
+        self.worker_count.get()
     }
 }
 

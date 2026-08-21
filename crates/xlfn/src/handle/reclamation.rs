@@ -6,7 +6,10 @@
 //! safe to reclaim. Call-scoped pointer witnesses and long-lived pins both
 //! use this boundary.
 
-use super::registry::{DetachedObject, ErasedObject, ObjectLocator, ObjectPin, ObjectStore};
+use super::arena::{BorrowedObject, PinnedObject};
+#[cfg(test)]
+use super::registry::ObjectIdentity;
+use super::registry::{DetachedObject, ErasedObject, LiveObjectRef, ObjectLocator, ObjectStore};
 use super::typed::ExcelHandleObject;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
@@ -22,7 +25,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// and pin obligations to clear.
 pub(super) struct RetiredObject {
     pub(super) epoch: u64,
-    pub(super) object: ObjectLocator,
+    pub(super) object: LiveObjectRef,
     pub(super) pins: usize,
     pub(super) value: ErasedObject,
 }
@@ -75,7 +78,7 @@ impl RetiredStore {
         count
     }
 
-    pub(super) fn release_pin(&mut self, object: ObjectLocator) {
+    pub(super) fn release_pin(&mut self, object: LiveObjectRef) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.object == object) {
             debug_assert!(entry.pins > 0);
             if entry.pins > 0 {
@@ -88,7 +91,11 @@ impl RetiredStore {
         let index = self
             .entries
             .iter()
-            .position(|entry| entry.pins == 0 && entry.object == object)
+            .position(|entry| {
+                entry.pins == 0
+                    && entry.object.id == object.id
+                    && entry.object.key == object.key_hint
+            })
             .or_else(|| {
                 self.entries
                     .iter()
@@ -256,7 +263,7 @@ thread_local! {
 /// thread first joins a domain; warm call entry/exit is TLS plus atomics.
 pub(super) struct EpochDomain {
     current: AtomicU64,
-    participants: Mutex<Vec<Arc<EpochParticipant>>>,
+    participants: Mutex<Vec<Weak<EpochParticipant>>>,
 }
 
 impl EpochDomain {
@@ -281,7 +288,7 @@ impl EpochDomain {
             }
 
             let participant = Arc::new(EpochParticipant::new());
-            self.participants.lock().push(Arc::clone(&participant));
+            self.participants.lock().push(Arc::downgrade(&participant));
             participants.retain(|entry| {
                 entry.domain_address != address || entry.domain.upgrade().is_some()
             });
@@ -315,14 +322,19 @@ impl EpochDomain {
     }
 
     pub(super) fn oldest_active(&self) -> Option<u64> {
-        self.participants
-            .lock()
-            .iter()
-            .filter_map(|participant| {
-                let epoch = participant.announced(Ordering::Acquire);
-                (epoch != EPOCH_INACTIVE).then_some(epoch)
-            })
-            .min()
+        let mut participants = self.participants.lock();
+        let mut oldest: Option<u64> = None;
+        participants.retain(|participant| {
+            let Some(participant) = participant.upgrade() else {
+                return false;
+            };
+            let epoch = participant.announced(Ordering::Acquire);
+            if epoch != EPOCH_INACTIVE {
+                oldest = Some(oldest.map_or(epoch, |current| current.min(epoch)));
+            }
+            true
+        });
+        oldest
     }
 }
 
@@ -367,9 +379,9 @@ impl PublishedObjectPtr {
     pub(crate) fn resolve<'call, T: Send + Sync + 'static>(
         self,
         guard: ObjectReadGuard<'call>,
-    ) -> Option<TypedObjectRef<'call, T>> {
+    ) -> Option<BorrowedObject<'call, T>> {
         self.typed_ptr::<T>()
-            .map(|ptr| TypedObjectRef { ptr, guard })
+            .map(|ptr| BorrowedObject::new(ptr, guard))
     }
 }
 
@@ -381,26 +393,6 @@ impl ErasedObject {
             type_id: self.type_id,
             type_name: self.type_name,
         }
-    }
-}
-
-/// A typed publication pointer whose lifetime is tied to a call's object-read
-/// capability. The guard is retained in the value so the pointer cannot be
-/// constructed without an epoch witness.
-pub(crate) struct TypedObjectRef<'call, T> {
-    ptr: NonNull<T>,
-    guard: ObjectReadGuard<'call>,
-}
-
-impl<T> TypedObjectRef<'_, T> {
-    #[inline]
-    pub(crate) fn as_ptr(&self) -> NonNull<T> {
-        self.ptr
-    }
-
-    #[inline]
-    pub(crate) fn guard(&self) -> ObjectReadGuard<'_> {
-        self.guard
     }
 }
 
@@ -425,9 +417,16 @@ impl<'call> ObjectReadGuard<'call> {
 
     pub(crate) fn pin<T: ExcelHandleObject>(
         self,
-        object: ObjectLocator,
-    ) -> XllResult<(ObjectPin, NonNull<T>)> {
-        self.registration.store.pin_or_resurrect::<T>(object)
+        object: LiveObjectRef,
+    ) -> XllResult<PinnedObject<T>> {
+        let (pin, ptr) = self
+            .registration
+            .store
+            .pin_or_resurrect::<T>(ObjectLocator {
+                id: object.id,
+                key_hint: object.key,
+            })?;
+        Ok(PinnedObject::from_parts(pin, ptr))
     }
 }
 
@@ -599,8 +598,8 @@ mod tests {
         let store = Arc::clone(&registry.objects);
         let reader = store.epoch.enter();
         let object = ErasedObject::new(42_u32, Arc::clone(&registry.cleanup));
-        let locator = ObjectLocator {
-            id: ObjectId(1),
+        let locator = LiveObjectRef {
+            id: ObjectIdentity(ObjectId(1)),
             key: ObjectKey {
                 namespace: 1,
                 slot: 0,
@@ -628,8 +627,8 @@ mod tests {
     fn retired_store_requires_both_epoch_and_pin_quiescence() {
         let registry = HandleRegistry::new(1);
         let object = ErasedObject::new(42_u32, Arc::clone(&registry.cleanup));
-        let locator = ObjectLocator {
-            id: ObjectId(1),
+        let locator = LiveObjectRef {
+            id: ObjectIdentity(ObjectId(1)),
             key: ObjectKey {
                 namespace: 1,
                 slot: 0,
