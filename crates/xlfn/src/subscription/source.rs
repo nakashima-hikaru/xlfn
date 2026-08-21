@@ -2,6 +2,7 @@ use super::*;
 use crate::generation::RuntimeGeneration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(test, feature = "bench-internals"))]
 static NEXT_INTERNAL_SOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// A thread-safe cancellation capability detached from subscription ownership.

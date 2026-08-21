@@ -5,22 +5,23 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use xlfn::prelude::*;
-use xlfn::rtd::RtdSubscription;
+use xlfn::rtd::{RtdCancellation, RtdCancellationHandle, RtdSubscription};
 
 pub(crate) struct MetricSubscription {
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) worker: Option<JoinHandle<()>>,
 }
 
-// SAFETY: request_cancel stops the sole producer, and disconnect_and_wait
-// joins that producer before returning.
-unsafe impl RtdSubscription for MetricSubscription {
-    fn request_cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+impl RtdSubscription for MetricSubscription {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
+        let cancelled = Arc::clone(&self.cancelled);
+        Arc::new(RtdCancellationHandle::new(move || {
+            cancelled.store(true, Ordering::Relaxed);
+        }))
     }
 
     fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
-        self.request_cancel();
+        self.cancelled.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| XllError::Panic)?;
         }

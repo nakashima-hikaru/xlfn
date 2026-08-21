@@ -49,12 +49,12 @@ The source's subscription path must be bounded. It may create a worker or regist
 {{#include ../../examples/rtd-source/src/metric_subscription.rs}}
 ```
 
-`RtdSubscription` is an unsafe trait because this implementation controls
-whether the XLL can be unloaded. The `unsafe impl` is justified only by the
-two-part quiescence guarantee shown above: cancellation stops the sole
-producer, and `disconnect_and_wait` joins it before returning.
+The `RtdSubscription` implementation controls whether the XLL can be safely
+unloaded. The two-part quiescence guarantee shown above ensures that
+`cancellation()` stops the sole producer, and `disconnect_and_wait` joins it
+before returning.
 
-`request_cancel` must be non-blocking, idempotent, panic-free, and must not call Excel or re-enter framework subscription APIs. `disconnect_and_wait` performs the quiescence barrier: when it returns, the source must no longer execute XLL code or publish through the sink.
+Cancellation must be non-blocking, idempotent, panic-free, and must not call Excel or re-enter framework subscription APIs. `disconnect_and_wait` performs the quiescence barrier: when it returns, the source must no longer execute XLL code or publish through the sink.
 
 Do not implement a timeout that abandons an in-process callback and then permits the XLL to unload. Put uninterruptible producers in another process.
 
