@@ -2773,7 +2773,7 @@ fn close_resets_to_closed_for_reopen() {
     let rt1 = slot.get_owned().unwrap();
     assert!(!slot.is_none());
 
-    let _quiescent = slot.seal(Some(generation(1))).map(|_| ()).unwrap();
+    slot.seal(Some(generation(1))).map(|_| ()).unwrap();
     assert!(slot.is_none());
 
     slot.arm(generation(2), crate::HandleConfig::default())

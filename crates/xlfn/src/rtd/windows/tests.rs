@@ -1464,7 +1464,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
                     assert!(!bstr.is_null());
                     let length = SysStringLen(bstr) as usize;
                     let actual = String::from_utf16_lossy(std::slice::from_raw_parts(bstr, length));
-                    assert_eq!(actual, expected.as_str());
+                    assert_eq!(actual, expected.as_ref());
                 }
                 StoredRtdValue::Error(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);

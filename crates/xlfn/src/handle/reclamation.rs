@@ -241,8 +241,14 @@ where
 
 type EpochParticipant = EpochParticipantCore<AtomicU64, AtomicUsize>;
 
+struct EpochParticipantCacheEntry {
+    domain_address: usize,
+    domain: Weak<EpochDomain>,
+    participant: Arc<EpochParticipant>,
+}
+
 thread_local! {
-    static EPOCH_PARTICIPANTS: RefCell<Vec<(usize, Weak<EpochDomain>, Arc<EpochParticipant>)>> =
+    static EPOCH_PARTICIPANTS: RefCell<Vec<EpochParticipantCacheEntry>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -265,21 +271,25 @@ impl EpochDomain {
         let address = Arc::as_ptr(self).addr();
         EPOCH_PARTICIPANTS.with(|participants| {
             let mut participants = participants.borrow_mut();
-            if let Some((_, domain, participant)) = participants
+            if let Some(entry) = participants
                 .iter()
-                .find(|(candidate, _, _)| *candidate == address)
-                && let Some(domain) = domain.upgrade()
+                .find(|entry| entry.domain_address == address)
+                && let Some(domain) = entry.domain.upgrade()
                 && Arc::ptr_eq(&domain, self)
             {
-                return Arc::clone(participant);
+                return Arc::clone(&entry.participant);
             }
 
             let participant = Arc::new(EpochParticipant::new());
             self.participants.lock().push(Arc::clone(&participant));
-            participants.retain(|(candidate, domain, _)| {
-                *candidate != address || domain.upgrade().is_some()
+            participants.retain(|entry| {
+                entry.domain_address != address || entry.domain.upgrade().is_some()
             });
-            participants.push((address, Arc::downgrade(self), Arc::clone(&participant)));
+            participants.push(EpochParticipantCacheEntry {
+                domain_address: address,
+                domain: Arc::downgrade(self),
+                participant: Arc::clone(&participant),
+            });
             participant
         })
     }
