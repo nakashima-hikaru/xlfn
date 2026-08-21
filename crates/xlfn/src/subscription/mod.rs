@@ -29,14 +29,13 @@ pub use value::{IntoRtdValue, RtdValue};
 
 pub(crate) use catalog::*;
 pub(crate) use delivery::*;
-pub(crate) use identity::SourceKey;
 pub(crate) use identity::*;
 pub(crate) use operation_gate::*;
 pub(crate) use quota::*;
 pub(crate) use runtime::*;
 pub(crate) use server::*;
 pub(crate) use slot::*;
-pub(crate) use source::{ErasedRtdSource, RtdSourceRef};
+pub(crate) use source::ErasedRtdSource;
 pub(crate) use topic::{
     ConnectionGeneration, ServerGeneration, SourceId, SubscriptionIdentity, SubscriptionKey,
     TopicId,

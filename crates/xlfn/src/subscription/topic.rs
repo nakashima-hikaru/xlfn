@@ -134,12 +134,25 @@ pub(crate) struct SubscriptionIdentity {
     pub(crate) topic: RtdTopic,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct SubscriptionKey(pub(crate) Arc<str>);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SubscriptionKey {
+    runtime_id: u64,
+    subscription_id: u64,
+}
 
 impl SubscriptionKey {
-    pub(crate) fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
-        Self(format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}").into())
+    pub(crate) const fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
+        Self {
+            runtime_id,
+            subscription_id,
+        }
+    }
+
+    pub(crate) fn to_transport(self) -> String {
+        format!(
+            "stream:v1:{:016x}:{:016x}",
+            self.runtime_id, self.subscription_id
+        )
     }
 
     pub(crate) fn parse_transport(value: &str) -> XllResult<Self> {
@@ -153,48 +166,24 @@ impl SubscriptionKey {
             return Err(XllError::InvalidHandle);
         };
 
-        if runtime.len() != 16
-            || subscription.len() != 16
-            || !runtime.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
-            || !subscription
-                .as_bytes()
-                .iter()
-                .all(|b| b.is_ascii_hexdigit())
-        {
+        let Some(runtime_id) = parse_fixed_hex(runtime) else {
             return Err(XllError::InvalidHandle);
-        }
+        };
+        let Some(subscription_id) = parse_fixed_hex(subscription) else {
+            return Err(XllError::InvalidHandle);
+        };
 
-        Ok(Self(value.into()))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::ops::Deref for SubscriptionKey {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        Ok(Self {
+            runtime_id,
+            subscription_id,
+        })
     }
 }
 
-impl PartialEq<str> for SubscriptionKey {
-    fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
-    }
-}
-
-impl PartialEq<&str> for SubscriptionKey {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<SubscriptionKey> for str {
-    fn eq(&self, other: &SubscriptionKey) -> bool {
-        self == other.as_str()
-    }
+fn parse_fixed_hex(value: &str) -> Option<u64> {
+    (value.len() == 16 && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| u64::from_str_radix(value, 16).ok())
+        .flatten()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

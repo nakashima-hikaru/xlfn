@@ -5,7 +5,7 @@ error[E0277]: `NonNull<Inner>` cannot be shared between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be shared between threads safely
   |
   = help: within `Nested<'call>`, the trait `Sync` is not implemented for `NonNull<Inner>`
-note: required because it appears within the type `xlfn::Handle<'call, Inner>`
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
   | pub struct Handle<'call, T: ExcelHandleObject> {
@@ -15,7 +15,7 @@ note: required because it appears within the type `Nested<'call>`
   |
 7 | struct Nested<'call> {
   |        ^^^^^^
-note: required by a bound in `xlfn::ExcelHandleObject`
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
  --> src/handle/typed.rs
   |
   | pub trait ExcelHandleObject: Send + Sync + 'static {}
@@ -28,7 +28,7 @@ error[E0277]: `NonNull<Inner>` cannot be sent between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be sent between threads safely
   |
   = help: within `Nested<'call>`, the trait `Send` is not implemented for `NonNull<Inner>`
-note: required because it appears within the type `xlfn::Handle<'call, Inner>`
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
   | pub struct Handle<'call, T: ExcelHandleObject> {
@@ -38,7 +38,7 @@ note: required because it appears within the type `Nested<'call>`
   |
 7 | struct Nested<'call> {
   |        ^^^^^^
-note: required by a bound in `xlfn::ExcelHandleObject`
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
  --> src/handle/typed.rs
   |
   | pub trait ExcelHandleObject: Send + Sync + 'static {}
@@ -56,18 +56,18 @@ note: required because it appears within the type `xlfn::host_callback::HostCall
   |
   | pub(crate) struct HostCallbackSession {
   |                   ^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn::CallScope<'call>`
+note: required because it appears within the type `xlfn::value::CallScope<'call>`
  --> src/value.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^
-  = note: required because it appears within the type `&'call xlfn::CallScope<'call>`
-note: required because it appears within the type `PhantomData<&'call xlfn::CallScope<'call>>`
+  = note: required because it appears within the type `&'call xlfn::value::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn::value::CallScope<'call>>`
  --> $RUST/core/src/marker.rs
   |
   | pub struct PhantomData<T: PointeeSized>;
   |            ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::Handle<'call, Inner>`
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
   | pub struct Handle<'call, T: ExcelHandleObject> {
@@ -77,7 +77,47 @@ note: required because it appears within the type `Nested<'call>`
   |
 7 | struct Nested<'call> {
   |        ^^^^^^
-note: required by a bound in `xlfn::ExcelHandleObject`
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
+ --> src/handle/typed.rs
+  |
+  | pub trait ExcelHandleObject: Send + Sync + 'static {}
+  |                                     ^^^^ required by this bound in `ExcelHandleObject`
+
+error[E0277]: `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^^^^^^^^ `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+  |
+  = help: within `Nested<'call>`, the trait `Sync` is not implemented for `RefCell<Vec<handle::registry::CallRegistration>>`
+  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
+note: required because it appears within the type `handle::registry::HandleCallGuard`
+ --> src/handle/registry.rs
+  |
+  | pub(crate) struct HandleCallGuard {
+  |                   ^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::value::CallScope<'call>`
+ --> src/value.rs
+  |
+  | pub struct CallScope<'call> {
+  |            ^^^^^^^^^
+  = note: required because it appears within the type `&'call xlfn::value::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn::value::CallScope<'call>>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
+ --> src/handle/typed.rs
+  |
+  | pub struct Handle<'call, T: ExcelHandleObject> {
+  |            ^^^^^^
+note: required because it appears within the type `Nested<'call>`
+ --> tests/ui/fail/nested_handle_storage.rs:7:8
+  |
+7 | struct Nested<'call> {
+  |        ^^^^^^
+note: required by a bound in `xlfn::handle::ExcelHandleObject`
  --> src/handle/typed.rs
   |
   | pub trait ExcelHandleObject: Send + Sync + 'static {}

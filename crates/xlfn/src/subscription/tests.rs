@@ -57,7 +57,7 @@ where
 }
 
 pub(crate) type PublishingSourceResult<T> = (
-    Arc<PublishingSource<T, fn() -> XllResult<()>>>,
+    RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
     Arc<Mutex<Option<RtdSink<T>>>>,
     Arc<AtomicBool>,
 );
@@ -67,13 +67,14 @@ pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>
 ) -> PublishingSourceResult<T> {
     let slot = Arc::new(Mutex::new(None));
     let disconnected = Arc::new(AtomicBool::new(false));
-    let source = Arc::new(PublishingSource {
+    let source = RtdSourceHandle::from_arc(Arc::new(PublishingSource {
         initial,
         sink_slot: Arc::clone(&slot),
         canceled: Arc::new(AtomicBool::new(false)),
         disconnected: Arc::clone(&disconnected),
         on_subscribe: None,
-    });
+    }))
+    .expect("test source handle allocation must succeed");
     (source, slot, disconnected)
 }
 
@@ -93,8 +94,8 @@ fn server_publish_isolation() {
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
 
-    let key_a = prep_a.key().clone();
-    let key_b = prep_b.key().clone();
+    let key_a = *prep_a.key();
+    let key_b = *prep_b.key();
     prep_a.commit();
     prep_b.commit();
 
@@ -155,8 +156,8 @@ fn notification_callback_isolation() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_a = prep_a.key().clone();
-    let key_b = prep_b.key().clone();
+    let key_a = *prep_a.key();
+    let key_b = *prep_b.key();
     prep_a.commit();
     prep_b.commit();
 
@@ -198,7 +199,7 @@ fn server_locality_refresh_lock_independence() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
     let conn_b = runtime
         .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -213,18 +214,38 @@ fn server_locality_refresh_lock_independence() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let server_b_clone = server_b.clone();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let batch = server_b_clone.begin_refresh().unwrap();
-        tx.send(batch).unwrap();
+        let observed = (batch.updates.len(), batch.updates[0].value.clone());
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        tx.send(observed).unwrap();
     });
 
-    let batch = rx
+    let (update_count, value) = rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("server_b.begin_refresh should not block on server_a state lock");
 
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(42.0));
+    assert_eq!(update_count, 1);
+    assert_eq!(value, StoredRtdValue::Number(42.0));
+    handle.join().unwrap();
+}
+
+#[test]
+fn refresh_batch_does_not_retain_server_arc() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime.register_server(ServerGeneration(1)).unwrap();
+    let before = Arc::strong_count(&server.inner);
+
+    let batch = server.begin_refresh().unwrap();
+
+    assert_eq!(
+        Arc::strong_count(&server.inner),
+        before,
+        "refresh batch must borrow ServerRuntime rather than retain an Arc",
+    );
+
     batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(Arc::strong_count(&server.inner), before);
 }
 
 #[test]
@@ -237,7 +258,7 @@ fn runtime_close_blocks_all_servers_immediately() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
     let conn_b = runtime
         .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -259,7 +280,7 @@ fn runtime_close_blocks_all_servers_immediately() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
-    let key_a = prep_a.key().clone();
+    let key_a = *prep_a.key();
     prep_a.commit();
     let conn_a = runtime
         .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -302,7 +323,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared-topic").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn_a = runtime
@@ -319,7 +340,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let prep_b = runtime
         .prepare(&source, RtdTopic::single("shared-topic").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
 
     runtime
@@ -354,7 +375,7 @@ fn uncommitted_update_does_not_trigger_notification() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
-    let key_a = prep_a.key().clone();
+    let key_a = *prep_a.key();
     prep_a.commit();
     let conn_a = runtime
         .connect_transaction(&server, TopicId(1), &key_a)
@@ -365,7 +386,7 @@ fn uncommitted_update_does_not_trigger_notification() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
     let _conn_b = runtime
         .connect_transaction(&server, TopicId(2), &key_b)
@@ -391,7 +412,7 @@ fn server_standalone_termination() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
     let conn_b = runtime
         .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -422,7 +443,7 @@ fn stale_sink_returns_closing() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
-    let key_a = prep_a.key().clone();
+    let key_a = *prep_a.key();
     prep_a.commit();
     let conn_a = runtime
         .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -439,7 +460,7 @@ fn stale_sink_returns_closing() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_b = prep_b.key().clone();
+    let key_b = *prep_b.key();
     prep_b.commit();
     let conn_b = runtime
         .connect_transaction(&server_b, TopicId(1), &key_b)
@@ -466,7 +487,7 @@ fn global_quota_enforcement() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("a-{}", i)).unwrap())
             .unwrap();
-        let key = prep.key().clone();
+        let key = *prep.key();
         prep.commit();
         let conn = runtime
             .connect_transaction(&server_a, TopicId(i), &key)
@@ -481,7 +502,7 @@ fn global_quota_enforcement() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("b-{}", i)).unwrap())
             .unwrap();
-        let key = prep.key().clone();
+        let key = *prep.key();
         prep.commit();
         let conn = runtime
             .connect_transaction(&server_b, TopicId(i), &key)
@@ -515,7 +536,7 @@ fn key_binding_concurrency_rejection() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn_a = runtime
@@ -554,7 +575,7 @@ fn runtime_close_waits_for_inflight() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
-    let key_a = prep_a.key().clone();
+    let key_a = *prep_a.key();
     prep_a.commit();
     let conn_a = runtime
         .connect_transaction(&server_a, TopicId(1), &key_a)
@@ -663,7 +684,7 @@ fn inflight_prepare_waits_for_close() {
         }
     }
 
-    let source = Arc::new(DroppingSource(Arc::clone(&source_dropped)));
+    let source = RtdSourceHandle::new(DroppingSource(Arc::clone(&source_dropped))).unwrap();
     let runtime_clone = Arc::clone(&runtime);
     let handle_prep = std::thread::spawn(move || {
         runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap())
@@ -730,13 +751,14 @@ fn reentrant_drop_safety() {
         }
     }
 
-    let source = Arc::new(ReentrantSource {
+    let source = RtdSourceHandle::new(ReentrantSource {
         runtime: Arc::clone(&runtime),
-    });
+    })
+    .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("reentrant").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -756,7 +778,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
 
     server
         .inner
@@ -800,7 +822,7 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("test_err").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -895,7 +917,7 @@ fn disconnect_propagates_subscription_cleanup_error() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("disc_err").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -929,7 +951,7 @@ fn rollback_records_subscription_cleanup_error() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("roll_err").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let mut conn = runtime
@@ -974,7 +996,7 @@ fn request_cancel_panic_propagates_to_termination() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("cancel_panic").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1022,19 +1044,20 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     let (tx_close, rx_close) = std::sync::mpsc::channel();
     let (tx_enter, rx_enter) = std::sync::mpsc::channel();
 
-    let source = Arc::new(DelayedSubscribeFailingSource {
+    let source = RtdSourceHandle::new(DelayedSubscribeFailingSource {
         tx_entered: std::sync::Mutex::new(Some(tx_enter)),
         rx_close: Mutex::new(rx_close),
-    });
+    })
+    .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("delayed_fail").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let runtime_clone = Arc::clone(&runtime);
     let server_clone = server.clone();
-    let key_clone = key.clone();
+    let key_clone = key;
 
     let handle = std::thread::spawn(move || {
         runtime_clone.connect_transaction(&server_clone, TopicId(1), &key_clone)
@@ -1067,7 +1090,7 @@ fn install_failure_during_closing_propagates_cleanup_error() {
 }
 
 #[test]
-fn cloned_arc_and_same_topic_reuse_pending_identity() {
+fn same_handle_and_same_topic_reuse_pending_identity() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let (source, _, _) = publishing_source::<f64>(None);
     let topic = RtdTopic::single("shared").unwrap();
@@ -1086,7 +1109,7 @@ fn cloned_arc_and_same_topic_reuse_pending_identity() {
 }
 
 #[test]
-fn distinct_arc_allocations_do_not_share_source_identity() {
+fn distinct_handles_do_not_share_source_identity() {
     let runtime = Arc::new(SubscriptionRuntime::new());
 
     let (source_a, _, _) = publishing_source::<f64>(None);
@@ -1103,7 +1126,7 @@ fn distinct_arc_allocations_do_not_share_source_identity() {
 }
 
 #[test]
-fn cloned_arc_reuses_active_subscription_identity() {
+fn same_handle_reuses_active_subscription_identity() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
 
@@ -1111,7 +1134,7 @@ fn cloned_arc_reuses_active_subscription_identity() {
     let topic = RtdTopic::single("shared-active").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
-    let key = first.key().clone();
+    let key = *first.key();
     first.commit();
 
     let connection = runtime
@@ -1131,25 +1154,7 @@ fn cloned_arc_reuses_active_subscription_identity() {
 }
 
 #[test]
-fn dead_source_identities_do_not_exhaust_quota() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: 1,
-        ..RtdLimits::standard()
-    }));
-
-    for index in 0..100 {
-        let (source, _, _) = publishing_source::<f64>(None);
-        let topic = RtdTopic::single(format!("topic-{index}")).unwrap();
-
-        let prepared = runtime.prepare(&source, topic).unwrap();
-
-        prepared.rollback();
-        drop(source);
-    }
-}
-
-#[test]
-fn live_source_identity_retains_its_quota_slot() {
+fn registered_source_identity_retains_its_quota_after_handle_drop() {
     let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
         max_source_ids: 1,
         ..RtdLimits::standard()
@@ -1161,6 +1166,7 @@ fn live_source_identity_retains_its_quota_slot() {
         .prepare(&first_source, RtdTopic::single("first").unwrap())
         .unwrap()
         .rollback();
+    drop(first_source);
 
     let (second_source, _, _) = publishing_source::<f64>(None);
 
@@ -1179,37 +1185,10 @@ fn live_source_reuses_identity_after_pending_subscription_is_removed() {
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
 
-    let first_key = first.key().to_owned();
+    let first_key = *first.key();
     first.rollback();
 
     let second = runtime.prepare(&source, topic).unwrap();
-
-    assert_ne!(second.key(), &first_key);
-}
-
-#[test]
-fn source_ids_are_monotonic_and_never_reused() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: 1,
-        ..RtdLimits::standard()
-    }));
-
-    let first_key = {
-        let (source, _, _) = publishing_source::<f64>(None);
-        let prepared = runtime
-            .prepare(&source, RtdTopic::single("same-topic").unwrap())
-            .unwrap();
-
-        let key = prepared.key().to_owned();
-        prepared.rollback();
-        drop(source);
-        key
-    };
-
-    let (second_source, _, _) = publishing_source::<f64>(None);
-    let second = runtime
-        .prepare(&second_source, RtdTopic::single("same-topic").unwrap())
-        .unwrap();
 
     assert_ne!(second.key(), &first_key);
 }
@@ -1229,48 +1208,18 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
         Err(XllError::Overloaded)
     ));
 
-    assert!(runtime.catalog.lock().sources.by_key.is_empty());
+    assert!(runtime.catalog.lock().sources.ids.is_empty());
 }
 
 #[test]
 fn resolve_live_source_reuses_identity() {
     let mut registry = SourceIdentityRegistry::new();
     let (source, _, _) = publishing_source::<f64>(None);
-    let first = registry.resolve(&source, 16).unwrap();
-    let second = registry.resolve(&source, 16).unwrap();
-    assert_eq!(first.id, second.id);
+    let first = registry.resolve(source.id, 16).unwrap();
+    let second = registry.resolve(source.id, 16).unwrap();
+    assert_eq!(first.source_id, second.source_id);
     assert!(first.newly_registered);
     assert!(!second.newly_registered);
-}
-
-#[test]
-fn dead_source_is_reclaimed_at_limit() {
-    let mut registry = SourceIdentityRegistry::new();
-    let (source, _, _) = publishing_source::<f64>(None);
-    let identity = registry.resolve(&source, 1).unwrap();
-    drop(source);
-    assert_eq!(registry.by_key.len(), 1);
-
-    let (other, _, _) = publishing_source::<f64>(None);
-    let other_identity = registry.resolve(&other, 1).unwrap();
-    assert_ne!(identity.id, other_identity.id);
-    assert!(other_identity.newly_registered);
-}
-
-#[test]
-fn weak_anchor_lifecycle_and_strong_count() {
-    let mut registry = SourceIdentityRegistry::new();
-    let (source, _, _) = publishing_source::<f64>(None);
-    let key = SourceKey::Arc(Arc::as_ptr(&source).cast::<()>() as usize);
-    let _ = registry.resolve(&source, 10).unwrap();
-
-    let weak = registry.by_key.get(&key).unwrap().anchor.clone();
-    assert_eq!(weak.strong_count(), 1);
-    drop(source);
-    assert_eq!(weak.strong_count(), 0);
-
-    registry.reclaim_dead();
-    assert!(registry.by_key.is_empty());
 }
 
 #[test]
@@ -1322,8 +1271,9 @@ fn large_logical_topic_uses_bounded_transport_key() {
     let topic = RtdTopic::single("x".repeat(16 * 1024)).unwrap();
     let prepared = runtime.prepare(&source, topic).unwrap();
 
-    assert_eq!(prepared.key().encode_utf16().count(), 43);
-    assert!(prepared.key().starts_with("stream:v1:"));
+    let transport = prepared.key().to_transport();
+    assert_eq!(transport.encode_utf16().count(), 43);
+    assert!(transport.starts_with("stream:v1:"));
     runtime.catalog.lock().assert_identity_invariants();
 }
 
@@ -1352,7 +1302,7 @@ fn identity_index_is_removed_after_final_unbind() {
     let prepared = runtime
         .prepare(&source, RtdTopic::single("unbind_test").unwrap())
         .unwrap();
-    let key = prepared.key().clone();
+    let key = *prepared.key();
     prepared.commit();
 
     let conn = runtime
@@ -1381,6 +1331,15 @@ fn transport_key_parser_rejects_noncanonical_keys() {
     ] {
         assert!(SubscriptionKey::parse_transport(invalid).is_err());
     }
+}
+
+#[test]
+fn subscription_key_round_trips_through_transport() {
+    let key = SubscriptionKey::from_allocated_id(1, 42);
+    let transport = key.to_transport();
+
+    assert_eq!(transport, "stream:v1:0000000000000001:000000000000002a");
+    assert_eq!(SubscriptionKey::parse_transport(&transport).unwrap(), key);
 }
 
 #[test]
@@ -1431,7 +1390,7 @@ fn server_notification_retry_sequence_eventually_succeeds() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("retry_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1478,7 +1437,7 @@ fn server_notification_retry_suppressed_after_max_attempts() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("suppress_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1509,7 +1468,7 @@ fn server_notification_panic_records_cleanup_failure() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("panic_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1557,7 +1516,7 @@ fn runtime_close_and_publish_race() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("race_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1613,7 +1572,7 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("quota_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1666,11 +1625,11 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
     assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
 
-    let source = Arc::new(SinkCapturingSource);
+    let source = RtdSourceHandle::new(SinkCapturingSource).unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("cycle_test").unwrap())
         .unwrap();
-    let key = prep.key().clone();
+    let key = *prep.key();
     prep.commit();
 
     let conn = runtime
@@ -1690,44 +1649,40 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
 }
 
 #[test]
-fn prepare_warm_path_does_not_increment_source_strong_count() {
+fn prepare_warm_path_reuses_registered_source_identity() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime.register_server(ServerGeneration(1)).unwrap();
 
     let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("warm-path-strong-count").unwrap();
 
-    assert_eq!(Arc::strong_count(&source), 1);
+    assert!(runtime.catalog.lock().sources.ids.is_empty());
 
-    // 1. Initial prepare: creates PendingSubscription -> strong count becomes 2 (local + PendingSubscription)
+    // 1. Initial prepare registers the handle identity and creates the pending subscription.
     let first = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(first.has_reservation());
-    assert_eq!(Arc::strong_count(&source), 2);
+    assert_eq!(runtime.catalog.lock().sources.ids.len(), 1);
 
-    // 2. ExistingPending prepare: reuses existing pending -> strong count remains 2 (0 clones)
+    // 2. ExistingPending prepare reuses the same handle identity and pending entry.
     let second_pending = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(second_pending.has_reservation());
-    assert_eq!(Arc::strong_count(&source), 2);
+    assert_eq!(runtime.catalog.lock().sources.ids.len(), 1);
     second_pending.rollback();
 
     // Commit and connect transaction to activate subscription.
     // The PendingSubscription is consumed/removed, so the runtime no longer retains Arc<Source>.
-    let key = first.key().clone();
+    let key = *first.key();
     first.commit();
     let conn = runtime
         .connect_transaction(&server, TopicId(1), &key)
         .unwrap();
     conn.commit().unwrap();
 
-    // While active, only the local variable holds a strong reference (SourceIdentityRegistry holds Weak)
-    assert_eq!(Arc::strong_count(&source), 1);
-
-    // 3. ExistingActive prepare: warm path lookup -> strong count remains 1 (0 clones)
+    // 3. ExistingActive prepare is a warm lookup without a new source identity.
     let warm_prepared = runtime.prepare(&source, topic).unwrap();
     assert!(!warm_prepared.has_reservation());
-    assert_eq!(Arc::strong_count(&source), 1);
+    assert_eq!(runtime.catalog.lock().sources.ids.len(), 1);
     warm_prepared.rollback();
-    assert_eq!(Arc::strong_count(&source), 1);
 }
 
 #[test]
@@ -1739,7 +1694,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     let topic = RtdTopic::single("existing-active-noop").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
-    let key = first.key().clone();
+    let key = *first.key();
     first.commit();
 
     let conn = runtime

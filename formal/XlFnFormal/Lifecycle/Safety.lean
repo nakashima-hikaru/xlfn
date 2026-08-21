@@ -72,7 +72,7 @@ theorem cleanup_owner_excludes_open_attempt
     s.openAttempt.isSome → s.cleanupOwner.isNone :=
   hWF.1
 
-theorem finish_close_publishes_closed_but_owner_remains
+theorem finish_removal_publishes_closed_but_owner_remains
     {s t : State}
     (hStep : Step s .finishFinalClose t) :
     t.phase = .closed ∧

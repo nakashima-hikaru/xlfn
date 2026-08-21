@@ -30,7 +30,7 @@ pub(crate) struct SubscriptionCatalog {
 }
 
 impl SubscriptionCatalog {
-    pub(crate) fn allocate_transport_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
+    pub(crate) fn allocate_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
         let id = self.next_subscription_id;
         self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,

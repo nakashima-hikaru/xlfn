@@ -1,9 +1,6 @@
 #[cfg(any(target_os = "windows", test))]
 use super::*;
 use super::{HandleId, ObjectId, PublishedTopic};
-use std::sync::Arc;
-#[cfg(any(target_os = "windows", test))]
-use std::sync::Weak;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FormulaBinding {
@@ -12,10 +9,7 @@ pub(crate) struct FormulaBinding {
 }
 
 pub(crate) struct Topic {
-    /// The object identity and token identity owned by this formula binding.
-    pub(crate) binding: FormulaBinding,
-    pub(crate) token: String,
-    pub(crate) rtd_key: Arc<str>,
+    /// The immutable publication owns the formula binding and wire identities.
     pub(crate) publication: triomphe::Arc<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) server_generation: Option<u64>,
@@ -31,8 +25,11 @@ pub(crate) struct HandleTopicOwner {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub(crate) struct HandleConnection {
-    pub(crate) runtime: Weak<HandleRuntime>,
+/// Provisional Excel topic assignment borrowing the handle runtime that
+/// created it. The borrow keeps commit and rollback on the same live runtime
+/// without a temporary `Weak` upgrade.
+pub(crate) struct HandleConnection<'runtime> {
+    pub(crate) runtime: &'runtime HandleRuntime,
     pub(crate) owner: HandleTopicOwner,
     pub(crate) key: HandleTopicKey,
     pub(crate) token: String,
@@ -41,7 +38,7 @@ pub(crate) struct HandleConnection {
 }
 
 #[cfg(any(target_os = "windows", test))]
-impl HandleConnection {
+impl HandleConnection<'_> {
     pub(crate) fn token(&self) -> &str {
         &self.token
     }
@@ -51,8 +48,7 @@ impl HandleConnection {
             return Ok(());
         }
         if self.created {
-            let runtime = self.runtime.upgrade().ok_or(XllError::Closing)?;
-            runtime.commit_connection(self.owner, self.key)?;
+            self.runtime.commit_connection(self.owner, self.key)?;
         }
         self.finished = true;
         Ok(())
@@ -63,16 +59,14 @@ impl HandleConnection {
             return;
         }
         self.finished = true;
-        if self.created
-            && let Some(runtime) = self.runtime.upgrade()
-        {
-            runtime.rollback_connection(self.owner, self.key);
+        if self.created {
+            self.runtime.rollback_connection(self.owner, self.key);
         }
     }
 }
 
 #[cfg(any(target_os = "windows", test))]
-impl Drop for HandleConnection {
+impl Drop for HandleConnection<'_> {
     fn drop(&mut self) {
         self.finish();
     }

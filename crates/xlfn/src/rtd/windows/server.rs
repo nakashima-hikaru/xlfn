@@ -904,12 +904,12 @@ pub(super) unsafe extern "system" fn connect_data(
     })
 }
 
-enum ConnectDataTransaction {
-    Handle(crate::handle::HandleConnection),
+enum ConnectDataTransaction<'runtime> {
+    Handle(crate::handle::HandleConnection<'runtime>),
     Subscription(crate::subscription::SubscriptionConnection),
 }
 
-impl ConnectDataTransaction {
+impl ConnectDataTransaction<'_> {
     unsafe fn write_value(&self, result: *mut VARIANT) -> i32 {
         match self {
             // SAFETY: caller validated result as non-null and writable; token remains readable.

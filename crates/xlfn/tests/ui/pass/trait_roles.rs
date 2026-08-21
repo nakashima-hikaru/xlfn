@@ -24,7 +24,7 @@ type FunctionResult<T> = XllResult<T>;
 type MainContext<'call> = MainThreadContext<'call, TestAddin>;
 
 mod reexported {
-    pub use xlfn::context::ThreadSafeContext as WorkerContext;
+    pub use xlfn::addin::ThreadSafeContext as WorkerContext;
     pub use xlfn::handle::{Handle, HandleAlias};
 }
 

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn::Matrix;
 use xlfn::benchmark_support::SemanticIdentityBenchmark;
+use xlfn::value::Matrix;
 
 fn input_identity_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("input_identity");

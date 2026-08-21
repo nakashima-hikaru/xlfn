@@ -11,12 +11,12 @@ namespace XlFnFormal.Composition
     the corresponding Lifecycle certificate predicate, so the checker and the
     relational model share the same proof obligation. -/
 
-private instance committedClosePrerequisitesDecidable
+private instance committedRemovalQuiescencePrerequisitesDecidable
     (lifecycle : Lifecycle.State) (generation : Lifecycle.AttemptId)
     (shutdown : Shutdown.State) :
     Decidable
-      (Lifecycle.CommittedClosePrerequisites lifecycle generation shutdown) := by
-  unfold Lifecycle.CommittedClosePrerequisites Lifecycle.CleanupReady
+      (Lifecycle.CommittedRemovalQuiescencePrerequisites lifecycle generation shutdown) := by
+  unfold Lifecycle.CommittedRemovalQuiescencePrerequisites Lifecycle.CleanupReady
     Shutdown.Resources.Quiescent Shutdown.Resources.HostDetached
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
@@ -24,11 +24,11 @@ private instance committedClosePrerequisitesDecidable
     Shutdown.Resources.GenerationReclaimed Shutdown.Resources.DiagnosticsDrained
   infer_instance
 
-private instance uncommittedClosePrerequisitesDecidable
+private instance uncommittedRemovalQuiescencePrerequisitesDecidable
     (lifecycle : Lifecycle.State) (resources : Shutdown.Resources) :
     Decidable
-      (Lifecycle.UncommittedClosePrerequisites lifecycle resources) := by
-  unfold Lifecycle.UncommittedClosePrerequisites Lifecycle.CleanupReady
+      (Lifecycle.UncommittedRemovalQuiescencePrerequisites lifecycle resources) := by
+  unfold Lifecycle.UncommittedRemovalQuiescencePrerequisites Lifecycle.CleanupReady
     Shutdown.Resources.Quiescent Shutdown.Resources.HostDetached
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
@@ -36,11 +36,11 @@ private instance uncommittedClosePrerequisitesDecidable
     Shutdown.Resources.GenerationReclaimed Shutdown.Resources.DiagnosticsDrained
   infer_instance
 
-private instance openRollbackPrerequisitesDecidable
+private instance openRollbackQuiescencePrerequisitesDecidable
     (lifecycle : Lifecycle.State) (resources : Shutdown.Resources) :
     Decidable
-      (Lifecycle.OpenRollbackPrerequisites lifecycle resources) := by
-  unfold Lifecycle.OpenRollbackPrerequisites Lifecycle.CleanupReady
+      (Lifecycle.OpenRollbackQuiescencePrerequisites lifecycle resources) := by
+  unfold Lifecycle.OpenRollbackQuiescencePrerequisites Lifecycle.CleanupReady
     Shutdown.Resources.Quiescent Shutdown.Resources.HostDetached
     Shutdown.Resources.CallsDrained Shutdown.Resources.ReturnsDrained
     Shutdown.Resources.AsyncDrained Shutdown.Resources.SubscriptionsDrained
@@ -127,7 +127,7 @@ def apply? (s : State) (event : Event) : Option State :=
       match s.currentShutdown with
       | none => none
       | some session =>
-          if Lifecycle.CommittedClosePrerequisites
+          if Lifecycle.CommittedRemovalQuiescencePrerequisites
               s.lifecycle session.generation session.state then
             some { s with currentShutdown := some (ShutdownSession.closed session) }
           else none
@@ -155,7 +155,7 @@ def apply? (s : State) (event : Event) : Option State :=
           else none
   | .finishUncommittedFinalClose resources =>
       if s.currentShutdown = none ∧
-          Lifecycle.UncommittedClosePrerequisites s.lifecycle resources then
+          Lifecycle.UncommittedRemovalQuiescencePrerequisites s.lifecycle resources then
         some { s with
           lifecycle := { s.lifecycle with phase := .closed }
           currentShutdown := none
@@ -163,7 +163,7 @@ def apply? (s : State) (event : Event) : Option State :=
       else none
   | .finishOpenRollback resources =>
       if s.currentShutdown = none ∧
-          Lifecycle.OpenRollbackPrerequisites s.lifecycle resources then
+          Lifecycle.OpenRollbackQuiescencePrerequisites s.lifecycle resources then
         some { s with
           lifecycle := { s.lifecycle with phase := .closed }
           currentShutdown := none
@@ -309,7 +309,7 @@ theorem apply?_sound
           simp [apply?, hSession] at h
       | some session =>
           by_cases hCertificate :
-              Lifecycle.CommittedClosePrerequisites
+              Lifecycle.CommittedRemovalQuiescencePrerequisites
                 s.lifecycle session.generation session.state
           · simp only [apply?, hSession] at h
             rw [if_pos hCertificate] at h
@@ -355,7 +355,7 @@ theorem apply?_sound
             cases h
   | finishUncommittedFinalClose resources =>
       by_cases hPre : s.currentShutdown = none ∧
-          Lifecycle.UncommittedClosePrerequisites s.lifecycle resources
+          Lifecycle.UncommittedRemovalQuiescencePrerequisites s.lifecycle resources
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h
@@ -365,7 +365,7 @@ theorem apply?_sound
         cases h
   | finishOpenRollback resources =>
       by_cases hPre : s.currentShutdown = none ∧
-          Lifecycle.OpenRollbackPrerequisites s.lifecycle resources
+          Lifecycle.OpenRollbackQuiescencePrerequisites s.lifecycle resources
       · simp only [apply?] at h
         rw [if_pos hPre] at h
         cases h

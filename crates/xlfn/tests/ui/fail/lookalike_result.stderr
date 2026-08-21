@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Result: xlfn::ExcelReturn` is not satisfied
+error[E0277]: the trait bound `Result: xlfn::value::ExcelReturn` is not satisfied
  --> tests/ui/fail/lookalike_result.rs:8:13
   |
 8 | fn bad() -> Result {
@@ -19,14 +19,14 @@ help: the trait `IntoExcel` is not implemented for `Result`
             i32
             i64
             std::string::String
-  = note: required for `Result` to implement `xlfn::ExcelReturn`
+  = note: required for `Result` to implement `xlfn::value::ExcelReturn`
 note: required by a bound in `xlfn::macro_support::sync_udf`
  --> src/macro_support.rs
   |
   | pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
   |                              ^^^^^^^^^^^ required by this bound in `sync_udf`
 
-error[E0277]: the trait bound `Result: xlfn::ExcelReturn` is not satisfied
+error[E0277]: the trait bound `Result: xlfn::value::ExcelReturn` is not satisfied
  --> tests/ui/fail/lookalike_result.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.LOOKALIKE")]
@@ -47,5 +47,5 @@ help: the trait `IntoExcel` is not implemented for `Result`
             i32
             i64
             std::string::String
-  = note: required for `Result` to implement `xlfn::ExcelReturn`
+  = note: required for `Result` to implement `xlfn::value::ExcelReturn`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

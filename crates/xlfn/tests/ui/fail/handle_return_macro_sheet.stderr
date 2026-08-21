@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Dataset: xlfn::MacroSheetReturn` is not satisfied
+error[E0277]: the trait bound `Dataset: xlfn::value::MacroSheetReturn` is not satisfied
   --> tests/ui/fail/handle_return_macro_sheet.rs:10:13
    |
 10 | fn bad() -> Dataset {
@@ -19,7 +19,7 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i32
              i64
              std::string::String
-   = note: required for `Dataset` to implement `xlfn::MacroSheetReturn`
+   = note: required for `Dataset` to implement `xlfn::value::MacroSheetReturn`
 note: required by a bound in `xlfn::value::assert_macro_sheet_return`
   --> src/value.rs
    |

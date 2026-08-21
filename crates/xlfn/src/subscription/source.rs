@@ -34,9 +34,10 @@ pub trait RtdSource: Send + Sync + 'static {
 
 /// Runtime-owned identity for an RTD source.
 ///
-/// The handle is the public source identity. Its internal `Arc` keeps the
-/// source alive, but allocation addresses are never exposed as part of the
-/// subscription API.
+/// The handle is the only public source identity. Its internal `Arc` keeps the
+/// source alive, but shared ownership and identity are deliberately separate:
+/// cloning a handle preserves its identity, while constructing another handle
+/// from the same `Arc` creates a new identity.
 pub struct RtdSourceHandle<S: RtdSource> {
     pub(crate) id: u64,
     pub(crate) source: Arc<S>,
@@ -66,7 +67,10 @@ impl<S: RtdSource> RtdSourceHandle<S> {
         Self::from_arc(Arc::new(source))
     }
 
-    /// Registers a source handle backed by an existing shared source.
+    /// Registers a new source handle backed by an existing shared source.
+    ///
+    /// The `Arc` supplies ownership only; it is not used as a subscription
+    /// identity.
     pub fn from_arc(source: Arc<S>) -> XllResult<Self> {
         let id = NEXT_SOURCE_HANDLE_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -76,37 +80,6 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self { id, source })
-    }
-}
-
-pub(crate) trait RtdSourceRef {
-    type Source: RtdSource;
-
-    fn source_key(&self) -> SourceKey;
-    fn source_arc(&self) -> Arc<Self::Source>;
-}
-
-impl<S: RtdSource> RtdSourceRef for RtdSourceHandle<S> {
-    type Source = S;
-
-    fn source_key(&self) -> SourceKey {
-        SourceKey::Handle(self.id)
-    }
-
-    fn source_arc(&self) -> Arc<Self::Source> {
-        Arc::clone(&self.source)
-    }
-}
-
-impl<S: RtdSource> RtdSourceRef for Arc<S> {
-    type Source = S;
-
-    fn source_key(&self) -> SourceKey {
-        SourceKey::Arc(Arc::as_ptr(self).cast::<()>() as usize)
-    }
-
-    fn source_arc(&self) -> Arc<Self::Source> {
-        Arc::clone(self)
     }
 }
 

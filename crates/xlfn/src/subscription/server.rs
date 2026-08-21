@@ -22,7 +22,7 @@ impl RtdServerHandle {
         self.inner.pulse_notification()
     }
 
-    pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch> {
+    pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_>> {
         self.inner.begin_refresh()
     }
 
@@ -60,7 +60,7 @@ impl RtdServerHandle {
 
 pub(crate) struct PublishCore {
     pub(crate) runtime_gate: Arc<OperationGate>,
-    pub(crate) server_gate: Arc<OperationGate>,
+    pub(crate) server_gate: OperationGate,
     pub(crate) queued_update_quota: triomphe::Arc<Quota>,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(crate) lifecycle: AtomicU8,
@@ -610,8 +610,8 @@ impl ServerRuntime {
         Ok(())
     }
 
-    pub(crate) fn begin_refresh(self: &Arc<Self>) -> XllResult<RtdRefreshBatch> {
-        let operation = self.enter_owned_operation()?;
+    pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_>> {
+        let operation = self.enter_operation()?;
         let (refresh_id, updates) = {
             self.publish.ensure_open()?;
             let mut refresh = self.publish.refresh.lock();
@@ -666,6 +666,7 @@ impl ServerRuntime {
             (refresh_id, updates_vec)
         };
         Ok(RtdRefreshBatch {
+            publish: self.publish.as_ref(),
             operation: Some(operation),
             refresh_id,
             updates,
@@ -1005,7 +1006,7 @@ impl<'a> ServerTermination<'a> {
                 .pending
                 .iter()
                 .filter(|(_, p)| p.server_generation == Some(self.server.generation))
-                .map(|(k, _)| k.clone())
+                .map(|(k, _)| *k)
                 .collect();
 
             let mut extra_sources = Vec::new();
@@ -1066,31 +1067,21 @@ impl<'a> ServerTermination<'a> {
 }
 
 #[must_use]
-pub(crate) struct RtdRefreshBatch {
-    pub(crate) operation: Option<OwnedServerOperation>,
+pub(crate) struct RtdRefreshBatch<'a> {
+    pub(crate) publish: &'a PublishCore,
+    pub(crate) operation: Option<ScopedServerOperation<'a>>,
     pub(crate) refresh_id: u64,
     pub(crate) updates: Vec<RtdUpdate>,
     pub(crate) completed: bool,
 }
 
-impl RtdRefreshBatch {
-    #[inline]
-    fn server(&self) -> &Arc<ServerRuntime> {
-        &self
-            .operation
-            .as_ref()
-            .expect("active refresh operation")
-            .server
-    }
-
+impl RtdRefreshBatch<'_> {
     pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
-        let attempt = self.server().publish.complete_refresh_inner(
-            self.refresh_id,
-            &self.updates,
-            outcome,
-        )?;
+        let attempt =
+            self.publish
+                .complete_refresh_inner(self.refresh_id, &self.updates, outcome)?;
         if let Some(attempt) = attempt {
-            self.server().publish.drive_notification(attempt);
+            self.publish.drive_notification(attempt);
         }
         self.completed = true;
         self.operation.take();
@@ -1098,17 +1089,12 @@ impl RtdRefreshBatch {
     }
 }
 
-impl Drop for RtdRefreshBatch {
+impl Drop for RtdRefreshBatch<'_> {
     fn drop(&mut self) {
         if self.completed {
             return;
         }
-        if let Some(operation) = &self.operation {
-            operation
-                .server
-                .publish
-                .abort_refresh_no_unwind(self.refresh_id);
-        }
+        self.publish.abort_refresh_no_unwind(self.refresh_id);
     }
 }
 

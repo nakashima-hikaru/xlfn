@@ -19,20 +19,20 @@ help: the following other types implement trait `xlfn::Addin`
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::AsyncContext`
+note: required by a bound in `xlfn::addin::AsyncContext`
   --> src/addin.rs
    |
    | pub struct AsyncContext<A: Addin> {
    |                            ^^^^^ required by this bound in `AsyncContext`
 
-error[E0599]: the method `state` exists for struct `xlfn::AsyncContext<State>`, but its trait bounds were not satisfied
+error[E0599]: the method `state` exists for struct `xlfn::addin::AsyncContext<State>`, but its trait bounds were not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:28:21
    |
  3 | struct State;
    | ------------ doesn't satisfy `State: xlfn::Addin`
 ...
 28 |     let _ = context.state();
-   |                     ^^^^^ method cannot be called on `xlfn::AsyncContext<State>` due to unsatisfied trait bounds
+   |                     ^^^^^ method cannot be called on `xlfn::addin::AsyncContext<State>` due to unsatisfied trait bounds
    |
    = note: the following trait bounds were not satisfied:
            `State: xlfn::Addin`
@@ -51,8 +51,8 @@ error[E0308]: mismatched types
 25 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
    |                                             ------------------- expected due to this
    |
-   = note: expected struct `xlfn::AsyncContext<State>`
-              found struct `xlfn::AsyncContext<AsyncTestAddin>`
+   = note: expected struct `xlfn::addin::AsyncContext<State>`
+              found struct `xlfn::addin::AsyncContext<AsyncTestAddin>`
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
@@ -61,8 +61,8 @@ error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
 26 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
-   = help: within `xlfn::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
-note: required because it appears within the type `xlfn::Handle<'_, Dataset>`
+   = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
+note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
   --> src/handle/typed.rs
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
@@ -82,24 +82,62 @@ error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared bet
 26 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
    |
-   = help: within `xlfn::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
+   = help: within `xlfn::value::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
 note: required because it appears within the type `xlfn::host_callback::HostCallbackSession`
   --> src/host_callback.rs
    |
    | pub(crate) struct HostCallbackSession {
    |                   ^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn::CallScope<'_>`
+note: required because it appears within the type `xlfn::value::CallScope<'_>`
   --> src/value.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn::CallScope<'_>>`
+   = note: required for `&xlfn::value::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::value::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
    |            ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::Handle<'_, Dataset>`
+note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
+  --> src/handle/typed.rs
+   |
+   | pub struct Handle<'call, T: ExcelHandleObject> {
+   |            ^^^^^^
+note: required by a bound in `xlfn::value::assert_async_parameter`
+  --> src/value.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |                                           ^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+  --> tests/ui/fail_async/async_handle_input.rs:26:14
+   |
+26 |     dataset: Handle<'_, Dataset>,
+   |              ^^^^^^^^^^^^^^^^^^^ `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+   |
+   = help: within `xlfn::value::CallScope<'_>`, the trait `Sync` is not implemented for `RefCell<Vec<handle::registry::CallRegistration>>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
+note: required because it appears within the type `handle::registry::HandleCallGuard`
+  --> src/handle/registry.rs
+   |
+   | pub(crate) struct HandleCallGuard {
+   |                   ^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::value::CallScope<'_>`
+  --> src/value.rs
+   |
+   | pub struct CallScope<'call> {
+   |            ^^^^^^^^^
+   = note: required for `&xlfn::value::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::value::CallScope<'_>>`
+  --> $RUST/core/src/marker.rs
+   |
+   | pub struct PhantomData<T: PointeeSized>;
+   |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
   --> src/handle/typed.rs
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
@@ -134,7 +172,7 @@ help: the following other types implement trait `xlfn::Addin`
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::AsyncContext`
+note: required by a bound in `xlfn::addin::AsyncContext`
   --> src/addin.rs
    |
    | pub struct AsyncContext<A: Addin> {

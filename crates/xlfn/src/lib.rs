@@ -44,6 +44,10 @@ pub mod benchmark_support;
 mod cache;
 mod callback_gate;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+#[allow(
+    dead_code,
+    reason = "Callback release state is an internal protocol witness"
+)]
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
@@ -76,10 +80,15 @@ mod registration;
 mod return_array;
 mod return_storage;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+#[allow(
+    dead_code,
+    reason = "Return protocol types are consumed only at FFI boundaries"
+)]
 mod return_value;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod rtd;
 mod runtime;
+mod runtime_components;
 mod shutdown;
 #[cfg(any(test, feature = "shutdown-refinement"))]
 mod shutdown_refinement;
@@ -89,75 +98,91 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
+pub use addin::{Addin, OpenContext, Opened, RuntimeConfig};
+pub use error::{ExcelError, XllError, XllResult};
+
+// These aliases are crate-internal only. Keeping implementation modules on
+// their canonical paths is the public API rule; the aliases let the existing
+// low-level implementation share concise names without reopening those paths
+// to downstream crates.
 #[cfg(feature = "async")]
-pub use addin::AsyncContext;
-pub use addin::{
-    Addin, AddinMetadata, AsyncRuntimeConfig, BuildInfo, DiagnosticsSetup, MacroSheetContext,
-    MainThreadContext, OpenContext, Opened, RtdConfig, RtdOpenContext, RuntimeConfig,
-    ThreadSafeContext,
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use addin::AsyncContext;
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use addin::{
+    AddinMetadata, AsyncRuntimeConfig, BuildInfo, DiagnosticsSetup, MacroSheetContext,
+    MainThreadContext, RtdConfig, RtdOpenContext, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
-pub use async_udf::{async_udf_boundary_named, cancel_async_calculation, end_async_calculation};
-pub use callback_value::{CallbackValueReleaseState, ExcelCallbackValue};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use async_udf::{
+    async_udf_boundary_named, cancel_async_calculation, end_async_calculation,
+};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use callback_value::{CallbackValueReleaseState, ExcelCallbackValue};
 #[cfg(any(feature = "async", test))]
-pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
-pub use diagnostics::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use diagnostics::{
     AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticSink, DiagnosticStats, InvalidAddinId,
     diagnostic_stats,
 };
-pub use error::{
-    DiagnosticId, DomainErrorCode, ExcelError, InputError, IntoXllError, Shape, XllError, XllResult,
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use error::{DiagnosticId, DomainErrorCode, InputError, IntoXllError, Shape};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use handle::{Handle, HandleAlias};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use input_identity::InputIdentityEncoder;
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use reference::{
+    ExcelReference, FromExcelReference, ReferenceArea, ReferenceAreas, SheetId, reference_from_raw,
 };
-pub use handle::{ExcelHandleObject, Handle, HandleAlias};
-#[doc(hidden)]
-pub use input_identity::InputIdentityEncoder;
-pub use shutdown::{CleanupIssueKind, CleanupReporter};
-pub mod ingress;
-pub use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
-#[doc(hidden)]
-pub use lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
-#[doc(hidden)]
-pub use reference::reference_from_raw;
-pub use reference::{ExcelReference, FromExcelReference, ReferenceArea, ReferenceAreas, SheetId};
-#[doc(hidden)]
-pub use registration::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use registration::{
     ArgumentAbi, ArgumentDescriptor, FunctionVisibility, MAX_EXCEL_FUNCTION_ARGUMENTS,
     MAX_REGISTER_ARGUMENT_HELP_ENTRIES, RegistrationDescriptor, RegistrationFlags, RegistrationId,
     RegistrationSignature, ResultAbi,
 };
-#[doc(hidden)]
-pub use return_value::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use return_value::{
     CallbackCleanupDebt, CleanupDebtSet, ExcelCallbackStatus, GitCookieDebt, RegistrationDebt,
     RegistryKeyDebt, ReturnContext, ReturnFreeBoundaryGuard, ffi_boundary, ffi_boundary_void,
     free_return, free_return_boundary, udf_boundary_named,
 };
-#[doc(hidden)]
-pub use rtd::dll_get_class_object;
-
-inventory::collect!(RegistrationDescriptor);
-
-#[doc(hidden)]
-pub use runtime::{CallGuard, LifecyclePhase, Runtime};
-pub use subscription::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use runtime::{CallGuard, LifecyclePhase, Runtime};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use subscription::{
     IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic,
     RtdValue,
 };
-#[doc(hidden)]
-pub use utf16::utf16_eq_ignore_ascii_case;
-pub use value::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use utf16::utf16_eq_ignore_ascii_case;
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use value::{
     ArgumentContext, AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column,
     ExcelCellOutput, ExcelCellValue, ExcelDateSystem, ExcelErrorValue, ExcelOutput, ExcelParameter,
     ExcelReturn, ExcelSerialDate, ExcelValue, FromExcel, IntoExcel, MacroSheetReturn,
     MainThreadReturn, Matrix, OptionalExcelValue, Row, ThreadSafeReturn, VolatileReturn,
     XlArrayRef, XlStrRef, XlValueRef,
 };
-#[doc(hidden)]
-pub use value::{
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use value::{
     argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
     assert_async_parameter, assert_async_return, assert_excel_parameter, assert_macro_sheet_return,
     assert_main_thread_return, assert_thread_safe_return, assert_volatile_return,
     cell_presence_from_raw, with_excel_call_scope,
 };
+pub mod ingress;
+
+inventory::collect!(registration::RegistrationDescriptor);
 
 #[cfg(test)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access for testing")]
@@ -460,7 +485,7 @@ pub(crate) mod test_callback {
 #[cfg(feature = "async")]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_async_only {
+macro_rules! __xlfn_macro_support_async_only {
     ($($body:tt)*) => {
         $($body)*
     };
@@ -469,7 +494,7 @@ macro_rules! __xlfn_async_only {
 #[cfg(not(feature = "async"))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_async_only {
+macro_rules! __xlfn_macro_support_async_only {
     ($($body:tt)*) => {
         compile_error!("asynchronous Excel functions require the xlfn `async` feature");
     };
@@ -478,7 +503,7 @@ macro_rules! __xlfn_async_only {
 #[cfg(feature = "async")]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_async_exports {
+macro_rules! __xlfn_macro_support_async_exports {
     ($runtime:expr) => {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
@@ -490,13 +515,13 @@ macro_rules! __xlfn_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::__private::cancel_async_calculation($runtime);
+            $crate::macro_support::cancel_async_calculation($runtime);
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::end_async_calculation($runtime);
+            $crate::macro_support::end_async_calculation($runtime);
         }
     };
 }
@@ -504,26 +529,8 @@ macro_rules! __xlfn_async_exports {
 #[cfg(not(feature = "async"))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_async_exports {
+macro_rules! __xlfn_macro_support_async_exports {
     ($runtime:expr) => {};
-}
-
-/// Capabilities supplied to exported functions by the generated Excel boundary.
-pub mod context {
-    pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
-
-    #[cfg(feature = "async")]
-    pub use crate::addin::AsyncContext;
-    #[cfg(feature = "async")]
-    pub use crate::{CancellationGuarantee, CancellationToken, Cancelled};
-}
-
-/// Real-time data subscriptions and source registration.
-pub mod rtd_api {
-    pub use crate::{
-        IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic,
-        RtdValue,
-    };
 }
 
 /// Unstable lower-level APIs. Enable the `unstable` feature explicitly.
@@ -554,52 +561,15 @@ pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function}
 
 /// Common imports for authoring an add-in.
 pub mod prelude {
-    pub use crate::addin::{Addin, OpenContext, Opened, RtdOpenContext, RuntimeConfig};
     #[cfg(feature = "async")]
-    pub use crate::context::AsyncContext;
-    pub use crate::context::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
+    pub use crate::addin::AsyncContext;
+    pub use crate::addin::{Addin, OpenContext, Opened, RtdOpenContext, RuntimeConfig};
+    pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
     pub use crate::handle::{Handle, HandleAlias};
-    pub use crate::rtd_api::{RtdSourceHandle, RtdTopic};
+    pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelErrorValue, ExcelSerialDate, Matrix, OptionalExcelValue, Row,
     };
     pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
-}
-
-/// Implementation details consumed by generated code, not a stable API.
-#[doc(hidden)]
-pub mod __private {
-    pub const BUILD_TARGET: &str = if cfg!(all(
-        target_os = "windows",
-        target_arch = "x86",
-        target_env = "msvc"
-    )) {
-        "i686-pc-windows-msvc"
-    } else if cfg!(all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc"
-    )) {
-        "x86_64-pc-windows-msvc"
-    } else {
-        "unsupported-target"
-    };
-
-    pub use crate::macro_support::{
-        ArgumentAbi, ArgumentDescriptor, CallFrame, CellPresence, ExcelOutput, ExcelReturn,
-        FunctionRegistration, InputIdentityEncoder, MacroRuntime, MainThreadReturn, ReturnContext,
-        addin_manager_info, argument_presence, assert_async_parameter, assert_async_return,
-        assert_excel_parameter, assert_macro_sheet_return, assert_main_thread_return,
-        assert_thread_safe_return, assert_volatile_return, auto_close_generated_addin,
-        auto_remove_generated_addin, convert_argument, convert_reference, dll_can_unload_now,
-        dll_get_class_object, free_generated_return, macro_sheet_context, main_thread_context,
-        open_generated_addin, publish_new_handle, submit_registration, sync_udf,
-        thread_safe_context, utf16_eq_ignore_ascii_case,
-    };
-    #[cfg(feature = "async")]
-    pub use crate::macro_support::{
-        GenerationLease, async_context, async_udf, cancel_async_calculation, end_async_calculation,
-    };
-    pub use xlfn_sys::XLOPER12;
 }

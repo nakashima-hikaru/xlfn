@@ -5,7 +5,7 @@ set_option autoImplicit false
 namespace XlFnFormal.Shutdown
 
 /-- A state similar to an implementation that reports a cleanup error but
-unconditionally calls `finish_close`: one active call still owns module code. -/
+unconditionally calls `finish_removal`: one active call still owns module code. -/
 def unsafePreFinalState : State :=
   { phase := .closing .finalize,
     resources :=
@@ -27,7 +27,7 @@ theorem unchecked_finish_is_not_safe :
 
 /-- The unsafe operation cannot be represented by the certified transition
 relation.  This is the regression property that rules out unconditional
-`Runtime::finish_close()`. -/
+`Runtime::finish_removal()`. -/
 theorem unchecked_finish_has_no_certificate :
     ¬ Step unsafePreFinalState .finishClose
       (uncheckedFinish unsafePreFinalState) := by

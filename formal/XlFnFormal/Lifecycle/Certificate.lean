@@ -5,7 +5,7 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Lifecycle
 
-/-! The concrete runtime has one Rust `CloseCertificate` type, but the
+/-! The concrete runtime has one Rust `LogicalQuiescenceCertificate` type, but the
     abstract model distinguishes the semantic paths which issue it.  A
     committed close owns a live Shutdown session; an uncommitted final close
     has no Shutdown generation at all; open rollback is a separate owner. -/
@@ -18,7 +18,7 @@ def CleanupReady
   lifecycle.cleanupOwner = some owner ∧
   resources.Quiescent
 
-def CommittedClosePrerequisites
+def CommittedRemovalQuiescencePrerequisites
     (lifecycle : State)
     (generation : AttemptId)
     (shutdown : Shutdown.State) : Prop :=
@@ -27,24 +27,24 @@ def CommittedClosePrerequisites
   CleanupReady lifecycle .finalClose shutdown.resources ∧
   shutdown.phase = .closing .finalize
 
-structure CommittedCloseCertificate
+structure CommittedLogicalQuiescenceCertificate
     (lifecycle : State)
     (generation : AttemptId)
     (shutdown : Shutdown.State) : Prop where
-  prerequisites : CommittedClosePrerequisites lifecycle generation shutdown
+  prerequisites : CommittedRemovalQuiescencePrerequisites lifecycle generation shutdown
 
-def UncommittedClosePrerequisites
+def UncommittedRemovalQuiescencePrerequisites
     (lifecycle : State)
     (resources : Shutdown.Resources) : Prop :=
   lifecycle.phase = .closing ∧
   CleanupReady lifecycle .finalClose resources
 
-structure UncommittedCloseCertificate
+structure UncommittedLogicalQuiescenceCertificate
     (lifecycle : State)
     (resources : Shutdown.Resources) : Prop where
-  prerequisites : UncommittedClosePrerequisites lifecycle resources
+  prerequisites : UncommittedRemovalQuiescencePrerequisites lifecycle resources
 
-def OpenRollbackPrerequisites
+def OpenRollbackQuiescencePrerequisites
     (lifecycle : State)
     (resources : Shutdown.Resources) : Prop :=
   (lifecycle.phase = .openRollbackPending ∨ lifecycle.phase = .closing) ∧
@@ -53,11 +53,11 @@ def OpenRollbackPrerequisites
 structure OpenRollbackCertificate
     (lifecycle : State)
     (resources : Shutdown.Resources) : Prop where
-  prerequisites : OpenRollbackPrerequisites lifecycle resources
+  prerequisites : OpenRollbackQuiescencePrerequisites lifecycle resources
 
-theorem CommittedCloseCertificate.lifecycle_ready
+theorem CommittedLogicalQuiescenceCertificate.lifecycle_ready
     {lifecycle : State} {generation : AttemptId} {shutdown : Shutdown.State}
-    (certificate : CommittedCloseCertificate lifecycle generation shutdown) :
+    (certificate : CommittedLogicalQuiescenceCertificate lifecycle generation shutdown) :
     lifecycle.phase = .closing ∧
     lifecycle.generation = generation ∧
     lifecycle.openAttempt = none ∧
@@ -66,50 +66,50 @@ theorem CommittedCloseCertificate.lifecycle_ready
     ⟨hPhase, hGeneration, hReady, _⟩
   exact ⟨hPhase, hGeneration, hReady.1, hReady.2.1⟩
 
-theorem CommittedCloseCertificate.shutdown_ready
+theorem CommittedLogicalQuiescenceCertificate.shutdown_ready
     {lifecycle : State} {generation : AttemptId} {shutdown : Shutdown.State}
-    (certificate : CommittedCloseCertificate lifecycle generation shutdown) :
+    (certificate : CommittedLogicalQuiescenceCertificate lifecycle generation shutdown) :
     shutdown.phase = .closing .finalize ∧
     shutdown.resources.Quiescent := by
   rcases certificate.prerequisites with
     ⟨_, _, hReady, hFinalize⟩
   exact ⟨hFinalize, hReady.2.2⟩
 
-theorem CommittedCloseCertificate.can_finish_shutdown
+theorem CommittedLogicalQuiescenceCertificate.can_finish_shutdown
     {lifecycle : State} {generation : AttemptId} {shutdown : Shutdown.State}
-    (certificate : CommittedCloseCertificate lifecycle generation shutdown) :
+    (certificate : CommittedLogicalQuiescenceCertificate lifecycle generation shutdown) :
     ∃ shutdown', Shutdown.Step shutdown .finishClose shutdown' := by
   rcases certificate.shutdown_ready with ⟨hFinalize, hQuiescent⟩
   exact ⟨{ shutdown with phase := .closed },
     Shutdown.Step.finishClose hFinalize hQuiescent⟩
 
-theorem CommittedCloseCertificate.can_publish_closed
+theorem CommittedLogicalQuiescenceCertificate.can_publish_closed
     {lifecycle : State} {generation : AttemptId} {shutdown : Shutdown.State}
-    (certificate : CommittedCloseCertificate lifecycle generation shutdown) :
+    (certificate : CommittedLogicalQuiescenceCertificate lifecycle generation shutdown) :
     ∃ lifecycle', Lifecycle.Step lifecycle .finishFinalClose lifecycle' := by
   rcases certificate.lifecycle_ready with
     ⟨hPhase, _, hNoAttempt, hOwner⟩
   exact ⟨{ lifecycle with phase := .closed },
     Lifecycle.Step.finishFinalClose hPhase hNoAttempt hOwner⟩
 
-theorem UncommittedCloseCertificate.lifecycle_ready
+theorem UncommittedLogicalQuiescenceCertificate.lifecycle_ready
     {lifecycle : State} {resources : Shutdown.Resources}
-    (certificate : UncommittedCloseCertificate lifecycle resources) :
+    (certificate : UncommittedLogicalQuiescenceCertificate lifecycle resources) :
     lifecycle.phase = .closing ∧
     lifecycle.openAttempt = none ∧
     lifecycle.cleanupOwner = some .finalClose := by
   rcases certificate.prerequisites with ⟨hPhase, hReady⟩
   exact ⟨hPhase, hReady.1, hReady.2.1⟩
 
-theorem UncommittedCloseCertificate.resources_quiescent
+theorem UncommittedLogicalQuiescenceCertificate.resources_quiescent
     {lifecycle : State} {resources : Shutdown.Resources}
-    (certificate : UncommittedCloseCertificate lifecycle resources) :
+    (certificate : UncommittedLogicalQuiescenceCertificate lifecycle resources) :
     resources.Quiescent := by
   exact certificate.prerequisites.2.2.2
 
-theorem UncommittedCloseCertificate.can_finish
+theorem UncommittedLogicalQuiescenceCertificate.can_finish
     {lifecycle : State} {resources : Shutdown.Resources}
-    (certificate : UncommittedCloseCertificate lifecycle resources) :
+    (certificate : UncommittedLogicalQuiescenceCertificate lifecycle resources) :
     ∃ lifecycle', Lifecycle.Step lifecycle .finishFinalClose lifecycle' := by
   rcases certificate.lifecycle_ready with ⟨hPhase, hNoAttempt, hOwner⟩
   exact ⟨{ lifecycle with phase := .closed },

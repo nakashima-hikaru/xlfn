@@ -35,6 +35,17 @@ pub(crate) struct PublishedTopic {
     pub(crate) state: AtomicU8,
 }
 
+pub(crate) enum PreparedHandleObject {
+    New {
+        object_id: Option<ObjectId>,
+        value: ErasedObject,
+    },
+    Existing {
+        object_id: ObjectId,
+        object_key: ObjectKey,
+    },
+}
+
 impl PublishedTopic {
     fn new(binding: FormulaBinding, token: String, rtd_key: Arc<str>) -> Self {
         Self {
@@ -328,7 +339,7 @@ impl HandleRuntime {
         if !topics
             .by_key
             .get(&key)
-            .is_some_and(|topic| topic.token == token)
+            .is_some_and(|topic| topic.publication.token == token)
         {
             return Err(XllError::StaleHandle);
         }
@@ -350,8 +361,8 @@ impl HandleRuntime {
         }
 
         let valid_topic = topics.by_key.get(&key).is_some_and(|topic| {
-            topic.binding == publication.binding
-                && topic.token == publication.token
+            topic.publication.binding == publication.binding
+                && topic.publication.token == publication.token
                 && triomphe::Arc::ptr_eq(&topic.publication, publication)
         });
         if !valid_topic {
@@ -402,11 +413,9 @@ impl HandleRuntime {
         self.prepare_observed_object::<T, K>(
             key,
             || {
-                create().map(|value| {
-                    (
-                        None,
-                        HandleObject::new(value, Arc::clone(&self.registry.cleanup)),
-                    )
+                create().map(|value| PreparedHandleObject::New {
+                    object_id: None,
+                    value: ErasedObject::new(value, Arc::clone(&self.registry.cleanup)),
                 })
             },
             observe,
@@ -417,7 +426,7 @@ impl HandleRuntime {
         &self,
         key: K,
         object_id: ObjectId,
-        object: Arc<T>,
+        object_key: ObjectKey,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -427,19 +436,19 @@ impl HandleRuntime {
         self.prepare_observed_object::<T, K>(
             key,
             || {
-                Ok((
-                    Some(object_id),
-                    HandleObject::from_arc(object, Arc::clone(&self.registry.cleanup)),
-                ))
+                Ok(PreparedHandleObject::Existing {
+                    object_id,
+                    object_key,
+                })
             },
             observe,
         )
     }
 
-    pub(crate) fn prepare_observed_object<T, K>(
+    fn prepare_observed_object<T, K>(
         &self,
         key: K,
-        create: impl FnOnce() -> XllResult<(Option<ObjectId>, HandleObject)>,
+        create: impl FnOnce() -> XllResult<PreparedHandleObject>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -546,8 +555,8 @@ impl HandleRuntime {
             //
             if let Some(topic) = topics.by_key.get(&key) {
                 let decision = PrepareDecision::Existing {
-                    token: topic.token.clone(),
-                    rtd_key: Arc::clone(&topic.rtd_key),
+                    token: topic.publication.token.clone(),
+                    rtd_key: Arc::clone(&topic.publication.rtd_key),
                     generation: topics.generation,
                 };
                 drop(topics);
@@ -576,8 +585,8 @@ impl HandleRuntime {
 
             if let Some(topic) = topics.by_key.get(&key) {
                 let decision = PrepareDecision::Existing {
-                    token: topic.token.clone(),
-                    rtd_key: Arc::clone(&topic.rtd_key),
+                    token: topic.publication.token.clone(),
+                    rtd_key: Arc::clone(&topic.publication.rtd_key),
                     generation: topics.generation,
                 };
                 drop(topics);
@@ -646,18 +655,23 @@ impl HandleRuntime {
         //
         // Cold path: no existing topic, invoke the factory.
         //
-        let (object_id, object) = match create() {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(error);
+        let (token, binding_id, object_id, reused) = match create()? {
+            PreparedHandleObject::New { object_id, value } => {
+                let mut pending = PendingHandleValue::new(
+                    &self.registry,
+                    value,
+                    "unpublished handle formula value",
+                );
+                self.registry
+                    .insert_pending_object_with_kind::<T>(pending.slot(), object_id)?
             }
+            PreparedHandleObject::Existing {
+                object_id,
+                object_key,
+            } => self
+                .registry
+                .insert_existing_object_binding::<T>(object_id, object_key)?,
         };
-        let mut value =
-            PendingHandleValue::new(&self.registry, object, "unpublished handle formula value");
-
-        let (token, binding_id, object_id, reused) = self
-            .registry
-            .insert_pending_object_with_kind::<T>(value.slot(), object_id)?;
         let binding = FormulaBinding {
             id: binding_id,
             object_id,
@@ -685,8 +699,10 @@ impl HandleRuntime {
             (&self.registry, &self.topics, key, token.as_str()),
             |(registry, topics, key, token)| {
                 let mut topics = topics.write();
-                let removed = if let Some(topic) =
-                    topics.by_key.get(&key).filter(|topic| topic.token == token)
+                let removed = if let Some(topic) = topics
+                    .by_key
+                    .get(&key)
+                    .filter(|topic| topic.publication.token == token)
                 {
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
                     let token_wire = self.refinement_token(token);
@@ -700,7 +716,7 @@ impl HandleRuntime {
                     // final commit. Removing it here also covers future
                     // changes that add a post-publication failure point.
                     self.published.remove(key);
-                    let rtd_key = Arc::clone(&topic.rtd_key);
+                    let rtd_key = Arc::clone(&topic.publication.rtd_key);
                     let owner = topic.excel_topic;
                     topics.by_key.remove(&key);
                     topics.by_rtd_key.remove(rtd_key.as_ref());
@@ -757,9 +773,6 @@ impl HandleRuntime {
         topics.by_key.insert(
             key,
             Topic {
-                binding,
-                token: token.clone(),
-                rtd_key: Arc::clone(&rtd_key),
                 publication: triomphe::Arc::clone(&publication),
                 #[cfg(any(target_os = "windows", test))]
                 server_generation: None,
@@ -793,7 +806,7 @@ impl HandleRuntime {
         if !topics
             .by_key
             .get(&key)
-            .is_some_and(|topic| topic.token == token)
+            .is_some_and(|topic| topic.publication.token == token)
         {
             return Err(XllError::StaleHandle);
         }
@@ -859,7 +872,7 @@ impl HandleRuntime {
         server_generation: u64,
         excel_topic_id: i32,
         rtd_key: &str,
-    ) -> XllResult<HandleConnection> {
+    ) -> XllResult<HandleConnection<'_>> {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
@@ -867,7 +880,7 @@ impl HandleRuntime {
         let (key, token, created) =
             self.connect_inner(server_generation, excel_topic_id, rtd_key)?;
         Ok(HandleConnection {
-            runtime: Arc::downgrade(self),
+            runtime: self,
             owner,
             key,
             token,
@@ -921,7 +934,7 @@ impl HandleRuntime {
                 topic.excel_topic_committed = false;
                 true
             };
-            (topic.token.clone(), created)
+            (topic.publication.token.clone(), created)
         };
         topics.by_excel_id.insert(owner, key);
         #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -998,11 +1011,11 @@ impl HandleRuntime {
             let Some(topic) = topics.by_key.remove(&key) else {
                 return;
             };
-            topics.by_rtd_key.remove(topic.rtd_key.as_ref());
+            topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
             if let Some(owner) = topic.excel_topic {
                 topics.by_excel_id.remove(&owner);
             }
-            Some(topic.token)
+            Some(topic.publication.token.clone())
         };
         if let Some(token) = token {
             self.registry
@@ -1046,10 +1059,10 @@ impl HandleRuntime {
             self.published.remove(key);
             let topic = topics.by_key.remove(&key);
             topic.map(|topic| {
-                topics.by_rtd_key.remove(topic.rtd_key.as_ref());
+                topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
                 linearization.disconnect(&key, owner);
-                (key, topic.token, was_provisional)
+                (key, topic.publication.token.clone(), was_provisional)
             })
         };
         if let Some((key, token, was_provisional)) = removed {
@@ -1201,18 +1214,18 @@ impl HandleRuntime {
                         .store(PublishedTopicState::Stale as u8, Ordering::Release);
                     self.published.remove(key);
                     let topic = topics.by_key.remove(&key)?;
-                    topics.by_rtd_key.remove(topic.rtd_key.as_ref());
+                    topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
                     if let Some(owner) = topic.excel_topic {
                         topics.by_excel_id.remove(&owner);
                     }
                     #[cfg(any(test, feature = "handle-refinement-trace"))]
                     refinement_topics.push((
                         key,
-                        topic.token.clone(),
+                        topic.publication.token.clone(),
                         was_provisional,
                         refinement_id,
                     ));
-                    Some(topic.token)
+                    Some(topic.publication.token.clone())
                 })
                 .collect::<Vec<_>>();
             #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -1277,7 +1290,7 @@ impl HandleRuntime {
             let tokens = topics
                 .by_key
                 .drain()
-                .map(|(_, topic)| topic.token)
+                .map(|(_, topic)| topic.publication.token.clone())
                 .collect::<Vec<_>>();
             topics.by_rtd_key.clear();
             topics.by_excel_id.clear();

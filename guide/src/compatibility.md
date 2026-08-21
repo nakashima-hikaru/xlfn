@@ -86,7 +86,7 @@ xlfn-sys = "0.2"
 use xlfn_sys::XLOPER12;
 ```
 
-Generated code may use hidden items under `xlfn::__private`, but that module is
+Generated code may use hidden items under `xlfn::macro_support`, but that module is
 an implementation detail and is not a supported application API.
 
 ## Build-profile requirements

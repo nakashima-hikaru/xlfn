@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use xlfn::benchmark_support::{BenchHandleObject, RawArgumentIngressBenchmark};
-use xlfn::{ExcelCellValue, ExcelValue, Matrix};
+use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
 fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");

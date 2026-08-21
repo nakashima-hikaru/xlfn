@@ -1,5 +1,6 @@
 use super::*;
 use arc_swap::ArcSwapAny;
+use std::cell::RefCell;
 use std::ptr::NonNull;
 
 #[repr(u8)]
@@ -64,70 +65,60 @@ impl HandleCleanupState {
     }
 }
 
+/// A single owner for an object stored in the object registry.
+///
+/// This is deliberately a type-erased `Box<T>`, not an `Arc<T>`. The registry
+/// owns the value for as long as at least one binding refers to its
+/// [`ObjectKey`]. Call-scoped handles only borrow the payload while the epoch
+/// guard is active.
+///
 /// # Invariants
 ///
-/// - `ptr` was produced by `Arc::into_raw(Arc<T>)` for exactly one
-///   concrete `T: Send + Sync + 'static`.
+/// - `ptr` was produced by `Box::into_raw(Box<T>)` for exactly one concrete
+///   `T: Send + Sync + 'static`.
 /// - `type_id == TypeId::of::<T>()`.
-/// - `clone_strong` and `drop_strong` are the monomorphized operations
-///   for that same `T`.
-/// - Every live `HandleObject` represents exactly one `Arc<T>` strong count.
-/// - Cloning creates exactly one additional strong count.
-/// - Dropping consumes exactly one strong count.
-/// - These fields are never independently mutated.
-pub(crate) struct HandleObject {
+/// - `drop_value` is the monomorphized operation for that same `T`.
+/// - The owner is moved exactly once into the object registry or retired
+///   queue.
+pub(crate) struct ErasedObject {
     ptr: NonNull<()>,
     type_id: TypeId,
     type_name: &'static str,
-    clone_strong: unsafe fn(NonNull<()>),
-    drop_strong: unsafe fn(NonNull<()>),
+    drop_value: unsafe fn(NonNull<()>),
     cleanup: Arc<HandleCleanupState>,
+    drop_operation: &'static str,
 }
 
 // SAFETY: construction only accepts `T: Send + Sync + 'static` and all
 // type-erasure metadata is immutable and installed atomically by
-// `new::<T>` / `from_arc::<T>`.
-unsafe impl Send for HandleObject {}
+// `new::<T>`.
+unsafe impl Send for ErasedObject {}
 
 // SAFETY: same invariant as Send; dereference is only exposed after
 // TypeId validation as a shared `&T`.
-unsafe impl Sync for HandleObject {}
+unsafe impl Sync for ErasedObject {}
 
-unsafe fn clone_strong<T: Send + Sync + 'static>(ptr: NonNull<()>) {
-    // SAFETY: HandleObject construction produced `ptr` from `Arc::into_raw(Arc<T>)`.
+unsafe fn drop_value<T: Send + Sync + 'static>(ptr: NonNull<()>) {
+    // SAFETY: ErasedObject construction produced `ptr` from
+    // `Box::into_raw(Box<T>)` and this owner is consumed exactly once.
     unsafe {
-        Arc::<T>::increment_strong_count(ptr.cast::<T>().as_ptr());
+        drop(Box::<T>::from_raw(ptr.cast::<T>().as_ptr()));
     }
 }
 
-unsafe fn drop_strong<T: Send + Sync + 'static>(ptr: NonNull<()>) {
-    // SAFETY: this HandleObject owns exactly one `Arc<T>` strong reference.
-    unsafe {
-        drop(Arc::<T>::from_raw(ptr.cast::<T>().as_ptr()));
-    }
-}
-
-impl HandleObject {
+impl ErasedObject {
     pub(crate) fn new<T: Send + Sync + 'static>(
         value: T,
         cleanup: Arc<HandleCleanupState>,
     ) -> Self {
-        Self::from_arc(Arc::new(value), cleanup)
-    }
-
-    pub(crate) fn from_arc<T: Send + Sync + 'static>(
-        value: Arc<T>,
-        cleanup: Arc<HandleCleanupState>,
-    ) -> Self {
-        let ptr = Arc::into_raw(value);
+        let ptr = Box::into_raw(Box::new(value));
         Self {
-            ptr: NonNull::new(ptr.cast_mut().cast())
-                .expect("Arc::into_raw returns a non-null pointer"),
+            ptr: NonNull::new(ptr.cast()).expect("Box::into_raw returns a non-null pointer"),
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            clone_strong: clone_strong::<T>,
-            drop_strong: drop_strong::<T>,
+            drop_value: drop_value::<T>,
             cleanup,
+            drop_operation: "handle object drop",
         }
     }
 
@@ -136,55 +127,28 @@ impl HandleObject {
         (self.type_id == TypeId::of::<T>()).then(|| self.ptr.cast::<T>())
     }
 
-    pub(crate) fn clone_typed_arc<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        if self.type_id != TypeId::of::<T>() {
-            return None;
-        }
-        let ptr = self.ptr.cast::<T>().as_ptr();
-        // SAFETY:
-        // matching TypeId proves that `ptr` was produced from Arc<T>;
-        // this HandleObject owns a live strong reference.
-        unsafe {
-            Arc::increment_strong_count(ptr);
-            Some(Arc::from_raw(ptr))
-        }
-    }
-
     #[inline]
     pub(crate) fn address(&self) -> usize {
         self.ptr.as_ptr().addr()
     }
-}
 
-impl Clone for HandleObject {
-    fn clone(&self) -> Self {
-        // SAFETY: `clone_strong` matches the concrete type used at construction.
-        unsafe {
-            (self.clone_strong)(self.ptr);
-        }
-        Self {
-            ptr: self.ptr,
-            type_id: self.type_id,
-            type_name: self.type_name,
-            clone_strong: self.clone_strong,
-            drop_strong: self.drop_strong,
-            cleanup: Arc::clone(&self.cleanup),
-        }
+    fn set_drop_operation(&mut self, operation: &'static str) {
+        self.drop_operation = operation;
     }
 }
 
-impl Drop for HandleObject {
+impl Drop for ErasedObject {
     fn drop(&mut self) {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: this HandleObject owns exactly one strong count
-            // for the concrete type associated with `drop_strong`.
+            // SAFETY: this ErasedObject owns the allocation for the concrete
+            // type associated with `drop_value`.
             unsafe {
-                (self.drop_strong)(self.ptr);
+                (self.drop_value)(self.ptr);
             }
         }));
         if result.is_err() {
             let error = XllError::Panic;
-            crate::diagnostics::report_no_unwind("handle object drop", &error);
+            crate::diagnostics::report_no_unwind(self.drop_operation, &error);
             self.cleanup.record(error);
         }
     }
@@ -193,23 +157,22 @@ impl Drop for HandleObject {
 /// One canonical formula-binding record shared by the mutable registry and
 /// the immutable read-side publication snapshot.
 ///
-/// Immutable ArcSwap snapshots are the reclamation barrier. Removing a
-/// publication only makes it unavailable to new readers; an old snapshot
-/// keeps both the publication and its object alive until the reader releases
-/// the guard.
+/// Immutable ArcSwap snapshots publish binding metadata only. Object
+/// reclamation is governed by the call epoch, so an old snapshot does not own
+/// or extend the lifetime of the object payload.
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     pub(crate) object_id: ObjectId,
-    pub(crate) object: HandleObject,
+    pub(crate) object_key: ObjectKey,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object_id: ObjectId, object: HandleObject) -> Self {
+    fn new(id: HandleId, object_id: ObjectId, object_key: ObjectKey) -> Self {
         Self {
             id,
             object_id,
-            object,
+            object_key,
             state: AtomicU8::new(BindingState::Live as u8),
         }
     }
@@ -335,39 +298,339 @@ pub(crate) struct BindingSlot {
     pub(crate) record: Option<triomphe::Arc<BindingRecord>>,
 }
 
-/// Canonical ownership and type metadata for one shared handle object.
-///
-/// Binding records retain their own `Arc<HandleObject>` so immutable
-/// publication snapshots can keep a borrowed lookup alive without consulting
-/// the registry lock. This table is the authoritative identity index used by
-/// cold binding creation and tracks when an object has no live bindings left.
+/// Generation-checked identity of an object in the runtime-local object
+/// registry. It is intentionally separate from [`ObjectId`]: `ObjectId` is
+/// the stable semantic identity used by formula revisions, while this key is
+/// the current storage identity used to prevent ABA after object retirement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ObjectKey {
+    pub(crate) namespace: u64,
+    pub(crate) slot: u32,
+    pub(crate) generation: u64,
+}
+
+/// Canonical ownership and binding-count metadata for one shared handle
+/// object. Type metadata remains in [`ErasedObject`], the sole owner of the
+/// payload, so it cannot diverge from the drop function.
 pub(crate) struct ObjectEntry {
-    pub(crate) address: usize,
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
+    pub(crate) object_id: ObjectId,
     pub(crate) bindings: usize,
+    pub(crate) value: ErasedObject,
+}
+
+struct ObjectSlot {
+    generation: u64,
+    entry: Option<ObjectEntry>,
+}
+
+/// The sole owner of live handle objects.
+///
+/// Binding records and immutable publication snapshots contain only an
+/// [`ObjectKey`]. Binding metadata is protected by the canonical handle state
+/// lock and object storage by the runtime-local arena lock; readers borrow a
+/// typed pointer for the duration of a call epoch.
+pub(crate) struct ObjectRegistry {
+    namespace: u64,
+    slots: Vec<ObjectSlot>,
+    free: Vec<usize>,
+    by_identity: FxHashMap<ObjectId, ObjectKey>,
+}
+
+impl ObjectRegistry {
+    fn new(namespace: u64) -> Self {
+        Self {
+            namespace,
+            slots: Vec::new(),
+            free: Vec::new(),
+            by_identity: FxHashMap::default(),
+        }
+    }
+
+    fn key_for_identity(&self, object_id: ObjectId) -> Option<ObjectKey> {
+        self.by_identity.get(&object_id).copied()
+    }
+
+    fn get(&self, key: ObjectKey) -> Option<&ObjectEntry> {
+        if key.namespace != self.namespace {
+            return None;
+        }
+        let slot = self.slots.get(key.slot as usize)?;
+        (slot.generation == key.generation)
+            .then_some(slot.entry.as_ref())
+            .flatten()
+    }
+
+    fn get_mut(&mut self, key: ObjectKey) -> Option<&mut ObjectEntry> {
+        if key.namespace != self.namespace {
+            return None;
+        }
+        let slot = self.slots.get_mut(key.slot as usize)?;
+        (slot.generation == key.generation)
+            .then_some(slot.entry.as_mut())
+            .flatten()
+    }
+
+    fn insert(&mut self, object_id: ObjectId, value: ErasedObject) -> XllResult<ObjectKey> {
+        let index = match self.free.pop() {
+            Some(index) => index,
+            None => {
+                let index = self.slots.len();
+                u32::try_from(index).map_err(|_| XllError::Domain {
+                    code: DomainErrorCode::Overflow,
+                })?;
+                self.slots.push(ObjectSlot {
+                    generation: 1,
+                    entry: None,
+                });
+                index
+            }
+        };
+
+        let slot = u32::try_from(index).map_err(|_| XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
+        })?;
+        let generation = self.slots[index].generation.max(1);
+        let key = ObjectKey {
+            namespace: self.namespace,
+            slot,
+            generation,
+        };
+        let entry = ObjectEntry {
+            object_id,
+            bindings: 1,
+            value,
+        };
+        debug_assert!(self.slots[index].entry.is_none());
+        self.slots[index].entry = Some(entry);
+        self.by_identity.insert(object_id, key);
+        Ok(key)
+    }
+
+    fn add_binding(&mut self, key: ObjectKey, object_id: ObjectId) -> XllResult<()> {
+        let entry = self.get_mut(key).ok_or(XllError::StaleHandle)?;
+        if entry.object_id != object_id {
+            return Err(XllError::StaleHandle);
+        }
+        entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
+            code: DomainErrorCode::Overflow,
+        })?;
+        Ok(())
+    }
+
+    fn release_binding(&mut self, key: ObjectKey) -> Option<ErasedObject> {
+        let index = key.slot as usize;
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != key.generation {
+            debug_assert!(false, "binding references a stale object key");
+            return None;
+        }
+        let entry = slot.entry.as_mut()?;
+        debug_assert!(entry.bindings > 0);
+        entry.bindings -= 1;
+        if entry.bindings != 0 {
+            return None;
+        }
+
+        let entry = slot.entry.take().expect("object entry was checked above");
+        self.by_identity.remove(&entry.object_id);
+        if let Some(next) = slot.generation.checked_add(1) {
+            slot.generation = next;
+            self.free.push(index);
+        }
+        Some(entry.value)
+    }
+
+    fn take_all(&mut self) -> Vec<ErasedObject> {
+        self.by_identity.clear();
+        self.free.clear();
+        let mut values = Vec::new();
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(entry) = slot.entry.take() {
+                values.push(entry.value);
+            }
+            if let Some(next) = slot.generation.checked_add(1) {
+                slot.generation = next;
+                self.free.push(index);
+            }
+        }
+        values
+    }
+}
+
+struct RetiredObject {
+    epoch: u64,
+    value: ErasedObject,
+}
+
+struct EpochState {
+    current: u64,
+    active: FxHashMap<ThreadId, (u64, usize)>,
+}
+
+struct EpochDomain {
+    state: Mutex<EpochState>,
+}
+
+impl EpochDomain {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(EpochState {
+                current: 1,
+                active: FxHashMap::default(),
+            }),
+        }
+    }
+
+    fn enter(self: &Arc<Self>) -> EpochGuard {
+        let thread = std::thread::current().id();
+        let mut state = self.state.lock();
+        let epoch = state.current;
+        let active = state.active.entry(thread).or_insert((epoch, 0));
+        active.1 = active.1.checked_add(1).expect("handle call depth overflow");
+        EpochGuard {
+            domain: Arc::clone(self),
+            thread,
+        }
+    }
+
+    fn retire_epoch(&self) -> u64 {
+        let mut state = self.state.lock();
+        let epoch = state.current;
+        state.current = state.current.saturating_add(1);
+        epoch
+    }
+
+    fn oldest_active(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .active
+            .values()
+            .map(|(epoch, _)| *epoch)
+            .min()
+    }
+}
+
+struct EpochGuard {
+    domain: Arc<EpochDomain>,
+    thread: ThreadId,
+}
+
+impl Drop for EpochGuard {
+    fn drop(&mut self) {
+        let mut state = self.domain.state.lock();
+        let Some((_, count)) = state.active.get_mut(&self.thread) else {
+            debug_assert!(false, "handle epoch guard is unbalanced");
+            return;
+        };
+        *count = count.checked_sub(1).expect("handle epoch guard underflow");
+        if *count == 0 {
+            state.active.remove(&self.thread);
+        }
+    }
+}
+
+/// Reclamation queue shared with call scopes. A runtime-specific registration
+/// is created only when a scope resolves a handle, so scalar Excel calls do
+/// not acquire an epoch or touch the queue.
+pub(crate) struct HandleReclaimer {
+    live: Mutex<ObjectRegistry>,
+    retired: Mutex<Vec<RetiredObject>>,
+    epoch: Arc<EpochDomain>,
+}
+
+impl HandleReclaimer {
+    fn new(namespace: u64) -> Self {
+        Self {
+            live: Mutex::new(ObjectRegistry::new(namespace)),
+            retired: Mutex::new(Vec::new()),
+            epoch: Arc::new(EpochDomain::new()),
+        }
+    }
+
+    fn retire(&self, mut value: ErasedObject, operation: &'static str) {
+        value.set_drop_operation(operation);
+        let epoch = self.epoch.retire_epoch();
+        self.retired.lock().push(RetiredObject { epoch, value });
+        self.reclaim();
+    }
+
+    fn retire_all(&self, values: impl IntoIterator<Item = ErasedObject>, operation: &'static str) {
+        let epoch = self.epoch.retire_epoch();
+        let mut retired = self.retired.lock();
+        retired.extend(values.into_iter().map(|mut value| {
+            value.set_drop_operation(operation);
+            RetiredObject { epoch, value }
+        }));
+        drop(retired);
+        self.reclaim();
+    }
+
+    fn reclaim(&self) {
+        let safe_before = self.epoch.oldest_active().unwrap_or(u64::MAX);
+        let mut ready = Vec::new();
+        {
+            let mut retired = self.retired.lock();
+            let mut pending = Vec::with_capacity(retired.len());
+            for entry in retired.drain(..) {
+                if entry.epoch < safe_before {
+                    ready.push(entry.value);
+                } else {
+                    pending.push(entry);
+                }
+            }
+            *retired = pending;
+        }
+        drop(ready);
+    }
+}
+
+struct CallRegistration {
+    reclaimer: Arc<HandleReclaimer>,
+    epoch: EpochGuard,
+}
+
+/// Epoch participation for one Excel callback scope.
+pub(crate) struct HandleCallGuard {
+    reclaimers: RefCell<Vec<CallRegistration>>,
+}
+
+impl HandleCallGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            reclaimers: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn register(&self, reclaimer: &Arc<HandleReclaimer>) {
+        let mut reclaimers = self.reclaimers.borrow_mut();
+        if !reclaimers
+            .iter()
+            .any(|registration| Arc::ptr_eq(&registration.reclaimer, reclaimer))
+        {
+            reclaimers.push(CallRegistration {
+                reclaimer: Arc::clone(reclaimer),
+                epoch: reclaimer.epoch.enter(),
+            });
+        }
+    }
+}
+
+impl Drop for HandleCallGuard {
+    fn drop(&mut self) {
+        let reclaimers = std::mem::take(self.reclaimers.get_mut());
+        for registration in reclaimers {
+            let reclaimer = registration.reclaimer;
+            drop(registration.epoch);
+            reclaimer.reclaim();
+        }
+    }
 }
 
 pub(crate) struct RegistryState {
     pub(crate) slots: Vec<BindingSlot>,
     pub(crate) free: Vec<usize>,
     pub(crate) live_bindings: usize,
-    pub(crate) objects: FxHashMap<ObjectId, ObjectEntry>,
     pub(crate) next_object_id: u64,
-}
-
-fn release_object_binding(state: &mut RegistryState, object_id: ObjectId) {
-    let remove = if let Some(entry) = state.objects.get_mut(&object_id) {
-        debug_assert!(entry.bindings > 0);
-        entry.bindings -= 1;
-        entry.bindings == 0
-    } else {
-        debug_assert!(false, "binding references a missing object entry");
-        false
-    };
-    if remove {
-        state.objects.remove(&object_id);
-    }
 }
 
 pub(crate) struct HandleRegistry {
@@ -378,20 +641,21 @@ pub(crate) struct HandleRegistry {
     pub(crate) state: RwLock<RegistryState>,
     pub(crate) published: PublishedBindings,
     pub(crate) cleanup: Arc<HandleCleanupState>,
+    pub(crate) reclaimer: Arc<HandleReclaimer>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
 pub(crate) struct PendingHandleValue<'a> {
     registry: &'a HandleRegistry,
-    value: Option<HandleObject>,
+    value: Option<ErasedObject>,
     operation: &'static str,
 }
 
 impl<'a> PendingHandleValue<'a> {
     pub(crate) fn new(
         registry: &'a HandleRegistry,
-        value: HandleObject,
+        value: ErasedObject,
         operation: &'static str,
     ) -> Self {
         Self {
@@ -401,16 +665,17 @@ impl<'a> PendingHandleValue<'a> {
         }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<HandleObject> {
+    pub(crate) fn slot(&mut self) -> &mut Option<ErasedObject> {
         &mut self.value
     }
 }
 
 impl Drop for PendingHandleValue<'_> {
     fn drop(&mut self) {
-        if let Some(value) = self.value.take() {
-            self.registry
-                .drop_values(std::iter::once(value), self.operation);
+        if let Some(mut value) = self.value.take() {
+            value.set_drop_operation(self.operation);
+            drop(value);
+            self.registry.reclaimer.reclaim();
         }
     }
 }
@@ -457,6 +722,8 @@ impl HandleRegistry {
         let secret = entropy[8..]
             .try_into()
             .expect("the handle MAC key slice has 32 bytes");
+        let cleanup = Arc::new(HandleCleanupState::new());
+        let reclaimer = Arc::new(HandleReclaimer::new(session));
         Self {
             session,
             secret,
@@ -466,11 +733,11 @@ impl HandleRegistry {
                 slots: Vec::new(),
                 free: Vec::new(),
                 live_bindings: 0,
-                objects: FxHashMap::default(),
                 next_object_id: 1,
             }),
             published: PublishedBindings::new(maximum_bindings),
-            cleanup: Arc::new(HandleCleanupState::new()),
+            cleanup,
+            reclaimer,
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: Mutex::new(None),
         }
@@ -518,7 +785,7 @@ impl HandleRegistry {
     where
         T: Send + Sync + 'static,
     {
-        let object = HandleObject::new(
+        let object = ErasedObject::new(
             value.take().expect("pending handle value is armed"),
             Arc::clone(&self.cleanup),
         );
@@ -529,7 +796,7 @@ impl HandleRegistry {
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<HandleObject>,
+        value: &mut Option<ErasedObject>,
         requested_object_id: Option<ObjectId>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
@@ -544,6 +811,7 @@ impl HandleRegistry {
                 code: DomainErrorCode::Overflow,
             });
         }
+        let mut objects = self.reclaimer.live.lock();
 
         let object = value.as_ref().expect("pending handle object is armed");
         if object.type_id != TypeId::of::<T>() {
@@ -559,9 +827,13 @@ impl HandleRegistry {
         }
         let object_id = requested_object_id.unwrap_or(ObjectId(state.next_object_id));
         let new_object_id = requested_object_id.is_none();
-        let existing_bindings = if let Some(entry) = state.objects.get(&object_id) {
-            if entry.type_id != TypeId::of::<T>() {
-                let actual_type = entry.type_name;
+        let existing_key = requested_object_id.and_then(|_| objects.key_for_identity(object_id));
+        if let Some(existing_key) = existing_key {
+            let entry = objects
+                .get(existing_key)
+                .expect("object identity index must point at a live entry");
+            if entry.value.type_id != TypeId::of::<T>() {
+                let actual_type = entry.value.type_name;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
                         expected_type = type_name::<T>(),
@@ -571,15 +843,13 @@ impl HandleRegistry {
                 }));
                 return Err(XllError::InvalidHandle);
             }
-            if entry.address != object.address() {
+            if entry.value.address() != object.address() {
                 return Err(XllError::StaleHandle);
             }
-            Some(entry.bindings.checked_add(1).ok_or(XllError::Domain {
+            entry.bindings.checked_add(1).ok_or(XllError::Domain {
                 code: DomainErrorCode::Overflow,
-            })?)
-        } else {
-            None
-        };
+            })?;
+        }
         if new_object_id {
             state
                 .next_object_id
@@ -588,6 +858,17 @@ impl HandleRegistry {
                     code: DomainErrorCode::Overflow,
                 })?;
         }
+
+        let object_key = match existing_key {
+            Some(existing_key) => {
+                objects.add_binding(existing_key, object_id)?;
+                existing_key
+            }
+            None => objects.insert(
+                object_id,
+                value.take().expect("pending handle object is armed"),
+            )?,
+        };
 
         let (index, slot, reused) = match state.free.pop() {
             Some(index) => {
@@ -615,31 +896,83 @@ impl HandleRegistry {
         if new_object_id {
             state.next_object_id += 1;
         }
-        match existing_bindings {
-            Some(bindings) => {
-                state
-                    .objects
-                    .get_mut(&object_id)
-                    .expect("validated object entry must remain present")
-                    .bindings = bindings;
-            }
-            None => {
-                state.objects.insert(
-                    object_id,
-                    ObjectEntry {
-                        address: object.address(),
-                        type_id: object.type_id,
-                        type_name: object.type_name,
-                        bindings: 1,
-                    },
-                );
-            }
-        }
-        let object = value.take().expect("pending handle object is armed");
-        let record = triomphe::Arc::new(BindingRecord::new(id, object_id, object));
+        let record = triomphe::Arc::new(BindingRecord::new(id, object_id, object_key));
         state.slots[index].record = Some(triomphe::Arc::clone(&record));
         self.published.insert(id, record);
         state.live_bindings += 1;
+        drop(objects);
+        drop(state);
+        #[cfg(any(test, feature = "shutdown-refinement"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
+        Ok((self.format_token(id), id, object_id, reused))
+    }
+
+    pub(crate) fn insert_existing_object_binding<T>(
+        &self,
+        object_id: ObjectId,
+        object_key: ObjectKey,
+    ) -> XllResult<(String, HandleId, ObjectId, bool)>
+    where
+        T: ExcelHandleObject,
+    {
+        let mut state = self.state.write();
+        if !self.is_open() {
+            return Err(XllError::Closing);
+        }
+        if state.live_bindings >= self.maximum_bindings {
+            return Err(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            });
+        }
+        let mut objects = self.reclaimer.live.lock();
+        let entry = objects.get(object_key).ok_or(XllError::StaleHandle)?;
+        if entry.object_id != object_id {
+            return Err(XllError::StaleHandle);
+        }
+        if entry.value.type_id != TypeId::of::<T>() {
+            let actual_type = entry.value.type_name;
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                tracing::warn!(
+                    expected_type = type_name::<T>(),
+                    actual_type,
+                    "Excel handle alias type mismatch"
+                );
+            }));
+            return Err(XllError::InvalidHandle);
+        }
+        entry.bindings.checked_add(1).ok_or(XllError::Domain {
+            code: DomainErrorCode::Overflow,
+        })?;
+        objects.add_binding(object_key, object_id)?;
+
+        let (index, slot, reused) = match state.free.pop() {
+            Some(index) => {
+                let slot = u32::try_from(index).map_err(|_| XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
+                })?;
+                (index, slot, true)
+            }
+            None => {
+                let index = state.slots.len();
+                let slot = u32::try_from(index).map_err(|_| XllError::Domain {
+                    code: DomainErrorCode::Overflow,
+                })?;
+                state.slots.push(BindingSlot {
+                    next_generation: 1,
+                    record: None,
+                });
+                (index, slot, false)
+            }
+        };
+        let id = HandleId {
+            slot,
+            generation: state.slots[index].next_generation.max(1),
+        };
+        let record = triomphe::Arc::new(BindingRecord::new(id, object_id, object_key));
+        state.slots[index].record = Some(triomphe::Arc::clone(&record));
+        self.published.insert(id, record);
+        state.live_bindings += 1;
+        drop(objects);
         drop(state);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
@@ -666,8 +999,12 @@ impl HandleRegistry {
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        let Some(value) = record.object.typed_ptr::<T>() else {
-            let actual_type = record.object.type_name;
+        let objects = self.reclaimer.live.lock();
+        let object = objects
+            .get(record.object_key)
+            .ok_or(XllError::StaleHandle)?;
+        let Some(value) = object.value.typed_ptr::<T>() else {
+            let actual_type = object.value.type_name;
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -678,8 +1015,10 @@ impl HandleRegistry {
             }));
             return Err(XllError::InvalidHandle);
         };
-        // SAFETY: `value` points to the live data payload retained by `record.object`.
+        // SAFETY: `value` points to the live data payload owned by the object
+        // registry while the read lock is held.
         let value = unsafe { value.as_ref().clone() };
+        drop(objects);
         drop(state);
         Ok(value)
     }
@@ -697,6 +1036,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
+        scope.register_handle_reclaimer(&self.reclaimer);
         let published_snapshot = self.published.load(id.slot);
         if let Some(record) = published_snapshot
             .get(id.slot)
@@ -705,8 +1045,15 @@ impl HandleRegistry {
             if !self.is_open() {
                 return Err(XllError::Closing);
             }
-            let Some(value) = record.object.typed_ptr::<T>() else {
-                let actual_type = record.object.type_name;
+            let state = self.state.read();
+            let objects = self.reclaimer.live.lock();
+            let object = objects
+                .get(record.object_key)
+                .ok_or(XllError::StaleHandle)?;
+            let Some(value) = object.value.typed_ptr::<T>() else {
+                let actual_type = object.value.type_name;
+                drop(objects);
+                drop(state);
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
                         expected_type = type_name::<T>(),
@@ -723,7 +1070,10 @@ impl HandleRegistry {
             }
 
             let object_id = record.object_id;
-            return Ok(Handle::new(published_snapshot, id, object_id, value, scope));
+            let object_key = record.object_key;
+            drop(objects);
+            drop(state);
+            return Ok(Handle::new(object_id, object_key, value, scope));
         }
         drop(published_snapshot);
 
@@ -756,8 +1106,13 @@ impl HandleRegistry {
             .get(id.slot)
             .filter(|published| triomphe::Arc::ptr_eq(published, record))
             .ok_or(XllError::StaleHandle)?;
-        let Some(value) = record.object.typed_ptr::<T>() else {
-            let actual_type = record.object.type_name;
+        let objects = self.reclaimer.live.lock();
+        let object = objects
+            .get(record.object_key)
+            .ok_or(XllError::StaleHandle)?;
+        let Some(value) = object.value.typed_ptr::<T>() else {
+            let actual_type = object.value.type_name;
+            drop(objects);
             drop(state);
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -773,8 +1128,10 @@ impl HandleRegistry {
             return Err(XllError::StaleHandle);
         }
         let object_id = record.object_id;
+        let object_key = record.object_key;
+        drop(objects);
         drop(state);
-        Ok(Handle::new(published_snapshot, id, object_id, value, scope))
+        Ok(Handle::new(object_id, object_key, value, scope))
     }
 
     #[cfg(test)]
@@ -790,22 +1147,30 @@ impl HandleRegistry {
         }
         let slot = state
             .slots
-            .get_mut(id.slot as usize)
+            .get(id.slot as usize)
             .ok_or(XllError::StaleHandle)?;
         let record = slot
             .record
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        if record.object.typed_ptr::<T>().is_none() {
+        let mut objects = self.reclaimer.live.lock();
+        let object = objects
+            .get(record.object_key)
+            .ok_or(XllError::StaleHandle)?;
+        if object.value.typed_ptr::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
         let record = triomphe::Arc::clone(record);
-        let object_id = record.object_id;
+        let object_key = record.object_key;
         record
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
         self.published.remove(id, &record);
+        let slot = state
+            .slots
+            .get_mut(id.slot as usize)
+            .expect("binding slot was checked above");
         drop(slot.record.take().expect("record was checked above"));
         let reusable = if let Some(next) = slot.next_generation.checked_add(1) {
             slot.next_generation = next;
@@ -813,38 +1178,27 @@ impl HandleRegistry {
         } else {
             false
         };
-        release_object_binding(&mut state, object_id);
+        let value = objects.release_binding(object_key);
+        drop(objects);
         state.live_bindings -= 1;
         if reusable {
             state.free.push(id.slot as usize);
         }
         drop(state);
+        if let Some(value) = value {
+            self.reclaimer.retire(value, "handle registry test removal");
+        }
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "The kind-reporting wrapper is used by lifecycle trace production"
-    )]
-    pub(crate) fn remove_any(&self, token: &str) -> XllResult<HandleObject> {
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let result = self
-            .remove_any_with_kind(token, |_| {})
-            .map(|(value, _reusable)| value);
-        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-        let result = self
-            .remove_any_with_kind(token)
-            .map(|(value, _reusable)| value);
-        result
-    }
-
-    fn remove_any_with_kind(
+    fn remove_with_kind(
         &self,
         token: &str,
+        operation: &'static str,
         #[cfg(any(test, feature = "handle-refinement-trace"))] on_linearized: impl FnOnce(bool),
-    ) -> XllResult<(HandleObject, bool)> {
+    ) -> XllResult<bool> {
         let verified = self.parse_token(HandleToken::new(token))?;
         let id = verified.id;
         let mut state = self.state.write();
@@ -853,30 +1207,34 @@ impl HandleRegistry {
         }
         let slot = state
             .slots
-            .get_mut(id.slot as usize)
+            .get(id.slot as usize)
             .ok_or(XllError::StaleHandle)?;
         let record = slot
             .record
             .as_ref()
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
+        let mut objects = self.reclaimer.live.lock();
         let record = triomphe::Arc::clone(record);
-        let object_id = record.object_id;
+        let object_key = record.object_key;
         record
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
         self.published.remove(id, &record);
+        let slot = state
+            .slots
+            .get_mut(id.slot as usize)
+            .expect("binding slot was checked above");
         let slot_record = slot.record.take().expect("record was checked above");
-        let object = triomphe::Arc::try_unwrap(slot_record)
-            .map(|r| r.object)
-            .unwrap_or_else(|r| r.object.clone());
+        drop(slot_record);
         let reusable = if let Some(next) = slot.next_generation.checked_add(1) {
             slot.next_generation = next;
             true
         } else {
             false
         };
-        release_object_binding(&mut state, object_id);
+        let value = objects.release_binding(object_key);
+        drop(objects);
         state.live_bindings -= 1;
         if reusable {
             state.free.push(id.slot as usize);
@@ -884,27 +1242,16 @@ impl HandleRegistry {
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         on_linearized(reusable);
         drop(state);
+        if let Some(value) = value {
+            self.reclaimer.retire(value, operation);
+        }
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
-        Ok((object, reusable))
-    }
-
-    pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
-        if let Err(error) = result {
-            self.cleanup.record(error);
-        }
+        Ok(reusable)
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
         self.cleanup.result()
-    }
-
-    pub(crate) fn drop_values(
-        &self,
-        values: impl IntoIterator<Item = HandleObject>,
-        operation: &'static str,
-    ) {
-        self.record_cleanup_result(drop_handle_objects(values, operation));
     }
 
     pub(crate) fn remove_and_drop(&self, token: &str, operation: &'static str) {
@@ -917,15 +1264,10 @@ impl HandleRegistry {
         operation: &'static str,
     ) -> Option<bool> {
         #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let result = self.remove_any_with_kind(token, |_| {});
+        let result = self.remove_with_kind(token, operation, |_| {});
         #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-        let result = self.remove_any_with_kind(token);
-        if let Ok((value, reusable)) = result {
-            self.drop_values(std::iter::once(value), operation);
-            Some(reusable)
-        } else {
-            None
-        }
+        let result = self.remove_with_kind(token, operation);
+        result.ok()
     }
 
     #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -935,18 +1277,12 @@ impl HandleRegistry {
         operation: &'static str,
         on_linearized: impl FnOnce(bool),
     ) -> Option<bool> {
-        if let Ok((value, reusable)) = self.remove_any_with_kind(token, on_linearized) {
-            self.drop_values(std::iter::once(value), operation);
-            Some(reusable)
-        } else {
-            None
-        }
+        self.remove_with_kind(token, operation, on_linearized).ok()
     }
 
-    pub(crate) fn take_values_for_close(&self) -> Vec<triomphe::Arc<BindingRecord>> {
+    pub(crate) fn retire_values_for_close(&self) -> usize {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
-        let mut records = Vec::with_capacity(live_bindings);
         state.free.clear();
         self.published.clear();
         for index in 0..state.slots.len() {
@@ -955,21 +1291,22 @@ impl HandleRegistry {
                 record
                     .state
                     .store(BindingState::Retired as u8, Ordering::Release);
-                records.push(record);
+                drop(record);
             }
             if let Some(next) = slot.next_generation.checked_add(1) {
                 slot.next_generation = next;
                 state.free.push(index);
             }
         }
-        state.objects.clear();
+        let values = self.reclaimer.live.lock().take_all();
         state.live_bindings = 0;
         drop(state);
+        self.reclaimer.retire_all(values, "handle registry close");
         #[cfg(any(test, feature = "shutdown-refinement"))]
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }
-        records
+        live_bindings
     }
 
     /// Reject new token resolutions while the runtime drains topic and
@@ -995,8 +1332,8 @@ impl HandleRegistry {
         if HandleRegistryPhase::from_raw(previous) == HandleRegistryPhase::Closed {
             return self.cleanup_result();
         }
-        let records = self.take_values_for_close();
-        self.record_cleanup_result(drop_binding_records(records, "handle registry close"));
+        self.retire_values_for_close();
+        self.reclaimer.reclaim();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()

@@ -102,11 +102,11 @@ where
     A: Addin,
 {
     std::hint::black_box(crate::crt::effective_crt_policy());
-    let close_epoch = runtime.close_epoch();
-    let mut open_attempt = None;
-    let mut callbacks = HostCallbackSession::new();
+    let removal_epoch = runtime.removal_epoch();
+    let mut transaction = None;
     let result = catch_unwind(AssertUnwindSafe(|| {
         if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending {
+            let mut callbacks = HostCallbackSession::new();
             let outcome = rollback_open::<A>(runtime, &mut callbacks);
             if !outcome.unload_safe() {
                 let error = XllError::Internal {
@@ -121,24 +121,22 @@ where
         // A final removal that overlapped recovery of a previous failed open
         // owns the terminal outcome. Do not resurrect the runtime after that
         // close has already completed.
-        if runtime.close_epoch() != close_epoch {
+        if runtime.removal_epoch() != removal_epoch {
             return Err(XllError::Closing);
         }
 
-        open_attempt = Some(runtime.begin_open_if_epoch(close_epoch)?);
-        retry_metadata_debt(runtime, &mut callbacks)?;
+        transaction = Some(OpenTransaction::begin(runtime, removal_epoch)?);
+        let transaction = transaction
+            .as_mut()
+            .expect("the open transaction was installed");
+        retry_metadata_debt(runtime, transaction.callbacks_mut())?;
         let registrations = open_addin_inner::<A>(
             runtime,
             BuildInfo::new(addin_id.clone(), version, target),
             descriptors,
-            &mut callbacks,
+            transaction.callbacks_mut(),
         )?;
-        runtime.finish_open(
-            open_attempt
-                .as_mut()
-                .expect("the open attempt was installed"),
-            registrations,
-        )
+        transaction.finish(registrations)
     }));
 
     match result {
@@ -149,15 +147,71 @@ where
         Ok(Err(error)) => {
             write_startup_log(addin_id, &format!("xlAutoOpen failed: {error}"));
             report_boundary_error("xlAutoOpen", &error);
-            rollback_active_open::<A>(runtime, open_attempt.as_mut(), &mut callbacks);
+            if let Some(transaction) = transaction.as_mut() {
+                transaction.rollback();
+            }
             0
         }
         Err(_) => {
             let error = XllError::Panic;
             write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
-            rollback_active_open::<A>(runtime, open_attempt.as_mut(), &mut callbacks);
+            if let Some(transaction) = transaction.as_mut() {
+                transaction.rollback();
+            }
             0
+        }
+    }
+}
+
+/// Owns one logical open attempt, including the callback session that can
+/// undo host mutations made by that attempt. The caller must explicitly call
+/// [`Self::finish`] or [`Self::rollback`]; dropping an active transaction only
+/// quarantines the runtime and never performs implicit callback cleanup.
+struct OpenTransaction<'runtime, A: Addin> {
+    runtime: &'runtime Runtime<A>,
+    callbacks: HostCallbackSession,
+    attempt: Option<crate::runtime::OpenAttemptGuard<'runtime, A>>,
+}
+
+impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
+    fn begin(runtime: &'runtime Runtime<A>, removal_epoch: u64) -> XllResult<Self> {
+        Ok(Self {
+            runtime,
+            callbacks: HostCallbackSession::new(),
+            attempt: Some(runtime.begin_open_if_epoch(removal_epoch)?),
+        })
+    }
+
+    fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
+        &mut self.callbacks
+    }
+
+    fn finish(&mut self, registrations: Vec<crate::RegistrationId>) -> XllResult<()> {
+        self.runtime.finish_open(
+            self.attempt
+                .as_mut()
+                .expect("an open transaction always owns its attempt"),
+            registrations,
+        )
+    }
+
+    fn rollback(&mut self) {
+        rollback_active_open(self.runtime, self.attempt.as_mut(), &mut self.callbacks);
+    }
+}
+
+impl<A: Addin> Drop for OpenTransaction<'_, A> {
+    fn drop(&mut self) {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(crate::runtime::OpenAttemptGuard::is_active)
+        {
+            // A dropped transaction must not call Excel. It is an unrecovered
+            // protocol failure, so retain the fail-safe terminal state for a
+            // later explicit removal/reload decision.
+            self.runtime.quarantine();
         }
     }
 }
@@ -577,7 +631,7 @@ where
     let registration_state_known = !runtime.registration_state_unknown();
     let mut finalized = false;
     if local_quiescent && host_callbacks_detached && registration_state_known {
-        let prerequisites = crate::runtime::OpenRollbackPrerequisites {
+        let prerequisites = crate::runtime::OpenRollbackQuiescencePrerequisites {
             exports: exports_drained,
             rtd: rtd_quiescent
                 .expect("RTD certificate is present when rollback is local-quiescent"),
@@ -627,10 +681,7 @@ pub fn remove_addin<A>(runtime: &Runtime<A>) -> i32
 where
     A: Addin,
 {
-    let mut callbacks = HostCallbackSession::new();
-    let close_result = catch_unwind(AssertUnwindSafe(|| {
-        remove_addin_inner::<A>(runtime, &mut callbacks)
-    }));
+    let close_result = catch_unwind(AssertUnwindSafe(|| remove_addin_inner::<A>(runtime)));
     let success = match close_result {
         Ok(success) => success,
         Err(_) => {
@@ -641,21 +692,21 @@ where
         }
     };
     match success {
-        CloseSuccess::AlreadyClosed => {
+        RemovalSuccess::AlreadyClosed => {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             runtime.record_composition_already_closed_return();
             1
         }
-        CloseSuccess::Quarantined => 1,
+        RemovalSuccess::Quarantined => 1,
         #[cfg(not(any(test, feature = "shutdown-refinement")))]
-        CloseSuccess::Closed {
+        RemovalSuccess::Closed {
             witness: _witness,
-            close_attempt: _close_attempt,
+            removal_attempt: _removal_attempt,
         } => 1,
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        CloseSuccess::Closed {
+        RemovalSuccess::Closed {
             witness,
-            close_attempt: _close_attempt,
+            removal_attempt: _removal_attempt,
         } => {
             runtime
                 .record_ghost_returned_success(witness)
@@ -672,31 +723,72 @@ where
     }
 }
 
-enum CloseSuccess<'runtime, A: Addin> {
+enum RemovalSuccess<'runtime, A: Addin> {
     AlreadyClosed,
     Quarantined,
     Closed {
         witness: crate::runtime::ClosedWitness,
-        close_attempt: crate::runtime::CloseAttemptGuard<'runtime, A>,
+        removal_attempt: crate::runtime::RemovalAttemptGuard<'runtime, A>,
     },
 }
 
 struct QuarantineSignal;
 
-fn remove_addin_inner<'runtime, A>(
+/// Owns the terminal-removal attempt and its callback session. Cleanup is
+/// explicit: the transaction is consumed only after a close certificate is
+/// produced, while an active drop can only preserve quarantine.
+struct RemovalTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
-    callbacks: &mut HostCallbackSession,
-) -> CloseSuccess<'runtime, A>
+    callbacks: HostCallbackSession,
+    attempt: Option<crate::runtime::RemovalAttemptGuard<'runtime, A>>,
+}
+
+impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
+    fn begin(runtime: &'runtime Runtime<A>) -> Option<Self> {
+        Some(Self {
+            runtime,
+            callbacks: HostCallbackSession::new(),
+            attempt: Some(runtime.begin_final_removal()?),
+        })
+    }
+
+    fn callbacks(&self) -> &HostCallbackSession {
+        &self.callbacks
+    }
+
+    fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
+        &mut self.callbacks
+    }
+
+    fn into_attempt(mut self) -> crate::runtime::RemovalAttemptGuard<'runtime, A> {
+        self.attempt
+            .take()
+            .expect("a removal transaction always owns its attempt")
+    }
+}
+
+impl<A: Addin> Drop for RemovalTransaction<'_, A> {
+    fn drop(&mut self) {
+        if self.attempt.is_some() {
+            // No callback or partial cleanup is legal from Drop. The runtime
+            // remains terminally quarantined until an explicit boundary can
+            // account for every outstanding resource.
+            self.runtime.quarantine();
+        }
+    }
+}
+
+fn remove_addin_inner<'runtime, A>(runtime: &'runtime Runtime<A>) -> RemovalSuccess<'runtime, A>
 where
     A: Addin,
 {
     match catch_unwind(AssertUnwindSafe(|| {
-        remove_addin_inner_unchecked::<A>(runtime, callbacks)
+        remove_addin_inner_unchecked::<A>(runtime)
     })) {
         Ok(success) => success,
         Err(payload) => {
             if payload.is::<QuarantineSignal>() {
-                CloseSuccess::Quarantined
+                RemovalSuccess::Quarantined
             } else {
                 std::panic::resume_unwind(payload)
             }
@@ -706,18 +798,17 @@ where
 
 fn remove_addin_inner_unchecked<'runtime, A>(
     runtime: &'runtime Runtime<A>,
-    callbacks: &mut HostCallbackSession,
-) -> CloseSuccess<'runtime, A>
+) -> RemovalSuccess<'runtime, A>
 where
     A: Addin,
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    // Even an apparently closed runtime must pass through begin_final_close:
+    // Even an apparently closed runtime must pass through begin_final_removal:
     // a concurrent xlAutoOpen may already have sampled the previous close
     // epoch without having acquired its open-attempt token yet.
-    let Some(close_attempt) = runtime.begin_final_close() else {
-        return CloseSuccess::AlreadyClosed;
+    let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
+        return RemovalSuccess::AlreadyClosed;
     };
     crate::ingress::global_ingress().begin_close_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -769,7 +860,7 @@ where
 
     let registrations = runtime.registrations();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_pending(callbacks, &registrations)
+        HostRegistrar::unregister_pending(transaction.callbacks_mut(), &registrations)
     })) {
         for (registration, error) in &outcome.failed {
             if registration.cleanup_severity().is_unload_unsafe() {
@@ -834,9 +925,10 @@ where
     }
 
     let event_registrations = runtime.event_registrations();
-    if !callbacks.permits_callbacks() {
+    if !transaction.callbacks().permits_callbacks() {
         if !event_registrations.is_empty() {
-            let error = callbacks
+            let error = transaction
+                .callbacks()
                 .terminal_status()
                 .map(|status| XllError::ExcelApi {
                     function: "xlEventRegister(unregister suppressed)",
@@ -861,7 +953,7 @@ where
             }
         }
     } else if let Ok(event_outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_events_detailed(callbacks, &event_registrations)
+        HostRegistrar::unregister_events_detailed(transaction.callbacks_mut(), &event_registrations)
     })) {
         for (_, error) in &event_outcome.failed {
             report_boundary_error("xlAutoRemove event unregister", error);
@@ -1078,7 +1170,7 @@ where
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RtdDrained);
 
     let certificate = runtime
-        .certify_close(crate::runtime::ClosePrerequisites {
+        .certify_logical_quiescence(crate::runtime::RemovalQuiescencePrerequisites {
             exports: exports_drained,
             rtd: rtd_quiescent,
             host_callbacks,
@@ -1097,7 +1189,7 @@ where
                 &error,
             )
         });
-    let closed_witness = runtime.finish_close(certificate).unwrap_or_else(|error| {
+    let closed_witness = runtime.finish_removal(certificate).unwrap_or_else(|error| {
         handle_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::CloseInvariantViolation,
@@ -1106,9 +1198,9 @@ where
         )
     });
 
-    CloseSuccess::Closed {
+    RemovalSuccess::Closed {
         witness: closed_witness,
-        close_attempt,
+        removal_attempt: transaction.into_attempt(),
     }
 }
 
@@ -1152,10 +1244,10 @@ fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
     quarantine_runtime_resources(runtime);
 }
 
-fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, hazard: crate::shutdown::UnloadHazard) {
+fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdown::UnloadHazard) {
     runtime.quarantine();
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.ghost_quarantine(hazard.ghost_failure());
+    runtime.ghost_quarantine(_hazard.ghost_failure());
     quarantine_runtime_resources(runtime);
 }
 
@@ -1334,7 +1426,7 @@ mod tests {
     #[test]
     fn xl_auto_close_on_closed_runtime_invalidates_a_pending_open_epoch() {
         let runtime = Runtime::<LayersPanic>::new();
-        let stale_epoch = runtime.close_epoch();
+        let stale_epoch = runtime.removal_epoch();
 
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
         assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
@@ -1500,8 +1592,7 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        let mut callbacks = HostCallbackSession::new();
-        remove_addin_inner::<RetryClose>(&runtime, &mut callbacks);
+        remove_addin_inner::<RetryClose>(&runtime);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(
@@ -1542,8 +1633,7 @@ mod tests {
         runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let mut callbacks = HostCallbackSession::new();
-        remove_addin_inner::<CleanupPanic>(&runtime, &mut callbacks);
+        remove_addin_inner::<CleanupPanic>(&runtime);
 
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(drops.load(Ordering::Acquire), 0);
@@ -1575,12 +1665,9 @@ mod tests {
         runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let result = {
-            let mut callbacks = HostCallbackSession::new();
-            remove_addin_inner::<QuiesceFailure>(&runtime, &mut callbacks)
-        };
+        let result = { remove_addin_inner::<QuiesceFailure>(&runtime) };
 
-        assert!(matches!(result, CloseSuccess::Quarantined));
+        assert!(matches!(result, RemovalSuccess::Quarantined));
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
         assert_eq!(drops.load(Ordering::Acquire), 0);
         assert_eq!(host_auto_close::<QuiesceFailure>(&runtime), 1);
@@ -1652,7 +1739,7 @@ mod tests {
 
     struct TraceHandle;
 
-    impl crate::ExcelHandleObject for TraceHandle {}
+    impl crate::handle::ExcelHandleObject for TraceHandle {}
 
     struct TraceSubscription;
 
@@ -1759,16 +1846,17 @@ mod tests {
             )))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let source = std::sync::Arc::new(TraceSource {
+        let source = crate::RtdSourceHandle::new(TraceSource {
             sink: std::sync::Arc::clone(&trace_sink),
-        });
+        })
+        .unwrap();
         let prepared = subscriptions
             .prepare(
                 &source,
                 crate::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
-        let key = prepared.key().clone();
+        let key = *prepared.key();
         prepared.commit();
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(1), &key)
@@ -2008,9 +2096,9 @@ mod tests {
         crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
         crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::Panic);
 
-        let first = runtime.begin_final_close().unwrap();
+        let first = runtime.begin_final_removal().unwrap();
         drop(first);
-        let second = runtime.begin_final_close().unwrap();
+        let second = runtime.begin_final_removal().unwrap();
         drop(second);
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
@@ -2090,12 +2178,12 @@ mod tests {
         let (owner_tx, owner_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let close_waiter = std::thread::spawn(move || {
-            let close_attempt = closing_runtime
-                .begin_final_close()
+            let removal_attempt = closing_runtime
+                .begin_final_removal()
                 .expect("final close must acquire after open rejection");
             owner_tx.send(()).expect("final close owner signal");
             release_rx.recv().expect("final close release signal");
-            drop(close_attempt);
+            drop(removal_attempt);
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while uncommitted.phase() != crate::LifecyclePhase::Closing
@@ -2135,17 +2223,17 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let success = remove_addin_inner::<CleanClose>(&runtime, &mut HostCallbackSession::new());
+        let success = remove_addin_inner::<CleanClose>(&runtime);
         assert!(runtime.begin_open().is_err());
-        let CloseSuccess::Closed {
+        let RemovalSuccess::Closed {
             witness,
-            close_attempt,
+            removal_attempt,
         } = success
         else {
             panic!("test close must own the close attempt");
         };
         runtime.record_ghost_returned_success(witness).unwrap();
-        drop(close_attempt);
+        drop(removal_attempt);
 
         let mut reopened = runtime.begin_open().unwrap();
         runtime.publish((), ());
@@ -2355,9 +2443,9 @@ mod tests {
             .expect("async close-order task did not start");
 
         crate::test_callback::set_terminal(XLF_UNREGISTER, XLRET_ABORT);
-        let close = remove_addin_inner::<CleanClose>(runtime, &mut HostCallbackSession::new());
+        let close = remove_addin_inner::<CleanClose>(runtime);
 
-        assert!(matches!(close, CloseSuccess::Quarantined));
+        assert!(matches!(close, RemovalSuccess::Quarantined));
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
         assert_eq!(
             crate::test_callback::callback_order(),
@@ -2422,7 +2510,7 @@ mod tests {
         }
     }
 
-    impl crate::ExcelHandleObject for OrderedHandle {}
+    impl crate::handle::ExcelHandleObject for OrderedHandle {}
 
     impl Addin for OrderedClose {
         type State = OrderedState;
@@ -2466,13 +2554,14 @@ mod tests {
         let server = subscriptions
             .register_server(crate::subscription::ServerGeneration(1))
             .unwrap();
-        let source = std::sync::Arc::new(OrderedSource {
+        let source = crate::RtdSourceHandle::new(OrderedSource {
             events: std::sync::Arc::clone(&events),
-        });
+        })
+        .unwrap();
         let prepared = subscriptions
             .prepare(&source, crate::RtdTopic::single("ordered").unwrap())
             .unwrap();
-        let key = prepared.key().clone();
+        let key = *prepared.key();
         prepared.commit();
         let conn = subscriptions
             .connect_transaction(&server, crate::subscription::TopicId(1), &key)

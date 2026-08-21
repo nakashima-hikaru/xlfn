@@ -1,43 +1,4 @@
-use super::*;
 use std::cell::RefCell;
-
-pub(crate) fn drop_handle_objects(
-    values: impl IntoIterator<Item = HandleObject>,
-    operation: &'static str,
-) -> XllResult<()> {
-    let mut failure = None;
-    for value in values {
-        if catch_unwind(AssertUnwindSafe(|| drop(value))).is_err() {
-            crate::diagnostics::report_no_unwind(operation, &XllError::Panic);
-            if failure.is_none() {
-                failure = Some(XllError::Panic);
-            }
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-pub(crate) fn drop_binding_records(
-    records: impl IntoIterator<Item = triomphe::Arc<BindingRecord>>,
-    operation: &'static str,
-) -> XllResult<()> {
-    let mut failure = None;
-    for record in records {
-        if catch_unwind(AssertUnwindSafe(|| drop(record))).is_err() {
-            crate::diagnostics::report_no_unwind(operation, &XllError::Panic);
-            if failure.is_none() {
-                failure = Some(XllError::Panic);
-            }
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
 
 pub(crate) fn encode_tag(tag: &[u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

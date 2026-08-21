@@ -6,13 +6,34 @@ use crate::{
     XllResult,
 };
 use std::marker::PhantomData;
-use std::ops::Index;
-use std::rc::Rc;
-use std::slice;
+#[cfg(test)]
+use xlfn_sys::XLOPER12Array;
 use xlfn_sys::{
-    XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT,
-    XLTYPE_MASK, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_STR,
+    XLOPER12, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL,
+    XLTYPE_NUM, XLTYPE_STR,
 };
+
+/// Borrowed call-scoped views used while converting one worksheet call.
+pub mod borrowed;
+/// Excel serial-date policy and value types.
+pub mod date;
+/// Internal semantic identity support used by generated input conversion.
+#[doc(hidden)]
+pub mod identity;
+/// Input conversion traits and presence/default handling.
+pub mod input;
+/// Owned rectangular and bounded collection values.
+pub mod matrix;
+/// Output conversion traits and return-cell representations.
+pub mod output;
+/// Raw, borrowed views over Excel's XLOPER12 input representation.
+pub mod raw;
+
+pub use date::{ExcelDateSystem, ExcelSerialDate};
+pub(crate) use matrix::validate_matrix_dimensions;
+pub use matrix::{BoundedVarArgs, Column, Matrix, Row};
+pub(crate) use raw::{GridView, encode_raw_value};
+pub use raw::{XlArrayRef, XlStrRef, XlValueRef};
 
 const MAX_UTF16_UNITS: usize = 32_767;
 const EXCEL_MAX_ROWS: usize = 1_048_576;
@@ -25,441 +46,6 @@ const MAX_ARRAY_ELEMENTS: usize = 4_000_000;
 pub(crate) const MAX_ARRAY_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "32"))]
 pub(crate) const MAX_ARRAY_BYTES: usize = 256 * 1024 * 1024;
-
-#[derive(Clone, Copy)]
-pub struct XlValueRef<'call> {
-    raw: &'call XLOPER12,
-    _not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-enum GridView<'call> {
-    Scalar(XlValueRef<'call>),
-    Multi {
-        rows: usize,
-        columns: usize,
-        values: *mut XLOPER12,
-        _lifetime: PhantomData<&'call XLOPER12>,
-    },
-}
-
-impl<'call> GridView<'call> {
-    fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        if value.base_type() == XLTYPE_MULTI {
-            let array = value.array(argument)?;
-            Ok(Self::Multi {
-                rows: array.rows as usize,
-                columns: array.columns as usize,
-                values: array.values,
-                _lifetime: PhantomData,
-            })
-        } else {
-            Ok(Self::Scalar(value))
-        }
-    }
-
-    const fn shape(&self) -> (usize, usize) {
-        match self {
-            Self::Scalar(_) => (1, 1),
-            Self::Multi { rows, columns, .. } => (*rows, *columns),
-        }
-    }
-
-    fn element(&self, index: usize) -> XllResult<XlValueRef<'call>> {
-        match self {
-            Self::Scalar(value) if index == 0 => Ok(*value),
-            Self::Scalar(_) => Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::GRID_INDEX,
-            }),
-            Self::Multi { values, .. } => {
-                // SAFETY: `array` validation established the contiguous range,
-                // and callers only request indices within the validated shape.
-                unsafe { XlValueRef::from_raw(values.add(index)) }
-            }
-        }
-    }
-}
-
-impl<'call> XlValueRef<'call> {
-    /// Creates a call-scoped view over an argument supplied by Excel.
-    ///
-    /// # Safety
-    ///
-    /// `raw` must be non-null, aligned, and point to a live XLOPER12 for
-    /// `'call`. Any nested pointers selected by `xltype` must satisfy the
-    /// corresponding Excel SDK contract.
-    pub unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
-        // SAFETY: The caller guarantees a live, aligned XLOPER12 for 'call.
-        let raw = unsafe { raw.as_ref() }
-            .ok_or_else(|| XllError::input("<raw>", InputError::NullPointer))?;
-        if raw.xltype & !(XLTYPE_MASK | XLBIT_XL_FREE | XLBIT_DLL_FREE) != 0 {
-            return Err(XllError::input(
-                "<raw>",
-                InputError::Malformed("unknown xltype flag"),
-            ));
-        }
-        Ok(Self {
-            raw,
-            _not_send_or_sync: PhantomData,
-        })
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn base_type(&self) -> u32 {
-        self.raw.base_type()
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn raw(&self) -> &'call XLOPER12 {
-        self.raw
-    }
-
-    /// Returns this value as a finite Excel number without allocating.
-    #[inline]
-    pub fn as_f64(self) -> XllResult<f64> {
-        <f64 as FromExcel>::from_excel(self, "<array cell>")
-    }
-
-    /// Returns this value as an Excel boolean without allocating.
-    #[inline]
-    pub fn as_bool(self) -> XllResult<bool> {
-        <bool as FromExcel>::from_excel(self, "<array cell>")
-    }
-
-    /// Borrows the UTF-16 payload of an Excel string without decoding it.
-    #[inline]
-    pub fn as_str(self) -> XllResult<XlStrRef<'call>> {
-        self.as_str_with_argument("<array cell>")
-    }
-
-    /// Borrows an Excel string while preserving the caller's argument name in
-    /// conversion errors. This is used by allocation-free generated enum
-    /// conversions.
-    #[inline]
-    pub fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
-        Ok(XlStrRef {
-            utf16: self.utf16(argument)?,
-            argument,
-        })
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn is_blank(self) -> bool {
-        self.base_type() == XLTYPE_NIL
-    }
-
-    fn wrong_type(&self, argument: &'static str, expected: &'static str) -> XllError {
-        if self.base_type() == XLTYPE_ERR {
-            // SAFETY: XLTYPE_ERR selects the error union member.
-            let code = unsafe { self.raw.value.error };
-            return ExcelError::from_code(code).map_or_else(
-                || XllError::input(argument, InputError::Malformed("unknown error code")),
-                XllError::ExcelValue,
-            );
-        }
-        XllError::input(
-            argument,
-            InputError::WrongType {
-                expected,
-                actual: self.base_type(),
-            },
-        )
-    }
-
-    pub(crate) fn utf16(&self, argument: &'static str) -> XllResult<&'call [u16]> {
-        if self.base_type() != XLTYPE_STR {
-            return Err(self.wrong_type(argument, "string"));
-        }
-        // SAFETY: XLTYPE_STR selects the string union member.
-        let pointer = unsafe { self.raw.value.string };
-        if pointer.is_null() {
-            return Err(XllError::input(argument, InputError::NullPointer));
-        }
-        // SAFETY: Excel strings begin with one readable length code unit.
-        let length = unsafe { *pointer } as usize;
-        if length > MAX_UTF16_UNITS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: MAX_UTF16_UNITS,
-                    actual: length,
-                },
-            ));
-        }
-        // SAFETY: The Excel string contract guarantees length following units.
-        Ok(unsafe { slice::from_raw_parts(pointer.add(1), length) })
-    }
-
-    pub(crate) fn array(&self, argument: &'static str) -> XllResult<XLOPER12Array> {
-        if self.base_type() != XLTYPE_MULTI {
-            return Err(self.wrong_type(argument, "array"));
-        }
-        // SAFETY: XLTYPE_MULTI selects the array union member.
-        let array = unsafe { self.raw.value.array };
-        if array.rows < 0 || array.columns < 0 {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("negative array dimension"),
-            ));
-        }
-        let rows = array.rows as usize;
-        let columns = array.columns as usize;
-        if rows > EXCEL_MAX_ROWS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_ROWS,
-                    actual: rows,
-                },
-            ));
-        }
-        if columns > EXCEL_MAX_COLUMNS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_COLUMNS,
-                    actual: columns,
-                },
-            ));
-        }
-        let elements = rows.checked_mul(columns).ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("array dimension overflow"))
-        })?;
-        if elements > MAX_ARRAY_ELEMENTS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_ELEMENTS,
-                    actual: elements,
-                },
-            ));
-        }
-        let bytes = elements
-            .checked_mul(std::mem::size_of::<XLOPER12>())
-            .ok_or_else(|| {
-                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-            })?;
-        if bytes > MAX_ARRAY_BYTES {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_BYTES,
-                    actual: bytes,
-                },
-            ));
-        }
-        if elements != 0 && array.values.is_null() {
-            return Err(XllError::input(argument, InputError::NullPointer));
-        }
-        if elements != 0
-            && !(array.values as usize).is_multiple_of(std::mem::align_of::<XLOPER12>())
-        {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("misaligned array pointer"),
-            ));
-        }
-        Ok(array)
-    }
-}
-
-/// A call-scoped, allocation-free view of an Excel UTF-16 string.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct XlStrRef<'call> {
-    utf16: &'call [u16],
-    argument: &'static str,
-}
-
-impl<'call> XlStrRef<'call> {
-    #[must_use]
-    #[inline]
-    pub const fn as_utf16(self) -> &'call [u16] {
-        self.utf16
-    }
-
-    pub fn chars(self) -> impl Iterator<Item = Result<char, std::char::DecodeUtf16Error>> + 'call {
-        char::decode_utf16(self.utf16.iter().copied())
-    }
-
-    pub fn to_string(self) -> XllResult<String> {
-        String::from_utf16(self.utf16)
-            .map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))
-    }
-}
-
-/// A call-scoped view over an Excel `xltypeMulti` value.
-///
-/// Constructed by `#[excel_function]` wrappers for `XlArrayRef<'_>`
-/// parameters. Cells are converted only when the caller asks for a typed
-/// value, so iterating or inspecting the shape performs no allocation.
-#[derive(Clone, Copy)]
-pub struct XlArrayRef<'call> {
-    cells: &'call [XLOPER12],
-    rows: usize,
-    columns: usize,
-    _not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-impl<'call> XlArrayRef<'call> {
-    fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        let array = value.array(argument)?;
-        let rows = array.rows as usize;
-        let columns = array.columns as usize;
-        let len = rows * columns;
-        let cells = if len == 0 {
-            &[]
-        } else {
-            // SAFETY: XlValueRef::array validated the non-null pointer,
-            // dimensions, byte size, and lifetime of this contiguous range.
-            unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
-        };
-        Ok(Self {
-            cells,
-            rows,
-            columns,
-            _not_send_or_sync: PhantomData,
-        })
-    }
-
-    #[must_use]
-    pub const fn rows(self) -> usize {
-        self.rows
-    }
-
-    #[must_use]
-    pub const fn columns(self) -> usize {
-        self.columns
-    }
-
-    #[must_use]
-    pub const fn shape(self) -> (usize, usize) {
-        (self.rows, self.columns)
-    }
-
-    #[must_use]
-    pub const fn len(self) -> usize {
-        self.cells.len()
-    }
-
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.cells.is_empty()
-    }
-
-    #[must_use]
-    pub fn get(self, row: usize, column: usize) -> Option<XlValueRef<'call>> {
-        if row >= self.rows || column >= self.columns {
-            return None;
-        }
-        let index = row * self.columns + column;
-        Some(XlValueRef {
-            raw: &self.cells[index],
-            _not_send_or_sync: PhantomData,
-        })
-    }
-
-    pub fn cells(self) -> impl ExactSizeIterator<Item = XlValueRef<'call>> + 'call {
-        self.cells.iter().map(|raw| XlValueRef {
-            raw,
-            _not_send_or_sync: PhantomData,
-        })
-    }
-}
-
-impl<'call> FromExcel<'call> for XlArrayRef<'call> {
-    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        Self::from_value(value, argument)
-    }
-
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.u64(self.rows as u64);
-        encoder.u64(self.columns as u64);
-        for cell in self.cells.iter() {
-            // SAFETY: XlArrayRef owns a validated borrow of every cell in its
-            // contiguous Excel array for the duration of this call.
-            match unsafe { XlValueRef::from_raw(cell as *const _ as *mut _) } {
-                Ok(value) => encode_raw_value(value, true, encoder),
-                Err(error) => encoder.fail(error),
-            }
-        }
-    }
-}
-
-#[repr(u8)]
-enum RawValueKind {
-    Number = 1,
-    Boolean = 2,
-    String = 3,
-    Error = 4,
-    Missing = 5,
-    Blank = 6,
-    Array = 7,
-}
-
-fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder) {
-    match value.base_type() {
-        XLTYPE_NUM => {
-            encoder.tag(RawValueKind::Number as u8);
-            // SAFETY: XLTYPE_NUM selects the number union member.
-            encoder.u64(unsafe { value.raw.value.number }.to_bits());
-        }
-        XLTYPE_BOOL => {
-            encoder.tag(RawValueKind::Boolean as u8);
-            // SAFETY: XLTYPE_BOOL selects the boolean union member.
-            encoder.u32(unsafe { value.raw.value.boolean } as u32);
-        }
-        XLTYPE_INT => {
-            encoder.tag(RawValueKind::Number as u8);
-            // SAFETY: XLTYPE_INT selects the integer union member.
-            encoder.f64(unsafe { value.raw.value.integer } as f64);
-        }
-        XLTYPE_STR => {
-            encoder.tag(RawValueKind::String as u8);
-            match value.utf16(encoder.argument()) {
-                Ok(text) => {
-                    encoder.u64(text.len() as u64);
-                    for unit in text {
-                        encoder.u32(u32::from(*unit));
-                    }
-                }
-                Err(error) => encoder.fail(error),
-            }
-        }
-        XLTYPE_ERR => {
-            encoder.tag(RawValueKind::Error as u8);
-            // SAFETY: XLTYPE_ERR selects the error union member.
-            encoder.i64(unsafe { value.raw.value.error } as i64);
-        }
-        XLTYPE_MISSING => encoder.tag(RawValueKind::Missing as u8),
-        XLTYPE_NIL => encoder.tag(RawValueKind::Blank as u8),
-        XLTYPE_MULTI if !nested => match value.array(encoder.argument()) {
-            Ok(array) => {
-                encoder.tag(RawValueKind::Array as u8);
-                encoder.u64(array.rows as u64);
-                encoder.u64(array.columns as u64);
-                let elements = (array.rows as usize) * (array.columns as usize);
-                for index in 0..elements {
-                    // SAFETY: XlValueRef::array validated the contiguous
-                    // element range and index is within its dimensions.
-                    match unsafe { XlValueRef::from_raw(array.values.add(index)) } {
-                        Ok(element) => encode_raw_value(element, true, encoder),
-                        Err(error) => encoder.fail(error),
-                    }
-                }
-            }
-            Err(error) => encoder.fail(error),
-        },
-        XLTYPE_MULTI => {
-            encoder.fail_input(InputError::Malformed("nested arrays are not supported"))
-        }
-        actual => encoder.fail_input(InputError::WrongType {
-            expected: "worksheet value",
-            actual,
-        }),
-    }
-}
 
 /// Converts a call-scoped Excel value into owned Rust data.
 ///
@@ -520,7 +106,7 @@ pub trait FromExcel<'call>: Sized {
 /// Framework-side argument dispatch.
 ///
 /// This bridge is public only because generated proc-macro code is compiled
-/// in the add-in crate. It is re-exported by `xlfn::__private`, not by the
+/// in the add-in crate. It is re-exported by `xlfn::macro_support`, not by the
 /// normal `xlfn` value API.
 #[doc(hidden)]
 pub trait ExcelParameter<'call>: Sized {
@@ -699,7 +285,7 @@ pub trait IntoExcel {
 /// Framework-side return dispatch.
 ///
 /// This bridge is public only for generated proc-macro code and is exposed by
-/// `xlfn::__private`, not by the normal `xlfn` value API.
+/// `xlfn::macro_support`, not by the normal `xlfn` value API.
 #[doc(hidden)]
 pub trait ExcelReturn: Sized {
     /// Whether this return path publishes a formula revision.
@@ -820,12 +406,28 @@ where
 #[doc(hidden)]
 pub struct CallScope<'call> {
     callbacks: HostCallbackSession,
+    handle_guard: crate::handle::HandleCallGuard,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
 
 impl<'call> CallScope<'call> {
+    pub(crate) fn new() -> Self {
+        Self {
+            callbacks: HostCallbackSession::new(),
+            handle_guard: crate::handle::HandleCallGuard::new(),
+            lifetime: PhantomData,
+        }
+    }
+
     pub(crate) fn callbacks(&self) -> &HostCallbackSession {
         &self.callbacks
+    }
+
+    pub(crate) fn register_handle_reclaimer(
+        &self,
+        reclaimer: &std::sync::Arc<crate::handle::HandleReclaimer>,
+    ) {
+        self.handle_guard.register(reclaimer);
     }
 }
 
@@ -834,11 +436,18 @@ impl<'call> CallScope<'call> {
 pub fn with_excel_call_scope<R>(
     operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
 ) -> R {
-    let scope = CallScope {
-        callbacks: HostCallbackSession::new(),
-        lifetime: PhantomData,
-    };
+    let scope = CallScope::new();
     operation(&scope)
+}
+
+/// Runs an operation under a fresh call scope while borrowing existing state
+/// for exactly the same callback lifetime.
+pub(crate) fn with_excel_call_scope_and_state<S, R>(
+    state: &S,
+    operation: impl for<'scope> FnOnce(&'scope S, &'scope CallScope<'scope>) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(state, &scope)
 }
 
 #[doc(hidden)]
@@ -1015,192 +624,6 @@ pub enum ExcelOutput {
     Array(XlArrayOutput),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Matrix<T> {
-    rows: usize,
-    columns: usize,
-    data: Vec<T>,
-}
-
-impl<T> Matrix<T> {
-    pub fn new(rows: usize, columns: usize, data: Vec<T>) -> XllResult<Self> {
-        validate_matrix_dimensions(rows, columns, data.len())?;
-        Ok(Self {
-            rows,
-            columns,
-            data,
-        })
-    }
-}
-
-pub(crate) fn validate_matrix_dimensions(
-    rows: usize,
-    columns: usize,
-    actual: usize,
-) -> XllResult<()> {
-    if rows == 0 || columns == 0 {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::Malformed("matrix dimensions must be non-zero"),
-        ));
-    }
-    if rows > EXCEL_MAX_ROWS {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::TooLarge {
-                limit: EXCEL_MAX_ROWS,
-                actual: rows,
-            },
-        ));
-    }
-    if columns > EXCEL_MAX_COLUMNS {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::TooLarge {
-                limit: EXCEL_MAX_COLUMNS,
-                actual: columns,
-            },
-        ));
-    }
-    let expected = rows.checked_mul(columns).ok_or(XllError::Domain {
-        code: DomainErrorCode::Overflow,
-    })?;
-    if expected != actual {
-        return Err(XllError::ElementCountMismatch {
-            rows,
-            columns,
-            expected,
-            actual,
-        });
-    }
-    if expected > MAX_ARRAY_ELEMENTS {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::TooLarge {
-                limit: MAX_ARRAY_ELEMENTS,
-                actual: expected,
-            },
-        ));
-    }
-    Ok(())
-}
-
-impl<T> Matrix<T> {
-    #[must_use]
-    pub const fn rows(&self) -> usize {
-        self.rows
-    }
-
-    #[must_use]
-    pub const fn columns(&self) -> usize {
-        self.columns
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    #[must_use]
-    pub fn into_vec(self) -> Vec<T> {
-        self.data
-    }
-
-    pub fn row(&self, row: usize) -> Option<&[T]> {
-        let start = row.checked_mul(self.columns)?;
-        let end = start.checked_add(self.columns)?;
-        self.data.get(start..end)
-    }
-
-    pub fn column(&self, column: usize) -> Option<impl Iterator<Item = &T>> {
-        (column < self.columns).then(|| self.data.iter().skip(column).step_by(self.columns))
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.data.iter()
-    }
-}
-
-impl<T> Index<(usize, usize)> for Matrix<T> {
-    type Output = T;
-
-    fn index(&self, (row, column): (usize, usize)) -> &Self::Output {
-        assert!(row < self.rows, "matrix row index out of bounds");
-        assert!(column < self.columns, "matrix column index out of bounds");
-        let index = row
-            .checked_mul(self.columns)
-            .and_then(|index| index.checked_add(column))
-            .expect("matrix index overflow");
-        &self.data[index]
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Row<T>(Vec<T>);
-
-impl<T> Row<T> {
-    pub fn new(data: Vec<T>) -> XllResult<Self> {
-        let matrix = Matrix::new(1, data.len(), data)?;
-        Ok(Self(matrix.into_vec()))
-    }
-    pub fn as_slice(&self) -> &[T] {
-        &self.0
-    }
-    pub fn into_vec(self) -> Vec<T> {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Column<T>(Vec<T>);
-
-impl<T> Column<T> {
-    pub fn new(data: Vec<T>) -> XllResult<Self> {
-        let matrix = Matrix::new(data.len(), 1, data)?;
-        Ok(Self(matrix.into_vec()))
-    }
-    pub fn as_slice(&self) -> &[T] {
-        &self.0
-    }
-    pub fn into_vec(self) -> Vec<T> {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BoundedVarArgs<T, const MAX: usize>(Vec<T>);
-
-impl<T, const MAX: usize> BoundedVarArgs<T, MAX> {
-    pub fn new(values: Vec<T>) -> XllResult<Self> {
-        if MAX == 0 {
-            return Err(XllError::input(
-                "<varargs>",
-                InputError::Malformed("bounded varargs maximum must be non-zero"),
-            ));
-        }
-        if values.len() > MAX {
-            return Err(XllError::input(
-                "<varargs>",
-                InputError::TooLarge {
-                    limit: MAX,
-                    actual: values.len(),
-                },
-            ));
-        }
-        Ok(Self(values))
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[T] {
-        &self.0
-    }
-
-    #[must_use]
-    pub fn into_vec(self) -> Vec<T> {
-        self.0
-    }
-}
-
 /// An input-only distinction between an omitted and a blank Excel argument.
 ///
 /// Excel does not preserve these meanings for UDF return values: both are
@@ -1218,69 +641,6 @@ enum OptionalValueKind {
     Missing = 0,
     Blank = 1,
     Value = 2,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ExcelDateSystem {
-    /// The workbook setting has not yet been resolved by the caller.
-    #[default]
-    Workbook,
-    Windows1900,
-    Mac1904,
-}
-
-impl ExcelDateSystem {
-    const fn identity_tag(self) -> u8 {
-        match self {
-            Self::Workbook => 0,
-            Self::Windows1900 => 1,
-            Self::Mac1904 => 2,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExcelSerialDate {
-    serial: f64,
-    date_system: ExcelDateSystem,
-}
-
-impl ExcelSerialDate {
-    pub fn new(serial: f64, date_system: ExcelDateSystem) -> XllResult<Self> {
-        if !serial.is_finite() {
-            return Err(XllError::input("date", InputError::NonFinite));
-        }
-        Ok(Self {
-            serial,
-            date_system,
-        })
-    }
-
-    #[must_use]
-    pub const fn serial(self) -> f64 {
-        self.serial
-    }
-
-    #[must_use]
-    pub const fn date_system(self) -> ExcelDateSystem {
-        self.date_system
-    }
-
-    #[must_use]
-    pub const fn with_date_system(mut self, date_system: ExcelDateSystem) -> Self {
-        self.date_system = date_system;
-        self
-    }
-
-    #[must_use]
-    pub fn is_fictitious_1900_leap_day(self) -> bool {
-        self.date_system == ExcelDateSystem::Windows1900 && self.serial.floor() == 60.0
-    }
-
-    #[must_use]
-    pub fn fractional_day(self) -> f64 {
-        self.serial.rem_euclid(1.0)
-    }
 }
 
 fn convert_with_semantic_identity<T>(

@@ -109,7 +109,7 @@ inductive Step : State → Event → State → Prop where
       {session : ShutdownSession}
       (hSession : s.currentShutdown = some session)
       (certificate :
-        Lifecycle.CommittedCloseCertificate
+        Lifecycle.CommittedLogicalQuiescenceCertificate
           s.lifecycle session.generation session.state) :
       Step s .finishCommittedShutdown
         { s with currentShutdown := some (ShutdownSession.closed session) }
@@ -142,7 +142,7 @@ inductive Step : State → Event → State → Prop where
       {resources : Shutdown.Resources}
       (hNoSession : s.currentShutdown = none)
       (certificate :
-        Lifecycle.UncommittedCloseCertificate s.lifecycle resources) :
+        Lifecycle.UncommittedLogicalQuiescenceCertificate s.lifecycle resources) :
       Step s (.finishUncommittedFinalClose resources)
         { s with
             lifecycle := { s.lifecycle with phase := .closed }

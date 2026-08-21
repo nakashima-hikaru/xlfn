@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn::Matrix;
 use xlfn::benchmark_support::FormulaRevisionBenchmark;
+use xlfn::value::Matrix;
 
 fn formula_revision_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("formula_revision/warm_hit");

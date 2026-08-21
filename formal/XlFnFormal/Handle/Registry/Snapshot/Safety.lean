@@ -49,7 +49,7 @@ theorem retire_requires_no_borrow
   cases hStep with
   | retirePublication _ _ _ hNoBorrow => exact hNoBorrow
 
-theorem finish_close_requires_reclamation
+theorem finish_removal_requires_reclamation
     {s s' : State} (hStep : Step s .finishClose s') :
     s.borrows = [] ∧ s.publications = [] ∧ s.snapshot = [] := by
   cases hStep with

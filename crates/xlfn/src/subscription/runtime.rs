@@ -122,7 +122,7 @@ impl SubscriptionRuntime {
         }
         let publish = triomphe::Arc::new(PublishCore {
             runtime_gate: Arc::clone(&self.runtime_gate),
-            server_gate: Arc::new(OperationGate::new()),
+            server_gate: OperationGate::new(),
             queued_update_quota: triomphe::Arc::clone(&self.queued_update_quota),
             module_ingress: self.module_ingress,
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
@@ -152,13 +152,13 @@ impl SubscriptionRuntime {
         Ok(RtdServerHandle { inner: server })
     }
 
-    pub(crate) fn prepare<R>(
+    pub(crate) fn prepare<S>(
         self: &Arc<Self>,
-        source: &R,
+        source: &RtdSourceHandle<S>,
         topic: RtdTopic,
     ) -> XllResult<PreparedSubscription>
     where
-        R: RtdSourceRef,
+        S: RtdSource,
     {
         let _operation = self.runtime_gate.enter()?;
         #[cfg(test)]
@@ -171,15 +171,15 @@ impl SubscriptionRuntime {
 
         let source_identity = catalog
             .sources
-            .resolve(source, self.limits.max_source_ids)?;
-        let source_id = source_identity.id;
+            .resolve(source.id, self.limits.max_source_ids)?;
+        let source_id = source_identity.source_id;
 
         let identity = SubscriptionIdentity {
             source_id: SourceId(source_id),
             topic: topic.clone(),
         };
 
-        if let Some(existing_key) = catalog.identities.get_key(&identity).cloned() {
+        if let Some(existing_key) = catalog.identities.get_key(&identity).copied() {
             if catalog.active_keys.contains_key(&existing_key) {
                 return Ok(PreparedSubscription {
                     key: existing_key,
@@ -225,15 +225,15 @@ impl SubscriptionRuntime {
             }
         };
 
-        let key = catalog.allocate_transport_key(self.runtime_id)?;
+        let key = catalog.allocate_key(self.runtime_id)?;
 
-        catalog.identities.insert(identity, key.clone())?;
+        catalog.identities.insert(identity, key)?;
 
         let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;
-        let erased_source: Arc<dyn ErasedRtdSource> = source.source_arc() as _;
+        let erased_source: Arc<dyn ErasedRtdSource> = Arc::clone(&source.source) as _;
         catalog.pending.insert(
-            key.clone(),
+            key,
             PendingSubscription {
                 live_reservations: 1,
                 committed: false,
@@ -389,7 +389,7 @@ impl SubscriptionRuntime {
             };
 
             catalog.active_keys.insert(
-                key.clone(),
+                *key,
                 ActiveKeyBinding {
                     connection_generation: conn_gen,
                     stage: BindingStage::Connecting,
@@ -412,11 +412,11 @@ impl SubscriptionRuntime {
             } else {
                 match Quota::try_acquire(&self.active_quota) {
                     Ok(permit) => {
-                        shard.topic_by_key.insert(key.clone(), topic_id);
+                        shard.topic_by_key.insert(*key, topic_id);
                         shard.active_by_topic.insert(
                             topic_id,
                             ActiveSubscription {
-                                key: key.clone(),
+                                key: *key,
                                 generation: conn_gen,
                                 committed: false,
                                 latest: StoredRtdValue::Empty,
@@ -510,7 +510,7 @@ impl SubscriptionRuntime {
             operation: Some(operation),
             topic_id,
             generation: conn_gen,
-            key: key.clone(),
+            key: *key,
             value: latest_value,
             observed_sequence,
             created: true,

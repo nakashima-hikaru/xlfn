@@ -21,8 +21,29 @@ use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named
 use crate::value::{
     ArgumentContext, ExcelCellOutput, ExcelParameter, argument_from_raw,
     argument_from_raw_with_arguments, cell_presence_from_raw, with_excel_call_scope,
+    with_excel_call_scope_and_state,
 };
 use crate::{Addin, CallScope, Runtime};
+
+#[doc(hidden)]
+pub const BUILD_TARGET: &str = if cfg!(all(
+    target_os = "windows",
+    target_arch = "x86",
+    target_env = "msvc"
+)) {
+    "i686-pc-windows-msvc"
+} else if cfg!(all(
+    target_os = "windows",
+    target_arch = "x86_64",
+    target_env = "msvc"
+)) {
+    "x86_64-pc-windows-msvc"
+} else {
+    "unsupported-target"
+};
+
+#[doc(hidden)]
+pub use xlfn_sys::XLOPER12;
 
 #[doc(hidden)]
 pub use inventory::submit as submit_registration;
@@ -44,6 +65,10 @@ pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         crate::rtd::dll_can_unload_now()
     }
 }
+#[doc(hidden)]
+pub use crate::__xlfn_macro_support_async_exports as __xlfn_async_exports;
+#[doc(hidden)]
+pub use crate::__xlfn_macro_support_async_only as __xlfn_async_only;
 #[doc(hidden)]
 pub use crate::utf16::utf16_eq_ignore_ascii_case;
 #[doc(hidden)]
@@ -69,20 +94,19 @@ pub fn thread_safe_context<'state, A: Addin>(
 #[doc(hidden)]
 pub fn main_thread_context<'call, A: Addin>(
     frame: &CallFrame<'call>,
-    _state: &A::State,
+    state: &'call A::State,
     runtime: &'call MacroRuntime<A>,
 ) -> crate::addin::MainThreadContext<'call, A> {
-    crate::addin::MainThreadContext::new(runtime.runtime(), frame.scope)
+    crate::addin::MainThreadContext::new(state, runtime.runtime(), frame.scope)
 }
 
 /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
 #[doc(hidden)]
 pub fn macro_sheet_context<'call, A: Addin>(
     frame: &CallFrame<'call>,
-    _state: &A::State,
-    runtime: &'call MacroRuntime<A>,
+    state: &'call A::State,
 ) -> crate::addin::MacroSheetContext<'call, A> {
-    crate::addin::MacroSheetContext::new(runtime.runtime(), frame.scope)
+    crate::addin::MacroSheetContext::new(state, frame.scope)
 }
 
 #[doc(hidden)]
@@ -444,12 +468,12 @@ pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
     execute: F,
 ) -> *mut xlfn_sys::XLOPER12
 where
-    F: for<'call> FnOnce(&A::State, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
+    F: for<'call> FnOnce(&'call A::State, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
 {
     udf_boundary_named(runtime.runtime(), udf_id, excel_name, |state| {
-        with_excel_call_scope(|scope| {
+        with_excel_call_scope_and_state(state, |state, scope| {
             let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
-            execute(&*state, &mut frame)
+            execute(state, &mut frame)
         })
     })
 }

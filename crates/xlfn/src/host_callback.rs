@@ -238,7 +238,8 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let escaped = crate::with_excel_call_scope(|scope| {
-            let context = crate::MacroSheetContext::<()>::new(&runtime, scope);
+            let state = ();
+            let context = crate::MacroSheetContext::<()>::new(&state, scope);
             std::mem::forget(context);
             scope.callbacks().shared_handle()
         });

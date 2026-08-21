@@ -173,9 +173,9 @@ impl SyncBoundaryWorkerPool {
             let _ = ingress.seal_and_drain();
         }
         let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::<()>::new()));
-        let close_epoch = runtime.close_epoch();
+        let removal_epoch = runtime.removal_epoch();
         let mut open_attempt = runtime
-            .begin_open_if_epoch(close_epoch)
+            .begin_open_if_epoch(removal_epoch)
             .expect("begin_open");
         runtime.publish((), ());
         runtime
@@ -1383,7 +1383,7 @@ unsafe impl crate::RtdSubscription for BenchmarkSubscription {
 }
 
 struct BenchmarkRtdSource<T> {
-    sink: parking_lot::Mutex<Option<crate::RtdSink<T>>>,
+    sink: Arc<parking_lot::Mutex<Option<crate::RtdSink<T>>>>,
 }
 
 impl<T: crate::IntoRtdValue + Clone + Send + Sync + 'static> crate::RtdSource
@@ -1420,21 +1420,23 @@ impl RtdPublishNumberBenchmark {
         let server = runtime
             .register_server(crate::subscription::ServerGeneration(1))
             .expect("server registration must succeed");
-        let source = Arc::new(BenchmarkRtdSource {
-            sink: parking_lot::Mutex::new(None),
-        });
+        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {
+            sink: Arc::clone(&sink_slot),
+        })
+        .expect("benchmark source handle allocation must succeed");
         let topic =
             crate::RtdTopic::new(["BENCH", "NUMBER"]).expect("benchmark RTD topic must be valid");
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");
-        let key = prepared.key().clone();
+        let key = *prepared.key();
         let conn = runtime
             .connect_transaction(&server, crate::subscription::TopicId(1), &key)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();
-        let sink = source.sink.lock().clone().expect("sink must be captured");
+        let sink = sink_slot.lock().clone().expect("sink must be captured");
         Self {
             _runtime: runtime,
             server,
@@ -1486,21 +1488,23 @@ impl RtdPublishStringBenchmark {
         let server = runtime
             .register_server(crate::subscription::ServerGeneration(1))
             .expect("server registration must succeed");
-        let source = Arc::new(BenchmarkRtdSource {
-            sink: parking_lot::Mutex::new(None),
-        });
+        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {
+            sink: Arc::clone(&sink_slot),
+        })
+        .expect("benchmark source handle allocation must succeed");
         let topic =
             crate::RtdTopic::new(["BENCH", "STRING"]).expect("benchmark RTD topic must be valid");
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");
-        let key = prepared.key().clone();
+        let key = *prepared.key();
         let conn = runtime
             .connect_transaction(&server, crate::subscription::TopicId(2), &key)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();
-        let sink = source.sink.lock().clone().expect("sink must be captured");
+        let sink = sink_slot.lock().clone().expect("sink must be captured");
         Self {
             _runtime: runtime,
             server,

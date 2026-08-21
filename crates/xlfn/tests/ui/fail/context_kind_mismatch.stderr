@@ -7,6 +7,6 @@ error[E0308]: mismatched types
 8 |     #[excel_context(main_thread)] context: ThreadSafeContext<'_, ()>,
   |                                            ------------------------- expected due to this
   |
-  = note: expected struct `xlfn::ThreadSafeContext<'_, ()>`
+  = note: expected struct `xlfn::addin::ThreadSafeContext<'_, ()>`
              found struct `MainThreadContext<'_, ()>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

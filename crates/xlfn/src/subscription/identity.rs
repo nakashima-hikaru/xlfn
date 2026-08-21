@@ -1,87 +1,47 @@
 use super::*;
-use rustc_hash::FxHashMap;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum SourceKey {
-    Handle(u64),
-    Arc(usize),
-}
-
-pub(crate) struct SourceIdentityEntry {
-    pub(crate) id: u64,
-    pub(crate) anchor: Weak<dyn ErasedRtdSource>,
-}
+use rustc_hash::FxHashSet;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ResolvedSourceIdentity {
-    pub(crate) key: SourceKey,
-    pub(crate) id: u64,
+    pub(crate) source_id: u64,
     pub(crate) newly_registered: bool,
 }
 
-// Each registry entry owns a Weak anchor to the source allocation.
-//
-// The Weak keeps the allocation backing store alive even after the
-// source value is dropped, so the address cannot be reused by another
-// Arc allocation while the entry remains in the registry.
-//
+// Source handles carry a process-stable monotonic identity. The registry
+// therefore stores only that opaque identity; it never derives identity from
+// an allocation address and does not need an ownership anchor. Registered
+// handle identities remain reserved until the subscription runtime is cleared.
 pub(crate) struct SourceIdentityRegistry {
-    pub(crate) by_key: FxHashMap<SourceKey, SourceIdentityEntry>,
-    pub(crate) next_id: u64,
+    pub(crate) ids: FxHashSet<u64>,
 }
 
 impl SourceIdentityRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            by_key: FxHashMap::default(),
-            next_id: 1,
+            ids: FxHashSet::default(),
         }
     }
 
-    pub(crate) fn allocate_id(&mut self) -> XllResult<u64> {
-        let id = self.next_id;
-        self.next_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
-        })?;
-        Ok(id)
-    }
-
-    pub(crate) fn resolve<R>(
+    pub(crate) fn resolve(
         &mut self,
-        source: &R,
+        source_id: u64,
         limit: usize,
-    ) -> XllResult<ResolvedSourceIdentity>
-    where
-        R: RtdSourceRef,
-    {
-        let key = source.source_key();
-
-        if let Some(entry) = self.by_key.get(&key) {
+    ) -> XllResult<ResolvedSourceIdentity> {
+        if self.ids.contains(&source_id) {
             return Ok(ResolvedSourceIdentity {
-                key,
-                id: entry.id,
+                source_id,
                 newly_registered: false,
             });
         }
 
-        if self.by_key.len() >= limit {
-            self.reclaim_dead();
-        }
-
-        if self.by_key.len() >= limit {
+        if self.ids.len() >= limit {
             return Err(XllError::Overloaded);
         }
 
-        let id = self.allocate_id()?;
-        let source = source.source_arc();
-        let weak = Arc::downgrade(&source);
-        let anchor: Weak<dyn ErasedRtdSource> = weak;
-
-        self.by_key.insert(key, SourceIdentityEntry { id, anchor });
+        self.ids.insert(source_id);
 
         Ok(ResolvedSourceIdentity {
-            key,
-            id,
+            source_id,
             newly_registered: true,
         })
     }
@@ -91,23 +51,11 @@ impl SourceIdentityRegistry {
             return;
         }
 
-        let should_remove = self
-            .by_key
-            .get(&identity.key)
-            .is_some_and(|entry| entry.id == identity.id);
-
-        if should_remove {
-            self.by_key.remove(&identity.key);
-        }
-    }
-
-    pub(crate) fn reclaim_dead(&mut self) {
-        self.by_key
-            .retain(|_, entry| entry.anchor.strong_count() != 0);
+        self.ids.remove(&identity.source_id);
     }
 
     pub(crate) fn clear(&mut self) {
-        self.by_key.clear();
+        self.ids.clear();
     }
 }
 
@@ -145,7 +93,7 @@ impl SubscriptionIdentityIndex {
             });
         }
 
-        self.key_by_identity.insert(identity.clone(), key.clone());
+        self.key_by_identity.insert(identity.clone(), key);
         self.identity_by_key.insert(key, identity);
 
         Ok(())

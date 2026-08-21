@@ -2310,14 +2310,18 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         sink: Mutex::new(None),
         disconnected: Arc::clone(&disconnected),
     });
+    let source_handle = crate::RtdSourceHandle::from_arc(Arc::clone(&source)).unwrap();
     let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.as_ref().unwrap().clone();
 
     let prepared = subscriptions
-        .prepare(&source, RtdTopic::single("dispatch-refresh").unwrap())
+        .prepare(
+            &source_handle,
+            RtdTopic::single("dispatch-refresh").unwrap(),
+        )
         .unwrap();
-    let key_obj = prepared.key().clone();
+    let key_obj = *prepared.key();
     let conn = subscriptions
         .connect_transaction(&handle, crate::subscription::TopicId(77), &key_obj)
         .unwrap();
@@ -2573,7 +2577,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let prepared = subscriptions
         .prepare(&source, RtdTopic::single("ensure-test").unwrap())
         .unwrap();
-    let key_obj = prepared.key().clone();
+    let key_obj = *prepared.key();
     prepared.commit();
     let conn = subscriptions
         .connect_transaction(handle, crate::subscription::TopicId(1), &key_obj)

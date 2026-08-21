@@ -1,6 +1,6 @@
 use xlfn::prelude::*;
 
-static __XLFN_RUNTIME: xlfn::__private::MacroRuntime<()> = xlfn::__private::MacroRuntime::new();
+static __XLFN_RUNTIME: xlfn::macro_support::MacroRuntime<()> = xlfn::macro_support::MacroRuntime::new();
 
 #[excel_function(name = "FAIL.NESTED.ARRAY")]
 fn bad() -> Matrix<Matrix<f64>> {
