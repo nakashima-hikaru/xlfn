@@ -1,10 +1,12 @@
 use super::*;
+use crate::generation::RuntimeGeneration;
 use rustc_hash::FxHashMap;
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub(crate) struct SubscriptionRuntime {
+    pub(crate) generation: RuntimeGeneration,
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
     pub(crate) module_ingress: Option<&'static crate::ingress::ExportIngress>,
@@ -31,19 +33,25 @@ impl SubscriptionRuntime {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn with_limits(limits: RtdLimits) -> Self {
-        Self::with_limits_and_ingress(limits, None)
+        Self::with_limits_and_ingress(
+            RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            limits,
+            None,
+        )
     }
 
-    pub(crate) fn with_module_ingress(limits: RtdLimits) -> Self {
-        Self::with_limits_and_ingress(limits, Some(crate::ingress::global_ingress()))
+    pub(crate) fn with_module_ingress(generation: RuntimeGeneration, limits: RtdLimits) -> Self {
+        Self::with_limits_and_ingress(generation, limits, Some(crate::ingress::global_ingress()))
     }
 
     fn with_limits_and_ingress(
+        generation: RuntimeGeneration,
         limits: RtdLimits,
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> Self {
         let runtime_id = allocate_runtime_id().expect("runtime ID allocation overflow");
         Self {
+            generation,
             runtime_id,
             limits,
             module_ingress,
@@ -165,7 +173,10 @@ impl SubscriptionRuntime {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
-        topic.validate_with_limits(&self.limits)?;
+        if source.id.generation != self.generation {
+            return Err(XllError::StaleHandle);
+        }
+        topic.validate_protocol()?;
 
         let mut catalog = self.catalog.lock();
 

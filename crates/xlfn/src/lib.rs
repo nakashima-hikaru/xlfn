@@ -99,7 +99,9 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
-pub use addin::{Addin, AsyncWorkerCount, HandleConfig, OpenContext, Opened, RuntimeConfig};
+pub use addin::{
+    Addin, AsyncWorkerCount, HandleBindingLimit, HandleConfig, OpenContext, Opened, RuntimeConfig,
+};
 pub use error::{ExcelError, XllError, XllResult};
 
 // These aliases are crate-internal only. Keeping implementation modules on
@@ -132,7 +134,7 @@ pub(crate) use diagnostics::{
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use error::{DiagnosticId, DomainErrorCode, InputError, IntoXllError, Shape};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use handle::{AsyncHandle, Handle, HandleAlias, PinnedHandle};
+pub(crate) use handle::{Handle, HandleAlias, PinnedHandle};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
@@ -161,8 +163,8 @@ pub(crate) use runtime::{CallGuard, LifecyclePhase, Runtime};
 pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use subscription::{
-    IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic,
-    RtdValue,
+    IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
+    RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
 };
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use utf16::utf16_eq_ignore_ascii_case;
@@ -565,11 +567,11 @@ pub mod prelude {
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
     pub use crate::addin::{
-        Addin, HandleConfig, OpenContext, Opened, RtdOpenContext, RuntimeConfig,
+        Addin, HandleBindingLimit, HandleConfig, OpenContext, Opened, RtdOpenContext, RuntimeConfig,
     };
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
-    pub use crate::handle::{AsyncHandle, Handle, HandleAlias, PinnedHandle};
+    pub use crate::handle::{Handle, HandleAlias, PinnedHandle};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelErrorValue, ExcelSerialDate, Matrix, OptionalExcelValue, Row,

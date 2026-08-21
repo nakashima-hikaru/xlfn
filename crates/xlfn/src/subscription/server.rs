@@ -905,7 +905,7 @@ impl<'a> ServerTermination<'a> {
     pub(crate) fn request_cancel(&self) -> XllResult<()> {
         let mut first_error = None;
         for sub in &self.initial_subscriptions {
-            if catch_unwind(AssertUnwindSafe(|| sub.request_cancel())).is_err()
+            if catch_unwind(AssertUnwindSafe(|| sub.cancellation().request_cancel())).is_err()
                 && first_error.is_none()
             {
                 first_error = Some(XllError::Panic);

@@ -9,10 +9,12 @@ pub(crate) struct TestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
-// SAFETY: TestSubscription performs no background thread work.
-unsafe impl RtdSubscription for TestSubscription {
-    fn request_cancel(&self) {
-        self.canceled.store(true, Ordering::Release);
+impl RtdSubscription for TestSubscription {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
+        let canceled = Arc::clone(&self.canceled);
+        Arc::new(RtdCancellationHandle::new(move || {
+            canceled.store(true, Ordering::Release);
+        }))
     }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
@@ -67,13 +69,16 @@ pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>
 ) -> PublishingSourceResult<T> {
     let slot = Arc::new(Mutex::new(None));
     let disconnected = Arc::new(AtomicBool::new(false));
-    let source = RtdSourceHandle::from_arc(Arc::new(PublishingSource {
-        initial,
-        sink_slot: Arc::clone(&slot),
-        canceled: Arc::new(AtomicBool::new(false)),
-        disconnected: Arc::clone(&disconnected),
-        on_subscribe: None,
-    }))
+    let source = RtdSourceHandle::for_internal(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        PublishingSource {
+            initial,
+            sink_slot: Arc::clone(&slot),
+            canceled: Arc::new(AtomicBool::new(false)),
+            disconnected: Arc::clone(&disconnected),
+            on_subscribe: None,
+        },
+    )
     .expect("test source handle allocation must succeed");
     (source, slot, disconnected)
 }
@@ -731,7 +736,11 @@ fn inflight_prepare_waits_for_close() {
         }
     }
 
-    let source = RtdSourceHandle::new(DroppingSource(Arc::clone(&source_dropped))).unwrap();
+    let source = RtdSourceHandle::for_internal(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        DroppingSource(Arc::clone(&source_dropped)),
+    )
+    .unwrap();
     let runtime_clone = Arc::clone(&runtime);
     let handle_prep = std::thread::spawn(move || {
         runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap())
@@ -800,9 +809,12 @@ fn reentrant_drop_safety() {
         }
     }
 
-    let source = RtdSourceHandle::new(ReentrantSource {
-        runtime: Arc::clone(&runtime),
-    })
+    let source = RtdSourceHandle::for_internal(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        ReentrantSource {
+            runtime: Arc::clone(&runtime),
+        },
+    )
     .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("reentrant").unwrap())
@@ -854,9 +866,10 @@ fn server_lifecycle_rejects_mutations_when_closing() {
 }
 
 pub(crate) struct FailingDisconnectSubscription;
-// SAFETY: FailingDisconnectSubscription has no unsafe invariants to uphold.
-unsafe impl RtdSubscription for FailingDisconnectSubscription {
-    fn request_cancel(&self) {}
+impl RtdSubscription for FailingDisconnectSubscription {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
+        Arc::new(RtdCancellationHandle::noop())
+    }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Err(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::TEST_SENTINEL,
@@ -1038,10 +1051,11 @@ fn rollback_records_subscription_cleanup_error() {
 }
 
 struct PanickingCancelSubscription;
-// SAFETY: PanickingCancelSubscription has no unsafe invariants to uphold.
-unsafe impl RtdSubscription for PanickingCancelSubscription {
-    fn request_cancel(&self) {
-        panic!("request_cancel panic test");
+impl RtdSubscription for PanickingCancelSubscription {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
+        Arc::new(RtdCancellationHandle::new(|| {
+            panic!("request_cancel panic test");
+        }))
     }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Ok(())
@@ -1109,10 +1123,13 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     let (tx_close, rx_close) = std::sync::mpsc::channel();
     let (tx_enter, rx_enter) = std::sync::mpsc::channel();
 
-    let source = RtdSourceHandle::new(DelayedSubscribeFailingSource {
-        tx_entered: std::sync::Mutex::new(Some(tx_enter)),
-        rx_close: Mutex::new(rx_close),
-    })
+    let source = RtdSourceHandle::for_internal(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        DelayedSubscribeFailingSource {
+            tx_entered: std::sync::Mutex::new(Some(tx_enter)),
+            rx_close: Mutex::new(rx_close),
+        },
+    )
     .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("delayed_fail").unwrap())
@@ -1679,9 +1696,10 @@ pub(crate) struct SinkHoldingSubscription<T> {
     _sink: RtdSink<T>,
 }
 
-// SAFETY: SinkHoldingSubscription does not perform thread work.
-unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
-    fn request_cancel(&self) {}
+impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
+        Arc::new(RtdCancellationHandle::noop())
+    }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Ok(())
     }
@@ -1709,7 +1727,11 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
         .unwrap();
     assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
 
-    let source = RtdSourceHandle::new(SinkCapturingSource).unwrap();
+    let source = RtdSourceHandle::for_internal(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        SinkCapturingSource,
+    )
+    .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("cycle_test").unwrap())
         .unwrap();

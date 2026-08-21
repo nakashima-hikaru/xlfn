@@ -865,7 +865,7 @@ where
     }
 }
 
-impl<'call, T> FromExcel<'call> for crate::handle::AsyncHandle<T>
+impl<'call, T> FromExcel<'call> for crate::handle::PinnedHandle<T>
 where
     T: crate::handle::ExcelHandleObject,
 {
@@ -881,7 +881,7 @@ where
         context: &CallContext<'call>,
     ) -> XllResult<Self> {
         let token = <String as FromExcel>::from_excel(value, argument)?;
-        context.resolve_handle::<T>(&token)?.into_async()
+        context.resolve_handle::<T>(&token)?.pin()
     }
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {

@@ -1,23 +1,74 @@
 use super::*;
+use crate::generation::RuntimeGeneration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT_SOURCE_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_INTERNAL_SOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// # Safety
-/// Implementors must ensure that cancellation or disconnection can be safely initiated from any thread.
-pub unsafe trait RtdSubscription: Send + 'static {
+/// A thread-safe cancellation capability detached from subscription ownership.
+pub trait RtdCancellation: Send + Sync + 'static {
     fn request_cancel(&self);
+}
+
+/// Closure-backed cancellation capability for subscription implementations
+/// whose connection object itself is not safe to move across threads.
+pub struct RtdCancellationHandle {
+    action: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl RtdCancellationHandle {
+    pub fn new(action: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            action: Arc::new(action),
+        }
+    }
+
+    pub fn noop() -> Self {
+        Self::new(|| {})
+    }
+}
+
+impl RtdCancellation for RtdCancellationHandle {
+    fn request_cancel(&self) {
+        (self.action)();
+    }
+}
+
+/// A subscription whose cancellation and disconnection protocol is explicit.
+///
+/// Cancellation is exposed through a separate `Send + Sync` capability so the
+/// subscription itself does not need to promise that every method is safe to
+/// invoke from arbitrary threads.
+pub trait RtdSubscription: Send + 'static {
+    fn cancellation(&self) -> Arc<dyn RtdCancellation>;
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
 }
 
-// SAFETY: Box<dyn RtdSubscription> forwards directly to the inner RtdSubscription implementation.
-unsafe impl RtdSubscription for Box<dyn RtdSubscription> {
-    fn request_cancel(&self) {
-        (**self).request_cancel();
+#[derive(Debug)]
+pub(crate) struct SourceHandleAllocator {
+    generation: RuntimeGeneration,
+    next_id: AtomicU64,
+}
+
+impl SourceHandleAllocator {
+    pub(crate) fn new(generation: RuntimeGeneration) -> Arc<Self> {
+        Arc::new(Self {
+            generation,
+            next_id: AtomicU64::new(1),
+        })
     }
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-        (*self).disconnect_and_wait()
+    pub(crate) fn allocate<S: RtdSource>(
+        self: &Arc<Self>,
+        source: S,
+    ) -> XllResult<RtdSourceHandle<S>> {
+        RtdSourceHandle::from_arc_and_allocator(Arc::new(source), self)
+    }
+
+    pub(crate) fn allocate_shared<S: RtdSource>(
+        self: &Arc<Self>,
+        source: Arc<S>,
+    ) -> XllResult<RtdSourceHandle<S>> {
+        RtdSourceHandle::from_arc_and_allocator(source, self)
     }
 }
 
@@ -35,11 +86,18 @@ pub trait RtdSource: Send + Sync + 'static {
 /// Runtime-owned identity for an RTD source.
 ///
 /// The handle is the only public source identity. Its internal `Arc` keeps the
-/// source alive, but shared ownership and identity are deliberately separate:
-/// cloning a handle preserves its identity, while constructing another handle
-/// from the same `Arc` creates a new identity.
+/// source alive, but shared ownership and identity are deliberately separate.
+/// Handles are created by one [`crate::OpenContext`] and carry that open
+/// generation in their identity, so a handle from an earlier generation cannot
+/// be reused by a later subscription runtime.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SourceHandleId {
+    pub(crate) generation: RuntimeGeneration,
+    pub(crate) sequence: u64,
+}
+
 pub struct RtdSourceHandle<S: RtdSource> {
-    pub(crate) id: u64,
+    pub(crate) id: SourceHandleId,
     pub(crate) source: Arc<S>,
 }
 
@@ -62,24 +120,56 @@ impl<S: RtdSource> std::fmt::Debug for RtdSourceHandle<S> {
 }
 
 impl<S: RtdSource> RtdSourceHandle<S> {
-    /// Registers a source handle with a process-stable opaque identity.
-    pub fn new(source: S) -> XllResult<Self> {
-        Self::from_arc(Arc::new(source))
-    }
-
-    /// Registers a new source handle backed by an existing shared source.
-    ///
-    /// The `Arc` supplies ownership only; it is not used as a subscription
-    /// identity.
-    pub fn from_arc(source: Arc<S>) -> XllResult<Self> {
-        let id = NEXT_SOURCE_HANDLE_ID
+    fn from_arc_and_allocator(
+        source: Arc<S>,
+        allocator: &Arc<SourceHandleAllocator>,
+    ) -> XllResult<Self> {
+        let sequence = allocator
+            .next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
                 diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
-        Ok(Self { id, source })
+        Ok(Self::from_identity(source, allocator.generation, sequence))
+    }
+
+    fn from_identity(source: Arc<S>, generation: RuntimeGeneration, sequence: u64) -> Self {
+        Self {
+            id: SourceHandleId {
+                generation,
+                sequence,
+            },
+            source,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn for_internal(generation: RuntimeGeneration, source: S) -> XllResult<Self> {
+        let sequence = NEXT_INTERNAL_SOURCE_SEQUENCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+            })?;
+        Ok(Self::from_identity(Arc::new(source), generation, sequence))
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn for_internal_shared(
+        generation: RuntimeGeneration,
+        source: Arc<S>,
+    ) -> XllResult<Self> {
+        let sequence = NEXT_INTERNAL_SOURCE_SEQUENCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+            })?;
+        Ok(Self::from_identity(source, generation, sequence))
     }
 }
 

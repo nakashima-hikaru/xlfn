@@ -23,7 +23,9 @@ mod source;
 mod topic;
 mod value;
 
-pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
+pub use source::{
+    RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
+};
 pub use topic::{RtdLimits, RtdTopic};
 pub use value::{IntoRtdValue, RtdValue};
 
@@ -36,7 +38,7 @@ pub(crate) use quota::*;
 pub(crate) use runtime::*;
 pub(crate) use server::*;
 pub(crate) use slot::*;
-pub(crate) use source::ErasedRtdSource;
+pub(crate) use source::{ErasedRtdSource, SourceHandleAllocator, SourceHandleId};
 pub(crate) use topic::{SourceId, SubscriptionIdentity, SubscriptionKey, TopicId};
 pub(crate) use value::StoredRtdValue;
 #[cfg(test)]

@@ -1370,9 +1370,10 @@ impl Drop for ConcurrentHandleResolutionBenchmark {
 
 struct BenchmarkSubscription;
 
-// SAFETY: benchmark dummy subscription is thread-safe and has no resources.
-unsafe impl crate::RtdSubscription for BenchmarkSubscription {
-    fn request_cancel(&self) {}
+impl crate::RtdSubscription for BenchmarkSubscription {
+    fn cancellation(&self) -> Arc<dyn crate::RtdCancellation> {
+        Arc::new(crate::RtdCancellationHandle::noop())
+    }
     fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
         Ok(())
     }
@@ -1420,9 +1421,12 @@ impl RtdPublishNumberBenchmark {
             )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {
-            sink: Arc::clone(&sink_slot),
-        })
+        let source = crate::RtdSourceHandle::for_internal(
+            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
+            BenchmarkRtdSource {
+                sink: Arc::clone(&sink_slot),
+            },
+        )
         .expect("benchmark source handle allocation must succeed");
         let topic =
             crate::RtdTopic::new(["BENCH", "NUMBER"]).expect("benchmark RTD topic must be valid");
@@ -1491,9 +1495,12 @@ impl RtdPublishStringBenchmark {
             )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {
-            sink: Arc::clone(&sink_slot),
-        })
+        let source = crate::RtdSourceHandle::for_internal(
+            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
+            BenchmarkRtdSource {
+                sink: Arc::clone(&sink_slot),
+            },
+        )
         .expect("benchmark source handle allocation must succeed");
         let topic =
             crate::RtdTopic::new(["BENCH", "STRING"]).expect("benchmark RTD topic must be valid");

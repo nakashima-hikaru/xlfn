@@ -3,7 +3,10 @@ use crate::generation::RuntimeGeneration;
 use std::sync::Arc;
 
 pub(crate) struct SubscriptionRuntimeSlot {
-    service: crate::runtime_components::GenerationServiceSlot<RtdLimits, SubscriptionRuntime>,
+    service: crate::runtime_components::GenerationServiceSlot<
+        SubscriptionRuntimeConfig,
+        SubscriptionRuntime,
+    >,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
@@ -27,6 +30,12 @@ impl SubscriptionsStopped {
 pub(crate) type SubscriptionRuntimeRead =
     crate::runtime_components::GenerationServiceRead<SubscriptionRuntime>;
 
+#[derive(Clone, Copy)]
+struct SubscriptionRuntimeConfig {
+    generation: RuntimeGeneration,
+    limits: RtdLimits,
+}
+
 impl SubscriptionRuntimeSlot {
     pub(crate) const fn new() -> Self {
         Self {
@@ -41,7 +50,8 @@ impl SubscriptionRuntimeSlot {
         generation: RuntimeGeneration,
         limits: RtdLimits,
     ) -> crate::XllResult<()> {
-        self.service.arm(generation, limits)
+        self.service
+            .arm(generation, SubscriptionRuntimeConfig { generation, limits })
     }
 
     pub(crate) fn disarm(&self, generation: RuntimeGeneration) -> crate::XllResult<()> {
@@ -51,7 +61,12 @@ impl SubscriptionRuntimeSlot {
     #[inline]
     pub(crate) fn read(&self) -> crate::XllResult<SubscriptionRuntimeRead> {
         self.service.read(
-            |limits| Ok(Arc::new(SubscriptionRuntime::with_module_ingress(limits))),
+            |config| {
+                Ok(Arc::new(SubscriptionRuntime::with_module_ingress(
+                    config.generation,
+                    config.limits,
+                )))
+            },
             |_runtime| {
                 #[cfg(any(test, feature = "shutdown-refinement"))]
                 if let Some(ghost) = self.ghost.get() {

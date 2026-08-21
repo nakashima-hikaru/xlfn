@@ -1,10 +1,11 @@
+use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::{
     AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, ExcelValue,
     FromExcel, IntoXllError, Matrix, XllError, XllResult,
 };
 use std::marker::PhantomData;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use xlfn_sys::{XL_COERCE, XL_SHEET_NM};
@@ -51,10 +52,15 @@ pub struct OpenContext {
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
+    source_allocator: std::sync::Arc<crate::subscription::SourceHandleAllocator>,
 }
 
 impl OpenContext {
-    pub(crate) fn new(module_path: PathBuf, build_info: BuildInfo) -> Self {
+    pub(crate) fn new(
+        module_path: PathBuf,
+        build_info: BuildInfo,
+        generation: RuntimeGeneration,
+    ) -> Self {
         let module_directory = module_path
             .parent()
             .map(Path::to_path_buf)
@@ -63,6 +69,7 @@ impl OpenContext {
             module_path,
             module_directory,
             build_info,
+            source_allocator: crate::subscription::SourceHandleAllocator::new(generation),
         }
     }
 
@@ -89,14 +96,16 @@ impl OpenContext {
     /// Provides the RTD source-registration capability for this open.
     #[must_use]
     pub fn rtd(&self) -> RtdOpenContext<'_> {
-        RtdOpenContext { context: self }
+        RtdOpenContext {
+            allocator: &self.source_allocator,
+        }
     }
 }
 
 /// Capability for registering opaque RTD source identities during open.
 #[derive(Clone, Copy, Debug)]
 pub struct RtdOpenContext<'a> {
-    context: &'a OpenContext,
+    allocator: &'a std::sync::Arc<crate::subscription::SourceHandleAllocator>,
 }
 
 impl RtdOpenContext<'_> {
@@ -105,8 +114,7 @@ impl RtdOpenContext<'_> {
     where
         S: crate::RtdSource,
     {
-        let _ = self.context;
-        crate::RtdSourceHandle::new(source)
+        self.allocator.allocate(source)
     }
 
     /// Registers one new source identity backed by shared source storage.
@@ -119,8 +127,7 @@ impl RtdOpenContext<'_> {
     where
         S: crate::RtdSource,
     {
-        let _ = self.context;
-        crate::RtdSourceHandle::from_arc(source)
+        self.allocator.allocate_shared(source)
     }
 }
 
@@ -147,8 +154,28 @@ impl DiagnosticsSetup<'_> {
 
 /// Handle-registry policy selected during one add-in open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleBindingLimit(NonZeroU32);
+
+impl HandleBindingLimit {
+    #[must_use]
+    pub const fn new(value: u32) -> Option<Self> {
+        if value == 0 || value > HandleConfig::MAX_SUPPORTED_BINDINGS {
+            None
+        } else {
+            Some(Self(
+                NonZeroU32::new(value).expect("binding limit is non-zero"),
+            ))
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleConfig {
-    maximum_bindings: u32,
+    maximum_bindings: HandleBindingLimit,
 }
 
 impl HandleConfig {
@@ -163,28 +190,21 @@ impl HandleConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            maximum_bindings: Self::DEFAULT_MAX_BINDINGS,
+            maximum_bindings: HandleBindingLimit::new(Self::DEFAULT_MAX_BINDINGS)
+                .expect("default handle limit is supported"),
         }
     }
 
     #[must_use]
-    pub const fn with_max_bindings(mut self, maximum_bindings: u32) -> Self {
-        self.maximum_bindings = maximum_bindings;
-        self
+    pub const fn with_max_bindings(self, maximum_bindings: u32) -> Option<Self> {
+        let Some(maximum_bindings) = HandleBindingLimit::new(maximum_bindings) else {
+            return None;
+        };
+        Some(Self { maximum_bindings })
     }
 
     pub(crate) const fn maximum_bindings(self) -> u32 {
-        self.maximum_bindings
-    }
-
-    pub(crate) const fn validate(self) -> XllResult<()> {
-        if self.maximum_bindings <= Self::MAX_SUPPORTED_BINDINGS {
-            Ok(())
-        } else {
-            Err(XllError::Domain {
-                code: crate::DomainErrorCode::InvalidInput,
-            })
-        }
+        self.maximum_bindings.get()
     }
 }
 
@@ -828,9 +848,10 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
-        // SAFETY: disconnect_and_wait ensures safety
-        unsafe impl crate::RtdSubscription for TestSubscription {
-            fn request_cancel(&self) {}
+        impl crate::RtdSubscription for TestSubscription {
+            fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
+                std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+            }
             fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
                 self.disconnected.store(true, Ordering::Release);
                 Ok(())
@@ -864,9 +885,12 @@ mod tests {
         let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
-        let source = crate::RtdSourceHandle::new(TestSource {
-            disconnected: Arc::clone(&disconnected),
-        })
+        let source = crate::RtdSourceHandle::for_internal(
+            runtime.generation().expect("test runtime has a generation"),
+            TestSource {
+                disconnected: Arc::clone(&disconnected),
+            },
+        )
         .unwrap();
         let topic = crate::RtdTopic::single("shared-observation").unwrap();
         let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
@@ -965,8 +989,11 @@ mod tests {
             "0.1.0",
             "x86_64-pc-windows-msvc",
         );
-        let context =
-            crate::OpenContext::new(std::path::PathBuf::from("/test/module.xll"), build_info);
+        let context = crate::OpenContext::new(
+            std::path::PathBuf::from("/test/module.xll"),
+            build_info,
+            super::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        );
         let diag = context.diagnostics();
         let copied = diag;
         assert_eq!(

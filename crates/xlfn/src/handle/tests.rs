@@ -812,7 +812,7 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 }
 
 #[test]
-fn explicit_async_handle_argument_conversion_pins_the_payload() {
+fn explicit_pinned_handle_argument_conversion_pins_the_payload() {
     let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
     runtime.arm_test_generation();
     let handles = runtime.handles().unwrap();
@@ -821,7 +821,7 @@ fn explicit_async_handle_argument_conversion_pins_the_payload() {
         .unwrap();
     let (_encoded, mut raw) = token_value(&token);
 
-    let resolved: AsyncHandle<DataRecord> = crate::with_excel_call_scope(|scope| {
+    let resolved: PinnedHandle<DataRecord> = crate::with_excel_call_scope(|scope| {
         // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
         unsafe { crate::argument_from_raw_with_context(scope, runtime, "dataset", &mut raw) }
             .unwrap()
@@ -1547,12 +1547,12 @@ fn pin_promotion_resurrects_a_retired_payload_without_a_binding() {
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
 
-    let pinned: AsyncHandle<CountedDataRecord> = crate::with_excel_call_scope(|scope| {
+    let pinned: PinnedHandle<CountedDataRecord> = crate::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
         runtime
             .registry
             .remove_and_drop(&token, "test retire before pin promotion");
-        handle.into_async().unwrap()
+        handle.pin().unwrap()
     });
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -2808,11 +2808,6 @@ fn handle_config_rejects_an_unbounded_dense_publication_table() {
     let config = crate::HandleConfig::new()
         .with_max_bindings(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
 
-    assert!(matches!(
-        slot.arm(generation(1), config),
-        Err(XllError::Domain {
-            code: DomainErrorCode::InvalidInput
-        })
-    ));
+    assert!(config.is_none());
     assert!(slot.is_none());
 }

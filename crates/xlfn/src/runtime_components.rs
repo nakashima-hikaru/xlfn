@@ -5,7 +5,7 @@
 //! boundaries or exposing lifecycle bookkeeping to add-in authors.
 
 use arc_swap::ArcSwapOption;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::generation::{
-    AtomicOptionalOpenAttemptId, AtomicOptionalRuntimeGeneration, RuntimeGeneration,
+    AtomicOptionalOpenAttemptId, AtomicOptionalRuntimeGeneration, OpenAttemptId, RuntimeGeneration,
 };
 use crate::module_residency::ModuleResidencyLease;
 use crate::registration::{EventRegistration, ExcelNameKey, MetadataDebt, PendingRegistration};
@@ -459,20 +459,95 @@ impl<A: crate::Addin> QuarantineVault<A> {
     }
 }
 
-/// Lifecycle synchronization state: phase, epochs, open ownership, and the
-/// published generation all move together under the lifecycle protocol.
+/// Canonical lifecycle state owned by the lifecycle control mutex.
+///
+/// The atomic fields in [`LifecycleState`] are deliberately only read-side
+/// projections. Every writer first updates this state and then publishes a
+/// coherent projection through [`LifecycleState::refresh_projection`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LifecycleStateKind {
+    Closed,
+    Opening {
+        attempt: OpenAttemptId,
+    },
+    Open {
+        generation: RuntimeGeneration,
+    },
+    Closing {
+        generation: Option<RuntimeGeneration>,
+    },
+    OpenRollbackPending {
+        generation: Option<RuntimeGeneration>,
+    },
+    Quarantined,
+}
+
+impl LifecycleStateKind {
+    pub(crate) const fn phase(self) -> LifecyclePhase {
+        match self {
+            Self::Closed => LifecyclePhase::Closed,
+            Self::Opening { .. } => LifecyclePhase::Opening,
+            Self::Open { .. } => LifecyclePhase::Open,
+            Self::Closing { .. } => LifecyclePhase::Closing,
+            Self::OpenRollbackPending { .. } => LifecyclePhase::OpenRollbackPending,
+            Self::Quarantined => LifecyclePhase::Quarantined,
+        }
+    }
+
+    pub(crate) const fn open_attempt(self) -> Option<OpenAttemptId> {
+        match self {
+            Self::Opening { attempt } => Some(attempt),
+            Self::Closed
+            | Self::Open { .. }
+            | Self::Closing { .. }
+            | Self::OpenRollbackPending { .. }
+            | Self::Quarantined => None,
+        }
+    }
+}
+
+/// All mutable lifecycle decisions are made while this value is locked.
+///
+/// `known_generation` intentionally survives the transition to `Closed`: it
+/// identifies the last generation whose teardown was certified and is used by
+/// shutdown certificates and diagnostics. The currently active generation is
+/// still exposed separately through the `Open` state and the ArcSwap root.
+pub(crate) struct LifecycleControl {
+    pub(crate) state: LifecycleStateKind,
+    pub(crate) host_intent: HostLifecycleIntent,
+    pub(crate) next_lifecycle_attempt: u64,
+    pub(crate) known_generation: Option<RuntimeGeneration>,
+    pub(crate) removal_epoch: u64,
+    pub(crate) removal_attempt_active: bool,
+}
+
+impl LifecycleControl {
+    const fn new() -> Self {
+        Self {
+            state: LifecycleStateKind::Closed,
+            host_intent: HostLifecycleIntent::None,
+            next_lifecycle_attempt: 1,
+            known_generation: None,
+            removal_epoch: 0,
+            removal_attempt_active: false,
+        }
+    }
+}
+
+/// Lifecycle synchronization state: ownership remains in the opening slot
+/// and ArcSwap root, while all lifecycle writes are serialized by one control
+/// mutex. The atomics are projections for lock-free read-side admission.
 pub(crate) struct LifecycleState<A: crate::Addin> {
-    pub(crate) phase: AtomicU8,
-    pub(crate) host_intent: AtomicU8,
-    pub(crate) next_lifecycle_attempt: AtomicU64,
-    pub(crate) generation: AtomicOptionalRuntimeGeneration,
-    pub(crate) open_attempt_id: AtomicOptionalOpenAttemptId,
-    pub(crate) removal_epoch: AtomicU64,
+    phase: AtomicU8,
+    host_intent: AtomicU8,
+    generation: AtomicOptionalRuntimeGeneration,
+    open_attempt_id: AtomicOptionalOpenAttemptId,
+    removal_epoch: AtomicU64,
     pub(crate) opening: Mutex<Option<OpeningGeneration<A>>>,
     pub(crate) current: ArcSwapOption<OpenGeneration<A>>,
-    pub(crate) wait_lock: Mutex<()>,
-    pub(crate) lifecycle_changed: Condvar,
-    pub(crate) removal_attempt_active: AtomicBool,
+    control: Mutex<LifecycleControl>,
+    changed: Condvar,
+    removal_attempt_active: AtomicBool,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -487,18 +562,120 @@ impl<A: crate::Addin> LifecycleState<A> {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
             host_intent: AtomicU8::new(HostLifecycleIntent::None as u8),
-            next_lifecycle_attempt: AtomicU64::new(1),
             generation: AtomicOptionalRuntimeGeneration::empty(),
             open_attempt_id: AtomicOptionalOpenAttemptId::empty(),
             removal_epoch: AtomicU64::new(0),
             opening: Mutex::new(None),
             current: ArcSwapOption::const_empty(),
-            wait_lock: Mutex::new(()),
-            lifecycle_changed: Condvar::new(),
+            control: Mutex::new(LifecycleControl::new()),
+            changed: Condvar::new(),
             removal_attempt_active: AtomicBool::new(false),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, LifecycleControl> {
+        self.control.lock()
+    }
+
+    pub(crate) fn wait<'a>(&self, control: &mut MutexGuard<'a, LifecycleControl>) {
+        self.changed.wait(control);
+    }
+
+    pub(crate) fn notify_all(&self) {
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn phase(&self) -> LifecyclePhase {
+        LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn host_intent(&self) -> HostLifecycleIntent {
+        HostLifecycleIntent::from_raw(self.host_intent.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
+        self.open_attempt_id.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn removal_epoch(&self) -> u64 {
+        self.removal_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_host_intent(&self, intent: HostLifecycleIntent) {
+        let mut control = self.lock();
+        self.set_host_intent_locked(&mut control, intent);
+    }
+
+    pub(crate) fn set_host_intent_locked(
+        &self,
+        control: &mut LifecycleControl,
+        intent: HostLifecycleIntent,
+    ) {
+        control.host_intent = intent;
+        self.refresh_projection(control);
+    }
+
+    pub(crate) fn set_state(&self, control: &mut LifecycleControl, state: LifecycleStateKind) {
+        control.state = state;
+        self.refresh_projection(control);
+    }
+
+    pub(crate) fn set_known_generation(
+        &self,
+        control: &mut LifecycleControl,
+        generation: Option<RuntimeGeneration>,
+    ) {
+        control.known_generation = generation;
+        self.refresh_projection(control);
+    }
+
+    pub(crate) fn set_removal_attempt_active(&self, control: &mut LifecycleControl, active: bool) {
+        control.removal_attempt_active = active;
+        self.refresh_projection(control);
+    }
+
+    pub(crate) fn advance_removal_epoch(&self, control: &mut LifecycleControl) {
+        control.removal_epoch = control.removal_epoch.checked_add(1).unwrap_or_else(|| {
+            tracing::error!("lifecycle close epoch exhausted; fail-stopping");
+            std::process::abort();
+        });
+        self.refresh_projection(control);
+    }
+
+    pub(crate) fn next_lifecycle_attempt_id(
+        &self,
+        control: &mut LifecycleControl,
+    ) -> crate::XllResult<OpenAttemptId> {
+        let attempt_id = control.next_lifecycle_attempt;
+        let next = attempt_id.checked_add(1).ok_or(crate::XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::ATTEMPT_OVERFLOW,
+        })?;
+        let attempt = OpenAttemptId::new(attempt_id).ok_or(crate::XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::ATTEMPT_ZERO,
+        })?;
+        control.next_lifecycle_attempt = next;
+        Ok(attempt)
+    }
+
+    fn refresh_projection(&self, control: &LifecycleControl) {
+        self.host_intent
+            .store(control.host_intent as u8, Ordering::Release);
+        self.generation
+            .store(control.known_generation, Ordering::Release);
+        self.open_attempt_id
+            .store(control.state.open_attempt(), Ordering::Release);
+        self.removal_epoch
+            .store(control.removal_epoch, Ordering::Release);
+        self.removal_attempt_active
+            .store(control.removal_attempt_active, Ordering::Release);
+        self.phase
+            .store(control.state.phase() as u8, Ordering::Release);
     }
 
     pub(crate) fn stage_opening_state(

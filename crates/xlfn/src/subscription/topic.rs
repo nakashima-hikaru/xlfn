@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) const DEFAULT_MAX_RTD_TOPIC_PARTS: usize = 253;
-pub(crate) const DEFAULT_MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
+pub(crate) const MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
 pub(crate) const DEFAULT_MAX_RTD_PENDING: usize = 4096;
 pub(crate) const DEFAULT_MAX_RTD_ACTIVE: usize = 4096;
 pub(crate) const DEFAULT_MAX_RTD_QUEUED_UPDATES: usize = 4096;
@@ -12,8 +12,6 @@ pub(crate) const DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct RtdLimits {
-    pub(crate) max_topic_parts: usize,
-    pub(crate) max_topic_bytes: usize,
     pub(crate) max_pending: usize,
     pub(crate) max_active: usize,
     pub(crate) max_queued_updates: usize,
@@ -25,26 +23,12 @@ impl RtdLimits {
     #[must_use]
     pub const fn standard() -> Self {
         Self {
-            max_topic_parts: DEFAULT_MAX_RTD_TOPIC_PARTS,
-            max_topic_bytes: DEFAULT_MAX_RTD_TOPIC_BYTES,
             max_pending: DEFAULT_MAX_RTD_PENDING,
             max_active: DEFAULT_MAX_RTD_ACTIVE,
             max_queued_updates: DEFAULT_MAX_RTD_QUEUED_UPDATES,
             max_source_ids: DEFAULT_MAX_RTD_SOURCE_IDS,
             max_total_topic_bytes: DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES,
         }
-    }
-
-    #[must_use]
-    pub const fn with_max_topic_parts(mut self, value: usize) -> Self {
-        self.max_topic_parts = value;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_max_topic_bytes(mut self, value: usize) -> Self {
-        self.max_topic_bytes = value;
-        self
     }
 
     #[must_use]
@@ -75,16 +59,6 @@ impl RtdLimits {
     pub const fn with_max_total_topic_bytes(mut self, value: usize) -> Self {
         self.max_total_topic_bytes = value;
         self
-    }
-
-    #[must_use]
-    pub const fn max_topic_parts(&self) -> usize {
-        self.max_topic_parts
-    }
-
-    #[must_use]
-    pub const fn max_topic_bytes(&self) -> usize {
-        self.max_topic_bytes
     }
 
     #[must_use]
@@ -123,7 +97,7 @@ impl Default for RtdLimits {
 pub(crate) struct TopicId(pub(crate) i32);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct SourceId(pub(crate) u64);
+pub(crate) struct SourceId(pub(crate) SourceHandleId);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SubscriptionIdentity {
@@ -190,15 +164,14 @@ pub struct RtdTopic {
 
 impl RtdTopic {
     pub fn new(parts: impl IntoIterator<Item = impl Into<String>>) -> XllResult<Self> {
-        let limits = RtdLimits::standard();
         let mut normalized = Vec::new();
         let mut total_bytes = 0_usize;
         for part in parts {
-            if normalized.len() >= limits.max_topic_parts {
+            if normalized.len() >= MAX_RTD_TOPIC_PARTS {
                 return Err(XllError::input(
                     "RTD topic",
                     crate::InputError::TooLarge {
-                        limit: limits.max_topic_parts,
+                        limit: MAX_RTD_TOPIC_PARTS,
                         actual: normalized.len().saturating_add(1),
                     },
                 ));
@@ -214,16 +187,16 @@ impl RtdTopic {
                 XllError::input(
                     "RTD topic",
                     crate::InputError::TooLarge {
-                        limit: limits.max_topic_bytes,
+                        limit: MAX_RTD_TOPIC_BYTES,
                         actual: usize::MAX,
                     },
                 )
             })?;
-            if total_bytes > limits.max_topic_bytes {
+            if total_bytes > MAX_RTD_TOPIC_BYTES {
                 return Err(XllError::input(
                     "RTD topic",
                     crate::InputError::TooLarge {
-                        limit: limits.max_topic_bytes,
+                        limit: MAX_RTD_TOPIC_BYTES,
                         actual: total_bytes,
                     },
                 ));
@@ -250,8 +223,8 @@ impl RtdTopic {
         &self.parts
     }
 
-    pub(crate) fn validate_with_limits(&self, limits: &RtdLimits) -> XllResult<()> {
-        validate_topic_parts(&self.parts, limits)
+    pub(crate) fn validate_protocol(&self) -> XllResult<()> {
+        validate_topic_parts(&self.parts)
     }
 
     pub(crate) fn byte_len(&self) -> usize {
@@ -259,18 +232,18 @@ impl RtdTopic {
     }
 }
 
-fn validate_topic_parts(parts: &[String], limits: &RtdLimits) -> XllResult<()> {
+fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
     if parts.is_empty() || parts.iter().any(String::is_empty) {
         return Err(XllError::input(
             "RTD topic",
             crate::InputError::Malformed("RTD topics require non-empty parts"),
         ));
     }
-    if parts.len() > limits.max_topic_parts {
+    if parts.len() > MAX_RTD_TOPIC_PARTS {
         return Err(XllError::input(
             "RTD topic",
             crate::InputError::TooLarge {
-                limit: limits.max_topic_parts,
+                limit: MAX_RTD_TOPIC_PARTS,
                 actual: parts.len(),
             },
         ));
@@ -292,17 +265,17 @@ fn validate_topic_parts(parts: &[String], limits: &RtdLimits) -> XllResult<()> {
             XllError::input(
                 "RTD topic",
                 crate::InputError::TooLarge {
-                    limit: limits.max_topic_bytes,
+                    limit: MAX_RTD_TOPIC_BYTES,
                     actual: usize::MAX,
                 },
             )
         })?;
     }
-    if total_bytes > limits.max_topic_bytes {
+    if total_bytes > MAX_RTD_TOPIC_BYTES {
         return Err(XllError::input(
             "RTD topic",
             crate::InputError::TooLarge {
-                limit: limits.max_topic_bytes,
+                limit: MAX_RTD_TOPIC_BYTES,
                 actual: total_bytes,
             },
         ));

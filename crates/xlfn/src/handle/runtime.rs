@@ -796,7 +796,6 @@ impl HandleRuntimeSlot {
         generation: RuntimeGeneration,
         config: crate::HandleConfig,
     ) -> XllResult<()> {
-        config.validate()?;
         self.service.arm(generation, config)
     }
 

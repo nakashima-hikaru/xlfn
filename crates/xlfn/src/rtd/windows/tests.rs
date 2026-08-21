@@ -1189,9 +1189,10 @@ struct DispatchTestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
-// SAFETY: DispatchTestSubscription is a mock subscription for testing.
-unsafe impl RtdSubscription for DispatchTestSubscription {
-    fn request_cancel(&self) {}
+impl RtdSubscription for DispatchTestSubscription {
+    fn cancellation(&self) -> Arc<dyn crate::RtdCancellation> {
+        Arc::new(crate::RtdCancellationHandle::noop())
+    }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         self.disconnected.store(true, Ordering::Release);
@@ -2310,7 +2311,11 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         sink: Mutex::new(None),
         disconnected: Arc::clone(&disconnected),
     });
-    let source_handle = crate::RtdSourceHandle::from_arc(Arc::clone(&source)).unwrap();
+    let source_handle = crate::RtdSourceHandle::for_internal_shared(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        Arc::clone(&source),
+    )
+    .unwrap();
     let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.as_ref().unwrap().clone();

@@ -1096,6 +1096,65 @@ impl Drop for BindingRemoval<'_> {
     }
 }
 
+/// Write-side registry transaction.
+///
+/// The binding reservation and the live-object arena lock are acquired in the
+/// canonical order and are kept together until publication. This makes the
+/// object binding count, storage generation, and immutable binding snapshot a
+/// single internal mutation boundary without changing the lock-free read path.
+pub(crate) struct RegistryWriteTxn<'a> {
+    objects: parking_lot::MutexGuard<'a, ObjectRegistry>,
+    binding: BindingReservation<'a>,
+}
+
+impl<'a> RegistryWriteTxn<'a> {
+    fn reserve(registry: &'a HandleRegistry) -> XllResult<Self> {
+        let binding = registry.bindings.reserve()?;
+        let objects = registry.objects.live.lock();
+        Ok(Self { objects, binding })
+    }
+
+    fn objects(&mut self) -> &mut ObjectRegistry {
+        &mut self.objects
+    }
+
+    fn publish(self, object: LiveObjectRef, object_ref: PublishedObjectPtr) -> (HandleId, bool) {
+        let Self { objects, binding } = self;
+        drop(objects);
+        binding.publish(object, object_ref)
+    }
+}
+
+/// Write-side removal transaction. It mirrors [`RegistryWriteTxn`] for the
+/// retirement path and keeps the binding record and object entry paired until
+/// both mutations have been linearized.
+pub(crate) struct RegistryRemovalTxn<'a> {
+    objects: parking_lot::MutexGuard<'a, ObjectRegistry>,
+    binding: BindingRemoval<'a>,
+}
+
+impl<'a> RegistryRemovalTxn<'a> {
+    fn begin(registry: &'a HandleRegistry, id: HandleId) -> XllResult<Self> {
+        let binding = registry.bindings.begin_removal(id)?;
+        let objects = registry.objects.live.lock();
+        Ok(Self { objects, binding })
+    }
+
+    fn object(&self) -> LiveObjectRef {
+        self.binding.object()
+    }
+
+    fn objects(&mut self) -> &mut ObjectRegistry {
+        &mut self.objects
+    }
+
+    fn commit(self) -> bool {
+        let Self { objects, binding } = self;
+        drop(objects);
+        binding.commit()
+    }
+}
+
 pub(crate) struct HandleRegistry {
     pub(crate) codec: TokenCodec,
     pub(crate) phase: AtomicU8,
@@ -1262,8 +1321,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let reservation = self.bindings.reserve()?;
-        let mut objects = self.objects.live.lock();
+        let mut transaction = RegistryWriteTxn::reserve(self)?;
 
         let object = value.as_ref().expect("pending handle object is armed");
         if object.type_id != TypeId::of::<T>() {
@@ -1281,9 +1339,11 @@ impl HandleRegistry {
             Some(object_id) => object_id,
             None => self.objects.allocate_object_id()?,
         };
-        let existing_key = requested_object_id.and_then(|_| objects.key_for_identity(object_id));
+        let existing_key =
+            requested_object_id.and_then(|_| transaction.objects().key_for_identity(object_id));
         let existing_object_ref = if let Some(existing_key) = existing_key {
-            let entry = objects
+            let entry = transaction
+                .objects()
                 .get(existing_key)
                 .expect("object identity index must point at a live entry");
             if entry.value.type_id != TypeId::of::<T>() {
@@ -1309,7 +1369,7 @@ impl HandleRegistry {
         };
         let (object_key, object_ref) = match existing_key {
             Some(existing_key) => {
-                objects.add_binding(LiveObjectRef {
+                transaction.objects().add_binding(LiveObjectRef {
                     id: ObjectIdentity(object_id),
                     key: existing_key,
                 })?;
@@ -1323,13 +1383,12 @@ impl HandleRegistry {
                     .as_ref()
                     .expect("pending handle object is armed")
                     .published_ptr();
-                let object_key = objects.insert(object_id, value)?;
+                let object_key = transaction.objects().insert(object_id, value)?;
                 (object_key, object_ref)
             }
         };
 
-        drop(objects);
-        let (id, reused) = reservation.publish(
+        let (id, reused) = transaction.publish(
             LiveObjectRef {
                 id: ObjectIdentity(object_id),
                 key: object_key,
@@ -1353,14 +1412,15 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let reservation = self.bindings.reserve()?;
-        let mut objects = self.objects.live.lock();
-        let live_key = objects
+        let mut transaction = RegistryWriteTxn::reserve(self)?;
+        let live_key = transaction
+            .objects()
             .get(requested_object_key)
             .map(|_| requested_object_key)
-            .or_else(|| objects.key_for_identity(object_id));
+            .or_else(|| transaction.objects().key_for_identity(object_id));
         let (object_key, object_ref) = if let Some(object_key) = live_key {
-            let entry = objects
+            let entry = transaction
+                .objects()
                 .get(object_key)
                 .expect("object identity index must point at a live entry");
             if entry.object_id != object_id {
@@ -1381,14 +1441,14 @@ impl HandleRegistry {
                 code: DomainErrorCode::Overflow,
             })?;
             let object_ref = entry.value.published_ptr();
-            objects.add_binding(LiveObjectRef {
+            transaction.objects().add_binding(LiveObjectRef {
                 id: ObjectIdentity(object_id),
                 key: object_key,
             })?;
             (object_key, object_ref)
         } else {
             let Some((object_key, object_ref)) = self.objects.resurrect(
-                &mut objects,
+                transaction.objects(),
                 ObjectLocator {
                     id: ObjectIdentity(object_id),
                     key_hint: requested_object_key,
@@ -1402,8 +1462,7 @@ impl HandleRegistry {
             (object_key, object_ref)
         };
 
-        drop(objects);
-        let (id, reused) = reservation.publish(
+        let (id, reused) = transaction.publish(
             LiveObjectRef {
                 id: ObjectIdentity(object_id),
                 key: object_key,
@@ -1572,17 +1631,17 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let removal = self.bindings.begin_removal(id)?;
-        let mut objects = self.objects.live.lock();
-        let object = objects
-            .get(removal.object().key)
+        let mut transaction = RegistryRemovalTxn::begin(self, id)?;
+        let object_key = transaction.object().key;
+        let object = transaction
+            .objects()
+            .get(object_key)
             .ok_or(XllError::StaleHandle)?;
         if object.value.published_ptr().typed_ptr::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
-        let value = objects.release_binding(removal.object().key);
-        drop(objects);
-        let _reusable = removal.commit();
+        let value = transaction.objects().release_binding(object_key);
+        let _reusable = transaction.commit();
         if let Some(value) = value {
             self.objects.retire(value, "handle registry test removal");
         }
@@ -1604,11 +1663,10 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let removal = self.bindings.begin_removal(id)?;
-        let mut objects = self.objects.live.lock();
-        let value = objects.release_binding(removal.object().key);
-        drop(objects);
-        let reusable = removal.commit();
+        let mut transaction = RegistryRemovalTxn::begin(self, id)?;
+        let object_key = transaction.object().key;
+        let value = transaction.objects().release_binding(object_key);
+        let reusable = transaction.commit();
         on_linearized(reusable);
         if let Some(value) = value {
             self.objects.retire(value, operation);

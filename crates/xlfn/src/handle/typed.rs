@@ -45,12 +45,6 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         self.promote().map(|lease| PinnedHandle { lease })
     }
 
-    /// Promotes this capability to the handle type intended for an async
-    /// future. The returned value is `Send + Sync + 'static`.
-    pub fn into_async(self) -> XllResult<AsyncHandle<T>> {
-        self.promote().map(|lease| AsyncHandle { lease })
-    }
-
     /// Converts this borrowed capability into an explicit republish
     /// capability. A handle itself is never an Excel return value.
     pub fn alias(self) -> HandleAlias<'call, T> {
@@ -72,8 +66,8 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
-/// A long-lived synchronous handle. Use this when a handle must cross Excel
-/// calls but remain in synchronous application code.
+/// A long-lived handle. Use this when a handle must cross Excel calls or be
+/// moved into an asynchronous future.
 pub struct PinnedHandle<T: ExcelHandleObject> {
     lease: PinnedObject<T>,
 }
@@ -83,39 +77,9 @@ impl<T: ExcelHandleObject> PinnedHandle<T> {
     pub fn object_id(&self) -> u64 {
         self.lease.object_id()
     }
-
-    pub fn into_async(self) -> AsyncHandle<T> {
-        AsyncHandle { lease: self.lease }
-    }
 }
 
 impl<T: ExcelHandleObject> Deref for PinnedHandle<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.lease
-    }
-}
-
-/// A long-lived handle whose ownership is explicitly suitable for an async
-/// future. It owns the same registry pin as [`PinnedHandle`] but is a separate
-/// type so async APIs cannot accidentally capture [`Handle<'_, T>`].
-pub struct AsyncHandle<T: ExcelHandleObject> {
-    lease: PinnedObject<T>,
-}
-
-impl<T: ExcelHandleObject> AsyncHandle<T> {
-    /// Returns the stable runtime-local object identity.
-    pub fn object_id(&self) -> u64 {
-        self.lease.object_id()
-    }
-
-    pub fn into_pinned(self) -> PinnedHandle<T> {
-        PinnedHandle { lease: self.lease }
-    }
-}
-
-impl<T: ExcelHandleObject> Deref for AsyncHandle<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {

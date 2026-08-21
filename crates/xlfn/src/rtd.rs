@@ -4,8 +4,8 @@ use crate::XllResult;
 use crate::handle::HandleRuntime;
 use crate::host_callback::HostCallbackSession;
 pub use crate::subscription::{
-    IntoRtdValue, RtdLimits, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic,
-    RtdValue,
+    IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
+    RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

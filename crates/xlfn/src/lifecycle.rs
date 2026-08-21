@@ -312,7 +312,10 @@ where
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
     let registrar = HostRegistrar::connect(callbacks)
         .map_err(|error| retain_transaction_error(runtime, error))?;
-    let context = OpenContext::new(registrar.module_path().clone(), build_info);
+    let generation = runtime.active_generation().ok_or(XllError::Internal {
+        diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+    })?;
+    let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
     let runtime_config = initialize_addin::<A>(runtime, &context)?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
@@ -1578,6 +1581,7 @@ mod tests {
         OpenContext::new(
             std::path::PathBuf::from("test.xll"),
             BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            RuntimeGeneration::new(1).expect("test generation is non-zero"),
         )
     }
 
@@ -1913,9 +1917,10 @@ mod tests {
 
     struct TraceSubscription;
 
-    // SAFETY: this test subscription has no background work to wait for.
-    unsafe impl crate::RtdSubscription for TraceSubscription {
-        fn request_cancel(&self) {}
+    impl crate::RtdSubscription for TraceSubscription {
+        fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
+            std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+        }
 
         fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
             Ok(())
@@ -2019,9 +2024,12 @@ mod tests {
             )))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let source = crate::RtdSourceHandle::new(TraceSource {
-            sink: std::sync::Arc::clone(&trace_sink),
-        })
+        let source = crate::RtdSourceHandle::for_internal(
+            runtime.generation().expect("test runtime has a generation"),
+            TraceSource {
+                sink: std::sync::Arc::clone(&trace_sink),
+            },
+        )
         .unwrap();
         let prepared = subscriptions
             .prepare(
@@ -2662,9 +2670,10 @@ mod tests {
         events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
-    // SAFETY: disconnect_and_wait ensures no background work accesses module code.
-    unsafe impl crate::RtdSubscription for OrderedSubscription {
-        fn request_cancel(&self) {}
+    impl crate::RtdSubscription for OrderedSubscription {
+        fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
+            std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+        }
 
         fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
             self.events.lock().unwrap().push("subscription");
@@ -2744,9 +2753,12 @@ mod tests {
                     .expect("non-zero test server generation"),
             )
             .unwrap();
-        let source = crate::RtdSourceHandle::new(OrderedSource {
-            events: std::sync::Arc::clone(&events),
-        })
+        let source = crate::RtdSourceHandle::for_internal(
+            runtime.generation().expect("test runtime has a generation"),
+            OrderedSource {
+                events: std::sync::Arc::clone(&events),
+            },
+        )
         .unwrap();
         let prepared = subscriptions
             .prepare(&source, crate::RtdTopic::single("ordered").unwrap())

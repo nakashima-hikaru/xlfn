@@ -56,7 +56,7 @@ pub(crate) use token::{HandleId, HandleToken, ObjectId, TokenCodec};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
-pub use typed::{AsyncHandle, ExcelHandleObject, Handle, HandleAlias, PinnedHandle};
+pub use typed::{ExcelHandleObject, Handle, HandleAlias, PinnedHandle};
 
 #[cfg(test)]
 mod refinement_tests;

@@ -1,18 +1,19 @@
+use super::source::SourceHandleId;
 use super::*;
 use rustc_hash::FxHashSet;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ResolvedSourceIdentity {
-    pub(crate) source_id: u64,
+    pub(crate) source_id: SourceHandleId,
     pub(crate) newly_registered: bool,
 }
 
-// Source handles carry a process-stable monotonic identity. The registry
-// therefore stores only that opaque identity; it never derives identity from
-// an allocation address and does not need an ownership anchor. Registered
-// handle identities remain reserved until the subscription runtime is cleared.
+// Source handles carry a generation-owned identity. The registry therefore
+// stores only that typed identity; it never derives identity from an allocation
+// address and does not need an ownership anchor. Registered handle identities
+// remain reserved until the subscription runtime is cleared.
 pub(crate) struct SourceIdentityRegistry {
-    pub(crate) ids: FxHashSet<u64>,
+    pub(crate) ids: FxHashSet<SourceHandleId>,
 }
 
 impl SourceIdentityRegistry {
@@ -24,7 +25,7 @@ impl SourceIdentityRegistry {
 
     pub(crate) fn resolve(
         &mut self,
-        source_id: u64,
+        source_id: SourceHandleId,
         limit: usize,
     ) -> XllResult<ResolvedSourceIdentity> {
         if self.ids.contains(&source_id) {
