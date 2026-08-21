@@ -553,7 +553,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.has_current_generation()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn arm_test_generation(&self) {
         self.services
             .arm_generation(

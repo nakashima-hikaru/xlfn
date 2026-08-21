@@ -1615,10 +1615,7 @@ impl HandleRegistry {
         let _ = self.remove_and_drop_with_kind(token, operation);
     }
 
-    #[cfg(any(
-        test,
-        not(all(target_os = "windows", feature = "handle-refinement-trace"))
-    ))]
+    #[cfg(any(test, not(feature = "handle-refinement-trace")))]
     pub(crate) fn remove_and_drop_with_kind(
         &self,
         token: &str,

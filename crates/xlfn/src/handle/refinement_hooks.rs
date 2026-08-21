@@ -126,12 +126,12 @@ impl HandleRefinementHooks {
         self.trace.rollback_connection(key, owner);
     }
 
-    #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
     pub(crate) fn drain_pending(&self, token: TokenWire, runtime_id: u64, reusable: bool) {
         self.trace.drain_pending(token, runtime_id, reusable);
     }
 
-    #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
     pub(crate) fn drain_published(&self, token: TokenWire, reusable: bool) {
         self.trace.drain_published(token, reusable);
     }

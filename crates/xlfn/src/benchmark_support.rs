@@ -1041,14 +1041,18 @@ impl Drop for HandleDistinctKeyBenchmark {
 
 fn get_benchmark_runtime() -> &'static crate::Runtime<()> {
     static RUNTIME: std::sync::OnceLock<crate::Runtime<()>> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(crate::Runtime::new)
+    RUNTIME.get_or_init(|| {
+        let runtime = crate::Runtime::new();
+        runtime.arm_test_generation();
+        runtime
+    })
 }
 
 /// Benchmark harness for measuring raw Excel argument ingress conversion costs
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
     runtime: &'static crate::Runtime<()>,
-    handle_runtime: Option<Arc<HandleRuntime>>,
+    _handle_runtime: Option<Arc<HandleRuntime>>,
     raw: xlfn_sys::XLOPER12,
     _storage: Option<Box<dyn std::any::Any>>,
 }
@@ -1057,7 +1061,7 @@ impl RawArgumentIngressBenchmark {
     pub fn number(value: f64) -> Self {
         Self {
             runtime: get_benchmark_runtime(),
-            handle_runtime: None,
+            _handle_runtime: None,
             raw: xlfn_sys::XLOPER12::number(value),
             _storage: None,
         }
@@ -1075,7 +1079,7 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            handle_runtime: None,
+            _handle_runtime: None,
             raw,
             _storage: Some(Box::new(u16_chars)),
         }
@@ -1099,7 +1103,7 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            handle_runtime: None,
+            _handle_runtime: None,
             raw,
             _storage: Some(Box::new(cells)),
         }
@@ -1136,7 +1140,7 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime,
-            handle_runtime: Some(handle_runtime),
+            _handle_runtime: Some(handle_runtime),
             raw,
             _storage: Some(Box::new(u16_chars)),
         }
@@ -1232,14 +1236,6 @@ impl RawArgumentIngressBenchmark {
                 .finish()
                 .expect("formula revision return must produce fingerprint")
         })
-    }
-}
-
-impl Drop for RawArgumentIngressBenchmark {
-    fn drop(&mut self) {
-        if let Some(handle_rt) = &self.handle_runtime {
-            cleanup_handle_runtime(handle_rt);
-        }
     }
 }
 

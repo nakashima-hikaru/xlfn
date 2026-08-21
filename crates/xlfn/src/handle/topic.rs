@@ -469,9 +469,9 @@ impl TopicTable {
             .by_key
             .get(&key)
             .map(|topic| triomphe::Arc::clone(&topic.publication))?;
-        #[cfg(any(test, target_os = "windows"))]
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
         let was_provisional = publication.state() == PublishedTopicState::Provisional;
-        #[cfg(any(test, target_os = "windows"))]
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
         let initialization_id = state
             .initializing
             .get(&key)
@@ -487,11 +487,11 @@ impl TopicTable {
         }
         Some(TopicRemoval {
             token: topic.publication.token.clone(),
-            #[cfg(any(test, target_os = "windows"))]
+            #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
             key,
-            #[cfg(any(test, target_os = "windows"))]
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
             was_provisional,
-            #[cfg(any(test, target_os = "windows"))]
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
             initialization_id,
         })
     }
@@ -577,11 +577,11 @@ impl TopicTable {
 
 pub(crate) struct TopicRemoval {
     pub(crate) token: String,
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
     pub(crate) key: HandleTopicKey,
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
     pub(crate) was_provisional: bool,
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
     pub(crate) initialization_id: Option<u64>,
 }
 

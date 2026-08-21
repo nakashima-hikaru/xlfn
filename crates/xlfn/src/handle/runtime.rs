@@ -591,9 +591,9 @@ impl HandleRuntime {
         rtd_key: &str,
         server_generation: ServerGeneration,
     ) -> XllResult<()> {
-        let key = self.topics.claim_server(rtd_key, server_generation)?;
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.refinement.claim_server(&key, server_generation);
+        let _key = self.topics.claim_server(rtd_key, server_generation)?;
+        #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+        self.refinement.claim_server(&_key, server_generation);
         Ok(())
     }
 
@@ -837,7 +837,7 @@ impl HandleRuntime {
     pub fn terminate_all_topics(&self) {
         let removals = self.topics.remove_all();
         for removed in removals {
-            #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
             {
                 let token_wire = self.refinement_token(&removed.token);
                 let refinement = &self.refinement;
@@ -868,10 +868,7 @@ impl HandleRuntime {
                     );
                 }
             }
-            #[cfg(not(any(
-                test,
-                all(target_os = "windows", feature = "handle-refinement-trace")
-            )))]
+            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
             self.registry
                 .remove_and_drop_with_kind(&removed.token, "handle RTD termination");
         }

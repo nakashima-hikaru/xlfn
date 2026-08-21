@@ -118,23 +118,6 @@ impl Drop for HandlePrepareGuard<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn close_admission_rejects_new_prepares_and_drains_existing_ones() {
-        let state = HandlePrepareState::new();
-        let active = state.try_enter().expect("prepare admission starts open");
-
-        state.close_admission();
-        assert!(state.try_enter().is_none());
-
-        drop(active);
-        state.wait_for_idle();
-    }
-}
-
 #[cfg(target_os = "windows")]
 pub(crate) struct RtdOperationGuard {
     pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
@@ -149,5 +132,22 @@ impl Drop for RtdOperationGuard {
         if let Some(ghost) = self.ghost.as_ref() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_admission_rejects_new_prepares_and_drains_existing_ones() {
+        let state = HandlePrepareState::new();
+        let active = state.try_enter().expect("prepare admission starts open");
+
+        state.close_admission();
+        assert!(state.try_enter().is_none());
+
+        drop(active);
+        state.wait_for_idle();
     }
 }
