@@ -2801,3 +2801,18 @@ fn handle_slot_requires_matching_generation_for_seal() {
     slot.seal(Some(generation(7))).unwrap();
     assert!(slot.is_none());
 }
+
+#[test]
+fn handle_config_rejects_an_unbounded_dense_publication_table() {
+    let slot = HandleRuntimeSlot::new();
+    let config = crate::HandleConfig::new()
+        .with_max_bindings(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
+
+    assert!(matches!(
+        slot.arm(generation(1), config),
+        Err(XllError::Domain {
+            code: DomainErrorCode::InvalidInput
+        })
+    ));
+    assert!(slot.is_none());
+}

@@ -46,6 +46,17 @@ pub(crate) struct HandleCleanupState {
     failure: Mutex<Option<XllError>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct HandleRegistrySealed {
+    _private: (),
+}
+
+impl HandleRegistrySealed {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
 impl HandleCleanupState {
     fn new() -> Self {
         Self {
@@ -592,8 +603,10 @@ impl ObjectStore {
 
     pub(super) fn retire(&self, detached: DetachedObject, operation: &'static str) {
         let epoch = self.epoch.retire_epoch();
-        self.retired.lock().retire(detached, epoch, operation);
+        let mut retired = self.retired.lock();
+        retired.retire(detached, epoch, operation);
         self.retired_count.fetch_add(1, Ordering::Relaxed);
+        drop(retired);
         self.reclaim_if_needed();
     }
 
@@ -603,8 +616,10 @@ impl ObjectStore {
         operation: &'static str,
     ) {
         let epoch = self.epoch.retire_epoch();
-        let count = self.retired.lock().retire_all(values, epoch, operation);
+        let mut retired = self.retired.lock();
+        let count = retired.retire_all(values, epoch, operation);
         self.retired_count.fetch_add(count, Ordering::Relaxed);
+        drop(retired);
         self.reclaim();
     }
 
@@ -778,8 +793,12 @@ impl ObjectStore {
 
     pub(super) fn reclaim(&self) {
         let safe_before = self.epoch.oldest_active().unwrap_or(u64::MAX);
-        let ready = self.retired.lock().reclaim(safe_before);
-        self.retired_count.fetch_sub(ready.len(), Ordering::Relaxed);
+        let ready = {
+            let mut retired = self.retired.lock();
+            let ready = retired.reclaim(safe_before);
+            self.retired_count.fetch_sub(ready.len(), Ordering::Relaxed);
+            ready
+        };
         drop(ready);
     }
 }
@@ -1650,26 +1669,23 @@ impl HandleRegistry {
     /// This is intentionally restricted to the `handle` module. Callers must
     /// go through `HandleRuntime::seal`, which establishes the prepare/topic
     /// drain ordering before reaching this boundary.
-    pub(super) fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
+    pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed> {
         let previous = self
             .phase
             .swap(HandleRegistryPhase::Closing as u8, Ordering::AcqRel);
         if HandleRegistryPhase::from_raw(previous) == HandleRegistryPhase::Closed {
             self.cleanup_result()?;
-            return Ok(crate::shutdown::HandleRegistrySealed::new());
+            return Ok(HandleRegistrySealed::new());
         }
         self.retire_values_for_seal();
         self.objects.reclaim();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()?;
-        Ok(crate::shutdown::HandleRegistrySealed::new())
+        Ok(HandleRegistrySealed::new())
     }
 
-    pub(super) fn finish_quiescence(
-        &self,
-        _sealed: &crate::shutdown::HandleRegistrySealed,
-    ) -> XllResult<()> {
+    pub(super) fn finish_quiescence(&self, _sealed: &HandleRegistrySealed) -> XllResult<()> {
         self.objects.finish_quiescence()?;
         Ok(())
     }

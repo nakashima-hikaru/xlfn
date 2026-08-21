@@ -11,7 +11,9 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-use crate::generation::RuntimeGeneration;
+use crate::generation::{
+    AtomicOptionalOpenAttemptId, AtomicOptionalRuntimeGeneration, RuntimeGeneration,
+};
 use crate::module_residency::ModuleResidencyLease;
 use crate::registration::{EventRegistration, ExcelNameKey, MetadataDebt, PendingRegistration};
 use crate::runtime::{HostLifecycleIntent, LifecyclePhase, OpenGeneration, OpeningGeneration};
@@ -200,8 +202,8 @@ pub(crate) struct LifecycleState<A: crate::Addin> {
     pub(crate) phase: AtomicU8,
     pub(crate) host_intent: AtomicU8,
     pub(crate) next_lifecycle_attempt: AtomicU64,
-    pub(crate) generation: AtomicU64,
-    pub(crate) open_attempt_id: AtomicU64,
+    pub(crate) generation: AtomicOptionalRuntimeGeneration,
+    pub(crate) open_attempt_id: AtomicOptionalOpenAttemptId,
     pub(crate) removal_epoch: AtomicU64,
     pub(crate) opening: Mutex<Option<OpeningGeneration<A>>>,
     pub(crate) current: ArcSwapOption<OpenGeneration<A>>,
@@ -223,8 +225,8 @@ impl<A: crate::Addin> LifecycleState<A> {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
             host_intent: AtomicU8::new(HostLifecycleIntent::None as u8),
             next_lifecycle_attempt: AtomicU64::new(1),
-            generation: AtomicU64::new(0),
-            open_attempt_id: AtomicU64::new(0),
+            generation: AtomicOptionalRuntimeGeneration::empty(),
+            open_attempt_id: AtomicOptionalOpenAttemptId::empty(),
             removal_epoch: AtomicU64::new(0),
             opening: Mutex::new(None),
             current: ArcSwapOption::const_empty(),
@@ -500,6 +502,38 @@ pub(crate) struct RuntimeServices {
     pub(crate) async_manager: crate::async_udf::AsyncManager,
 }
 
+/// Reservation for the two generation-scoped service slots.
+///
+/// Arming is a transaction: until the reservation is committed, dropping it
+/// rolls both slots back.  A rollback failure means the slot protocol has
+/// violated its ownership invariant, so it is fail-stopped instead of being
+/// silently discarded at an open boundary.
+#[must_use = "an armed service reservation must be committed or rolled back"]
+pub(crate) struct ArmedServices<'a> {
+    services: &'a RuntimeServices,
+    generation: RuntimeGeneration,
+    committed: bool,
+}
+
+impl ArmedServices<'_> {
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+
+    pub(crate) fn rollback(mut self) {
+        self.committed = true;
+        self.services.disarm_or_abort(self.generation);
+    }
+}
+
+impl Drop for ArmedServices<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.services.disarm_or_abort(self.generation);
+        }
+    }
+}
+
 impl RuntimeServices {
     pub(crate) const fn new() -> Self {
         Self {
@@ -514,13 +548,27 @@ impl RuntimeServices {
         &self,
         generation: RuntimeGeneration,
         config: crate::RuntimeConfig,
-    ) -> crate::XllResult<()> {
+    ) -> crate::XllResult<ArmedServices<'_>> {
         self.handles.arm(generation, config.handle_config())?;
-        if let Err(error) = self.subscriptions.arm(generation, config.rtd_limits()) {
-            let _ = self.handles.disarm(generation);
-            return Err(error);
+        let armed = ArmedServices {
+            services: self,
+            generation,
+            committed: false,
+        };
+        self.subscriptions
+            .arm(generation, config.rtd_limits())
+            .map(|()| armed)
+    }
+
+    fn disarm_or_abort(&self, generation: RuntimeGeneration) {
+        if let Err(error) = self.disarm_generation(generation) {
+            tracing::error!(
+                ?generation,
+                %error,
+                "generation service rollback violated its state invariant"
+            );
+            std::process::abort();
         }
-        Ok(())
     }
 
     pub(crate) fn disarm_generation(&self, generation: RuntimeGeneration) -> crate::XllResult<()> {

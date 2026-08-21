@@ -7,6 +7,33 @@ use crate::{
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+macro_rules! lifecycle_token {
+    ($name:ident) => {
+        #[derive(Debug)]
+        pub(crate) struct $name {
+            _private: (),
+        }
+
+        impl $name {
+            fn new() -> Self {
+                Self { _private: () }
+            }
+
+            #[cfg(test)]
+            pub(crate) const fn for_test() -> Self {
+                Self { _private: () }
+            }
+        }
+    };
+}
+
+lifecycle_token!(HostCallbacksDetached);
+lifecycle_token!(AddinQuiesced);
+lifecycle_token!(GenerationReclaimed);
+
+#[cfg(not(feature = "async"))]
+lifecycle_token!(AsyncStopped);
+
 /// Handles the generated `xlAutoOpen` boundary. An open runtime is a
 /// controlled reload request: the old logical generation is terminally torn
 /// down, then a new generation is opened while the physical residency lease
@@ -429,7 +456,7 @@ struct OpenRollbackOutcome {
 }
 
 fn active_runtime_generation<A: Addin>(runtime: &Runtime<A>) -> Option<RuntimeGeneration> {
-    RuntimeGeneration::new(runtime.active_generation())
+    runtime.active_generation()
 }
 
 /// Shared execution-drain stage for rollback and final removal. The ghost
@@ -2054,7 +2081,10 @@ mod tests {
             runtime
                 .async_manager()
                 .spawn(
-                    runtime.generation(),
+                    runtime
+                        .generation()
+                        .expect("an open runtime has a published generation")
+                        .get(),
                     async move {
                         done_tx.send(()).unwrap();
                     },

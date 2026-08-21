@@ -16,6 +16,22 @@ pub(crate) struct SubscriptionRuntimeSlot {
 type SubscriptionRuntimeSlotState =
     crate::runtime_components::GenerationServiceState<RtdLimits, SubscriptionRuntime>;
 
+#[derive(Debug)]
+pub(crate) struct SubscriptionsStopped {
+    _private: (),
+}
+
+impl SubscriptionsStopped {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
 pub(crate) struct SubscriptionRuntimeRead {
     guard: Guard<Option<Arc<SubscriptionRuntime>>>,
 }
@@ -151,7 +167,10 @@ impl SubscriptionRuntimeSlot {
             )
     }
 
-    pub(crate) fn seal(&self, generation: Option<RuntimeGeneration>) -> crate::XllResult<()> {
+    pub(crate) fn seal(
+        &self,
+        generation: Option<RuntimeGeneration>,
+    ) -> crate::XllResult<SubscriptionsStopped> {
         let _transition = self.transition.lock();
         let runtime = {
             let mut state = self.state.lock();
@@ -178,9 +197,11 @@ impl SubscriptionRuntimeSlot {
                         return Err(crate::XllError::Closing);
                     }
                     *state = SubscriptionRuntimeSlotState::Closed;
-                    return Ok(());
+                    return Ok(SubscriptionsStopped::new());
                 }
-                SubscriptionRuntimeSlotState::Closed => return Ok(()),
+                SubscriptionRuntimeSlotState::Closed => {
+                    return Ok(SubscriptionsStopped::new());
+                }
                 SubscriptionRuntimeSlotState::TeardownFaulted { error, .. } => {
                     return Err(error.clone());
                 }
@@ -197,7 +218,7 @@ impl SubscriptionRuntimeSlot {
         match result {
             Ok(()) => {
                 *state = SubscriptionRuntimeSlotState::Closed;
-                Ok(())
+                Ok(SubscriptionsStopped::new())
             }
             Err(error) => {
                 *state = SubscriptionRuntimeSlotState::TeardownFaulted {

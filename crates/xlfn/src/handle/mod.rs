@@ -44,10 +44,11 @@ pub(crate) use refinement_hooks::HandleRefinementHooks;
 #[cfg(test)]
 pub(crate) use registry::{BindingState, HandleRegistryPhase, ObjectKey};
 pub(crate) use registry::{
-    ErasedObject, HandleRegistry, ObjectLocator, ObjectPin, PendingHandleValue,
+    ErasedObject, HandleRegistry, HandleRegistrySealed, ObjectLocator, ObjectPin,
+    PendingHandleValue,
 };
 pub(crate) use runtime::{
-    HandleRuntime, HandleRuntimeResolver, HandleRuntimeSealed, HandleRuntimeSlot,
+    HandleRuntime, HandleRuntimeResolver, HandleRuntimeSealed, HandleRuntimeSlot, HandlesQuiescent,
 };
 pub(crate) use token::{HandleId, HandleToken, ObjectId, TokenCodec};
 pub(crate) use topic::{

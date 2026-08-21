@@ -2,6 +2,23 @@ use super::*;
 
 pub(crate) const MAX_PENDING: usize = 4096;
 pub(crate) const MAX_ASYNC_HANDLE_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct AsyncStopped {
+    _private: (),
+}
+
+impl AsyncStopped {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
 pub(crate) struct AsyncManager {
     pub(crate) state: Mutex<ExecutorState>,
     /// Lock-free snapshot used by the async-UDF spawn hot path.
@@ -304,10 +321,10 @@ impl AsyncManager {
         }
     }
 
-    pub(crate) fn close(&self) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
+    pub(crate) fn close(&self) -> crate::shutdown::StopOutcome<AsyncStopped> {
         let Some(executor) = self.take_executor_for_close() else {
             return crate::shutdown::StopOutcome {
-                certificate: crate::shutdown::AsyncStopped::new(),
+                certificate: AsyncStopped::new(),
                 issues: Vec::new(),
             };
         };
@@ -327,7 +344,7 @@ impl AsyncManager {
         let issues = executor.finish_close();
         self.finish_close();
         crate::shutdown::StopOutcome {
-            certificate: crate::shutdown::AsyncStopped::new(),
+            certificate: AsyncStopped::new(),
             issues,
         }
     }

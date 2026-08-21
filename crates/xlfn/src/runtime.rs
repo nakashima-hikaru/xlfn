@@ -370,17 +370,16 @@ impl<A: crate::Addin> Runtime<A> {
         self.quarantine.snapshot()
     }
 
-    pub(crate) fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> Option<RuntimeGeneration> {
         self.lifecycle.generation.load(Ordering::Acquire)
     }
 
-    pub(crate) fn active_generation(&self) -> u64 {
-        let opening = self.lifecycle.open_attempt_id.load(Ordering::Acquire);
-        if opening != 0 {
-            opening
-        } else {
-            self.generation()
-        }
+    pub(crate) fn active_generation(&self) -> Option<RuntimeGeneration> {
+        self.lifecycle
+            .open_attempt_id
+            .load(Ordering::Acquire)
+            .map(OpenAttemptId::into_runtime_generation)
+            .or_else(|| self.generation())
     }
 
     pub(crate) fn begin_open_if_epoch(
@@ -392,7 +391,11 @@ impl<A: crate::Addin> Runtime<A> {
         let _wait_guard = self.lifecycle.wait_lock.lock();
         if self.lifecycle.removal_epoch.load(Ordering::Acquire) != expected_removal_epoch.get()
             || self.phase() != LifecyclePhase::Closed
-            || self.lifecycle.open_attempt_id.load(Ordering::Acquire) != 0
+            || self
+                .lifecycle
+                .open_attempt_id
+                .load(Ordering::Acquire)
+                .is_some()
             || self
                 .lifecycle
                 .removal_attempt_active
@@ -426,7 +429,7 @@ impl<A: crate::Addin> Runtime<A> {
         }
         self.lifecycle
             .open_attempt_id
-            .store(attempt_id.get(), Ordering::Release);
+            .store(Some(attempt_id), Ordering::Release);
         self.lifecycle
             .phase
             .store(LifecyclePhase::Opening as u8, Ordering::Release);
@@ -511,18 +514,20 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn publish_opening_generation(&self) -> XllResult<()> {
-        let generation = RuntimeGeneration::new(
-            self.lifecycle.open_attempt_id.load(Ordering::Acquire),
-        )
-        .ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::OPEN_STATE,
-        })?;
+        let attempt_id = self
+            .lifecycle
+            .open_attempt_id
+            .load(Ordering::Acquire)
+            .ok_or(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+            })?;
+        let generation = attempt_id.into_runtime_generation();
         let config = self.lifecycle.opening_config().ok_or(XllError::Internal {
             diagnostic_id: crate::DiagnosticId::OPEN_STATE,
         })?;
-        self.services.arm_generation(generation, config)?;
+        let armed_services = self.services.arm_generation(generation, config)?;
         if let Err(failure) = self.lifecycle.publish_opening_generation(generation) {
-            let _ = self.services.disarm_generation(generation);
+            armed_services.rollback();
             if let Some(opening) = failure.opening {
                 self.quarantine_opening_generation(
                     Some(generation),
@@ -532,6 +537,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
             return Err(failure.error);
         }
+        armed_services.commit();
         Ok(())
     }
 
@@ -554,7 +560,8 @@ impl<A: crate::Addin> Runtime<A> {
                 crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
                 crate::RuntimeConfig::new(),
             )
-            .expect("test runtime generation can be armed once");
+            .expect("test runtime generation can be armed once")
+            .commit();
     }
 
     pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
@@ -577,7 +584,7 @@ impl<A: crate::Addin> Runtime<A> {
     ) -> XllResult<()> {
         let _wait_guard = self.lifecycle.wait_lock.lock();
         self.lifecycle.lifecycle_changed.notify_all();
-        if self.lifecycle.open_attempt_id.load(Ordering::Acquire) != attempt.attempt_id.get() {
+        if self.lifecycle.open_attempt_id.load(Ordering::Acquire) != Some(attempt.attempt_id) {
             attempt.active = false;
             return Err(XllError::Closing);
         }
@@ -621,20 +628,26 @@ impl<A: crate::Addin> Runtime<A> {
                             self.lifecycle
                                 .phase
                                 .store(LifecyclePhase::Open as u8, Ordering::Release);
+                            self.lifecycle.generation.store(
+                                Some(attempt.attempt_id.into_runtime_generation()),
+                                Ordering::Release,
+                            );
                             self.lifecycle
-                                .generation
-                                .store(attempt.attempt_id.get(), Ordering::Release);
-                            self.lifecycle.open_attempt_id.store(0, Ordering::Release);
+                                .open_attempt_id
+                                .store(None, Ordering::Release);
                             attempt.active = false;
                             // The abstract open publication is complete before
                             // any concurrent producer can observe this ghost.
                             // The diagnostic, RTD, return, handle, subscription,
                             // and async hooks are installed only after this event.
                             debug_assert_eq!(self.phase(), LifecyclePhase::Open);
-                            debug_assert_eq!(self.generation(), attempt.attempt_id.get());
+                            debug_assert_eq!(
+                                self.generation(),
+                                Some(attempt.attempt_id.into_runtime_generation())
+                            );
                             debug_assert_eq!(
                                 self.lifecycle.open_attempt_id.load(Ordering::Acquire),
-                                0
+                                None
                             );
                             self.record_composition_event(
                                 crate::composition_refinement::CompositionEvent::CommitOpen {
@@ -661,10 +674,13 @@ impl<A: crate::Addin> Runtime<A> {
                     self.lifecycle
                         .phase
                         .store(LifecyclePhase::Open as u8, Ordering::Release);
+                    self.lifecycle.generation.store(
+                        Some(attempt.attempt_id.into_runtime_generation()),
+                        Ordering::Release,
+                    );
                     self.lifecycle
-                        .generation
-                        .store(attempt.attempt_id.get(), Ordering::Release);
-                    self.lifecycle.open_attempt_id.store(0, Ordering::Release);
+                        .open_attempt_id
+                        .store(None, Ordering::Release);
                     attempt.active = false;
                     Ok::<(), XllError>(())
                 })
@@ -715,14 +731,16 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     fn reject_open_attempt(&self, attempt: &mut OpenAttemptGuard<'_, A>) {
-        self.lifecycle.open_attempt_id.store(0, Ordering::Release);
+        self.lifecycle
+            .open_attempt_id
+            .store(None, Ordering::Release);
         attempt.active = false;
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     fn record_rejected_open(&self, attempt_id: OpenAttemptId) {
         debug_assert_eq!(self.phase(), LifecyclePhase::Closing);
-        debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), 0);
+        debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), None);
         self.record_composition_event(
             crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
                 attempt: attempt_id.get(),
@@ -732,11 +750,13 @@ impl<A: crate::Addin> Runtime<A> {
 
     fn fail_and_record(&self, attempt_id: OpenAttemptId) -> bool {
         let _wait_guard = self.lifecycle.wait_lock.lock();
-        if self.lifecycle.open_attempt_id.load(Ordering::Acquire) != attempt_id.get() {
+        if self.lifecycle.open_attempt_id.load(Ordering::Acquire) != Some(attempt_id) {
             return false;
         }
 
-        self.lifecycle.open_attempt_id.store(0, Ordering::Release);
+        self.lifecycle
+            .open_attempt_id
+            .store(None, Ordering::Release);
         let should_rollback = match self.phase() {
             LifecyclePhase::Opening => {
                 self.return_protocol.close_admission();
@@ -753,7 +773,7 @@ impl<A: crate::Addin> Runtime<A> {
         };
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
-            debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), 0);
+            debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), None);
             debug_assert!(matches!(
                 self.phase(),
                 LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
@@ -867,7 +887,7 @@ impl<A: crate::Addin> Runtime<A> {
                 }
 
                 if self.phase() != LifecyclePhase::Closed
-                    && self.lifecycle.open_attempt_id.load(Ordering::Acquire) == 0
+                    && self.lifecycle.open_attempt_id.load(Ordering::Acquire).is_none()
                     && !self.lifecycle.removal_attempt_active.load(Ordering::Acquire)
                 {
                     self.lifecycle.removal_attempt_active.store(true, Ordering::Release);
@@ -1156,7 +1176,7 @@ pub struct LogicalQuiescenceCertificate {
     #[cfg(any(test, feature = "shutdown-refinement"))]
     composition_resources: crate::shutdown_refinement::GhostResources,
     runtime_address: usize,
-    generation: u64,
+    generation: Option<RuntimeGeneration>,
 }
 
 #[derive(Debug)]
@@ -1164,7 +1184,7 @@ pub(crate) struct ClosedWitness {
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime_address: usize,
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    generation: u64,
+    generation: Option<RuntimeGeneration>,
 }
 
 #[derive(Debug)]
@@ -1298,15 +1318,22 @@ impl<A: crate::Addin> Runtime<A> {
         let async_stopped = self.services.async_manager.is_stopped();
         #[cfg(not(feature = "async"))]
         let async_stopped = true;
-        let handles_match_generation = RuntimeGeneration::new(
-            self.lifecycle.generation.load(Ordering::Acquire),
-        )
-        .is_none_or(|generation| prerequisites.handles_quiescent.generation() == Some(generation));
+        let handles_match_generation = self
+            .lifecycle
+            .generation
+            .load(Ordering::Acquire)
+            .is_none_or(|generation| {
+                prerequisites.handles_quiescent.generation() == Some(generation)
+            });
 
         let certified = matches!(
             self.phase(),
             LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
-        ) && self.lifecycle.open_attempt_id.load(Ordering::Acquire) == 0
+        ) && self
+            .lifecycle
+            .open_attempt_id
+            .load(Ordering::Acquire)
+            .is_none()
             && self
                 .lifecycle
                 .removal_attempt_active
@@ -1359,7 +1386,7 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = certificate.composition_resources;
         let _wait_guard = self.lifecycle.wait_lock.lock();
-        debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), 0);
+        debug_assert_eq!(self.lifecycle.open_attempt_id.load(Ordering::Acquire), None);
         if !matches!(
             self.phase(),
             LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
@@ -1400,13 +1427,20 @@ impl<A: crate::Addin> Runtime<A> {
         let async_stopped = self.services.async_manager.is_stopped();
         #[cfg(not(feature = "async"))]
         let async_stopped = true;
-        let handles_match_generation = RuntimeGeneration::new(
-            self.lifecycle.generation.load(Ordering::Acquire),
-        )
-        .is_none_or(|generation| prerequisites.handles_quiescent.generation() == Some(generation));
+        let handles_match_generation = self
+            .lifecycle
+            .generation
+            .load(Ordering::Acquire)
+            .is_none_or(|generation| {
+                prerequisites.handles_quiescent.generation() == Some(generation)
+            });
 
         let certified = self.phase() == LifecyclePhase::Closing
-            && self.lifecycle.open_attempt_id.load(Ordering::Acquire) == 0
+            && self
+                .lifecycle
+                .open_attempt_id
+                .load(Ordering::Acquire)
+                .is_none()
             && self
                 .lifecycle
                 .removal_attempt_active
@@ -1549,9 +1583,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn seal_handles(&self) -> XllResult<crate::handle::HandleRuntimeSealed> {
-        self.services
-            .handles
-            .seal(RuntimeGeneration::new(self.active_generation()))
+        self.services.handles.seal(self.active_generation())
     }
 
     pub(crate) fn finish_handle_quiescence(
@@ -1567,10 +1599,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        self.services
-            .subscriptions
-            .seal(RuntimeGeneration::new(self.active_generation()))
-            .map(|()| crate::shutdown::SubscriptionsStopped::new())
+        self.services.subscriptions.seal(self.active_generation())
     }
 
     #[cfg(feature = "async")]
@@ -1826,15 +1855,15 @@ pub(crate) mod tests {
             .certify_logical_quiescence(RemovalQuiescencePrerequisites {
                 exports,
                 rtd,
-                host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-                async_stopped: crate::shutdown::AsyncStopped::new(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::new(Some(
+                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
+                async_stopped: crate::shutdown::AsyncStopped::for_test(),
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
+                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
             })
             .unwrap();
         runtime.finish_removal(certificate).unwrap();
@@ -1854,15 +1883,15 @@ pub(crate) mod tests {
             .certify_open_rollback(OpenRollbackQuiescencePrerequisites {
                 exports,
                 rtd: crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
-                host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-                async_stopped: crate::shutdown::AsyncStopped::new(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::new(Some(
+                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
+                async_stopped: crate::shutdown::AsyncStopped::for_test(),
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
+                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
             })
             .unwrap();
         runtime.finish_open_rollback(certificate).unwrap();
@@ -2006,7 +2035,10 @@ pub(crate) mod tests {
             runtime.finish_open(&mut opening, Vec::new()),
             Err(XllError::Closing)
         ));
-        assert_eq!(runtime.lifecycle.open_attempt_id.load(Ordering::Acquire), 0);
+        assert_eq!(
+            runtime.lifecycle.open_attempt_id.load(Ordering::Acquire),
+            None
+        );
         assert!(!opening.is_active());
 
         closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -2045,15 +2077,15 @@ pub(crate) mod tests {
             .certify_logical_quiescence(RemovalQuiescencePrerequisites {
                 exports,
                 rtd,
-                host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-                async_stopped: crate::shutdown::AsyncStopped::new(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::new(Some(
+                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
+                async_stopped: crate::shutdown::AsyncStopped::for_test(),
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
+                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
+                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
             })
             .unwrap();
 
@@ -2169,15 +2201,15 @@ pub(crate) mod tests {
                 .certify_logical_quiescence(RemovalQuiescencePrerequisites {
                     exports,
                     rtd,
-                    host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-                    async_stopped: crate::shutdown::AsyncStopped::new(),
-                    subscriptions_stopped: crate::shutdown::SubscriptionsStopped::new(),
-                    handles_quiescent: crate::shutdown::HandlesQuiescent::new(Some(
+                    host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
+                    async_stopped: crate::shutdown::AsyncStopped::for_test(),
+                    subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
+                    handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                         crate::generation::RuntimeGeneration::new(1).unwrap()
                     ),),
                     diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                    addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-                    generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
+                    addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
+                    generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
                 })
                 .is_err()
         );

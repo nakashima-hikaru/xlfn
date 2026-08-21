@@ -889,7 +889,30 @@ impl HandleRuntime {
 pub(crate) struct HandleRuntimeSealed {
     generation: Option<RuntimeGeneration>,
     runtime: Option<Arc<HandleRuntime>>,
-    registry: Option<crate::shutdown::HandleRegistrySealed>,
+    registry: Option<HandleRegistrySealed>,
+}
+
+/// Proof that the handle registry for one specific runtime generation has no
+/// remaining pins. The generation identity travels with the proof so a
+/// certificate cannot be silently reused for a different service instance.
+#[derive(Debug)]
+pub(crate) struct HandlesQuiescent {
+    generation: Option<RuntimeGeneration>,
+}
+
+impl HandlesQuiescent {
+    fn new(generation: Option<RuntimeGeneration>) -> Self {
+        Self { generation }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(generation: Option<RuntimeGeneration>) -> Self {
+        Self { generation }
+    }
+
+    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation
+    }
 }
 
 impl HandleRuntimeSealed {
@@ -913,11 +936,11 @@ impl HandleRuntimeSealed {
         }
     }
 
-    pub(crate) fn finish(self) -> XllResult<crate::shutdown::HandlesQuiescent> {
+    pub(crate) fn finish(self) -> XllResult<HandlesQuiescent> {
         if let (Some(runtime), Some(registry)) = (self.runtime, self.registry) {
             runtime.registry.finish_quiescence(&registry)?;
         }
-        Ok(crate::shutdown::HandlesQuiescent::new(self.generation))
+        Ok(HandlesQuiescent::new(self.generation))
     }
 }
 
@@ -978,6 +1001,7 @@ impl HandleRuntimeSlot {
         generation: RuntimeGeneration,
         config: crate::HandleConfig,
     ) -> XllResult<()> {
+        config.validate()?;
         let mut state = self.state.lock();
         if !matches!(*state, HandleRuntimeSlotState::Closed) {
             return Err(XllError::Closing);

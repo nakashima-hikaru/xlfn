@@ -152,6 +152,12 @@ pub struct HandleConfig {
 
 impl HandleConfig {
     pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
+    /// Upper bound for the dense immutable publication table.
+    ///
+    /// The table is allocated when a handle generation is initialized, so an
+    /// unchecked `u32` would turn configuration input into an unbounded eager
+    /// allocation. The bound keeps the dense lookup policy explicit.
+    pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
 
     #[must_use]
     pub const fn new() -> Self {
@@ -168,6 +174,16 @@ impl HandleConfig {
 
     pub(crate) const fn maximum_bindings(self) -> u32 {
         self.maximum_bindings
+    }
+
+    pub(crate) const fn validate(self) -> XllResult<()> {
+        if self.maximum_bindings <= Self::MAX_SUPPORTED_BINDINGS {
+            Ok(())
+        } else {
+            Err(XllError::Domain {
+                code: crate::DomainErrorCode::InvalidInput,
+            })
+        }
     }
 }
 

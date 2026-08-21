@@ -116,12 +116,130 @@ impl RetiredStore {
     }
 }
 
-const EPOCH_INACTIVE: u64 = u64::MAX;
+// Epochs start at one, so zero is an unambiguous inactive marker. Keeping the
+// sentinel outside the live epoch range avoids the `u64::MAX` collision
+// between an active reader and the inactive state.
+const EPOCH_INACTIVE: u64 = 0;
 
-struct EpochParticipant {
-    announced: AtomicU64,
-    depth: AtomicUsize,
+trait EpochAtomicU64 {
+    fn new(value: u64) -> Self;
+    fn load(&self, ordering: Ordering) -> u64;
+    fn store(&self, value: u64, ordering: Ordering);
 }
+
+trait EpochAtomicUsize {
+    fn new(value: usize) -> Self;
+    fn fetch_add(&self, value: usize, ordering: Ordering) -> usize;
+    fn fetch_sub(&self, value: usize, ordering: Ordering) -> usize;
+}
+
+impl EpochAtomicU64 for AtomicU64 {
+    fn new(value: u64) -> Self {
+        AtomicU64::new(value)
+    }
+
+    fn load(&self, ordering: Ordering) -> u64 {
+        AtomicU64::load(self, ordering)
+    }
+
+    fn store(&self, value: u64, ordering: Ordering) {
+        AtomicU64::store(self, value, ordering);
+    }
+}
+
+impl EpochAtomicUsize for AtomicUsize {
+    fn new(value: usize) -> Self {
+        AtomicUsize::new(value)
+    }
+
+    fn fetch_add(&self, value: usize, ordering: Ordering) -> usize {
+        AtomicUsize::fetch_add(self, value, ordering)
+    }
+
+    fn fetch_sub(&self, value: usize, ordering: Ordering) -> usize {
+        AtomicUsize::fetch_sub(self, value, ordering)
+    }
+}
+
+#[cfg(test)]
+impl EpochAtomicU64 for loom::sync::atomic::AtomicU64 {
+    fn new(value: u64) -> Self {
+        loom::sync::atomic::AtomicU64::new(value)
+    }
+
+    fn load(&self, ordering: Ordering) -> u64 {
+        loom::sync::atomic::AtomicU64::load(self, ordering)
+    }
+
+    fn store(&self, value: u64, ordering: Ordering) {
+        loom::sync::atomic::AtomicU64::store(self, value, ordering);
+    }
+}
+
+#[cfg(test)]
+impl EpochAtomicUsize for loom::sync::atomic::AtomicUsize {
+    fn new(value: usize) -> Self {
+        loom::sync::atomic::AtomicUsize::new(value)
+    }
+
+    fn fetch_add(&self, value: usize, ordering: Ordering) -> usize {
+        loom::sync::atomic::AtomicUsize::fetch_add(self, value, ordering)
+    }
+
+    fn fetch_sub(&self, value: usize, ordering: Ordering) -> usize {
+        loom::sync::atomic::AtomicUsize::fetch_sub(self, value, ordering)
+    }
+}
+
+/// The reader-side epoch protocol is generic only over its atomic backend so
+/// the production implementation and the Loom model execute the same code.
+struct EpochParticipantCore<A, D> {
+    announced: A,
+    depth: D,
+}
+
+impl<A, D> EpochParticipantCore<A, D>
+where
+    A: EpochAtomicU64,
+    D: EpochAtomicUsize,
+{
+    fn new() -> Self {
+        Self {
+            announced: A::new(EPOCH_INACTIVE),
+            depth: D::new(0),
+        }
+    }
+
+    fn enter(&self, current: &A) -> u64 {
+        let previous_depth = self.depth.fetch_add(1, Ordering::Relaxed);
+        if previous_depth == 0 {
+            loop {
+                let epoch = current.load(Ordering::Acquire);
+                self.announced.store(epoch, Ordering::Release);
+                if current.load(Ordering::Acquire) == epoch {
+                    return epoch;
+                }
+                self.announced.store(EPOCH_INACTIVE, Ordering::Release);
+            }
+        }
+
+        self.announced.load(Ordering::Acquire)
+    }
+
+    fn leave(&self) {
+        let previous_depth = self.depth.fetch_sub(1, Ordering::Release);
+        debug_assert!(previous_depth > 0, "handle epoch guard is unbalanced");
+        if previous_depth == 1 {
+            self.announced.store(EPOCH_INACTIVE, Ordering::Release);
+        }
+    }
+
+    fn announced(&self, ordering: Ordering) -> u64 {
+        self.announced.load(ordering)
+    }
+}
+
+type EpochParticipant = EpochParticipantCore<AtomicU64, AtomicUsize>;
 
 thread_local! {
     static EPOCH_PARTICIPANTS: RefCell<Vec<(usize, Weak<EpochDomain>, Arc<EpochParticipant>)>> =
@@ -156,10 +274,7 @@ impl EpochDomain {
                 return Arc::clone(participant);
             }
 
-            let participant = Arc::new(EpochParticipant {
-                announced: AtomicU64::new(EPOCH_INACTIVE),
-                depth: AtomicUsize::new(0),
-            });
+            let participant = Arc::new(EpochParticipant::new());
             self.participants.lock().push(Arc::clone(&participant));
             participants.retain(|(candidate, domain, _)| {
                 *candidate != address || domain.upgrade().is_some()
@@ -171,19 +286,7 @@ impl EpochDomain {
 
     pub(super) fn enter(self: &Arc<Self>) -> EpochGuard {
         let participant = self.participant();
-        let previous_depth = participant.depth.fetch_add(1, Ordering::Relaxed);
-        if previous_depth == 0 {
-            loop {
-                let epoch = self.current.load(Ordering::Acquire);
-                participant.announced.store(epoch, Ordering::Release);
-                if self.current.load(Ordering::Acquire) == epoch {
-                    break;
-                }
-                participant
-                    .announced
-                    .store(EPOCH_INACTIVE, Ordering::Release);
-            }
-        }
+        participant.enter(&self.current);
         EpochGuard {
             _domain: Arc::clone(self),
             participant,
@@ -193,9 +296,12 @@ impl EpochDomain {
     pub(super) fn retire_epoch(&self) -> u64 {
         self.current
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
-                Some(epoch.saturating_add(1))
+                epoch.checked_add(1).filter(|next| *next != EPOCH_INACTIVE)
             })
-            .expect("epoch update always succeeds")
+            .unwrap_or_else(|_| {
+                tracing::error!("handle epoch space exhausted; fail-stopping");
+                std::process::abort();
+            })
     }
 
     pub(super) fn oldest_active(&self) -> Option<u64> {
@@ -203,7 +309,7 @@ impl EpochDomain {
             .lock()
             .iter()
             .filter_map(|participant| {
-                let epoch = participant.announced.load(Ordering::Acquire);
+                let epoch = participant.announced(Ordering::Acquire);
                 (epoch != EPOCH_INACTIVE).then_some(epoch)
             })
             .min()
@@ -217,13 +323,7 @@ pub(super) struct EpochGuard {
 
 impl Drop for EpochGuard {
     fn drop(&mut self) {
-        let previous_depth = self.participant.depth.fetch_sub(1, Ordering::Release);
-        debug_assert!(previous_depth > 0, "handle epoch guard is unbalanced");
-        if previous_depth == 1 {
-            self.participant
-                .announced
-                .store(EPOCH_INACTIVE, Ordering::Release);
-        }
+        self.participant.leave();
     }
 }
 
@@ -541,6 +641,46 @@ mod tests {
         retired.release_pin(locator);
         assert_eq!(retired.reclaim(1).len(), 0);
         assert_eq!(retired.reclaim(2).len(), 1);
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    fn loom_models_the_concrete_epoch_participant_core() {
+        loom::model(|| {
+            use loom::sync::Arc;
+            use loom::sync::atomic::{AtomicU64, Ordering};
+            use loom::thread;
+
+            type LoomParticipant = EpochParticipantCore<AtomicU64, loom::sync::atomic::AtomicUsize>;
+
+            let current = Arc::new(AtomicU64::new(1));
+            let participant = Arc::new(LoomParticipant::new());
+            let entered = Arc::new(AtomicU64::new(EPOCH_INACTIVE));
+
+            let reader_current = Arc::clone(&current);
+            let reader_participant = Arc::clone(&participant);
+            let reader_entered = Arc::clone(&entered);
+            let reader = thread::spawn(move || {
+                let epoch = reader_participant.enter(&reader_current);
+                reader_entered.store(epoch, Ordering::Release);
+                thread::yield_now();
+                reader_participant.leave();
+                reader_entered.store(EPOCH_INACTIVE, Ordering::Release);
+            });
+
+            let retired_at = current.fetch_add(1, Ordering::AcqRel);
+            let active = participant.announced(Ordering::Acquire);
+            let can_reclaim = active == EPOCH_INACTIVE || retired_at < active;
+
+            reader.join().expect("loom reader did not finish");
+            if can_reclaim {
+                let entered_at = entered.load(Ordering::Acquire);
+                assert!(
+                    entered_at == EPOCH_INACTIVE || entered_at > retired_at,
+                    "entered_at={entered_at}, retired_at={retired_at}, active={active}"
+                );
+            }
+        });
     }
 
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
