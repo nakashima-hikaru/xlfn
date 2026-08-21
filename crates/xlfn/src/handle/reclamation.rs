@@ -168,7 +168,7 @@ impl EpochAtomicUsize for AtomicUsize {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
 impl EpochAtomicU64 for loom::sync::atomic::AtomicU64 {
     fn new(value: u64) -> Self {
         loom::sync::atomic::AtomicU64::new(value)
@@ -183,7 +183,7 @@ impl EpochAtomicU64 for loom::sync::atomic::AtomicU64 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
 impl EpochAtomicUsize for loom::sync::atomic::AtomicUsize {
     fn new(value: usize) -> Self {
         loom::sync::atomic::AtomicUsize::new(value)

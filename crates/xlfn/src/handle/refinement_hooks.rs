@@ -5,10 +5,10 @@
 //! test and checker builds delegate to `refinement.rs`.
 
 use super::HandleTopicKey;
-#[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+#[cfg(any(target_os = "windows", test))]
 use super::HandleTopicOwner;
 use super::refinement_wire::TokenWire;
-#[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+#[cfg(any(target_os = "windows", test))]
 use crate::generation::ServerGeneration;
 
 #[cfg(any(test, feature = "handle-refinement-trace"))]
