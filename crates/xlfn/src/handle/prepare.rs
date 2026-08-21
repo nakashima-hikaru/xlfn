@@ -27,6 +27,7 @@ fn current_handle_prepare_stripe() -> usize {
 }
 
 pub(crate) struct HandlePrepareState {
+    accepting: AtomicBool,
     stripes: [CachePadded<AtomicUsize>; HANDLE_PREPARE_STRIPE_COUNT],
     pub(crate) waiters: AtomicUsize,
     pub(crate) wait_lock: Mutex<()>,
@@ -36,6 +37,7 @@ pub(crate) struct HandlePrepareState {
 impl HandlePrepareState {
     pub(crate) const fn new() -> Self {
         Self {
+            accepting: AtomicBool::new(true),
             stripes: [const { CachePadded::new(AtomicUsize::new(0)) }; HANDLE_PREPARE_STRIPE_COUNT],
             waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
@@ -43,7 +45,10 @@ impl HandlePrepareState {
         }
     }
 
-    pub(crate) fn enter(&self) -> HandlePrepareGuard<'_> {
+    pub(crate) fn try_enter(&self) -> Option<HandlePrepareGuard<'_>> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return None;
+        }
         let stripe_index = current_handle_prepare_stripe();
         self.stripes[stripe_index]
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -51,10 +56,20 @@ impl HandlePrepareState {
             })
             .expect("handle prepare count cannot overflow");
 
-        HandlePrepareGuard {
+        let guard = HandlePrepareGuard {
             state: self,
             stripe_index,
+        };
+        if self.accepting.load(Ordering::Acquire) {
+            Some(guard)
+        } else {
+            drop(guard);
+            None
         }
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.accepting.store(false, Ordering::Release);
     }
 
     pub(crate) fn wait_for_idle(&self) {
@@ -100,6 +115,23 @@ impl Drop for HandlePrepareGuard<'_> {
         if self.state.active() == 0 {
             self.state.idle.notify_all();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_admission_rejects_new_prepares_and_drains_existing_ones() {
+        let state = HandlePrepareState::new();
+        let active = state.try_enter().expect("prepare admission starts open");
+
+        state.close_admission();
+        assert!(state.try_enter().is_none());
+
+        drop(active);
+        state.wait_for_idle();
     }
 }
 

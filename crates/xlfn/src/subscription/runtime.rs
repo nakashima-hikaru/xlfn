@@ -352,10 +352,18 @@ impl SubscriptionRuntime {
         key: &SubscriptionKey,
     ) -> XllResult<SubscriptionConnection> {
         let operation = server_handle.inner.enter_owned_operation()?;
-        let conn_gen = ConnectionGeneration(
+        let conn_gen = ConnectionGeneration::new(
             self.next_connection_generation
-                .fetch_add(1, Ordering::Relaxed),
-        );
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                })
+                .map_err(|_| XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+                })?,
+        )
+        .ok_or(XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+        })?;
 
         let (source, topic) = {
             let mut catalog = self.catalog.lock();

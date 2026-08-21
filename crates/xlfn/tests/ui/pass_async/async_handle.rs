@@ -1,0 +1,11 @@
+use xlfn::prelude::*;
+
+#[derive(ExcelHandleObject)]
+struct Dataset;
+
+fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+
+fn main() {
+    xlfn::value::assert_async_parameter::<AsyncHandle<Dataset>>();
+    assert_send_sync_static::<AsyncHandle<Dataset>>();
+}

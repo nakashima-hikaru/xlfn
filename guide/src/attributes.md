@@ -167,7 +167,9 @@ publishes a new object while a same-revision recalculation reuses the memoized
 object. Accepting `Handle<'_, Dataset>` resolves and type-checks the token.
 `HandleAlias<'_, Dataset>` is the explicit main-thread return capability for
 republishing an existing object. Borrowed `Handle` values are not return values,
-and cannot be used by thread-safe, macro-sheet, or async functions.
+and cannot be used by thread-safe, macro-sheet, or async functions. Async
+functions that need an existing object use `AsyncHandle<Dataset>`, which is an
+owned, `'static` input created by pinning the authenticated registry object.
 
 See [Formula-owned handles](handles.md).
 

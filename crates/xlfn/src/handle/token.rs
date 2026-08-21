@@ -1,3 +1,5 @@
+use crate::generation::BindingGeneration;
+use crate::{XllError, XllResult};
 use std::cell::RefCell;
 
 pub(crate) fn encode_tag(tag: &[u8; 16]) -> String {
@@ -37,7 +39,7 @@ pub(crate) const fn hex_nibble(value: u8) -> Option<u8> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct HandleId {
     pub(crate) slot: u32,
-    pub(crate) generation: u64,
+    pub(crate) generation: BindingGeneration,
 }
 
 /// Runtime-local identity of the shared object behind one or more formula
@@ -81,6 +83,109 @@ pub(crate) struct ParsedHandleToken {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct VerifiedHandleToken {
     pub(crate) id: HandleId,
+}
+
+/// Token syntax, authentication, and the small thread-local verification
+/// cache.  Binding liveness is intentionally outside this type: callers must
+/// still resolve the authenticated `HandleId` through the binding table.
+pub(crate) struct TokenCodec {
+    pub(crate) session: u64,
+    pub(crate) secret: [u8; 32],
+}
+
+impl TokenCodec {
+    pub(crate) const fn new(session: u64, secret: [u8; 32]) -> Self {
+        Self { session, secret }
+    }
+
+    pub(crate) fn format(&self, id: HandleId) -> String {
+        let tag = encode_tag(&self.authentication_tag(id));
+        format!(
+            "xllh:3:{:016x}:{:08x}:{:016x}:{tag}",
+            self.session,
+            id.slot,
+            id.generation.get()
+        )
+    }
+
+    pub(crate) fn parse(
+        &self,
+        registry_address: usize,
+        token: HandleToken<'_>,
+    ) -> XllResult<VerifiedHandleToken> {
+        if let Some(id) = verified_token_cache_lookup(
+            registry_address,
+            self.session,
+            &self.secret,
+            token.as_str(),
+        ) {
+            return Ok(VerifiedHandleToken { id });
+        }
+
+        let parsed = self.parse_uncached(token)?;
+        let verified = self.verify(parsed)?;
+        verified_token_cache_store(
+            registry_address,
+            self.session,
+            &self.secret,
+            token.as_str(),
+            verified.id,
+        );
+        Ok(verified)
+    }
+
+    fn parse_uncached(&self, token: HandleToken<'_>) -> XllResult<ParsedHandleToken> {
+        let mut fields = token.as_str().splitn(7, ':');
+        let prefix = fields.next().ok_or(XllError::InvalidHandle)?;
+        let version = fields.next().ok_or(XllError::InvalidHandle)?;
+        let session = fields.next().ok_or(XllError::InvalidHandle)?;
+        let slot = fields.next().ok_or(XllError::InvalidHandle)?;
+        let generation = fields.next().ok_or(XllError::InvalidHandle)?;
+        let tag = fields.next().ok_or(XllError::InvalidHandle)?;
+        if fields.next().is_some()
+            || prefix != "xllh"
+            || version != "3"
+            || session.len() != 16
+            || slot.len() != 8
+            || generation.len() != 16
+            || tag.len() != 32
+        {
+            return Err(XllError::InvalidHandle);
+        }
+        let session = u64::from_str_radix(session, 16).map_err(|_| XllError::InvalidHandle)?;
+        let slot = u32::from_str_radix(slot, 16).map_err(|_| XllError::InvalidHandle)?;
+        let generation = u64::from_str_radix(generation, 16)
+            .ok()
+            .and_then(BindingGeneration::new)
+            .ok_or(XllError::InvalidHandle)?;
+        let tag = decode_tag(tag).ok_or(XllError::InvalidHandle)?;
+        Ok(ParsedHandleToken {
+            session,
+            id: HandleId { slot, generation },
+            tag,
+        })
+    }
+
+    fn verify(&self, parsed: ParsedHandleToken) -> XllResult<VerifiedHandleToken> {
+        let expected = self.authentication_tag(parsed.id);
+        if parsed.session != self.session
+            || !constant_time_eq::constant_time_eq(&parsed.tag, &expected)
+        {
+            return Err(XllError::InvalidHandle);
+        }
+        Ok(VerifiedHandleToken { id: parsed.id })
+    }
+
+    pub(crate) fn authentication_tag(&self, id: HandleId) -> [u8; 16] {
+        let mut mac = blake3::Hasher::new_keyed(&self.secret);
+        mac.update(b"xlfn-handle-token-v1\0");
+        mac.update(&self.session.to_le_bytes());
+        mac.update(&id.slot.to_le_bytes());
+        mac.update(&id.generation.get().to_le_bytes());
+        mac.finalize().as_bytes()[..16]
+            .try_into()
+            .expect("the BLAKE3 output contains a 128-bit tag")
+    }
 }
 
 pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;

@@ -1,39 +1,9 @@
 use super::*;
-use arc_swap::ArcSwapAny;
-use rustc_hash::FxHasher;
+use crate::generation::RuntimeGeneration;
+#[cfg(any(target_os = "windows", test))]
+use crate::generation::ServerGeneration;
 use std::cell::OnceCell;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicU8;
-
-const PUBLISHED_TOPIC_SHARD_COUNT: usize = 64;
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PublishedTopicState {
-    Provisional = 0,
-    Live = 1,
-    Stale = 2,
-    Closing = 3,
-}
-
-impl PublishedTopicState {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            value if value == Self::Provisional as u8 => Self::Provisional,
-            value if value == Self::Live as u8 => Self::Live,
-            value if value == Self::Stale as u8 => Self::Stale,
-            value if value == Self::Closing as u8 => Self::Closing,
-            _ => Self::Stale,
-        }
-    }
-}
-
-pub(crate) struct PublishedTopic {
-    pub(crate) binding: FormulaBinding,
-    pub(crate) token: String,
-    pub(crate) rtd_key: Arc<str>,
-    pub(crate) state: AtomicU8,
-}
+use std::mem::ManuallyDrop;
 
 pub(crate) enum PreparedHandleObject {
     New {
@@ -41,150 +11,7 @@ pub(crate) enum PreparedHandleObject {
         value: ErasedObject,
     },
     Existing {
-        object_id: ObjectId,
-        object_key: ObjectKey,
-    },
-}
-
-impl PublishedTopic {
-    fn new(binding: FormulaBinding, token: String, rtd_key: Arc<str>) -> Self {
-        Self {
-            binding,
-            token,
-            rtd_key,
-            state: AtomicU8::new(PublishedTopicState::Provisional as u8),
-        }
-    }
-
-    fn state(&self) -> PublishedTopicState {
-        PublishedTopicState::from_raw(self.state.load(Ordering::Acquire))
-    }
-}
-
-pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, triomphe::Arc<PublishedTopic>>;
-pub(crate) type PublishedTopicMapArc = triomphe::Arc<PublishedTopicMap>;
-
-pub(crate) struct PublishedTopics {
-    shards: [ArcSwapAny<PublishedTopicMapArc>; PUBLISHED_TOPIC_SHARD_COUNT],
-}
-
-impl PublishedTopics {
-    fn new() -> Self {
-        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
-        Self {
-            shards: std::array::from_fn(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_map))),
-        }
-    }
-
-    fn shard_index(key: &HandleTopicKey) -> usize {
-        let mut hasher = FxHasher::default();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) & (PUBLISHED_TOPIC_SHARD_COUNT - 1)
-    }
-
-    pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<PublishedTopicMapArc> {
-        self.shards[Self::shard_index(key)].load()
-    }
-
-    /// Update the publication snapshot while holding the canonical topic lock.
-    fn insert(&self, key: HandleTopicKey, topic: triomphe::Arc<PublishedTopic>) {
-        let shard = &self.shards[Self::shard_index(&key)];
-        let current = shard.load_full();
-        let mut next = current.as_ref().clone();
-        next.insert(key, topic);
-        shard.store(triomphe::Arc::new(next));
-    }
-
-    /// Update the publication snapshot while holding the canonical topic lock.
-    fn remove(&self, key: HandleTopicKey) {
-        let shard = &self.shards[Self::shard_index(&key)];
-        let current = shard.load_full();
-        if !current.contains_key(&key) {
-            return;
-        }
-        let mut next = current.as_ref().clone();
-        next.remove(&key);
-        shard.store(triomphe::Arc::new(next));
-    }
-
-    /// Clear all publication snapshots while holding the canonical topic lock.
-    fn clear(&self) {
-        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
-        for shard in &self.shards {
-            shard.store(triomphe::Arc::clone(&empty_map));
-        }
-    }
-}
-
-pub(crate) struct TopicState {
-    pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
-    // Excel RTD callback strings are resolved here; they are not lifecycle
-    // identities and are never parsed back into formula components.
-    pub(crate) by_rtd_key: FxHashMap<Arc<str>, HandleTopicKey>,
-    pub(crate) by_excel_id: FxHashMap<HandleTopicOwner, HandleTopicKey>,
-    pub(crate) initializing: FxHashMap<HandleTopicKey, Arc<Initialization>>,
-    pub(crate) generation: u64,
-    pub(crate) closed: bool,
-}
-
-impl Default for TopicState {
-    fn default() -> Self {
-        Self {
-            by_key: FxHashMap::default(),
-            by_rtd_key: FxHashMap::default(),
-            by_excel_id: FxHashMap::default(),
-            initializing: FxHashMap::default(),
-            generation: 1,
-            closed: false,
-        }
-    }
-}
-
-pub(crate) struct Initialization {
-    pub(crate) owner: ThreadId,
-    pub(crate) owner_done: AtomicBool,
-    pub(crate) wait: Mutex<()>,
-    pub(crate) completed: Condvar,
-    #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) refinement_id: u64,
-}
-
-impl Initialization {
-    fn wait_until_done(&self) {
-        let mut wait = self.wait.lock();
-        while !self.owner_done.load(Ordering::Acquire) {
-            self.completed.wait(&mut wait);
-        }
-    }
-
-    fn wait_until_done_or_closed(&self, topics: &RwLock<TopicState>) {
-        let mut wait = self.wait.lock();
-        while !self.owner_done.load(Ordering::Acquire) && !topics.read().closed {
-            self.completed.wait(&mut wait);
-        }
-    }
-
-    fn complete(&self) {
-        let _wait = self.wait.lock();
-        self.owner_done.store(true, Ordering::Release);
-        self.completed.notify_all();
-    }
-
-    fn notify_closed(&self) {
-        let _wait = self.wait.lock();
-        self.completed.notify_all();
-    }
-}
-
-pub(crate) enum PrepareDecision {
-    Existing {
-        token: String,
-        rtd_key: Arc<str>,
-        generation: u64,
-    },
-    Initialize {
-        initialization: Arc<Initialization>,
-        generation: u64,
+        object: ObjectLocator,
     },
 }
 
@@ -215,16 +42,154 @@ impl Drop for HandleInitializationGuard {
     }
 }
 
+/// Owns the single-flight marker for one cold topic preparation.
+///
+/// The marker is removed by `commit_publication` on success.  If any earlier
+/// step fails, dropping this reservation removes the marker and wakes all
+/// waiters, so the rollback protocol is no longer encoded in a closure hidden
+/// in the middle of `prepare_observed_object`.
+struct TopicReservation<'runtime> {
+    runtime: &'runtime HandleRuntime,
+    key: HandleTopicKey,
+    initialization: Arc<Initialization>,
+    active: bool,
+}
+
+impl<'runtime> TopicReservation<'runtime> {
+    fn new(
+        runtime: &'runtime HandleRuntime,
+        key: HandleTopicKey,
+        initialization: Arc<Initialization>,
+    ) -> Self {
+        Self {
+            runtime,
+            key,
+            initialization,
+            active: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TopicReservation<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        if self
+            .runtime
+            .topics
+            .finish_initialization(self.key, &self.initialization)
+        {
+            self.runtime
+                .refinement
+                .linearize()
+                .finish_initializer(self.initialization.refinement_id);
+        }
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        let _ = self
+            .runtime
+            .topics
+            .finish_initialization(self.key, &self.initialization);
+        self.initialization.complete();
+    }
+}
+
+/// Owns a binding and its provisional topic until publication is committed.
+///
+/// The object registry and topic table are intentionally rolled back together:
+/// a provisional token must never survive a failed observation or a topic
+/// collision.  This is the cold-path transaction boundary for handle
+/// publication.
+struct ProvisionalPublication<'runtime> {
+    runtime: &'runtime HandleRuntime,
+    key: HandleTopicKey,
+    token: String,
+    #[cfg(any(test, feature = "handle-refinement-trace"))]
+    refinement_id: u64,
+    active: bool,
+}
+
+impl<'runtime> ProvisionalPublication<'runtime> {
+    fn new(
+        runtime: &'runtime HandleRuntime,
+        key: HandleTopicKey,
+        token: String,
+        #[cfg(any(test, feature = "handle-refinement-trace"))] refinement_id: u64,
+    ) -> Self {
+        Self {
+            runtime,
+            key,
+            token,
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            refinement_id,
+            active: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ProvisionalPublication<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        {
+            let removed = self
+                .runtime
+                .topics
+                .remove_topic_if_token(self.key, &self.token)
+                .is_some();
+            if removed {
+                let token_wire = self.runtime.refinement_token(&self.token);
+                let refinement = &self.runtime.refinement;
+                let key = self.key;
+                let refinement_id = self.refinement_id;
+                let token = &self.token;
+                let _ = self.runtime.registry.remove_and_drop_with_trace(
+                    token,
+                    "handle publication rollback",
+                    move |reusable| {
+                        refinement.rollback_pending(&key, refinement_id, reusable, token_wire);
+                    },
+                );
+            } else {
+                let _ = self.runtime.registry.remove_and_drop_with_trace(
+                    &self.token,
+                    "handle publication rollback",
+                    |_| {},
+                );
+            }
+        }
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        {
+            self.runtime
+                .topics
+                .remove_topic_if_token(self.key, &self.token);
+            self.runtime
+                .registry
+                .remove_and_drop_with_kind(&self.token, "handle publication rollback");
+        }
+    }
+}
+
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct HandleRuntime {
     pub(crate) registry: HandleRegistry,
-    pub(crate) topics: RwLock<TopicState>,
-    pub(crate) published: PublishedTopics,
+    pub(crate) topics: TopicTable,
     pub(crate) prepares: HandlePrepareState,
     pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
     #[cfg(any(test, feature = "handle-refinement-trace"))]
-    pub(crate) refinement: HandleRefinementTrace,
+    pub(crate) refinement: HandleRefinementHooks,
 }
 
 impl HandleRuntime {
@@ -239,15 +204,14 @@ impl HandleRuntime {
     ) -> XllResult<Self> {
         let registry = HandleRegistry::try_new(maximum_bindings)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let registry_session = registry.session;
+        let registry_session = registry.codec.session;
         Ok(Self {
             registry,
-            topics: RwLock::new(TopicState::default()),
-            published: PublishedTopics::new(),
+            topics: TopicTable::new(),
             prepares: HandlePrepareState::new(),
             _module_ingress: module_ingress,
             #[cfg(any(test, feature = "handle-refinement-trace"))]
-            refinement: HandleRefinementTrace::new(registry_session),
+            refinement: HandleRefinementHooks::new(registry_session),
         })
     }
 
@@ -260,12 +224,16 @@ impl HandleRuntime {
     fn refinement_token(&self, token: &str) -> TokenWire {
         let parsed = self
             .registry
-            .parse_token(HandleToken::new(token))
+            .codec
+            .parse(
+                std::ptr::from_ref(&self.registry).addr(),
+                HandleToken::new(token),
+            )
             .expect("H4 trace token must be authenticated");
         TokenWire {
-            session: self.registry.session,
+            session: self.registry.codec.session,
             slot: u64::from(parsed.id.slot),
-            generation: parsed.id.generation,
+            generation: parsed.id.generation.get(),
         }
     }
 
@@ -325,77 +293,40 @@ impl HandleRuntime {
         key: HandleTopicKey,
         rtd_key: Arc<str>,
         token: String,
-        generation: u64,
+        generation: TopicGeneration,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)> {
         observe(&rtd_key, &token)?;
-
-        let topics = self.topics.read();
-
-        if topics.closed || topics.generation != generation {
-            return Err(XllError::Closing);
-        }
-
-        if !topics
-            .by_key
-            .get(&key)
-            .is_some_and(|topic| topic.publication.token == token)
-        {
-            return Err(XllError::StaleHandle);
-        }
-
+        self.topics.is_current(key, generation, &token)?;
         Ok((token, false))
     }
 
     fn commit_publication(
         &self,
         key: HandleTopicKey,
-        generation: u64,
+        generation: TopicGeneration,
         initialization: &Arc<Initialization>,
         publication: &triomphe::Arc<PublishedTopic>,
     ) -> XllResult<()> {
-        let mut topics = self.topics.write();
-
-        if topics.closed || topics.generation != generation {
-            return Err(XllError::Closing);
-        }
-
-        let valid_topic = topics.by_key.get(&key).is_some_and(|topic| {
-            topic.publication.binding == publication.binding
-                && topic.publication.token == publication.token
-                && triomphe::Arc::ptr_eq(&topic.publication, publication)
-        });
-        if !valid_topic {
-            return Err(XllError::StaleHandle);
-        }
-
-        if !topics
-            .initializing
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, initialization))
-        {
-            return Err(XllError::StaleHandle);
-        }
-
         // A provisional snapshot lets readers that raced with the publication
         // fall back to the canonical single-flight path. Make it Live only
         // after the initialization marker is removed.
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let token_wire = self.refinement_token(&publication.token);
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let mut linearization = self.refinement.linearize();
-        self.published
-            .insert(key, triomphe::Arc::clone(publication));
-        topics.initializing.remove(&key);
-        publication
-            .state
-            .store(PublishedTopicState::Live as u8, Ordering::Release);
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        linearization.commit_and_activate(&key, initialization.refinement_id, token_wire);
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        linearization.finish_initializer(initialization.refinement_id);
+        self.topics
+            .commit_publication(key, generation, initialization, publication, || {
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                {
+                    let mut linearization = self.refinement.linearize();
+                    linearization.commit_and_activate(
+                        &key,
+                        initialization.refinement_id,
+                        token_wire,
+                    );
+                    linearization.finish_initializer(initialization.refinement_id);
+                }
+            })?;
 
-        drop(topics);
         initialization.complete();
         Ok(())
     }
@@ -425,8 +356,7 @@ impl HandleRuntime {
     pub(crate) fn prepare_observed_alias<T, K>(
         &self,
         key: K,
-        object_id: ObjectId,
-        object_key: ObjectKey,
+        object: ObjectLocator,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -435,12 +365,7 @@ impl HandleRuntime {
     {
         self.prepare_observed_object::<T, K>(
             key,
-            || {
-                Ok(PreparedHandleObject::Existing {
-                    object_id,
-                    object_key,
-                })
-            },
+            || Ok(PreparedHandleObject::Existing { object }),
             observe,
         )
     }
@@ -457,13 +382,13 @@ impl HandleRuntime {
     {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter()?;
-        let _prepare = self.prepares.enter();
+        let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let _refinement_prepare = self.refinement.prepare_guard();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.begin_prepare();
         {
-            let published = self.published.load(&key);
+            let published = self.topics.published().load(&key);
             if let Some(publication) = published.get(&key) {
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
                 let warm_reader_id = {
@@ -529,89 +454,38 @@ impl HandleRuntime {
             }
         }
 
+        let owner = std::thread::current().id();
         let decision = loop {
-            let topics = self.topics.read();
-
-            if topics.closed {
-                return Err(XllError::Closing);
-            }
-
-            //
-            // 1. A cold publication for this key is still in progress.
-            //
-            if let Some(initialization) = topics.initializing.get(&key).cloned() {
-                if initialization.owner == std::thread::current().id() {
-                    return Err(XllError::ReentrantCall);
-                }
-
-                drop(topics);
-                initialization.wait_until_done_or_closed(&self.topics);
-                continue;
-            }
-
-            //
-            // 2. No initialization is in flight, so a visible topic is committed
-            //    enough to use as the memoized value.
-            //
-            if let Some(topic) = topics.by_key.get(&key) {
-                let decision = PrepareDecision::Existing {
-                    token: topic.publication.token.clone(),
-                    rtd_key: Arc::clone(&topic.publication.rtd_key),
-                    generation: topics.generation,
-                };
-                drop(topics);
-                break decision;
-            }
-
-            //
-            // 3. Real miss. Become the single-flight owner.
-            //
-            drop(topics);
-            let mut topics = self.topics.write();
-
-            if topics.closed {
-                return Err(XllError::Closing);
-            }
-
-            if let Some(initialization) = topics.initializing.get(&key).cloned() {
-                if initialization.owner == std::thread::current().id() {
-                    return Err(XllError::ReentrantCall);
-                }
-
-                drop(topics);
-                initialization.wait_until_done_or_closed(&self.topics);
-                continue;
-            }
-
-            if let Some(topic) = topics.by_key.get(&key) {
-                let decision = PrepareDecision::Existing {
-                    token: topic.publication.token.clone(),
-                    rtd_key: Arc::clone(&topic.publication.rtd_key),
-                    generation: topics.generation,
-                };
-                drop(topics);
-                break decision;
-            }
-
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let refinement_id = self.refinement.allocate_initializer_id();
-            let initialization = Arc::new(Initialization {
-                owner: std::thread::current().id(),
-                owner_done: AtomicBool::new(false),
-                wait: Mutex::new(()),
-                completed: Condvar::new(),
+            let decision = self.topics.prepare_decision(key, owner, || {
                 #[cfg(any(test, feature = "handle-refinement-trace"))]
-                refinement_id,
-            });
-
-            topics.initializing.insert(key, Arc::clone(&initialization));
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            self.refinement.begin_initializer(&key, refinement_id);
-
-            break PrepareDecision::Initialize {
-                initialization,
-                generation: topics.generation,
-            };
+                let refinement_id = self.refinement.allocate_initializer_id();
+                Arc::new(Initialization {
+                    owner,
+                    owner_done: AtomicBool::new(false),
+                    wait: Mutex::new(()),
+                    completed: Condvar::new(),
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    refinement_id,
+                })
+            })?;
+            match decision {
+                PrepareDecision::Wait { initialization } => {
+                    initialization.wait_until_done_or_closed(&self.topics);
+                }
+                PrepareDecision::Initialize {
+                    initialization,
+                    generation,
+                } => {
+                    #[cfg(any(test, feature = "handle-refinement-trace"))]
+                    self.refinement
+                        .begin_initializer(&key, initialization.refinement_id);
+                    break PrepareDecision::Initialize {
+                        initialization,
+                        generation,
+                    };
+                }
+                existing => break existing,
+            }
         };
 
         let (initialization, generation) = match decision {
@@ -627,30 +501,11 @@ impl HandleRuntime {
                 initialization,
                 generation,
             } => (initialization, generation),
+
+            PrepareDecision::Wait { .. } => unreachable!("wait decisions never leave the loop"),
         };
 
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let refinement = &self.refinement;
-        let initializing = scopeguard::guard(
-            (&self.topics, key, Arc::clone(&initialization)),
-            |(topics, key, owned)| {
-                {
-                    let mut topics = topics.write();
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    let mut linearization = refinement.linearize();
-                    if topics
-                        .initializing
-                        .get(&key)
-                        .is_some_and(|current| Arc::ptr_eq(current, &owned))
-                    {
-                        topics.initializing.remove(&key);
-                    }
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    linearization.finish_initializer(owned.refinement_id);
-                }
-                owned.complete();
-            },
-        );
+        let reservation = TopicReservation::new(self, key, Arc::clone(&initialization));
 
         //
         // Cold path: no existing topic, invoke the factory.
@@ -665,12 +520,9 @@ impl HandleRuntime {
                 self.registry
                     .insert_pending_object_with_kind::<T>(pending.slot(), object_id)?
             }
-            PreparedHandleObject::Existing {
-                object_id,
-                object_key,
-            } => self
-                .registry
-                .insert_existing_object_binding::<T>(object_id, object_key)?,
+            PreparedHandleObject::Existing { object } => {
+                self.registry.insert_existing_object_binding::<T>(object)?
+            }
         };
         let binding = FormulaBinding {
             id: binding_id,
@@ -695,152 +547,51 @@ impl HandleRuntime {
         }
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         let refinement_id = initialization.refinement_id;
-        let unpublished = scopeguard::guard(
-            (&self.registry, &self.topics, key, token.as_str()),
-            |(registry, topics, key, token)| {
-                let mut topics = topics.write();
-                let removed = if let Some(topic) = topics
-                    .by_key
-                    .get(&key)
-                    .filter(|topic| topic.publication.token == token)
-                {
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    let token_wire = self.refinement_token(token);
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    let mut linearization = self.refinement.linearize();
-                    topic
-                        .publication
-                        .state
-                        .store(PublishedTopicState::Stale as u8, Ordering::Release);
-                    // The publication is normally not visible until the
-                    // final commit. Removing it here also covers future
-                    // changes that add a post-publication failure point.
-                    self.published.remove(key);
-                    let rtd_key = Arc::clone(&topic.publication.rtd_key);
-                    let owner = topic.excel_topic;
-                    topics.by_key.remove(&key);
-                    topics.by_rtd_key.remove(rtd_key.as_ref());
-                    if let Some(owner) = owner {
-                        topics.by_excel_id.remove(&owner);
-                    }
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    linearization.withdraw_and_invalidate(&key, refinement_id, token_wire);
-                    true
-                } else {
-                    false
-                };
-                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                let _ = removed;
-                drop(topics);
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                if removed {
-                    let token_wire = self.refinement_token(token);
-                    let refinement = &self.refinement;
-                    let _ = registry.remove_and_drop_with_trace(
-                        token,
-                        "handle publication rollback",
-                        move |reusable| {
-                            refinement.rollback_pending(&key, refinement_id, reusable, token_wire);
-                        },
-                    );
-                } else {
-                    let _ = registry.remove_and_drop_with_trace(
-                        token,
-                        "handle publication rollback",
-                        |_| {},
-                    );
-                }
-                #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-                registry.remove_and_drop_with_kind(token, "handle publication rollback");
-            },
+        let provisional = ProvisionalPublication::new(
+            self,
+            key,
+            token.clone(),
+            #[cfg(any(test, feature = "handle-refinement-trace"))]
+            refinement_id,
         );
 
-        let mut topics = self.topics.write();
-        if topics.closed || topics.generation != generation {
-            return Err(XllError::Closing);
-        }
         let rtd_key: Arc<str> = key.format_rtd_key().into();
-        if topics.by_key.contains_key(&key) || topics.by_rtd_key.contains_key(rtd_key.as_ref()) {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_TOPIC_COLLISION,
-            });
-        }
         let publication = triomphe::Arc::new(PublishedTopic::new(
             binding,
             token.clone(),
             Arc::clone(&rtd_key),
         ));
-        topics.by_key.insert(
+        self.topics.insert_provisional(
             key,
-            Topic {
-                publication: triomphe::Arc::clone(&publication),
-                #[cfg(any(target_os = "windows", test))]
-                server_generation: None,
-                excel_topic: None,
-                #[cfg(any(target_os = "windows", test))]
-                excel_topic_committed: false,
+            generation,
+            triomphe::Arc::clone(&publication),
+            || {
+                #[cfg(any(test, feature = "handle-refinement-trace"))]
+                self.refinement.publish_and_install(
+                    &key,
+                    initialization.refinement_id,
+                    self.refinement_token(&token),
+                    &rtd_key,
+                );
             },
-        );
-        topics.by_rtd_key.insert(rtd_key.clone(), key);
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        self.refinement.publish_and_install(
-            &key,
-            initialization.refinement_id,
-            self.refinement_token(&token),
-            &rtd_key,
-        );
-        drop(topics);
-
-        {
-            let topics = self.topics.read();
-            if topics.closed || topics.generation != generation {
-                return Err(XllError::Closing);
-            }
-        }
+        )?;
+        self.topics.is_current(key, generation, &token)?;
         observe(&rtd_key, &token)?;
 
-        let topics = self.topics.read();
-        if topics.closed || topics.generation != generation {
-            return Err(XllError::Closing);
-        }
-        if !topics
-            .by_key
-            .get(&key)
-            .is_some_and(|topic| topic.publication.token == token)
-        {
-            return Err(XllError::StaleHandle);
-        }
-        drop(topics);
+        self.topics.is_current(key, generation, &token)?;
         self.commit_publication(key, generation, &initialization, &publication)?;
-        let _ = scopeguard::ScopeGuard::into_inner(unpublished);
-        let _ = scopeguard::ScopeGuard::into_inner(initializing);
+        provisional.commit();
+        reservation.commit();
         Ok((token, true))
     }
 
     #[cfg(any(target_os = "windows", test))]
-    fn topic_key_for_rtd(topics: &TopicState, rtd_key: &str) -> XllResult<HandleTopicKey> {
-        topics
-            .by_rtd_key
-            .get(rtd_key)
-            .copied()
-            .ok_or(XllError::StaleHandle)
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    pub fn claim_server(&self, rtd_key: &str, server_generation: u64) -> XllResult<()> {
-        let mut topics = self.topics.write();
-        if topics.closed {
-            return Err(XllError::Closing);
-        }
-        let key = Self::topic_key_for_rtd(&topics, rtd_key)?;
-        let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
-        if topic
-            .server_generation
-            .is_some_and(|existing| existing != server_generation)
-        {
-            return Err(XllError::InvalidHandle);
-        }
-        topic.server_generation = Some(server_generation);
+    pub fn claim_server(
+        &self,
+        rtd_key: &str,
+        server_generation: ServerGeneration,
+    ) -> XllResult<()> {
+        let key = self.topics.claim_server(rtd_key, server_generation)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.claim_server(&key, server_generation);
         Ok(())
@@ -849,7 +600,7 @@ impl HandleRuntime {
     #[cfg(test)]
     pub fn connect(
         &self,
-        server_generation: u64,
+        server_generation: ServerGeneration,
         excel_topic_id: i32,
         rtd_key: &str,
     ) -> XllResult<String> {
@@ -869,7 +620,7 @@ impl HandleRuntime {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect_transaction(
         self: &Arc<Self>,
-        server_generation: u64,
+        server_generation: ServerGeneration,
         excel_topic_id: i32,
         rtd_key: &str,
     ) -> XllResult<HandleConnection<'_>> {
@@ -892,7 +643,7 @@ impl HandleRuntime {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect_inner(
         &self,
-        server_generation: u64,
+        server_generation: ServerGeneration,
         excel_topic_id: i32,
         rtd_key: &str,
     ) -> XllResult<(HandleTopicKey, String, bool)> {
@@ -900,43 +651,7 @@ impl HandleRuntime {
             server_generation,
             topic_id: excel_topic_id,
         };
-        let mut topics = self.topics.write();
-        if topics.closed {
-            return Err(XllError::Closing);
-        }
-        let key = Self::topic_key_for_rtd(&topics, rtd_key)?;
-        if topics
-            .by_excel_id
-            .get(&owner)
-            .is_some_and(|existing| existing != &key)
-        {
-            return Err(XllError::InvalidHandle);
-        }
-        let (token, created) = {
-            let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
-            if topic
-                .server_generation
-                .is_some_and(|existing| existing != server_generation)
-            {
-                return Err(XllError::InvalidHandle);
-            }
-            topic.server_generation = Some(server_generation);
-            let created = if let Some(existing) = topic.excel_topic {
-                if existing != owner {
-                    return Err(XllError::InvalidHandle);
-                }
-                if !topic.excel_topic_committed {
-                    return Err(XllError::Overloaded);
-                }
-                false
-            } else {
-                topic.excel_topic = Some(owner);
-                topic.excel_topic_committed = false;
-                true
-            };
-            (topic.publication.token.clone(), created)
-        };
-        topics.by_excel_id.insert(owner, key);
+        let (key, token, created) = self.topics.connect(server_generation, owner, rtd_key)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         if created {
             self.refinement.begin_connection(&key, owner);
@@ -952,18 +667,7 @@ impl HandleRuntime {
         owner: HandleTopicOwner,
         key: HandleTopicKey,
     ) -> XllResult<()> {
-        let mut topics = self.topics.write();
-        if topics.closed {
-            return Err(XllError::Closing);
-        }
-        if topics.by_excel_id.get(&owner) != Some(&key) {
-            return Err(XllError::StaleHandle);
-        }
-        let topic = topics.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
-        if topic.excel_topic != Some(owner) {
-            return Err(XllError::StaleHandle);
-        }
-        topic.excel_topic_committed = true;
+        self.topics.commit_connection(owner, key)?;
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.commit_connection(&key, owner);
         Ok(())
@@ -971,20 +675,8 @@ impl HandleRuntime {
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: HandleTopicKey) {
-        let mut topics = self.topics.write();
-        if topics.by_excel_id.get(&owner) != Some(&key)
-            || !topics.by_key.get(&key).is_some_and(|topic| {
-                topic.excel_topic == Some(owner) && !topic.excel_topic_committed
-            })
-        {
+        if !self.topics.rollback_connection(owner, key) {
             return;
-        }
-        topics.by_excel_id.remove(&owner);
-        if let Some(topic) = topics.by_key.get_mut(&key) {
-            // The formula already owns the object and token. Roll back only
-            // the COM topic assignment so a failed value write can be retried.
-            topic.excel_topic = None;
-            topic.excel_topic_committed = false;
         }
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         self.refinement.rollback_connection(&key, owner);
@@ -992,87 +684,32 @@ impl HandleRuntime {
 
     #[cfg(test)]
     pub fn rollback(&self, rtd_key: &str) {
-        let token = {
-            let mut topics = self.topics.write();
-            let Ok(key) = Self::topic_key_for_rtd(&topics, rtd_key) else {
-                return;
-            };
-            let Some(publication) = topics
-                .by_key
-                .get(&key)
-                .map(|topic| triomphe::Arc::clone(&topic.publication))
-            else {
-                return;
-            };
-            publication
-                .state
-                .store(PublishedTopicState::Stale as u8, Ordering::Release);
-            self.published.remove(key);
-            let Some(topic) = topics.by_key.remove(&key) else {
-                return;
-            };
-            topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
-            if let Some(owner) = topic.excel_topic {
-                topics.by_excel_id.remove(&owner);
-            }
-            Some(topic.publication.token.clone())
-        };
-        if let Some(token) = token {
+        if let Some(removed) = self.topics.remove_by_rtd_key(rtd_key) {
             self.registry
-                .remove_and_drop(&token, "handle topic rollback");
+                .remove_and_drop(&removed.token, "handle topic rollback");
         }
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn disconnect(&self, server_generation: u64, excel_topic_id: i32) {
+    pub fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
         };
-        #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let mut pending_runtime_id = None;
-        let removed = {
-            let mut topics = self.topics.write();
-            let Some(key) = topics.by_excel_id.remove(&owner) else {
-                return;
-            };
-            let Some(publication) = topics
-                .by_key
-                .get(&key)
-                .map(|topic| triomphe::Arc::clone(&topic.publication))
-            else {
-                return;
-            };
-            let was_provisional = publication.state() == PublishedTopicState::Provisional;
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            if was_provisional {
-                pending_runtime_id = topics
-                    .initializing
-                    .get(&key)
-                    .map(|initialization| initialization.refinement_id);
-            }
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let mut linearization = self.refinement.linearize();
-            publication
-                .state
-                .store(PublishedTopicState::Stale as u8, Ordering::Release);
-            self.published.remove(key);
-            let topic = topics.by_key.remove(&key);
-            topic.map(|topic| {
-                topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
-                #[cfg(any(test, feature = "handle-refinement-trace"))]
-                linearization.disconnect(&key, owner);
-                (key, topic.publication.token.clone(), was_provisional)
-            })
+        let Some(removed) = self.topics.remove_by_excel_owner(owner) else {
+            return;
         };
-        if let Some((key, token, was_provisional)) = removed {
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            if was_provisional {
-                if let Some(runtime_id) = pending_runtime_id {
-                    let token_wire = self.refinement_token(&token);
-                    let refinement = &self.refinement;
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        {
+            let mut linearization = self.refinement.linearize();
+            linearization.disconnect(&removed.key, owner);
+            drop(linearization);
+            let token_wire = self.refinement_token(&removed.token);
+            let refinement = &self.refinement;
+            if removed.was_provisional {
+                if let Some(runtime_id) = removed.initialization_id {
                     let _ = self.registry.remove_and_drop_with_trace(
-                        &token,
+                        &removed.token,
                         "handle topic disconnect",
                         move |reusable| {
                             refinement.drain_pending(token_wire, runtime_id, reusable);
@@ -1080,31 +717,24 @@ impl HandleRuntime {
                     );
                 } else {
                     let _ = self.registry.remove_and_drop_with_trace(
-                        &token,
+                        &removed.token,
                         "handle topic disconnect",
                         |_| {},
                     );
                 }
             } else {
-                let token_wire = self.refinement_token(&token);
-                let refinement = &self.refinement;
                 let _ = self.registry.remove_and_drop_with_trace(
-                    &token,
+                    &removed.token,
                     "handle topic disconnect",
                     move |reusable| {
                         refinement.drain_published(token_wire, reusable);
                     },
                 );
             }
-            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
-            {
-                self.registry
-                    .remove_and_drop_with_kind(&token, "handle topic disconnect");
-                let _ = (key, was_provisional);
-            }
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let _ = key;
         }
+        #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+        self.registry
+            .remove_and_drop_with_kind(&removed.token, "handle topic disconnect");
     }
 
     pub fn lookup<'call, T>(
@@ -1118,35 +748,12 @@ impl HandleRuntime {
         self.registry.lookup_handle(scope, token)
     }
 
-    pub fn close(&self) -> XllResult<()> {
+    pub fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
+        self.prepares.close_admission();
         self.registry.begin_close();
-        let initializations = {
-            let mut topics = self.topics.write();
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let mut linearization = self.refinement.linearize();
-
-            topics.closed = true;
-            topics.generation = topics.generation.wrapping_add(1);
-            for topic in topics.by_key.values() {
-                topic
-                    .publication
-                    .state
-                    .store(PublishedTopicState::Closing as u8, Ordering::Release);
-            }
-            self.published.clear();
-            topics.by_key.clear();
-            topics.by_rtd_key.clear();
-            topics.by_excel_id.clear();
-
-            let initializations = topics
-                .initializing
-                .drain()
-                .map(|(_, value)| value)
-                .collect::<Vec<_>>();
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            linearization.seal_for_close();
-            initializations
-        };
+        let initializations = self.topics.close();
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.refinement.linearize().seal_for_close();
 
         //
         // Wake cold-path waiters.
@@ -1169,7 +776,7 @@ impl HandleRuntime {
         //
         self.prepares.wait_for_idle();
 
-        let result = self.registry.close();
+        let result = self.registry.seal();
         #[cfg(any(test, feature = "handle-refinement-trace"))]
         {
             self.refinement.close_registry();
@@ -1182,129 +789,135 @@ impl HandleRuntime {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn terminate_topics(&self, server_generation: u64) {
+    pub fn terminate_topics(&self, server_generation: ServerGeneration) {
+        let removals = self.topics.remove_generation(server_generation);
         #[cfg(any(test, feature = "handle-refinement-trace"))]
-        let mut refinement_topics = Vec::new();
-        let tokens = {
-            let mut topics = self.topics.write();
+        if !removals.is_empty() {
+            self.refinement
+                .linearize()
+                .detach_generation(server_generation);
+        }
+        for removed in removals {
             #[cfg(any(test, feature = "handle-refinement-trace"))]
-            let mut linearization = self.refinement.linearize();
-            let keys = topics
-                .by_key
-                .iter()
-                .filter(|(_, topic)| topic.server_generation == Some(server_generation))
-                .map(|(key, _)| *key)
-                .collect::<Vec<_>>();
-            let tokens = keys
-                .into_iter()
-                .filter_map(|key| {
-                    let publication = topics
-                        .by_key
-                        .get(&key)
-                        .map(|topic| triomphe::Arc::clone(&topic.publication))?;
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    let was_provisional = publication.state() == PublishedTopicState::Provisional;
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    let refinement_id = topics
-                        .initializing
-                        .get(&key)
-                        .map(|initialization| initialization.refinement_id);
-                    publication
-                        .state
-                        .store(PublishedTopicState::Stale as u8, Ordering::Release);
-                    self.published.remove(key);
-                    let topic = topics.by_key.remove(&key)?;
-                    topics.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
-                    if let Some(owner) = topic.excel_topic {
-                        topics.by_excel_id.remove(&owner);
-                    }
-                    #[cfg(any(test, feature = "handle-refinement-trace"))]
-                    refinement_topics.push((
-                        key,
-                        topic.publication.token.clone(),
-                        was_provisional,
-                        refinement_id,
-                    ));
-                    Some(topic.publication.token.clone())
-                })
-                .collect::<Vec<_>>();
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            if !tokens.is_empty() {
-                linearization.detach_generation(server_generation);
-            }
-            tokens
-        };
-        for token in tokens {
-            #[cfg(any(test, feature = "handle-refinement-trace"))]
-            match refinement_topics
-                .iter()
-                .find(|(_, value, _, _)| value == &token)
-                .map(|(_, _, was_provisional, refinement_id)| (*was_provisional, *refinement_id))
-            {
-                Some((true, Some(runtime_id))) => {
-                    let token_wire = self.refinement_token(&token);
+            if removed.was_provisional {
+                if let Some(runtime_id) = removed.initialization_id {
+                    let token_wire = self.refinement_token(&removed.token);
                     let refinement = &self.refinement;
                     let _ = self.registry.remove_and_drop_with_trace(
-                        &token,
+                        &removed.token,
                         "handle RTD termination",
                         move |reusable| {
                             refinement.drain_pending(token_wire, runtime_id, reusable);
                         },
                     );
+                } else {
+                    let _ = self.registry.remove_and_drop_with_trace(
+                        &removed.token,
+                        "handle RTD termination",
+                        |_| {},
+                    );
                 }
-                Some((false, _)) => {
-                    let token_wire = self.refinement_token(&token);
+            } else {
+                let token_wire = self.refinement_token(&removed.token);
+                let refinement = &self.refinement;
+                let _ = self.registry.remove_and_drop_with_trace(
+                    &removed.token,
+                    "handle RTD termination",
+                    move |reusable| {
+                        refinement.drain_published(token_wire, reusable);
+                    },
+                );
+            }
+            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+            self.registry
+                .remove_and_drop_with_kind(&removed.token, "handle RTD termination");
+        }
+    }
+
+    pub fn terminate_all_topics(&self) {
+        let removals = self.topics.remove_all();
+        for removed in removals {
+            #[cfg(any(test, all(target_os = "windows", feature = "handle-refinement-trace")))]
+            {
+                let token_wire = self.refinement_token(&removed.token);
+                let refinement = &self.refinement;
+                if removed.was_provisional {
+                    if let Some(runtime_id) = removed.initialization_id {
+                        let _ = self.registry.remove_and_drop_with_trace(
+                            &removed.token,
+                            "handle RTD termination",
+                            move |reusable| {
+                                refinement.drain_pending(token_wire, runtime_id, reusable);
+                            },
+                        );
+                    } else {
+                        let _ = self.registry.remove_and_drop_with_trace(
+                            &removed.token,
+                            "handle RTD termination",
+                            |_| {},
+                        );
+                    }
+                } else {
                     let refinement = &self.refinement;
                     let _ = self.registry.remove_and_drop_with_trace(
-                        &token,
+                        &removed.token,
                         "handle RTD termination",
                         move |reusable| {
                             refinement.drain_published(token_wire, reusable);
                         },
                     );
                 }
-                _ => {
-                    let _ = self.registry.remove_and_drop_with_trace(
-                        &token,
-                        "handle RTD termination",
-                        |_| {},
-                    );
-                }
             }
-            #[cfg(not(any(test, feature = "handle-refinement-trace")))]
+            #[cfg(not(any(
+                test,
+                all(target_os = "windows", feature = "handle-refinement-trace")
+            )))]
             self.registry
-                .remove_and_drop_with_kind(&token, "handle RTD termination");
-        }
-    }
-
-    pub fn terminate_all_topics(&self) {
-        let tokens = {
-            let mut topics = self.topics.write();
-            for topic in topics.by_key.values() {
-                topic
-                    .publication
-                    .state
-                    .store(PublishedTopicState::Stale as u8, Ordering::Release);
-            }
-            self.published.clear();
-            let tokens = topics
-                .by_key
-                .drain()
-                .map(|(_, topic)| topic.publication.token.clone())
-                .collect::<Vec<_>>();
-            topics.by_rtd_key.clear();
-            topics.by_excel_id.clear();
-            tokens
-        };
-        for token in tokens {
-            self.registry
-                .remove_and_drop(&token, "handle RTD termination");
+                .remove_and_drop_with_kind(&removed.token, "handle RTD termination");
         }
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.registry.len()
+    }
+}
+
+/// The handle runtime has stopped accepting work and its registry has moved
+/// every payload root to the retired store. The token keeps the runtime alive
+/// until add-in state cleanup has completed and pin quiescence is certified.
+pub(crate) struct HandleRuntimeSealed {
+    generation: Option<RuntimeGeneration>,
+    runtime: Option<Arc<HandleRuntime>>,
+    registry: Option<crate::shutdown::HandleRegistrySealed>,
+}
+
+impl HandleRuntimeSealed {
+    fn empty(generation: Option<RuntimeGeneration>) -> Self {
+        Self {
+            generation,
+            runtime: None,
+            registry: None,
+        }
+    }
+
+    fn from_runtime(
+        generation: Option<RuntimeGeneration>,
+        runtime: Arc<HandleRuntime>,
+        registry: crate::shutdown::HandleRegistrySealed,
+    ) -> Self {
+        Self {
+            generation,
+            runtime: Some(runtime),
+            registry: Some(registry),
+        }
+    }
+
+    pub(crate) fn finish(self) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        if let (Some(runtime), Some(registry)) = (self.runtime, self.registry) {
+            runtime.registry.finish_quiescence(&registry)?;
+        }
+        Ok(crate::shutdown::HandlesQuiescent::new(self.generation))
     }
 }
 
@@ -1316,12 +929,8 @@ pub(crate) struct HandleRuntimeSlot {
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
-enum HandleRuntimeSlotState {
-    Vacant,
-    Initializing,
-    Ready,
-    Failed(XllError),
-}
+type HandleRuntimeSlotState =
+    crate::runtime_components::GenerationServiceState<crate::HandleConfig, HandleRuntime>;
 
 /// A read capability that holds an `arc_swap::Guard` over a published
 /// `HandleRuntime`.  The warm path acquires this without any `Mutex` or
@@ -1357,10 +966,39 @@ impl HandleRuntimeSlot {
     pub(crate) const fn new() -> Self {
         Self {
             published: arc_swap::ArcSwapOption::const_empty(),
-            state: Mutex::new(HandleRuntimeSlotState::Vacant),
+            state: Mutex::new(HandleRuntimeSlotState::Closed),
             changed: parking_lot::Condvar::new(),
             #[cfg(any(test, feature = "shutdown-refinement"))]
             ghost: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn arm(
+        &self,
+        generation: RuntimeGeneration,
+        config: crate::HandleConfig,
+    ) -> XllResult<()> {
+        let mut state = self.state.lock();
+        if !matches!(*state, HandleRuntimeSlotState::Closed) {
+            return Err(XllError::Closing);
+        }
+        *state = HandleRuntimeSlotState::Cold { generation, config };
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn disarm(&self, generation: RuntimeGeneration) -> XllResult<()> {
+        let mut state = self.state.lock();
+        match &*state {
+            HandleRuntimeSlotState::Cold {
+                generation: active, ..
+            } if *active == generation => {
+                *state = HandleRuntimeSlotState::Closed;
+                self.changed.notify_all();
+                Ok(())
+            }
+            HandleRuntimeSlotState::Closed => Ok(()),
+            _ => Err(XllError::Closing),
         }
     }
 
@@ -1380,7 +1018,7 @@ impl HandleRuntimeSlot {
         }
         matches!(
             *self.state.lock(),
-            HandleRuntimeSlotState::Vacant | HandleRuntimeSlotState::Failed(_)
+            HandleRuntimeSlotState::Closed | HandleRuntimeSlotState::InitFaulted { .. }
         )
     }
 
@@ -1404,58 +1042,76 @@ impl HandleRuntimeSlot {
 
         loop {
             match &*state {
-                HandleRuntimeSlotState::Ready => {
+                HandleRuntimeSlotState::Ready { .. } => {
                     drop(state);
                     let guard = self.published.load();
                     debug_assert!(guard.is_some());
                     return Ok(HandleRuntimeRead { guard });
                 }
 
-                HandleRuntimeSlotState::Failed(error) => {
+                HandleRuntimeSlotState::InitFaulted { error, .. } => {
                     return Err(error.clone());
                 }
 
-                HandleRuntimeSlotState::Initializing => {
+                HandleRuntimeSlotState::TeardownFaulted { error, runtime, .. } => {
+                    let _ = runtime;
+                    return Err(error.clone());
+                }
+
+                HandleRuntimeSlotState::Initializing { generation }
+                | HandleRuntimeSlotState::Sealing { generation } => {
+                    let _ = generation;
                     self.changed.wait(&mut state);
                 }
 
-                HandleRuntimeSlotState::Vacant => {
-                    *state = HandleRuntimeSlotState::Initializing;
-                    break;
+                HandleRuntimeSlotState::Cold { generation, .. } => {
+                    let generation = *generation;
+                    let config = match &*state {
+                        HandleRuntimeSlotState::Cold { config, .. } => *config,
+                        _ => unreachable!(),
+                    };
+                    *state = HandleRuntimeSlotState::Initializing { generation };
+                    drop(state);
+
+                    let candidate = HandleRuntime::try_new_with_ingress(
+                        usize::try_from(config.maximum_bindings())
+                            .expect("handle capacity fits the platform usize"),
+                        Some(crate::ingress::global_ingress()),
+                    )
+                    .map(Arc::new);
+
+                    let mut state = self.state.lock();
+                    match candidate {
+                        Ok(runtime) => {
+                            #[cfg(any(test, feature = "shutdown-refinement"))]
+                            if let Some(ghost) = self.ghost.get() {
+                                runtime.set_ghost(Arc::clone(ghost));
+                            }
+
+                            self.published.store(Some(runtime));
+                            *state = HandleRuntimeSlotState::Ready { generation };
+                            self.changed.notify_all();
+                            drop(state);
+
+                            let guard = self.published.load();
+                            debug_assert!(guard.is_some());
+                            return Ok(HandleRuntimeRead { guard });
+                        }
+
+                        Err(error) => {
+                            *state = HandleRuntimeSlotState::InitFaulted {
+                                generation,
+                                error: error.clone(),
+                            };
+                            self.changed.notify_all();
+                            return Err(error);
+                        }
+                    }
                 }
-            }
-        }
 
-        drop(state);
-
-        // Mutex released — only this thread constructs the runtime.
-        let candidate =
-            HandleRuntime::try_new_with_ingress(16_384, Some(crate::ingress::global_ingress()))
-                .map(Arc::new);
-
-        let mut state = self.state.lock();
-
-        match candidate {
-            Ok(runtime) => {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
-                if let Some(ghost) = self.ghost.get() {
-                    runtime.set_ghost(Arc::clone(ghost));
+                HandleRuntimeSlotState::Closed => {
+                    return Err(XllError::Closing);
                 }
-
-                self.published.store(Some(runtime));
-                *state = HandleRuntimeSlotState::Ready;
-                self.changed.notify_all();
-                drop(state);
-
-                let guard = self.published.load();
-                debug_assert!(guard.is_some());
-                Ok(HandleRuntimeRead { guard })
-            }
-
-            Err(error) => {
-                *state = HandleRuntimeSlotState::Failed(error.clone());
-                self.changed.notify_all();
-                Err(error)
             }
         }
     }
@@ -1468,35 +1124,96 @@ impl HandleRuntimeSlot {
         Ok(Arc::clone(read.as_arc()))
     }
 
-    pub(crate) fn close(&self) -> XllResult<crate::shutdown::HandlesQuiescent> {
+    pub(crate) fn seal(
+        &self,
+        generation: Option<RuntimeGeneration>,
+    ) -> XllResult<HandleRuntimeSealed> {
         let handles = {
             let mut state = self.state.lock();
 
-            while matches!(*state, HandleRuntimeSlotState::Initializing) {
+            while matches!(
+                *state,
+                HandleRuntimeSlotState::Initializing { .. }
+                    | HandleRuntimeSlotState::Sealing { .. }
+            ) {
                 self.changed.wait(&mut state);
             }
 
-            let handles = match &*state {
-                HandleRuntimeSlotState::Ready => self.published.swap(None),
-                HandleRuntimeSlotState::Vacant | HandleRuntimeSlotState::Failed(_) => None,
-                HandleRuntimeSlotState::Initializing => unreachable!(),
-            };
-
-            // Reset to Vacant so the slot can be reopened, mirroring the
-            // previous `.take()` semantics.
-            *state = HandleRuntimeSlotState::Vacant;
-
-            handles
+            match &*state {
+                HandleRuntimeSlotState::Ready { generation: active } => {
+                    if generation != Some(*active) {
+                        return Err(XllError::Closing);
+                    }
+                    let handles = self.published.swap(None);
+                    *state = HandleRuntimeSlotState::Sealing {
+                        generation: *active,
+                    };
+                    handles
+                }
+                HandleRuntimeSlotState::Cold {
+                    generation: active, ..
+                }
+                | HandleRuntimeSlotState::InitFaulted {
+                    generation: active, ..
+                } => {
+                    if generation != Some(*active) {
+                        return Err(XllError::Closing);
+                    }
+                    *state = HandleRuntimeSlotState::Closed;
+                    self.changed.notify_all();
+                    return Ok(HandleRuntimeSealed::empty(generation));
+                }
+                HandleRuntimeSlotState::Closed => {
+                    return Ok(HandleRuntimeSealed::empty(generation));
+                }
+                HandleRuntimeSlotState::TeardownFaulted {
+                    generation: active,
+                    error,
+                    runtime,
+                    ..
+                } => {
+                    let _ = runtime;
+                    if generation != Some(*active) {
+                        return Err(XllError::Closing);
+                    }
+                    return Err(error.clone());
+                }
+                HandleRuntimeSlotState::Initializing { .. }
+                | HandleRuntimeSlotState::Sealing { .. } => unreachable!(),
+            }
         };
 
-        let result = if let Some(handles) = handles {
-            let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
-            let handle_result = handles.close();
-            rtd_result.and(handle_result)
-        } else {
-            Ok(())
+        let Some(handles) = handles else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
+            });
         };
-        result.map(|()| crate::shutdown::HandlesQuiescent::new())
+        let generation = generation.expect("a published handle runtime has a generation");
+
+        let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
+        let handle_result = handles.seal();
+        let result = rtd_result.and(handle_result);
+        let mut state = self.state.lock();
+        match result {
+            Ok(registry) => {
+                *state = HandleRuntimeSlotState::Closed;
+                self.changed.notify_all();
+                Ok(HandleRuntimeSealed::from_runtime(
+                    Some(generation),
+                    handles,
+                    registry,
+                ))
+            }
+            Err(error) => {
+                *state = HandleRuntimeSlotState::TeardownFaulted {
+                    generation,
+                    error: error.clone(),
+                    runtime: ManuallyDrop::new(handles),
+                };
+                self.changed.notify_all();
+                Err(error)
+            }
+        }
     }
 }
 

@@ -125,6 +125,8 @@ private def simpleEvent : String → Option Event
   | "unlockRtdServer" => some .unlockRtdServer
   | "addHandle" => some .addHandle
   | "removeHandle" => some .removeHandle
+  | "addHandlePin" => some .addHandlePin
+  | "removeHandlePin" => some .removeHandlePin
   | "startDiagnostics" => some .startDiagnostics
   | "enqueueDiagnostic" => some .enqueueDiagnostic
   | "flushDiagnostic" => some .flushDiagnostic
@@ -197,6 +199,7 @@ private def parseResources (json : Json) : Except String Resources := do
   let rtdServers : Nat ← field json "rtdServers"
   let rtdServerLocks : Nat ← field json "rtdServerLocks"
   let handles : Nat ← field json "handles"
+  let handlePins : Nat ← field json "handlePins"
   let generationUnique : Bool ← field json "generationUnique"
   let addinQuiesced : Bool ← field json "addinQuiesced"
   let generationOwnedByRuntime : Bool ← field json "generationOwnedByRuntime"
@@ -223,6 +226,7 @@ private def parseResources (json : Json) : Except String Resources := do
     rtdServers,
     rtdServerLocks,
     handles,
+    handlePins,
     generationUnique,
     addinQuiesced,
     generationOwnedByRuntime,

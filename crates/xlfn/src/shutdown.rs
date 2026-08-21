@@ -1,3 +1,4 @@
+use crate::generation::RuntimeGeneration;
 use crate::{IntoXllError, XllError};
 
 /// Classification for a best-effort failure observed after unload safety was
@@ -145,6 +146,24 @@ macro_rules! shutdown_token {
 shutdown_token!(HostCallbacksDetached);
 shutdown_token!(AsyncStopped);
 shutdown_token!(SubscriptionsStopped);
-shutdown_token!(HandlesQuiescent);
+shutdown_token!(HandleRegistrySealed);
 shutdown_token!(AddinQuiesced);
 shutdown_token!(GenerationReclaimed);
+
+/// Proof that the handle registry for one specific runtime generation has no
+/// remaining pins. The generation identity travels with the proof so a
+/// certificate cannot be silently reused for a different service instance.
+#[derive(Debug)]
+pub(crate) struct HandlesQuiescent {
+    generation: Option<RuntimeGeneration>,
+}
+
+impl HandlesQuiescent {
+    pub(crate) const fn new(generation: Option<RuntimeGeneration>) -> Self {
+        Self { generation }
+    }
+
+    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation
+    }
+}

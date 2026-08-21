@@ -322,7 +322,7 @@ fn benchmark_revision_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
 
 fn cleanup_handle_runtime(runtime: &HandleRuntime) {
     runtime.terminate_all_topics();
-    let _ = runtime.close();
+    let _ = runtime.seal();
 }
 
 /// A batch whose runtime and formula keys are prepared before the timed call.
@@ -1418,7 +1418,10 @@ impl RtdPublishNumberBenchmark {
     pub fn new() -> Self {
         let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
         let server = runtime
-            .register_server(crate::subscription::ServerGeneration(1))
+            .register_server(
+                crate::subscription::ServerGeneration::new(1)
+                    .expect("non-zero test server generation"),
+            )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
         let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {
@@ -1486,7 +1489,10 @@ impl RtdPublishStringBenchmark {
     pub fn new() -> Self {
         let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
         let server = runtime
-            .register_server(crate::subscription::ServerGeneration(1))
+            .register_server(
+                crate::subscription::ServerGeneration::new(1)
+                    .expect("non-zero test server generation"),
+            )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
         let source = crate::RtdSourceHandle::new(BenchmarkRtdSource {

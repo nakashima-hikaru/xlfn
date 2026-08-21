@@ -10,7 +10,7 @@ The formal model specifies and verifies the critical lifecycle and
 concurrency protocols implemented in `xlfn`:
 
 - **Lifecycle synchronization**: Opening, explicit removal, controlled reload, open-rollback, and terminal coordination.
-- **Resource shutdown**: Deterministic staged teardown, quarantine, and certificate-based quiescence.
+- **Resource shutdown**: Deterministic staged teardown, quarantine, and certificate-based quiescence, including separate registry-sealed and pin-drained milestones.
 - **Physical residency**: A separate module self-reference that remains held across logical `closed` and is releasable only after the quiescence certificate.
 - **Composition**: Verified composition of lifecycle states and resource shutdown sessions.
 - **Handle safety**:
@@ -120,7 +120,7 @@ an explicit Add-in contract:
 - ingress, external entries, calls, worksheet return blocks and free callbacks;
 - async tasks and executor state;
 - subscriptions, callbacks, RTD operations, factories, servers and locks;
-- call-scoped handle borrows and published handles;
+- call-scoped handle borrows, published handles, and long-lived registry pins;
 - registration state and callback-gate state;
 - `generationUnique`, `addinQuiesced`, and `generationOwnedByRuntime` for open generation reclamation;
 - diagnostics and cleanup-issue accounting.
@@ -133,6 +133,18 @@ establishes `generationOwnedByRuntime = false`.
 `RtdDrained` is intentionally limited to RTD operations, class factories,
 servers, and server locks. `SubscriptionsDrained` owns the separate
 subscription/callback postcondition.
+
+Handle shutdown has two distinct obligations. `handles = 0` means that no
+formula binding roots remain; `handlePins = 0` means that no `PinnedHandle` or
+`AsyncHandle` can still retain a retired payload. The model therefore permits
+the registry to be sealed before pin drain, but admits `handlesDrained` only
+after both counters are zero. This matches the Rust order: `HandleRuntime::seal`
+retires bindings, Add-in cleanup drops generation state, and only then can
+`HandlesQuiescent` be issued.
+
+The Rust shutdown refinement trace carries the same `handlePins` counter and
+`addHandlePin`/`removeHandlePin` events, so the executable trace checker observes
+the same seal-versus-pin-drain boundary as the Lean transition system.
 
 `XlFnFormal/Shutdown/Invariant.lean` proves cumulative certificate
 preservation across the ordered stages. `Safety.lean` proves monotone phase
@@ -237,12 +249,25 @@ refinement layer over the canonical topic state:
 ### Published-handle snapshots
 
 `XlFnFormal/Handle/Registry/Snapshot` formalizes the `BindingRecord`
-fast-lookup architecture as an RCU layer over canonical registry semantics:
+fast-lookup architecture as an RCU layer over canonical registry semantics.
+`XlFnFormal/Handle/Registry/Object` separately models the object store, its
+non-owning publication pointer, and epoch-retired queue:
 
+- **Object payload model** (`Object.lean`): A binding carries an object identity
+  and a non-owning publication pointer. The payload exists either in the live
+  object registry or in the epoch-retired queue; reclamation is permitted only
+  after every active call epoch has advanced beyond the retirement epoch and
+  the explicit pin count is zero. `PinHeld` models the long-lived ownership
+  edge used by `PinnedHandle` and `AsyncHandle`; close may move
+  a pinned payload to the retired queue without reclaiming it.
+  Retired-object resurrection preserves `ObjectId` while assigning a fresh
+  `ObjectKey`, and is permitted only for an unpinned retired payload, which is
+  the alias-publication and async-promotion contract implemented by Rust.
 - **Model & Invariants** (`Model.lean`): Tracks published objects, the current
   immutable snapshot, and active call-scoped `Borrow` records. A publication
   remains rooted after it becomes `stale` or `closing` until no borrow refers to
-  it, matching the strong `Arc<BindingRecord> → Arc<HandleObject>` chain.
+  it; the payload lifetime is supplied by the call's object-read capability
+  and epoch model rather than by a second owning `Arc` chain.
 - **Transitions & Checker** (`Transition.lean`, `Checker.lean`):
   `observeBorrow` performs the snapshot lookup, generation/authentication and
   `Live` check at the borrow linearization point. `releaseBorrow` ends the call

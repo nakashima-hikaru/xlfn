@@ -3,6 +3,10 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
+fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
+    crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
+}
+
 struct TraceValue;
 
 impl ExcelHandleObject for TraceValue {}
@@ -27,7 +31,7 @@ fn cold_success_trace() {
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
         .expect("cold publication succeeds");
-    runtime.close().expect("cold success closes");
+    runtime.seal().map(|_| ()).expect("cold success closes");
     write_trace(&runtime, "rust-handle-cold-success.json");
 }
 
@@ -36,7 +40,7 @@ fn cold_failure_trace() {
     let key = test_topic_key("h4-cold-failure");
     let result = runtime.prepare_observed(key, create_value, |_, _| Err(XllError::Panic));
     assert!(matches!(result, Err(XllError::Panic)));
-    runtime.close().expect("cold failure closes");
+    runtime.seal().map(|_| ()).expect("cold failure closes");
     write_trace(&runtime, "rust-handle-cold-observe-failure.json");
 }
 
@@ -48,7 +52,7 @@ fn warm_disconnect_trace() {
         .expect("initial publication succeeds");
     let rtd_key = key.format_rtd_key();
     runtime
-        .connect(1, 41, &rtd_key)
+        .connect(server_generation(1), 41, &rtd_key)
         .expect("Excel connection commits");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -62,13 +66,13 @@ fn warm_disconnect_trace() {
         })
     });
     entered_rx.recv().expect("warm reader did not enter");
-    runtime.disconnect(1, 41);
+    runtime.disconnect(server_generation(1), 41);
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
         Err(XllError::StaleHandle)
     ));
-    runtime.close().expect("disconnect trace closes");
+    runtime.seal().map(|_| ()).expect("disconnect trace closes");
     write_trace(&runtime, "rust-handle-warm-disconnect.json");
 }
 
@@ -80,7 +84,7 @@ fn warm_generation_termination_trace() {
         .expect("initial publication succeeds");
     let rtd_key = key.format_rtd_key();
     runtime
-        .claim_server(&rtd_key, 1)
+        .claim_server(&rtd_key, server_generation(1))
         .expect("server claims topic");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -94,13 +98,16 @@ fn warm_generation_termination_trace() {
         })
     });
     entered_rx.recv().expect("warm reader did not enter");
-    runtime.terminate_topics(1);
+    runtime.terminate_topics(server_generation(1));
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
         Err(XllError::StaleHandle)
     ));
-    runtime.close().expect("termination trace closes");
+    runtime
+        .seal()
+        .map(|_| ())
+        .expect("termination trace closes");
     write_trace(&runtime, "rust-handle-warm-generation-termination.json");
 }
 
@@ -112,7 +119,7 @@ fn same_key_aba_trace() {
         .expect("initial publication succeeds");
     let rtd_key = key.format_rtd_key();
     runtime
-        .connect(1, 77, &rtd_key)
+        .connect(server_generation(1), 77, &rtd_key)
         .expect("Excel connection commits");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -126,7 +133,7 @@ fn same_key_aba_trace() {
         })
     });
     entered_rx.recv().expect("old warm reader did not enter");
-    runtime.disconnect(1, 77);
+    runtime.disconnect(server_generation(1), 77);
 
     let (_, created) = runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -138,7 +145,7 @@ fn same_key_aba_trace() {
         worker.join().expect("old warm reader panicked"),
         Err(XllError::StaleHandle)
     ));
-    runtime.close().expect("ABA trace closes");
+    runtime.seal().map(|_| ()).expect("ABA trace closes");
     write_trace(&runtime, "rust-handle-same-key-aba.json");
 }
 
@@ -169,7 +176,7 @@ fn warm_close_trace() {
         .refinement
         .set_before_seal_hook(seal_entered_tx, seal_release_rx);
     let close_runtime = Arc::clone(&runtime);
-    let close_thread = thread::spawn(move || close_runtime.close());
+    let close_thread = thread::spawn(move || close_runtime.seal().map(|_| ()));
     seal_entered_rx
         .recv()
         .expect("close reached the Closing/SealForClose boundary");

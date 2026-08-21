@@ -5,6 +5,11 @@ error[E0277]: `NonNull<Inner>` cannot be shared between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be shared between threads safely
   |
   = help: within `Nested<'call>`, the trait `Sync` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `handle::reclamation::TypedObjectRef<'call, Inner>`
+ --> src/handle/reclamation.rs
+  |
+  | pub(crate) struct TypedObjectRef<'call, T> {
+  |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
@@ -28,6 +33,11 @@ error[E0277]: `NonNull<Inner>` cannot be sent between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be sent between threads safely
   |
   = help: within `Nested<'call>`, the trait `Send` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `handle::reclamation::TypedObjectRef<'call, Inner>`
+ --> src/handle/reclamation.rs
+  |
+  | pub(crate) struct TypedObjectRef<'call, T> {
+  |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
@@ -83,16 +93,16 @@ note: required by a bound in `xlfn::handle::ExcelHandleObject`
   | pub trait ExcelHandleObject: Send + Sync + 'static {}
   |                                     ^^^^ required by this bound in `ExcelHandleObject`
 
-error[E0277]: `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+error[E0277]: `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
  --> tests/ui/fail/nested_handle_storage.rs:7:8
   |
 7 | struct Nested<'call> {
-  |        ^^^^^^^^^^^^^ `RefCell<Vec<handle::registry::CallRegistration>>` cannot be shared between threads safely
+  |        ^^^^^^^^^^^^^ `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
   |
-  = help: within `Nested<'call>`, the trait `Sync` is not implemented for `RefCell<Vec<handle::registry::CallRegistration>>`
-  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
-note: required because it appears within the type `handle::registry::HandleCallGuard`
- --> src/handle/registry.rs
+  = help: within `Nested<'call>`, the trait `Sync` is not implemented for `OnceCell<handle::reclamation::CallRegistration>`
+  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::OnceLock` instead
+note: required because it appears within the type `handle::reclamation::HandleCallGuard`
+ --> src/handle/reclamation.rs
   |
   | pub(crate) struct HandleCallGuard {
   |                   ^^^^^^^^^^^^^^^

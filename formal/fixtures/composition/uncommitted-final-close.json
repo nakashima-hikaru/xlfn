@@ -25,6 +25,7 @@
       "rtdServers": 0,
       "rtdServerLocks": 0,
       "handles": 0,
+      "handlePins": 0,
       "generationUnique": true,
       "addinQuiesced": true,
       "generationOwnedByRuntime": false,

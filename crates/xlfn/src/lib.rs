@@ -58,6 +58,7 @@ mod crt;
 pub mod diagnostics;
 pub mod error;
 mod execution;
+mod generation;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod handle;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
@@ -98,7 +99,7 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
-pub use addin::{Addin, OpenContext, Opened, RuntimeConfig};
+pub use addin::{Addin, HandleConfig, OpenContext, Opened, RuntimeConfig};
 pub use error::{ExcelError, XllError, XllResult};
 
 // These aliases are crate-internal only. Keeping implementation modules on
@@ -131,7 +132,7 @@ pub(crate) use diagnostics::{
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use error::{DiagnosticId, DomainErrorCode, InputError, IntoXllError, Shape};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use handle::{Handle, HandleAlias};
+pub(crate) use handle::{AsyncHandle, Handle, HandleAlias, PinnedHandle};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
@@ -563,10 +564,12 @@ pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function}
 pub mod prelude {
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
-    pub use crate::addin::{Addin, OpenContext, Opened, RtdOpenContext, RuntimeConfig};
+    pub use crate::addin::{
+        Addin, HandleConfig, OpenContext, Opened, RtdOpenContext, RuntimeConfig,
+    };
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
-    pub use crate::handle::{Handle, HandleAlias};
+    pub use crate::handle::{AsyncHandle, Handle, HandleAlias, PinnedHandle};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelErrorValue, ExcelSerialDate, Matrix, OptionalExcelValue, Row,

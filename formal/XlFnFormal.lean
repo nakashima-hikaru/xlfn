@@ -24,6 +24,7 @@ import XlFnFormal.Composition.Safety
 import XlFnFormal.Composition.Checker
 import XlFnFormal.Composition.Refinement
 import XlFnFormal.Handle.Registry.Model
+import XlFnFormal.Handle.Registry.Object
 import XlFnFormal.Handle.Registry.Transition
 import XlFnFormal.Handle.Registry.Invariant
 import XlFnFormal.Handle.Registry.Safety

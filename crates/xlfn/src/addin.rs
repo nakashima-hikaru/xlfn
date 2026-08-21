@@ -144,10 +144,44 @@ impl DiagnosticsSetup<'_> {
     }
 }
 
-/// RTD and asynchronous runtime policy selected during one add-in open.
+/// Handle-registry policy selected during one add-in open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleConfig {
+    maximum_bindings: u32,
+}
+
+impl HandleConfig {
+    pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
+
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            maximum_bindings: Self::DEFAULT_MAX_BINDINGS,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_max_bindings(mut self, maximum_bindings: u32) -> Self {
+        self.maximum_bindings = maximum_bindings;
+        self
+    }
+
+    pub(crate) const fn maximum_bindings(self) -> u32 {
+        self.maximum_bindings
+    }
+}
+
+impl Default for HandleConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RTD, handle, and asynchronous runtime policy selected during one add-in open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     rtd: RtdConfig,
+    handles: HandleConfig,
     async_runtime: AsyncRuntimeConfig,
 }
 
@@ -156,6 +190,7 @@ impl RuntimeConfig {
     pub const fn new() -> Self {
         Self {
             rtd: RtdConfig::new(),
+            handles: HandleConfig::new(),
             async_runtime: AsyncRuntimeConfig::new(),
         }
     }
@@ -167,6 +202,12 @@ impl RuntimeConfig {
     }
 
     #[must_use]
+    pub const fn with_handle_config(mut self, handles: HandleConfig) -> Self {
+        self.handles = handles;
+        self
+    }
+
+    #[must_use]
     pub const fn with_async_worker_count(mut self, worker_count: usize) -> Self {
         self.async_runtime = self.async_runtime.with_worker_count(worker_count);
         self
@@ -174,6 +215,10 @@ impl RuntimeConfig {
 
     pub(crate) const fn rtd_limits(self) -> crate::RtdLimits {
         self.rtd.limits()
+    }
+
+    pub(crate) const fn handle_config(self) -> HandleConfig {
+        self.handles
     }
 
     #[cfg(feature = "async")]
@@ -611,7 +656,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     where
         Source: crate::RtdSource,
     {
-        let subscriptions = self.runtime.subscriptions();
+        let subscriptions = self.runtime.subscriptions()?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
         match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.callbacks) {
@@ -768,7 +813,7 @@ mod tests {
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        let subscriptions = runtime.subscriptions();
+        let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
         let source = crate::RtdSourceHandle::new(TestSource {
@@ -778,7 +823,10 @@ mod tests {
         let topic = crate::RtdTopic::single("shared-observation").unwrap();
         let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
         let server = subscriptions
-            .register_server(crate::subscription::ServerGeneration(51))
+            .register_server(
+                crate::subscription::ServerGeneration::new(51)
+                    .expect("non-zero test server generation"),
+            )
             .unwrap();
         let key_obj = *prepared.key();
         let conn = subscriptions
@@ -843,6 +891,7 @@ mod tests {
         );
         let lease = crate::runtime::GenerationLease::<AsyncTestAddin> {
             generation: Arc::new(crate::runtime::OpenGeneration {
+                id: crate::generation::RuntimeGeneration::new(1).unwrap(),
                 state: 23_u32,
                 layers: (),
             }),

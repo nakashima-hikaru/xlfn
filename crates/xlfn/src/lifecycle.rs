@@ -1,3 +1,4 @@
+use crate::generation::RuntimeGeneration;
 use crate::host_callback::{HostCallbackSession, HostCallbackState};
 use crate::registration::HostRegistrar;
 use crate::{
@@ -107,7 +108,8 @@ where
     let result = catch_unwind(AssertUnwindSafe(|| {
         if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending {
             let mut callbacks = HostCallbackSession::new();
-            let outcome = rollback_open::<A>(runtime, &mut callbacks);
+            let outcome =
+                rollback_open::<A>(runtime, &mut callbacks, active_runtime_generation(runtime));
             if !outcome.unload_safe() {
                 let error = XllError::Internal {
                     diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_PENDING,
@@ -175,7 +177,10 @@ struct OpenTransaction<'runtime, A: Addin> {
 }
 
 impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
-    fn begin(runtime: &'runtime Runtime<A>, removal_epoch: u64) -> XllResult<Self> {
+    fn begin(
+        runtime: &'runtime Runtime<A>,
+        removal_epoch: crate::generation::RemovalEpoch,
+    ) -> XllResult<Self> {
         Ok(Self {
             runtime,
             callbacks: HostCallbackSession::new(),
@@ -321,8 +326,14 @@ fn rollback_active_open<A>(
     if !attempt.is_active() {
         return;
     }
+    let generation = Some(
+        RuntimeGeneration::new(attempt.attempt_id().get())
+            .expect("an active open attempt has a runtime generation"),
+    );
     if attempt.fail() {
-        match catch_unwind(AssertUnwindSafe(|| rollback_open::<A>(runtime, callbacks))) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            rollback_open::<A>(runtime, callbacks, generation)
+        })) {
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
                 let error = XllError::Internal {
@@ -345,13 +356,21 @@ where
 {
     let opened = A::open(context).map_err(IntoXllError::into_xll_error)?;
     let (state, layers, runtime_config) = opened.into_parts();
-    runtime.configure_runtime(runtime_config);
     // Stage unique ownership in OpeningGeneration before invoking add-in hooks.
     // If subsequent hooks panic, the outer boundary can roll the state back
     // through quiesce and cleanup with complete unique ownership.
-    if let Err((error, state)) = runtime.stage_opening_state(state) {
-        drop(layers);
-        std::mem::forget(state);
+    if let Err((error, state)) = runtime.stage_opening_state(state, runtime_config) {
+        let generation = active_runtime_generation(runtime);
+        runtime.quarantine_state(
+            generation,
+            state,
+            crate::runtime_components::QuarantineReason::OpenStateInvariant,
+        );
+        runtime.quarantine_layers(
+            generation,
+            layers,
+            crate::runtime_components::QuarantineReason::OpenStateInvariant,
+        );
         return Err(error);
     }
     let opening = runtime
@@ -362,7 +381,11 @@ where
 
     let opening = opening.attach_layers(layers);
     if let Err((error, opening)) = runtime.restore_opening_generation(opening) {
-        std::mem::forget(opening);
+        runtime.quarantine_opening_generation(
+            active_runtime_generation(runtime),
+            opening,
+            crate::runtime_components::QuarantineReason::OpenStateInvariant,
+        );
         return Err(error);
     }
     Ok(runtime_config)
@@ -405,6 +428,34 @@ struct OpenRollbackOutcome {
     finalized: bool,
 }
 
+fn active_runtime_generation<A: Addin>(runtime: &Runtime<A>) -> Option<RuntimeGeneration> {
+    RuntimeGeneration::new(runtime.active_generation())
+}
+
+/// Shared execution-drain stage for rollback and final removal. The ghost
+/// event emission remains an explicit policy switch because rollback and
+/// terminal close occupy different abstract transitions.
+fn drain_execution<A: Addin>(
+    runtime: &Runtime<A>,
+    _record_ghost: bool,
+) -> crate::ingress::ExportsDrained {
+    let exports_drained = crate::ingress::global_ingress().seal_and_drain();
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    if _record_ghost {
+        runtime.record_ghost_event_linearized(crate::shutdown_refinement::GhostEvent::CallsDrained);
+    }
+
+    runtime.wait_for_returns();
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    if _record_ghost {
+        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReturnsDrained);
+    }
+
+    exports_drained
+}
+
 impl OpenRollbackOutcome {
     fn unload_safe(&self) -> bool {
         self.local_quiescent
@@ -417,6 +468,7 @@ impl OpenRollbackOutcome {
 fn rollback_open<A>(
     runtime: &Runtime<A>,
     callbacks: &mut HostCallbackSession,
+    generation: Option<RuntimeGeneration>,
 ) -> OpenRollbackOutcome
 where
     A: Addin,
@@ -437,8 +489,7 @@ where
     crate::ingress::global_ingress().begin_close_with(|| {});
 
     let mut local_quiescent = true;
-    let exports_drained = crate::ingress::global_ingress().seal_and_drain();
-    runtime.wait_for_returns();
+    let exports_drained = drain_execution(runtime, false);
 
     #[cfg(feature = "async")]
     let async_stopped = {
@@ -522,7 +573,7 @@ where
     let mut addin_quiesced = None;
     let mut generation_reclaimed = None;
     if let Some(opening) = runtime.take_opening_generation() {
-        let (mut state, layers) = opening.into_parts();
+        let (mut state, layers, _config) = opening.into_parts();
         match catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
             .map_err(|_| XllError::Panic)
             .and_then(|result| result.map_err(IntoXllError::into_xll_error))
@@ -538,8 +589,18 @@ where
                 // A failed quiesce cannot prove that State-owned
                 // execution resources have stopped. Preserve it until
                 // the caller enters the quarantine path.
-                std::mem::forget(layers);
-                std::mem::forget(state);
+                if let Some(layers) = layers {
+                    runtime.quarantine_layers(
+                        generation,
+                        layers,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                }
+                runtime.quarantine_state(
+                    generation,
+                    state,
+                    crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                );
                 local_quiescent = false;
             }
         }
@@ -548,9 +609,9 @@ where
         generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
     }
 
-    let handles_quiescent = if local_quiescent {
-        match runtime.close_handles() {
-            Ok(certificate) => Some(certificate),
+    let mut handles_sealed = if local_quiescent {
+        match runtime.seal_handles() {
+            Ok(token) => Some(token),
             Err(error) => {
                 report_boundary_error("xlAutoOpen handle rollback", &error);
                 local_quiescent = false;
@@ -589,7 +650,11 @@ where
                 crate::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
-            std::mem::forget(state);
+            runtime.quarantine_state(
+                generation,
+                state,
+                crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
+            );
         } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
             report.push(
                 "Addin::State::drop",
@@ -602,8 +667,30 @@ where
         }
     }
     if let Some(state) = addin_state {
-        std::mem::forget(state);
+        runtime.quarantine_state(
+            generation,
+            state,
+            crate::runtime_components::QuarantineReason::BoundaryFailure,
+        );
     }
+
+    let handles_quiescent = if local_quiescent {
+        match runtime.finish_handle_quiescence(
+            handles_sealed
+                .take()
+                .expect("handle seal token is present when rollback is local-quiescent"),
+        ) {
+            Ok(certificate) => Some(certificate),
+            Err(error) => {
+                report_boundary_error("xlAutoOpen handle pin rollback", &error);
+                local_quiescent = false;
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {
             diagnostic_id: crate::DiagnosticId::REGISTRATION_UNKNOWN,
@@ -711,12 +798,13 @@ where
             runtime
                 .record_ghost_returned_success(witness)
                 .unwrap_or_else(|error| {
-                    handle_unload_hazard(
+                    let control = handle_unload_hazard(
                         runtime,
                         crate::shutdown::UnloadHazard::CloseInvariantViolation,
                         "xlAutoRemove success refinement",
                         &error,
-                    )
+                    );
+                    let _ = commit_removal_control(runtime, control);
                 });
             1
         }
@@ -732,7 +820,13 @@ enum RemovalSuccess<'runtime, A: Addin> {
     },
 }
 
-struct QuarantineSignal;
+enum RemovalControl {
+    Quarantine {
+        hazard: crate::shutdown::UnloadHazard,
+        boundary: &'static str,
+        error: XllError,
+    },
+}
 
 /// Owns the terminal-removal attempt and its callback session. Cleanup is
 /// explicit: the transaction is consumed only after a close certificate is
@@ -785,20 +879,15 @@ where
     match catch_unwind(AssertUnwindSafe(|| {
         remove_addin_inner_unchecked::<A>(runtime)
     })) {
-        Ok(success) => success,
-        Err(payload) => {
-            if payload.is::<QuarantineSignal>() {
-                RemovalSuccess::Quarantined
-            } else {
-                std::panic::resume_unwind(payload)
-            }
-        }
+        Ok(Ok(success)) => success,
+        Ok(Err(control)) => commit_removal_control(runtime, control),
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
 fn remove_addin_inner_unchecked<'runtime, A>(
     runtime: &'runtime Runtime<A>,
-) -> RemovalSuccess<'runtime, A>
+) -> Result<RemovalSuccess<'runtime, A>, RemovalControl>
 where
     A: Addin,
 {
@@ -808,7 +897,7 @@ where
     // a concurrent xlAutoOpen may already have sampled the previous close
     // epoch without having acquired its open-attempt token yet.
     let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
-        return RemovalSuccess::AlreadyClosed;
+        return Ok(RemovalSuccess::AlreadyClosed);
     };
     crate::ingress::global_ingress().begin_close_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -821,15 +910,7 @@ where
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
 
-    let exports_drained = crate::ingress::global_ingress().seal_and_drain();
-
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_event_linearized(crate::shutdown_refinement::GhostEvent::CallsDrained);
-
-    runtime.wait_for_returns();
-
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReturnsDrained);
+    let exports_drained = drain_execution(runtime, true);
 
     #[cfg(feature = "async")]
     let async_stopped = {
@@ -846,14 +927,17 @@ where
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::AsyncDrained);
 
-    let subscriptions_stopped = runtime.close_subscriptions().unwrap_or_else(|error| {
-        handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::SubscriptionProducerStillRunning,
-            "xlAutoRemove subscription shutdown",
-            &error,
-        )
-    });
+    let subscriptions_stopped = match runtime.close_subscriptions() {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::SubscriptionProducerStillRunning,
+                "xlAutoRemove subscription shutdown",
+                &error,
+            ));
+        }
+    };
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::SubscriptionsDrained);
@@ -997,7 +1081,7 @@ where
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::CloseCallbackGate);
 
     if let Some((hazard, boundary, error)) = unload_failure.take() {
-        handle_unload_hazard(runtime, hazard, boundary, &error);
+        return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
 
     let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
@@ -1016,13 +1100,17 @@ where
                                 .and_then(|result| result.map_err(IntoXllError::into_xll_error))
                         {
                             report_boundary_error("xlAutoRemove quiesce", &error);
-                            std::mem::forget(generation);
-                            handle_unload_hazard(
+                            runtime.quarantine_generation(
+                                active_runtime_generation(runtime),
+                                generation,
+                                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                            );
+                            return Err(handle_unload_hazard(
                                 runtime,
                                 crate::shutdown::UnloadHazard::AddinQuiesceFailed,
                                 "xlAutoRemove quiesce",
                                 &error,
-                            );
+                            ));
                         }
                         drop(generation.layers);
                         addin_state = Some(generation.state);
@@ -1032,31 +1120,46 @@ where
                             diagnostic_id: crate::DiagnosticId::STATE_SCAN,
                         };
                         report_boundary_error("xlAutoRemove state escaped", &error);
-                        let _ = std::sync::Arc::into_raw(generation);
-                        handle_unload_hazard(
+                        runtime.quarantine_shared_generation(
+                            active_runtime_generation(runtime),
+                            generation,
+                            crate::runtime_components::QuarantineReason::AddinGenerationEscaped,
+                        );
+                        return Err(handle_unload_hazard(
                             runtime,
                             crate::shutdown::UnloadHazard::AddinGenerationEscaped,
                             "xlAutoRemove state escaped",
                             &error,
-                        );
+                        ));
                     }
                 }
             }
             crate::runtime::ShutdownGeneration::Opening(opening) => {
-                let (mut state, layers) = opening.into_parts();
+                let (mut state, layers, _config) = opening.into_parts();
                 if let Err(error) = catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
                     .map_err(|_| XllError::Panic)
                     .and_then(|result| result.map_err(IntoXllError::into_xll_error))
                 {
                     report_boundary_error("xlAutoRemove quiesce", &error);
-                    std::mem::forget(layers);
-                    std::mem::forget(state);
-                    handle_unload_hazard(
+                    let generation_id = active_runtime_generation(runtime);
+                    if let Some(layers) = layers {
+                        runtime.quarantine_layers(
+                            generation_id,
+                            layers,
+                            crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                        );
+                    }
+                    runtime.quarantine_state(
+                        generation_id,
+                        state,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                    return Err(handle_unload_hazard(
                         runtime,
                         crate::shutdown::UnloadHazard::AddinQuiesceFailed,
                         "xlAutoRemove quiesce",
                         &error,
-                    );
+                    ));
                 }
                 drop(layers);
                 addin_state = Some(state);
@@ -1078,17 +1181,17 @@ where
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
     }
 
-    let handles_quiescent = runtime.close_handles().unwrap_or_else(|error| {
-        handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
-            "xlAutoRemove handle table shutdown",
-            &error,
-        )
-    });
-
-    #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HandlesDrained);
+    let handles_sealed = match runtime.seal_handles() {
+        Ok(token) => token,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
+                "xlAutoRemove handle table shutdown",
+                &error,
+            ));
+        }
+    };
 
     if let Some(mut state) = addin_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
@@ -1101,7 +1204,11 @@ where
                 crate::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
-            std::mem::forget(state);
+            runtime.quarantine_state(
+                active_runtime_generation(runtime),
+                state,
+                crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
+            );
         } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
             report.push(
                 "Addin::State::drop",
@@ -1116,61 +1223,77 @@ where
         report_cleanup_issue(issue);
     }
 
-    let diagnostics_stopped = crate::diagnostics::close_diagnostic_router()
-        .map(|outcome| {
-            for issue in outcome.issues {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
-                runtime
-                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
-                report_cleanup_issue(&issue);
-            }
-            outcome.certificate
-        })
-        .unwrap_or_else(|error| {
-            let error = error.into_xll_error();
-            handle_unload_hazard(
+    let handles_quiescent = match runtime.finish_handle_quiescence(handles_sealed) {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
-                "xlAutoRemove diagnostic refinement",
+                crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
+                "xlAutoRemove handle pin quiescence",
                 &error,
-            )
-        });
+            ));
+        }
+    };
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
-    runtime
-        .record_ghost_diagnostics_stopped()
-        .unwrap_or_else(|error| {
-            handle_unload_hazard(
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HandlesDrained);
+
+    let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router().map(|outcome| {
+        for issue in outcome.issues {
+            #[cfg(any(test, feature = "shutdown-refinement"))]
+            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
+            report_cleanup_issue(&issue);
+        }
+        outcome.certificate
+    }) {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            let error = error.into_xll_error();
+            return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
                 "xlAutoRemove diagnostic refinement",
                 &error,
-            )
-        });
+            ));
+        }
+    };
+
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    if let Err(error) = runtime.record_ghost_diagnostics_stopped() {
+        return Err(handle_unload_hazard(
+            runtime,
+            crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
+            "xlAutoRemove diagnostic refinement",
+            &error,
+        ));
+    }
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::DiagnosticsDrained);
 
-    let rtd_quiescent = crate::rtd::wait_for_module_quiescence().unwrap_or_else(|error| {
-        let hazard = if error.revocation_debt != 0 {
-            crate::shutdown::UnloadHazard::RtdGitRevocationDebt
-        } else {
-            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
-        };
-        handle_unload_hazard(
-            runtime,
-            hazard,
-            "xlAutoRemove RTD GIT quiescence",
-            &XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
-            },
-        )
-    });
+    let rtd_quiescent = match crate::rtd::wait_for_module_quiescence() {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            let hazard = if error.revocation_debt != 0 {
+                crate::shutdown::UnloadHazard::RtdGitRevocationDebt
+            } else {
+                crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+            };
+            return Err(handle_unload_hazard(
+                runtime,
+                hazard,
+                "xlAutoRemove RTD GIT quiescence",
+                &XllError::Internal {
+                    diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
+                },
+            ));
+        }
+    };
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RtdDrained);
 
-    let certificate = runtime
-        .certify_logical_quiescence(crate::runtime::RemovalQuiescencePrerequisites {
+    let certificate =
+        match runtime.certify_logical_quiescence(crate::runtime::RemovalQuiescencePrerequisites {
             exports: exports_drained,
             rtd: rtd_quiescent,
             host_callbacks,
@@ -1180,28 +1303,33 @@ where
             diagnostics_stopped,
             addin_quiesced,
             generation_reclaimed,
-        })
-        .unwrap_or_else(|error| {
-            handle_unload_hazard(
+        }) {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                return Err(handle_unload_hazard(
+                    runtime,
+                    crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                    "xlAutoRemove certification",
+                    &error,
+                ));
+            }
+        };
+    let closed_witness = match runtime.finish_removal(certificate) {
+        Ok(witness) => witness,
+        Err(error) => {
+            return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                "xlAutoRemove certification",
+                "xlAutoRemove removal completion",
                 &error,
-            )
-        });
-    let closed_witness = runtime.finish_removal(certificate).unwrap_or_else(|error| {
-        handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::CloseInvariantViolation,
-            "xlAutoRemove removal completion",
-            &error,
-        )
-    });
+            ));
+        }
+    };
 
-    RemovalSuccess::Closed {
+    Ok(RemovalSuccess::Closed {
         witness: closed_witness,
         removal_attempt: transaction.into_attempt(),
-    }
+    })
 }
 
 fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
@@ -1218,23 +1346,42 @@ fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
 
 #[cold]
 fn handle_unload_hazard<A: Addin>(
-    runtime: &Runtime<A>,
+    _runtime: &Runtime<A>,
     hazard: crate::shutdown::UnloadHazard,
     boundary: &'static str,
     error: &XllError,
-) -> ! {
+) -> RemovalControl {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         tracing::error!(?hazard, %error, "unload safety could not be established");
     }));
     if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        runtime.ghost_fail_stop(hazard.ghost_failure());
+        _runtime.ghost_fail_stop(hazard.ghost_failure());
         fail_stop_invariant(boundary, error);
     }
 
-    quarantine_for_hazard(runtime, hazard);
     report_boundary_error(boundary, error);
-    std::panic::panic_any(QuarantineSignal)
+    RemovalControl::Quarantine {
+        hazard,
+        boundary,
+        error: error.clone(),
+    }
+}
+
+fn commit_removal_control<A: Addin>(
+    runtime: &Runtime<A>,
+    control: RemovalControl,
+) -> RemovalSuccess<'_, A> {
+    match control {
+        RemovalControl::Quarantine {
+            hazard,
+            boundary: _boundary,
+            error: _error,
+        } => {
+            quarantine_for_hazard(runtime, hazard);
+            RemovalSuccess::Quarantined
+        }
+    }
 }
 
 fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
@@ -1251,7 +1398,7 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
     quarantine_runtime_resources(runtime);
 }
 
-fn quarantine_runtime_resources<A: Addin>(_runtime: &Runtime<A>) {
+fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         crate::rtd::begin_module_close();
         let ingress = crate::ingress::global_ingress();
@@ -1265,6 +1412,15 @@ fn quarantine_runtime_resources<A: Addin>(_runtime: &Runtime<A>) {
             let _ = ingress.seal_and_drain();
         }
         crate::callback_gate::close_from_runtime();
+        let quarantined = runtime.quarantine_snapshot();
+        if let Some((generation, reason)) = quarantined.last() {
+            tracing::error!(
+                generation = generation.map_or(0, RuntimeGeneration::get),
+                ?reason,
+                resource_count = quarantined.len(),
+                "runtime resources retained in quarantine vault"
+            );
+        }
     }));
 }
 
@@ -1458,7 +1614,14 @@ mod tests {
         assert!(!runtime.has_current_generation());
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
-        assert!(rollback_open::<LayersPanic>(&runtime, &mut callbacks).unload_safe());
+        assert!(
+            rollback_open::<LayersPanic>(
+                &runtime,
+                &mut callbacks,
+                active_runtime_generation(&runtime),
+            )
+            .unload_safe()
+        );
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
@@ -1688,7 +1851,11 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
-        let outcome = rollback_open::<RetryClose>(&runtime, &mut callbacks);
+        let outcome = rollback_open::<RetryClose>(
+            &runtime,
+            &mut callbacks,
+            active_runtime_generation(&runtime),
+        );
         assert!(outcome.unload_safe());
         assert!(outcome.finalized);
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
@@ -1835,10 +2002,13 @@ mod tests {
 
         let notifier_state =
             std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
-        let subscriptions = runtime.subscriptions();
+        let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();
         let server = subscriptions
-            .register_server(crate::subscription::ServerGeneration(1))
+            .register_server(
+                crate::subscription::ServerGeneration::new(1)
+                    .expect("non-zero test server generation"),
+            )
             .unwrap();
         server
             .attach_update_notifier(crate::rtd::RtdNotifier::for_test(std::sync::Arc::clone(
@@ -2207,7 +2377,11 @@ mod tests {
         let mut opening = rollback.begin_open().unwrap();
         assert!(opening.fail());
         let mut callbacks = HostCallbackSession::new();
-        let outcome = rollback_open::<CleanClose>(&rollback, &mut callbacks);
+        let outcome = rollback_open::<CleanClose>(
+            &rollback,
+            &mut callbacks,
+            active_runtime_generation(&rollback),
+        );
         assert!(outcome.unload_safe());
         check(
             "open rollback",
@@ -2273,7 +2447,14 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
-        assert!(rollback_open::<AlwaysFailClose>(&runtime, &mut callbacks).unload_safe());
+        assert!(
+            rollback_open::<AlwaysFailClose>(
+                &runtime,
+                &mut callbacks,
+                active_runtime_generation(&runtime),
+            )
+            .unload_safe()
+        );
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
 
         assert_eq!(host_auto_remove::<AlwaysFailClose>(&runtime), 1);
@@ -2549,10 +2730,13 @@ mod tests {
                 })
             })
             .unwrap();
-        let subscriptions = runtime.subscriptions();
+        let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();
         let server = subscriptions
-            .register_server(crate::subscription::ServerGeneration(1))
+            .register_server(
+                crate::subscription::ServerGeneration::new(1)
+                    .expect("non-zero test server generation"),
+            )
             .unwrap();
         let source = crate::RtdSourceHandle::new(OrderedSource {
             events: std::sync::Arc::clone(&events),
@@ -2621,7 +2805,11 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
-        assert!(runtime.stage_opening_state(state).is_ok());
+        assert!(
+            runtime
+                .stage_opening_state(state, crate::RuntimeConfig::new())
+                .is_ok()
+        );
         let opening = runtime.take_opening_generation().unwrap();
         let opening = opening.attach_layers(());
         assert!(runtime.restore_opening_generation(opening).is_ok());
@@ -2712,7 +2900,11 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
-        assert!(runtime.stage_opening_state(state).is_ok());
+        assert!(
+            runtime
+                .stage_opening_state(state, crate::RuntimeConfig::new())
+                .is_ok()
+        );
         let opening = runtime.take_opening_generation().unwrap();
 
         let opening = opening.attach_layers(());
@@ -2721,7 +2913,11 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
-        let outcome = rollback_open::<PanicLayersAddin>(&runtime, &mut callbacks);
+        let outcome = rollback_open::<PanicLayersAddin>(
+            &runtime,
+            &mut callbacks,
+            active_runtime_generation(&runtime),
+        );
         assert!(outcome.unload_safe());
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
 

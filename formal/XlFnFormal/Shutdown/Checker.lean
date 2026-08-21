@@ -81,7 +81,7 @@ private def rtdDrained (r : Resources) : Bool :=
     r.rtdServerLocks == 0
 
 private def handlesDrained (r : Resources) : Bool :=
-  r.handles == 0
+  r.handles == 0 && r.handlePins == 0
 
 private def generationReclaimed (r : Resources) : Bool :=
   r.generationUnique == true && r.addinQuiesced == true && r.generationOwnedByRuntime == false
@@ -356,6 +356,16 @@ def apply? (s : State) (event : Event) : Option State :=
         some { s with resources :=
           { s.resources with handles := decrement s.resources.handles } }
       else none
+  | .addHandlePin =>
+      if allowsHandleCreation s.phase = true then
+        some { s with resources :=
+          { s.resources with handlePins := s.resources.handlePins + 1 } }
+      else none
+  | .removeHandlePin =>
+      if live s.phase ∧ s.resources.handlePins > 0 then
+        some { s with resources :=
+          { s.resources with handlePins := decrement s.resources.handlePins } }
+      else none
   | .startDiagnostics =>
       if s.phase = .open ∧ s.resources.diagnosticsRunning = false then
         some { s with resources :=
@@ -501,6 +511,8 @@ theorem apply?_sound
     | apply Step.unlockRtdServer
     | apply Step.addHandle
     | apply Step.removeHandle
+    | apply Step.addHandlePin
+    | apply Step.removeHandlePin
     | apply Step.startDiagnostics
     | apply Step.enqueueDiagnostic
     | apply Step.flushDiagnostic

@@ -135,6 +135,7 @@ impl DiagnosticId {
     pub(crate) const STRING_LENGTH: Self = Self::from_ascii8(*b"STRINGLE");
     pub(crate) const HANDLE_CALLBACKS: Self = Self::from_ascii8(*b"HANDCBKS");
     pub(crate) const HANDLE_CONTEXT: Self = Self::from_ascii8(*b"HANDCTXT");
+    pub(crate) const HANDLE_PINS: Self = Self::from_ascii8(*b"HANDPINS");
     pub(crate) const HANDLE_DIGEST: Self = Self::from_ascii8(*b"HANDDIGE");
     pub(crate) const HANDLE_UDF: Self = Self::from_ascii8(*b"HANDUDFI");
     pub(crate) const RETURN_REOPEN: Self = Self::from_ascii8(*b"RTNREOPN");

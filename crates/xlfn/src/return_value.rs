@@ -121,11 +121,10 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
             diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
-        let (object_id, object_key) = operation()?.into_parts();
-        let (token, _) =
-            handles.prepare_observed_alias::<T, _>(key, object_id, object_key, |key, token| {
-                crate::rtd::observe(arc_handles, key, token, callbacks)
-            })?;
+        let object = operation()?.into_locator();
+        let (token, _) = handles.prepare_observed_alias::<T, _>(key, object, |key, token| {
+            crate::rtd::observe(arc_handles, key, token, callbacks)
+        })?;
         Ok(token)
     }
 

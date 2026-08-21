@@ -1055,7 +1055,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     assert_eq!(reentrant_status.load(Ordering::Acquire), S_OK);
 
     drop(ensured);
-    handles.close().unwrap();
+    handles.seal().map(|_| ()).unwrap();
 }
 
 #[test]
@@ -1110,7 +1110,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     drop(operation);
     shutdown_subscriptions(subscriptions).unwrap();
     drop(ensured);
-    handles.close().unwrap();
+    handles.seal().map(|_| ()).unwrap();
 }
 
 fn iid_null_from_fields() -> GUID {

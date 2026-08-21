@@ -423,11 +423,8 @@ impl<'call> CallScope<'call> {
         &self.callbacks
     }
 
-    pub(crate) fn register_handle_reclaimer(
-        &self,
-        reclaimer: &std::sync::Arc<crate::handle::HandleReclaimer>,
-    ) {
-        self.handle_guard.register(reclaimer);
+    pub(crate) fn handle_guard(&'call self) -> &'call crate::handle::HandleCallGuard {
+        &self.handle_guard
     }
 }
 
@@ -851,7 +848,7 @@ where
     }
 
     fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.u64(self.object_id.0);
+        encoder.u64(self.object.id.0);
     }
 
     fn from_excel_with_identity(
@@ -862,7 +859,44 @@ where
     ) -> XllResult<Self> {
         let handle = Self::from_excel_with_context(value, argument, context)?;
         if let Some(identity) = identity {
-            identity.u64(handle.object_id.0);
+            identity.u64(handle.object.id.0);
+        }
+        Ok(handle)
+    }
+}
+
+impl<'call, T> FromExcel<'call> for crate::handle::AsyncHandle<T>
+where
+    T: crate::handle::ExcelHandleObject,
+{
+    fn from_excel(_value: XlValueRef<'call>, _argument: &'static str) -> XllResult<Self> {
+        Err(XllError::Internal {
+            diagnostic_id: crate::DiagnosticId::HANDLE_NO_CONTEXT,
+        })
+    }
+
+    fn from_excel_with_context(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+    ) -> XllResult<Self> {
+        let token = <String as FromExcel>::from_excel(value, argument)?;
+        context.resolve_handle::<T>(&token)?.into_async()
+    }
+
+    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.u64(self.object_id());
+    }
+
+    fn from_excel_with_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        let handle = Self::from_excel_with_context(value, argument, context)?;
+        if let Some(identity) = identity {
+            identity.u64(handle.object_id());
         }
         Ok(handle)
     }
@@ -2415,6 +2449,7 @@ mod tests {
         use crate::handle::{FormulaCaller, FormulaRevisionKey, HandleTopicKey};
 
         let runtime = Box::leak(Box::new(crate::Runtime::<()>::new()));
+        runtime.arm_test_generation();
         let handle_rt = runtime.handles().unwrap();
 
         let topic_a = HandleTopicKey::Formula(FormulaRevisionKey::new(
@@ -2440,19 +2475,14 @@ mod tests {
             .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))
             .unwrap();
 
-        let (object_id, object) = crate::with_excel_call_scope(|scope| {
+        let object = crate::with_excel_call_scope(|scope| {
             let resolved: crate::Handle<'_, SemanticHandleTestObj> =
                 handle_rt.lookup(scope, &token_a).unwrap();
-            resolved.alias().into_parts()
+            resolved.alias().into_locator()
         });
 
         let (token_b, _) = handle_rt
-            .prepare_observed_alias::<SemanticHandleTestObj, _>(
-                topic_b,
-                object_id,
-                object,
-                |_, _| Ok(()),
-            )
+            .prepare_observed_alias::<SemanticHandleTestObj, _>(topic_b, object, |_, _| Ok(()))
             .unwrap();
 
         assert_ne!(token_a, token_b);
@@ -2492,7 +2522,7 @@ mod tests {
             }
             .unwrap();
             let id = arguments.inputs.unwrap().finish();
-            (handle.data, id, handle.object_id)
+            (handle.data, id, handle.object.id)
         });
 
         let (handle_data_b, id_b, object_id_b) = crate::with_excel_call_scope(|scope| {
@@ -2510,7 +2540,7 @@ mod tests {
             }
             .unwrap();
             let id = arguments.inputs.unwrap().finish();
-            (handle.data, id, handle.object_id)
+            (handle.data, id, handle.object.id)
         });
 
         assert_eq!(handle_data_a, 99);

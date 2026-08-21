@@ -14,6 +14,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `ExcelErrorValue` | Excel error | preserves the exact error |
 | `ExcelSerialDate` | finite number | starts with `ExcelDateSystem::Workbook` |
 | `Handle<'_, T>` | string handle token | authenticates, checks generation, and checks object type; valid only for the active call |
+| `AsyncHandle<T>` | string handle token | authenticates and pins the typed object before an async future is scheduled; owned and `'static` |
 | `Option<T>` | value, blank, or missing | blank and missing become `None` |
 | `OptionalExcelValue<T>` | value, blank, or missing | preserves all three states |
 | `XlArrayRef<'call>` | rectangular multi-value | zero-allocation borrowed cells; synchronous UDFs only |

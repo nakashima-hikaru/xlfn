@@ -119,9 +119,6 @@ impl Default for RtdLimits {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ServerGeneration(pub(crate) u64);
-
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct TopicId(pub(crate) i32);
 
@@ -185,9 +182,6 @@ fn parse_fixed_hex(value: &str) -> Option<u64> {
         .then(|| u64::from_str_radix(value, 16).ok())
         .flatten()
 }
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ConnectionGeneration(pub(crate) u64);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RtdTopic {

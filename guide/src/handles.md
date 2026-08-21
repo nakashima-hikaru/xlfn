@@ -81,6 +81,35 @@ an async task.
 
 No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<'_, T>`.
 
+## Explicit lifetime promotion
+
+When an application must retain a handle beyond the current Excel call, promote
+it explicitly:
+
+```rust
+fn retain(dataset: Handle<'_, Dataset>) -> XllResult<PinnedHandle<Dataset>> {
+    dataset.pin()
+}
+```
+
+`PinnedHandle<T>` is the long-lived synchronous registry lease, while
+`AsyncHandle<T>` marks the same ownership model as safe to move into a
+`Send + 'static` future:
+
+```rust
+fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<AsyncHandle<Dataset>> {
+    dataset.into_async()
+}
+```
+
+These types own a registry pin, not an `Arc<T>`. The registry remains the sole
+owner of the payload, and the payload is released when its formula bindings and
+all explicit pins are gone. A pin may therefore survive formula disconnect or
+terminal runtime close, but it must be dropped when the application no longer
+needs it. `PinnedHandle` and `AsyncHandle` are not Excel return values.
+`AsyncHandle<T>` is the only promoted handle type with automatic Excel input
+conversion; it is intended for asynchronous UDF parameters.
+
 ## Re-evaluation semantics
 
 Handle-producing functions are memoized by formula revision.
@@ -127,11 +156,14 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 ```
 
 `HandleAlias<'call, T>` is the only handle return capability. It is an
-identity-only object capability: it carries the identity of the underlying
-object and may retain a private lifetime pin so that object remains
-publishable until the alias is consumed. It does not expose a snapshot, `Arc`,
-or `&T`. Publishing it creates a new formula binding and token that shares the
-same underlying `HandleObject`; it does not clone the business object. A plain
+identity-only, call-scoped capability: it carries the underlying `ObjectId` and
+current `ObjectKey`, but it owns neither the object nor an `Arc` pin. Consume it
+while the originating call scope is active. If the source binding was the last
+live binding and was removed earlier in that scope, publication may resurrect
+the detached payload from the epoch-retired queue and install the new binding
+with a fresh `ObjectKey`. Once the call scope ends, an unconsumed alias is not a
+way to keep the object alive. Publishing creates a new formula binding to the
+same registry-owned value; it does not clone the business object. A plain
 `Handle` cannot be returned, cloned, or retained after the call.
 
 ## Lifetime
@@ -178,6 +210,11 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 
 `HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
 `Handle<'_, T>` is an input capability only and is not a valid return type.
+
+`AsyncHandle<T>` is intentionally not call-borrowed: it is an owned `'static`
+input that pins the registry payload before an async future is scheduled. It is
+the async counterpart to `Handle<'_, T>`; it does not make a borrowed handle
+safe to capture.
 
 ## Caller restrictions
 

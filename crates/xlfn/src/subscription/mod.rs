@@ -27,6 +27,7 @@ pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 pub use topic::{RtdLimits, RtdTopic};
 pub use value::{IntoRtdValue, RtdValue};
 
+pub(crate) use crate::generation::{ConnectionGeneration, ServerGeneration};
 pub(crate) use catalog::*;
 pub(crate) use delivery::*;
 pub(crate) use identity::*;
@@ -36,10 +37,7 @@ pub(crate) use runtime::*;
 pub(crate) use server::*;
 pub(crate) use slot::*;
 pub(crate) use source::ErasedRtdSource;
-pub(crate) use topic::{
-    ConnectionGeneration, ServerGeneration, SourceId, SubscriptionIdentity, SubscriptionKey,
-    TopicId,
-};
+pub(crate) use topic::{SourceId, SubscriptionIdentity, SubscriptionKey, TopicId};
 pub(crate) use value::StoredRtdValue;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -1,3 +1,4 @@
+pub(crate) use crate::generation::{BindingGeneration, ObjectGeneration, TopicGeneration};
 use crate::{DomainErrorCode, ExcelCallbackStatus, ReturnContext, XllError, XllResult};
 use parking_lot::{Condvar, Mutex, RwLock};
 use rustc_hash::FxHashMap;
@@ -7,27 +8,52 @@ use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::thread::ThreadId;
 
 mod connection;
 mod formula;
 mod prepare;
+mod reclamation;
 #[cfg(any(test, feature = "handle-refinement-trace"))]
 mod refinement;
+#[cfg(any(test, feature = "handle-refinement-trace"))]
+mod refinement_hooks;
 mod registry;
 mod runtime;
 mod token;
+mod topic;
 mod typed;
 
-pub(crate) use connection::*;
-pub(crate) use formula::*;
-pub(crate) use prepare::*;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) use connection::HandleConnection;
+pub(crate) use connection::{FormulaBinding, HandleTopicOwner, Topic};
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use formula::resolve_formula_caller;
+#[cfg(test)]
+pub(crate) use formula::test_topic_key;
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use formula::{FormulaCaller, FormulaRevisionKey};
+pub(crate) use formula::{HandleTopicKey, formula_revision_key};
+pub(crate) use prepare::HandlePrepareState;
+#[cfg(target_os = "windows")]
+pub(crate) use prepare::RtdOperationGuard;
+pub(crate) use reclamation::{HandleCallGuard, TypedObjectRef};
 #[cfg(any(test, feature = "handle-refinement-trace"))]
-pub(crate) use refinement::{HandleRefinementTrace, TokenWire};
-pub(crate) use registry::*;
-pub(crate) use runtime::*;
-pub(crate) use token::*;
-pub use typed::{ExcelHandleObject, Handle, HandleAlias};
+pub(crate) use refinement::TokenWire;
+#[cfg(any(test, feature = "handle-refinement-trace"))]
+pub(crate) use refinement_hooks::HandleRefinementHooks;
+#[cfg(test)]
+pub(crate) use registry::{BindingState, HandleRegistryPhase, ObjectKey};
+pub(crate) use registry::{
+    ErasedObject, HandleRegistry, ObjectLocator, ObjectPin, PendingHandleValue,
+};
+pub(crate) use runtime::{
+    HandleRuntime, HandleRuntimeResolver, HandleRuntimeSealed, HandleRuntimeSlot,
+};
+pub(crate) use token::{HandleId, HandleToken, ObjectId, TokenCodec};
+pub(crate) use topic::{
+    Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicTable,
+};
+pub use typed::{AsyncHandle, ExcelHandleObject, Handle, HandleAlias, PinnedHandle};
 
 #[cfg(test)]
 mod refinement_tests;

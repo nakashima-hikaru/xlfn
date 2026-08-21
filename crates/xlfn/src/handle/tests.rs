@@ -1,4 +1,12 @@
 use super::*;
+
+fn generation(raw: u64) -> crate::generation::RuntimeGeneration {
+    crate::generation::RuntimeGeneration::new(raw).expect("test generation is non-zero")
+}
+
+fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
+    crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
+}
 use crate::ExcelParameter;
 use crate::input_identity::InputFingerprint;
 use crate::input_identity::InputFingerprintBuilder;
@@ -248,7 +256,7 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     assert!(topics.by_excel_id.is_empty());
     drop(topics);
 
-    let published = runtime.published.load(&key);
+    let published = runtime.topics.published().load(&key);
     let publication = published
         .get(&key)
         .expect("successful observation must commit its published snapshot");
@@ -257,14 +265,14 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         PublishedTopicState::Live as u8
     );
 
-    runtime.connect(1, 41, &rtd_key).unwrap();
+    runtime.connect(server_generation(1), 41, &rtd_key).unwrap();
     {
         let topics = runtime.topics.read();
         assert_eq!(topics.by_excel_id.len(), 1);
         assert_eq!(topics.by_excel_id.values().next(), Some(&identity));
     }
 
-    runtime.disconnect(1, 41);
+    runtime.disconnect(server_generation(1), 41);
     let topics = runtime.topics.read();
     assert!(topics.by_key.is_empty());
     assert!(topics.by_rtd_key.is_empty());
@@ -281,14 +289,14 @@ fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
             key,
             || Ok(DataRecord(1)),
             |_, _| {
-                let published = runtime.published.load(&key);
+                let published = runtime.topics.published().load(&key);
                 assert!(published.get(&key).is_none());
                 Ok(())
             },
         )
         .unwrap();
 
-    assert!(runtime.published.load(&key).get(&key).is_some());
+    assert!(runtime.topics.published().load(&key).get(&key).is_some());
 }
 
 #[test]
@@ -430,6 +438,31 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
 }
 
 #[test]
+fn one_call_scope_carries_one_object_store_capability() {
+    struct ScopeObject(u32);
+    impl ExcelHandleObject for ScopeObject {}
+
+    let first = HandleRegistry::new(2);
+    let second = HandleRegistry::new(2);
+    let first_token = insert_production(&first, Arc::new(ScopeObject(1))).unwrap();
+    let second_token = insert_production(&second, Arc::new(ScopeObject(2))).unwrap();
+
+    crate::with_excel_call_scope(|scope| {
+        let first_handle = first
+            .lookup_handle::<ScopeObject>(scope, &first_token)
+            .expect("the first runtime establishes the call object store");
+        assert_eq!(first_handle.0, 1);
+
+        assert!(matches!(
+            second.lookup_handle::<ScopeObject>(scope, &second_token),
+            Err(XllError::Internal {
+                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT
+            })
+        ));
+    });
+}
+
+#[test]
 fn published_binding_snapshot_does_not_own_object_after_retirement() {
     struct Counted(Arc<AtomicUsize>);
     impl ExcelHandleObject for Counted {}
@@ -442,8 +475,14 @@ fn published_binding_snapshot_does_not_own_object_after_retirement() {
     let drops = Arc::new(AtomicUsize::new(0));
     let registry = HandleRegistry::new(2);
     let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops)))).unwrap();
-    let parsed = registry.parse_token(HandleToken::new(&token)).unwrap();
-    let snapshot = registry.published.load(parsed.id.slot);
+    let parsed = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&token),
+        )
+        .unwrap();
+    let snapshot = registry.bindings.published().load(parsed.id.slot);
     let publication = snapshot
         .get(parsed.id.slot)
         .expect("inserted handle must be published");
@@ -465,14 +504,26 @@ fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
 
     let registry = HandleRegistry::new(2);
     let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
-    let parsed1 = registry.parse_token(HandleToken::new(&token1)).unwrap();
+    let parsed1 = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&token1),
+        )
+        .unwrap();
 
     crate::with_excel_call_scope(|scope| {
         let old = registry.lookup_handle::<TestObj>(scope, &token1).unwrap();
         registry.remove::<TestObj>(&token1).unwrap();
 
         let token2 = insert_production(&registry, Arc::new(TestObj("second"))).unwrap();
-        let parsed2 = registry.parse_token(HandleToken::new(&token2)).unwrap();
+        let parsed2 = registry
+            .codec
+            .parse(
+                std::ptr::from_ref(&registry).addr(),
+                HandleToken::new(&token2),
+            )
+            .unwrap();
         assert_eq!(parsed1.id.slot, parsed2.id.slot);
         assert_ne!(parsed1.id.generation, parsed2.id.generation);
         assert_eq!(old.0, "first");
@@ -499,7 +550,7 @@ fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
 
     crate::with_excel_call_scope(|scope| {
         let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
-        registry.close().unwrap();
+        registry.seal().map(|_| ()).unwrap();
         assert_eq!(borrowed.0, "live");
         assert!(matches!(
             registry.lookup_handle::<TestObj>(scope, &token),
@@ -513,15 +564,20 @@ fn exhausted_generation_retires_the_slot_permanently() {
     let registry = HandleRegistry::new(2);
     let first = insert_production(&registry, Arc::new(1_u32)).unwrap();
     registry.remove::<u32>(&first).unwrap();
-    registry.state.write().slots[0].next_generation = u64::MAX;
+    registry.bindings.write_state().slots[0].next_generation =
+        crate::generation::BindingGeneration::new(u64::MAX).unwrap();
     let final_token = insert_production(&registry, Arc::new(1_u32)).unwrap();
     registry.remove::<u32>(&final_token).unwrap();
-    assert!(registry.state.read().free.is_empty());
+    assert!(registry.bindings.read_state().free.is_empty());
 
     let replacement = insert_production(&registry, Arc::new(2_u32)).unwrap();
     assert_eq!(
         registry
-            .parse_token(HandleToken::new(&replacement))
+            .codec
+            .parse(
+                std::ptr::from_ref(&registry).addr(),
+                HandleToken::new(&replacement),
+            )
             .unwrap()
             .id
             .slot,
@@ -574,7 +630,7 @@ fn close_invalidates_tokens_and_rejects_new_bindings() {
     let registry = HandleRegistry::new(2);
     let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
     let value = registry.lookup::<u32>(&token).unwrap();
-    registry.close().unwrap();
+    registry.seal().map(|_| ()).unwrap();
     assert!(registry.lookup::<u32>(&token).is_err());
     assert_eq!(value, 42);
     assert!(matches!(
@@ -597,7 +653,7 @@ fn shuttle_insert_racing_close_never_leaves_a_live_handle() {
             });
 
             shuttle::thread::yield_now();
-            registry.close().unwrap();
+            registry.seal().map(|_| ()).unwrap();
             let result = worker.join().expect("insertion thread panicked");
 
             assert_eq!(registry.len(), 0);
@@ -646,7 +702,7 @@ fn close_drops_values_outside_registry_lock() {
         }),
     )
     .unwrap();
-    registry.close().unwrap();
+    registry.seal().map(|_| ()).unwrap();
 }
 
 #[test]
@@ -670,7 +726,7 @@ fn close_contains_panicking_destructors_and_continues_dropping() {
     insert_production(&registry, Arc::new(PanicOnDrop)).unwrap();
     insert_production(&registry, Arc::new(CountOnDrop(Arc::clone(&drops)))).unwrap();
 
-    assert!(matches!(registry.close(), Err(XllError::Panic)));
+    assert!(matches!(registry.seal().map(|_| ()), Err(XllError::Panic)));
     assert_eq!(registry.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
@@ -727,8 +783,8 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
         1
     );
 
-    runtime.connect(1, 41, &rtd_key).unwrap();
-    runtime.disconnect(1, 41);
+    runtime.connect(server_generation(1), 41, &rtd_key).unwrap();
+    runtime.disconnect(server_generation(1), 41);
     assert_eq!(runtime.len(), 0);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
@@ -739,6 +795,7 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
 #[test]
 fn explicit_handle_argument_conversion_resolves_a_typed_token() {
     let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
+    runtime.arm_test_generation();
     let handles = runtime.handles().unwrap();
     let (token, _) = handles
         .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
@@ -755,13 +812,36 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 }
 
 #[test]
+fn explicit_async_handle_argument_conversion_pins_the_payload() {
+    let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
+    runtime.arm_test_generation();
+    let handles = runtime.handles().unwrap();
+    let (token, _) = handles
+        .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
+        .unwrap();
+    let (_encoded, mut raw) = token_value(&token);
+
+    let resolved: AsyncHandle<DataRecord> = crate::with_excel_call_scope(|scope| {
+        // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
+        unsafe { crate::argument_from_raw_with_context(scope, runtime, "dataset", &mut raw) }
+            .unwrap()
+    });
+    handles
+        .registry
+        .remove_and_drop(&token, "test remove async argument");
+    assert_eq!(resolved.0, 29);
+    drop(resolved);
+}
+
+#[test]
 fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
+    runtime.arm_test_generation();
     let handles = runtime.handles().unwrap();
     let key = test_topic_key("argument-errors");
     let rtd_key = key.format_rtd_key();
     let (token, _) = handles.prepare(key, || Ok(DataRecord(23))).unwrap();
-    handles.connect(1, 91, &rtd_key).unwrap();
+    handles.connect(server_generation(1), 91, &rtd_key).unwrap();
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
     // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
@@ -779,6 +859,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     });
 
     let foreign_runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::new()));
+    foreign_runtime.arm_test_generation();
     let (_foreign_encoded, mut foreign_raw) = token_value(&token);
     // SAFETY: `foreign_raw` and its counted UTF-16 storage remain live for conversion.
     crate::with_excel_call_scope(|scope| {
@@ -812,7 +893,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         assert!(matches!(tampered, Err(XllError::InvalidHandle)));
     });
 
-    handles.disconnect(1, 91);
+    handles.disconnect(server_generation(1), 91);
     let (_stale_encoded, mut stale_raw) = token_value(&token);
     // SAFETY: `stale_raw` and its counted UTF-16 storage remain live for conversion.
     crate::with_excel_call_scope(|scope| {
@@ -878,46 +959,54 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     let source_key = test_topic_key("source");
     let source_rtd_key = source_key.format_rtd_key();
     let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(31))).unwrap();
-    runtime.connect(1, 1, &source_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 1, &source_rtd_key)
+        .unwrap();
 
     let alias_key = test_topic_key("alias");
     let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, object_id) = crate::with_excel_call_scope(|scope| {
         let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        let (object_id, object_key) = resolved.alias().into_parts();
+        let object = resolved.alias().into_locator();
         let alias = runtime
-            .prepare_observed_alias::<DataRecord, _>(
-                alias_key,
-                object_id,
-                object_key,
-                |_, _| Ok(()),
-            )
+            .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
             .unwrap();
-        (alias.0, object_id)
+        (alias.0, object.id)
     });
-    runtime.connect(1, 2, &alias_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 2, &alias_rtd_key)
+        .unwrap();
     assert_ne!(source_token, alias_token);
     let source_binding = runtime
         .registry
-        .parse_token(HandleToken::new(&source_token))
+        .codec
+        .parse(
+            std::ptr::from_ref(&runtime.registry).addr(),
+            HandleToken::new(&source_token),
+        )
         .unwrap()
         .id;
     let alias_binding = runtime
         .registry
-        .parse_token(HandleToken::new(&alias_token))
+        .codec
+        .parse(
+            std::ptr::from_ref(&runtime.registry).addr(),
+            HandleToken::new(&alias_token),
+        )
         .unwrap()
         .id;
-    let state = runtime.registry.state.read();
+    let state = runtime.registry.bindings.read_state();
     let alias_object_id = state.slots[alias_binding.slot as usize]
         .record
         .as_ref()
         .unwrap()
-        .object_id;
+        .object
+        .id;
     assert_ne!(source_binding, alias_binding);
     assert_eq!(alias_object_id, object_id);
     drop(state);
 
-    runtime.disconnect(1, 1);
+    runtime.disconnect(server_generation(1), 1);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &source_token, |_| ()),
         Err(XllError::StaleHandle)
@@ -927,7 +1016,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         31
     );
 
-    runtime.disconnect(1, 2);
+    runtime.disconnect(server_generation(1), 2);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -958,37 +1047,120 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
             })
         })
         .unwrap();
-    runtime.connect(1, 3, &source_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 3, &source_rtd_key)
+        .unwrap();
 
     let alias_key = test_topic_key("alias-binding-target");
     let alias_rtd_key = alias_key.format_rtd_key();
     let alias_token = crate::with_excel_call_scope(|scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
-        let (object_id, object_key) = source.alias().into_parts();
+        let object = source.alias().into_locator();
         runtime
-            .prepare_observed_alias::<DropTracked, _>(alias_key, object_id, object_key, |_, _| {
-                Ok(())
-            })
+            .prepare_observed_alias::<DropTracked, _>(alias_key, object, |_, _| Ok(()))
             .unwrap()
             .0
     });
 
-    runtime.disconnect(1, 3);
+    runtime.disconnect(server_generation(1), 3);
     assert!(matches!(
         with_handle::<DropTracked, _>(&runtime, &source_token, |_| ()),
         Err(XllError::StaleHandle)
     ));
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
-    runtime.connect(1, 4, &alias_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 4, &alias_rtd_key)
+        .unwrap();
 
     assert_eq!(
         with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
         73
     );
-    runtime.disconnect(1, 4);
+    runtime.disconnect(server_generation(1), 4);
     assert_eq!(runtime.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
+    struct DropTracked {
+        value: u32,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ExcelHandleObject for DropTracked {}
+
+    impl Drop for DropTracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = HandleRuntime::new(8);
+    let source_key = test_topic_key("resurrection-source");
+    let (source_token, _) = runtime
+        .prepare_observed(
+            source_key,
+            || {
+                Ok(DropTracked {
+                    value: 107,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+    let alias_key = test_topic_key("resurrection-alias");
+    let alias_token = crate::with_excel_call_scope(|scope| {
+        let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
+        let object = source.alias().into_locator();
+
+        // The active call epoch keeps the detached payload available for the
+        // alias publication even though its last live binding is gone.
+        runtime
+            .registry
+            .remove_and_drop(&source_token, "retire source before alias publication");
+
+        let (alias_token, _) = runtime
+            .prepare_observed_alias::<DropTracked, _>(alias_key, object, |_, _| Ok(()))
+            .unwrap();
+
+        let alias_id = runtime
+            .registry
+            .codec
+            .parse(
+                std::ptr::from_ref(&runtime.registry).addr(),
+                HandleToken::new(&alias_token),
+            )
+            .unwrap()
+            .id;
+        let state = runtime.registry.bindings.read_state();
+        let alias_record = state.slots[alias_id.slot as usize]
+            .record
+            .as_ref()
+            .expect("resurrected alias must have a canonical record");
+        assert_eq!(alias_record.object.id, object.id);
+        assert_ne!(alias_record.object.key, object.key);
+        drop(state);
+
+        (alias_token, object.id)
+    })
+    .0;
+
+    assert_eq!(
+        with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
+        107
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    runtime
+        .registry
+        .remove_and_drop(&alias_token, "remove resurrected alias");
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    runtime.seal().map(|_| ()).unwrap();
 }
 
 #[test]
@@ -997,42 +1169,48 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
     let source_key = test_topic_key("identity-source");
     let source_rtd_key = source_key.format_rtd_key();
     let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(91))).unwrap();
-    runtime.connect(1, 5, &source_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 5, &source_rtd_key)
+        .unwrap();
 
-    let (object_id, object_key) = crate::with_excel_call_scope(|scope| {
+    let object = crate::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        source.alias().into_parts()
+        source.alias().into_locator()
     });
 
     let alias_key = test_topic_key("identity-alias");
     let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, _) = runtime
-        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, object_key, |_, _| Ok(()))
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
         .unwrap();
-    runtime.connect(1, 6, &alias_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 6, &alias_rtd_key)
+        .unwrap();
 
     let other_key = test_topic_key("identity-other");
     let other_rtd_key = other_key.format_rtd_key();
     let (other_token, _) = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap();
-    runtime.connect(1, 7, &other_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 7, &other_rtd_key)
+        .unwrap();
 
     crate::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
-        assert_eq!(source.object_id, alias.object_id);
+        assert_eq!(source.object.id, alias.object.id);
         assert_eq!(input_identity(&source), input_identity(&alias));
         assert_eq!(
             input_identity(&source),
-            reference_handle_identity(source.object_id.0)
+            reference_handle_identity(source.object.id.0)
         );
-        assert_ne!(source.object_id, other.object_id);
+        assert_ne!(source.object.id, other.object.id);
         assert_ne!(input_identity(&source), input_identity(&other));
     });
 
-    runtime.disconnect(1, 5);
-    runtime.disconnect(1, 6);
-    runtime.disconnect(1, 7);
+    runtime.disconnect(server_generation(1), 5);
+    runtime.disconnect(server_generation(1), 6);
+    runtime.disconnect(server_generation(1), 7);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1046,31 +1224,37 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .unwrap()
         .0;
     let source_rtd_key = source_key.format_rtd_key();
-    runtime.connect(1, 50, &source_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 50, &source_rtd_key)
+        .unwrap();
 
-    let (object_id, object_key) = crate::with_excel_call_scope(|scope| {
+    let object = crate::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        source.alias().into_parts()
+        source.alias().into_locator()
     });
 
     let alias_key = test_topic_key("semantic-memo-alias");
     let alias_token = runtime
-        .prepare_observed_alias::<DataRecord, _>(alias_key, object_id, object_key, |_, _| Ok(()))
+        .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
         .unwrap()
         .0;
     let alias_rtd_key = alias_key.format_rtd_key();
-    runtime.connect(1, 51, &alias_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 51, &alias_rtd_key)
+        .unwrap();
 
     let other_key = test_topic_key("semantic-memo-other");
     let other_token = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap().0;
     let other_rtd_key = other_key.format_rtd_key();
-    runtime.connect(1, 52, &other_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 52, &other_rtd_key)
+        .unwrap();
 
     let (source_revision, alias_revision, other_revision) = crate::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
-        assert_eq!(source.object_id, alias.object_id);
+        assert_eq!(source.object.id, alias.object.id);
         (
             semantic_handle_key(&source),
             semantic_handle_key(&alias),
@@ -1110,9 +1294,9 @@ fn semantic_handle_identity_controls_formula_memoization() {
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
     assert_eq!(token_a, token_b);
     let object_a =
-        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object_id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object.id).unwrap();
     let object_b =
-        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object_id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object.id).unwrap();
     assert_eq!(object_a, object_b);
 
     let third_calls = Arc::clone(&factory_calls);
@@ -1130,18 +1314,20 @@ fn semantic_handle_identity_controls_formula_memoization() {
     assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
     assert_ne!(token_a, token_c);
     let object_c =
-        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object_id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object.id).unwrap();
     assert_ne!(object_a, object_c);
 
     for (topic_id, rtd_key) in [
         (53, source_revision.format_rtd_key()),
         (55, other_revision.format_rtd_key()),
     ] {
-        runtime.connect(1, topic_id, &rtd_key).unwrap();
+        runtime
+            .connect(server_generation(1), topic_id, &rtd_key)
+            .unwrap();
     }
 
     for topic_id in [50, 51, 52, 53, 55] {
-        runtime.disconnect(1, topic_id);
+        runtime.disconnect(server_generation(1), topic_id);
     }
     assert_eq!(runtime.len(), 0);
 }
@@ -1163,25 +1349,29 @@ fn server_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
     let rtd_key = key.format_rtd_key();
     runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
 
-    runtime.claim_server(&rtd_key, 1).unwrap();
+    runtime
+        .claim_server(&rtd_key, server_generation(1))
+        .unwrap();
     assert!(matches!(
-        runtime.claim_server(&rtd_key, 2),
+        runtime.claim_server(&rtd_key, server_generation(2)),
         Err(XllError::InvalidHandle)
     ));
     assert!(matches!(
-        runtime.connect(2, 7, &rtd_key),
+        runtime.connect(server_generation(2), 7, &rtd_key),
         Err(XllError::InvalidHandle)
     ));
 
-    let provisional = runtime.connect_transaction(1, 7, &rtd_key).unwrap();
+    let provisional = runtime
+        .connect_transaction(server_generation(1), 7, &rtd_key)
+        .unwrap();
     drop(provisional);
     assert!(matches!(
-        runtime.connect(2, 7, &rtd_key),
+        runtime.connect(server_generation(2), 7, &rtd_key),
         Err(XllError::InvalidHandle)
     ));
 
-    runtime.connect(1, 8, &rtd_key).unwrap();
-    runtime.disconnect(1, 8);
+    runtime.connect(server_generation(1), 8, &rtd_key).unwrap();
+    runtime.disconnect(server_generation(1), 8);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1191,10 +1381,10 @@ fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
     let key = test_topic_key("uncalculated");
     let rtd_key = key.format_rtd_key();
     runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
-    runtime.connect(1, 9, &rtd_key).unwrap();
+    runtime.connect(server_generation(1), 9, &rtd_key).unwrap();
     runtime.rollback(&rtd_key);
     assert_eq!(runtime.len(), 0);
-    runtime.disconnect(1, 9);
+    runtime.disconnect(server_generation(1), 9);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1205,7 +1395,9 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let rtd_key = key.format_rtd_key();
     let (token, _) = runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
 
-    let connection = runtime.connect_transaction(1, 10, &rtd_key).unwrap();
+    let connection = runtime
+        .connect_transaction(server_generation(1), 10, &rtd_key)
+        .unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
 
@@ -1215,10 +1407,12 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
         1
     );
 
-    let retry = runtime.connect_transaction(1, 10, &rtd_key).unwrap();
+    let retry = runtime
+        .connect_transaction(server_generation(1), 10, &rtd_key)
+        .unwrap();
     assert_eq!(retry.token(), token);
     retry.commit().unwrap();
-    runtime.disconnect(1, 10);
+    runtime.disconnect(server_generation(1), 10);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1229,16 +1423,20 @@ fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
     let rtd_key = key.format_rtd_key();
     runtime.prepare(key, || Ok(DataRecord(3))).unwrap();
 
-    let connection = runtime.connect_transaction(1, 12, &rtd_key).unwrap();
+    let connection = runtime
+        .connect_transaction(server_generation(1), 12, &rtd_key)
+        .unwrap();
     assert!(matches!(
-        runtime.connect_transaction(1, 12, &rtd_key),
+        runtime.connect_transaction(server_generation(1), 12, &rtd_key),
         Err(XllError::Overloaded)
     ));
     connection.commit().unwrap();
 
-    let repeated = runtime.connect_transaction(1, 12, &rtd_key).unwrap();
+    let repeated = runtime
+        .connect_transaction(server_generation(1), 12, &rtd_key)
+        .unwrap();
     repeated.commit().unwrap();
-    runtime.disconnect(1, 12);
+    runtime.disconnect(server_generation(1), 12);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1248,9 +1446,11 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let key = test_topic_key("existing-transaction");
     let rtd_key = key.format_rtd_key();
     let (token, _) = runtime.prepare(key, || Ok(DataRecord(2))).unwrap();
-    runtime.connect(1, 11, &rtd_key).unwrap();
+    runtime.connect(server_generation(1), 11, &rtd_key).unwrap();
 
-    let connection = runtime.connect_transaction(1, 11, &rtd_key).unwrap();
+    let connection = runtime
+        .connect_transaction(server_generation(1), 11, &rtd_key)
+        .unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
 
@@ -1258,7 +1458,7 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
         2
     );
-    runtime.disconnect(1, 11);
+    runtime.disconnect(server_generation(1), 11);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1271,13 +1471,94 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     let second_rtd_key = second_key.format_rtd_key();
     runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
     runtime.prepare(second_key, || Ok(DataRecord(2))).unwrap();
-    runtime.connect(1, 9, &first_rtd_key).unwrap();
+    runtime
+        .connect(server_generation(1), 9, &first_rtd_key)
+        .unwrap();
     assert!(matches!(
-        runtime.connect(1, 9, &second_rtd_key),
+        runtime.connect(server_generation(1), 9, &second_rtd_key),
         Err(XllError::InvalidHandle)
     ));
-    runtime.disconnect(1, 9);
+    runtime.disconnect(server_generation(1), 9);
     assert_eq!(runtime.len(), 1);
+}
+
+#[test]
+fn pinned_handle_keeps_payload_alive_after_binding_retirement() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("pinned-handle-retirement");
+    let (token, _) = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap();
+
+    let pinned: PinnedHandle<CountedDataRecord> = crate::with_excel_call_scope(|scope| {
+        runtime
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .pin()
+            .unwrap()
+    });
+    runtime
+        .registry
+        .remove_and_drop(&token, "test remove while pinned");
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    drop(pinned);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn pinned_handle_survives_terminal_runtime_close() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("pinned-handle-close");
+    let (token, _) = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap();
+
+    let pinned: PinnedHandle<CountedDataRecord> = crate::with_excel_call_scope(|scope| {
+        runtime
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .pin()
+            .unwrap()
+    });
+    let sealed = runtime.seal().unwrap();
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        runtime.registry.finish_quiescence(&sealed),
+        Err(XllError::Internal { diagnostic_id })
+            if diagnostic_id == crate::DiagnosticId::HANDLE_PINS
+    ));
+    drop(pinned);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    runtime.registry.finish_quiescence(&sealed).unwrap();
+}
+
+#[test]
+fn pin_promotion_resurrects_a_retired_payload_without_a_binding() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = HandleRuntime::new(8);
+    let key = test_topic_key("pinned-handle-resurrection");
+    let (token, _) = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap();
+
+    let pinned: AsyncHandle<CountedDataRecord> = crate::with_excel_call_scope(|scope| {
+        let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
+        runtime
+            .registry
+            .remove_and_drop(&token, "test retire before pin promotion");
+        handle.into_async().unwrap()
+    });
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    drop(pinned);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 struct CountedDataRecord(Arc<std::sync::atomic::AtomicUsize>);
@@ -1312,15 +1593,15 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
     let (token, _) = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
-    runtime.connect(1, 7, &rtd_key).unwrap();
+    runtime.connect(server_generation(1), 7, &rtd_key).unwrap();
     crate::with_excel_call_scope(|scope| {
         let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
-        runtime.disconnect(1, 7);
+        runtime.disconnect(server_generation(1), 7);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(consumer.0.load(Ordering::Relaxed) == 0);
     });
     assert_eq!(drops.load(Ordering::Relaxed), 1);
-    runtime.disconnect(1, 7);
+    runtime.disconnect(server_generation(1), 7);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -1334,11 +1615,13 @@ fn terminate_and_close_release_every_remaining_topic_once() {
         runtime
             .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
             .unwrap();
-        runtime.claim_server(&rtd_key, 1).unwrap();
+        runtime
+            .claim_server(&rtd_key, server_generation(1))
+            .unwrap();
     }
-    runtime.terminate_topics(1);
+    runtime.terminate_topics(server_generation(1));
     assert_eq!(drops.load(Ordering::Relaxed), 2);
-    runtime.close().unwrap();
+    runtime.seal().map(|_| ()).unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
 
@@ -1582,7 +1865,9 @@ fn warm_observation_rejects_generation_terminated_topic() {
         .unwrap();
     assert!(created);
 
-    runtime.claim_server(&rtd_key, 1).unwrap();
+    runtime
+        .claim_server(&rtd_key, server_generation(1))
+        .unwrap();
 
     let observed_runtime = Arc::clone(&runtime);
     let result = runtime.prepare_observed::<DataRecord, _>(
@@ -1591,7 +1876,7 @@ fn warm_observation_rejects_generation_terminated_topic() {
         move |observed_rtd_key, observed_token| {
             assert_eq!(observed_rtd_key, rtd_key);
             assert_eq!(observed_token, token);
-            observed_runtime.terminate_topics(1);
+            observed_runtime.terminate_topics(server_generation(1));
             Ok(())
         },
     );
@@ -1660,7 +1945,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
         || Ok(DataRecord(1)),
         move |rtd_key, token| {
             let connection = observed_runtime
-                .connect_transaction(1, 17, rtd_key)
+                .connect_transaction(server_generation(1), 17, rtd_key)
                 .expect("ConnectData must be able to claim the visible topic");
             assert_eq!(connection.token(), token);
 
@@ -1671,7 +1956,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
             let disconnect_runtime = Arc::clone(&observed_runtime);
             let disconnect = std::thread::spawn(move || {
                 release_rx.recv().unwrap();
-                disconnect_runtime.disconnect(1, 17);
+                disconnect_runtime.disconnect(server_generation(1), 17);
             });
             release_tx.send(()).unwrap();
             disconnect.join().unwrap();
@@ -1705,13 +1990,13 @@ fn disconnect_rejects_provisional_excel_commit_without_resurrection() {
         || Ok(DataRecord(1)),
         move |rtd_key, token| {
             let connection = observed_runtime
-                .connect_transaction(1, 17, rtd_key)
+                .connect_transaction(server_generation(1), 17, rtd_key)
                 .expect("ConnectData must be able to claim the visible topic");
             assert_eq!(connection.token(), token);
 
             // DisconnectData may detach the topic before ConnectData commits
             // its provisional Excel connection.
-            observed_runtime.disconnect(1, 17);
+            observed_runtime.disconnect(server_generation(1), 17);
 
             // The commit must fail at the detached ownership boundary. Its
             // drop path must not recreate the topic or registry root.
@@ -1957,7 +2242,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     }
 
     let close_runtime = Arc::clone(&runtime);
-    let closer = std::thread::spawn(move || close_runtime.close());
+    let closer = std::thread::spawn(move || close_runtime.seal().map(|_| ()));
     let deadline = Instant::now() + Duration::from_secs(1);
     while !runtime.topics.read().closed {
         assert!(
@@ -2055,7 +2340,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
     let (closed_tx, closed_rx) = mpsc::channel();
 
     let closer = std::thread::spawn(move || {
-        closed_tx.send(closing_runtime.close()).unwrap();
+        closed_tx.send(closing_runtime.seal().map(|_| ())).unwrap();
     });
 
     while !runtime.topics.read().closed {
@@ -2126,26 +2411,21 @@ fn alias_preserves_pointer_and_object_identity() {
 
     let (token2, object_id1, ptr1) = crate::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
-        let object_id = handle1.object_id;
+        let object = handle1.object;
         let ptr = handle1.value.as_ptr();
         let alias = handle1.alias();
         let key2 = test_topic_key("alias_identity_2");
         let (token2, _) = runtime
-            .prepare_observed_alias::<TrackedObj, _>(
-                key2,
-                alias.object_id,
-                alias.object_key,
-                |_, _| Ok(()),
-            )
+            .prepare_observed_alias::<TrackedObj, _>(key2, alias.object, |_, _| Ok(()))
             .unwrap();
-        (token2, object_id, ptr)
+        (token2, object.id, ptr)
     });
 
     assert_ne!(token1, token2);
 
     crate::with_excel_call_scope(|scope| {
         let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
-        assert_eq!(handle2.object_id, object_id1);
+        assert_eq!(handle2.object.id, object_id1);
         assert_eq!(handle2.value.as_ptr(), ptr1);
         assert_eq!(*handle2, TrackedObj(12345));
     });
@@ -2186,12 +2466,7 @@ fn removing_original_binding_keeps_aliased_object_alive() {
         let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
         let alias = handle1.alias();
         let (token2, _) = runtime
-            .prepare_observed_alias::<DropCounter, _>(
-                key2,
-                alias.object_id,
-                alias.object_key,
-                |_, _| Ok(()),
-            )
+            .prepare_observed_alias::<DropCounter, _>(key2, alias.object, |_, _| Ok(()))
             .unwrap();
         token2
     });
@@ -2283,7 +2558,7 @@ fn registry_close_drops_each_handle_exactly_once() {
     }
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    runtime.close().unwrap();
+    runtime.seal().map(|_| ()).unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 5);
 }
 
@@ -2332,20 +2607,15 @@ fn zero_sized_type_handle_lifecycle() {
         let alias = handle1.alias();
         let key2 = test_topic_key("zst_test_2");
         let (token2, _) = runtime
-            .prepare_observed_alias::<ZeroSized, _>(
-                key2,
-                alias.object_id,
-                alias.object_key,
-                |_, _| Ok(()),
-            )
+            .prepare_observed_alias::<ZeroSized, _>(key2, alias.object, |_, _| Ok(()))
             .unwrap();
-        (token2, alias.object_id)
+        (token2, alias.object.id)
     });
 
     crate::with_excel_call_scope(|scope| {
         let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
         assert_eq!(*handle2, ZeroSized);
-        assert_eq!(handle2.object_id, object_id);
+        assert_eq!(handle2.object.id, object_id);
     });
 
     runtime.registry.remove_and_drop(&token1, "remove zst 1");
@@ -2355,7 +2625,7 @@ fn zero_sized_type_handle_lifecycle() {
     });
 
     runtime.registry.remove_and_drop(&token2, "remove zst 2");
-    runtime.close().unwrap();
+    runtime.seal().map(|_| ()).unwrap();
 }
 
 #[test]
@@ -2398,7 +2668,7 @@ fn alias_capability_does_not_extend_object_lifetime() {
         // The call epoch keeps the retired object readable until the scope
         // ends, but the borrowed alias is not an ownership extension.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(alias.object_id.0, 1);
+        assert_eq!(alias.object.id.0, 1);
     });
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -2426,6 +2696,8 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     let slot: &'static HandleRuntimeSlot = Box::leak(Box::new(HandleRuntimeSlot::new()));
     assert!(slot.is_none());
 
+    slot.arm(generation(1), crate::HandleConfig::default())
+        .unwrap();
     let handle_rt = slot.get_owned().unwrap();
     let key = test_topic_key("resolver_test");
     let (token, _) = handle_rt
@@ -2465,6 +2737,8 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
 fn concurrent_first_use_initializes_exactly_once() {
     let slot: &'static HandleRuntimeSlot = Box::leak(Box::new(HandleRuntimeSlot::new()));
     assert!(slot.is_none());
+    slot.arm(generation(1), crate::HandleConfig::default())
+        .unwrap();
 
     let barrier = Arc::new(std::sync::Barrier::new(16));
     let handles: Vec<_> = (0..16)
@@ -2490,18 +2764,40 @@ fn concurrent_first_use_initializes_exactly_once() {
 }
 
 #[test]
-fn close_resets_to_vacant_for_reopen() {
+fn close_resets_to_closed_for_reopen() {
     let slot = HandleRuntimeSlot::new();
     assert!(slot.is_none());
 
+    slot.arm(generation(1), crate::HandleConfig::default())
+        .unwrap();
     let rt1 = slot.get_owned().unwrap();
     assert!(!slot.is_none());
 
-    let _quiescent = slot.close().unwrap();
+    let _quiescent = slot.seal(Some(generation(1))).map(|_| ()).unwrap();
     assert!(slot.is_none());
 
+    slot.arm(generation(2), crate::HandleConfig::default())
+        .unwrap();
     let rt2 = slot.get_owned().unwrap();
     assert!(!slot.is_none());
 
     assert!(!Arc::ptr_eq(&rt1, &rt2));
+}
+
+#[test]
+fn handle_slot_requires_matching_generation_for_seal() {
+    let slot = HandleRuntimeSlot::new();
+    assert!(matches!(slot.read(), Err(XllError::Closing)));
+
+    slot.arm(generation(7), crate::HandleConfig::default())
+        .unwrap();
+    assert!(matches!(
+        slot.seal(Some(generation(6))),
+        Err(XllError::Closing)
+    ));
+    assert!(slot.get_owned().is_ok());
+    assert!(matches!(slot.disarm(generation(6)), Err(XllError::Closing)));
+
+    slot.seal(Some(generation(7))).unwrap();
+    assert!(slot.is_none());
 }

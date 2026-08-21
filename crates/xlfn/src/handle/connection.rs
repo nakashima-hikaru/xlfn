@@ -1,6 +1,7 @@
 #[cfg(any(target_os = "windows", test))]
 use super::*;
 use super::{HandleId, ObjectId, PublishedTopic};
+use crate::generation::ServerGeneration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FormulaBinding {
@@ -12,7 +13,7 @@ pub(crate) struct Topic {
     /// The immutable publication owns the formula binding and wire identities.
     pub(crate) publication: triomphe::Arc<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) server_generation: Option<u64>,
+    pub(crate) server_generation: Option<ServerGeneration>,
     pub(crate) excel_topic: Option<HandleTopicOwner>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) excel_topic_committed: bool,
@@ -20,7 +21,7 @@ pub(crate) struct Topic {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct HandleTopicOwner {
-    pub(crate) server_generation: u64,
+    pub(crate) server_generation: ServerGeneration,
     pub(crate) topic_id: i32,
 }
 

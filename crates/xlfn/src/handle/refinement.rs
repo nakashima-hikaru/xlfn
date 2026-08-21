@@ -4,6 +4,7 @@
 )]
 
 use super::{FormulaRevisionKey, HandleTopicKey, HandleTopicOwner};
+use crate::generation::ServerGeneration;
 use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -302,8 +303,10 @@ impl Linearization<'_> {
         });
     }
 
-    pub(crate) fn detach_generation(&mut self, generation: u64) {
-        self.machine.push(Event::DetachGeneration { generation });
+    pub(crate) fn detach_generation(&mut self, generation: ServerGeneration) {
+        self.machine.push(Event::DetachGeneration {
+            generation: generation.get(),
+        });
     }
 
     pub(crate) fn seal_for_close(&mut self) {
@@ -469,10 +472,10 @@ impl HandleRefinementTrace {
         self.linearize().abandon_warm_read(reader_id);
     }
 
-    pub(crate) fn claim_server(&self, key: &HandleTopicKey, generation: u64) {
+    pub(crate) fn claim_server(&self, key: &HandleTopicKey, generation: ServerGeneration) {
         self.inner.lock().push(Event::ClaimServer {
             key: topic_key(key),
-            generation,
+            generation: generation.get(),
         });
     }
 
@@ -508,7 +511,7 @@ impl HandleRefinementTrace {
         self.linearize().disconnect(key, owner);
     }
 
-    pub(crate) fn detach_generation(&self, generation: u64) {
+    pub(crate) fn detach_generation(&self, generation: ServerGeneration) {
         self.linearize().detach_generation(generation);
     }
 
@@ -600,7 +603,7 @@ fn encode_digest(digest: &[u8; 32]) -> String {
 
 fn owner_wire(owner: HandleTopicOwner) -> OwnerWire {
     OwnerWire {
-        server_generation: owner.server_generation,
+        server_generation: owner.server_generation.get(),
         topic_id: owner.topic_id,
     }
 }

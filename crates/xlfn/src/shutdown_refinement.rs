@@ -77,6 +77,7 @@ pub(crate) struct GhostResources {
     pub(crate) rtd_servers: u64,
     pub(crate) rtd_server_locks: u64,
     pub(crate) handles: u64,
+    pub(crate) handle_pins: u64,
     pub(crate) generation_unique: bool,
     pub(crate) addin_quiesced: bool,
     pub(crate) generation_owned_by_runtime: bool,
@@ -107,6 +108,7 @@ impl GhostResources {
             rtd_servers: 0,
             rtd_server_locks: 0,
             handles: 0,
+            handle_pins: 0,
             generation_unique: false,
             addin_quiesced: false,
             generation_owned_by_runtime: true,
@@ -142,6 +144,7 @@ impl GhostResources {
             rtd_servers: 0,
             rtd_server_locks: 0,
             handles: 0,
+            handle_pins: 0,
             generation_unique: true,
             addin_quiesced: true,
             generation_owned_by_runtime: false,
@@ -185,7 +188,7 @@ impl GhostResources {
     }
 
     fn handles_drained(&self) -> bool {
-        self.handles == 0
+        self.handles == 0 && self.handle_pins == 0
     }
 
     fn is_generation_reclaimed(&self) -> bool {
@@ -260,6 +263,8 @@ pub(crate) enum GhostEvent {
     UnlockRtdServer,
     AddHandle,
     RemoveHandle,
+    AddHandlePin,
+    RemoveHandlePin,
     StartDiagnostics,
     EnqueueDiagnostic,
     FlushDiagnostic,
@@ -646,6 +651,20 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             increment(&mut resources.handles, "handles")?;
         }
         GhostEvent::RemoveHandle => decrement(&mut resources.handles, "handles")?,
+        GhostEvent::AddHandlePin => {
+            if !handle_creation_allowed(&source.phase) {
+                return Err(GhostViolation::Precondition(
+                    "handle pin creation is not allowed in this phase",
+                ));
+            }
+            increment(&mut resources.handle_pins, "handle pins")?;
+        }
+        GhostEvent::RemoveHandlePin => {
+            if !live(&source.phase) {
+                return Err(GhostViolation::Terminal);
+            }
+            decrement(&mut resources.handle_pins, "handle pins")?;
+        }
         GhostEvent::StartDiagnostics => {
             if source.phase != GhostPhase::Open || resources.diagnostics_running {
                 return Err(GhostViolation::Precondition(
@@ -1104,6 +1123,33 @@ mod tests {
             machine.apply(GhostEvent::FinishClose),
             Err(GhostViolation::Precondition(_))
         ));
+    }
+
+    #[test]
+    fn handle_pin_must_drain_before_handle_milestone() {
+        let mut machine = open_machine();
+        machine.apply(GhostEvent::AddHandlePin).unwrap();
+        for event in [
+            GhostEvent::BeginClose,
+            GhostEvent::CallsDrained,
+            GhostEvent::ReturnsDrained,
+            GhostEvent::AsyncDrained,
+            GhostEvent::SubscriptionsDrained,
+            GhostEvent::CloseCallbackGate,
+            GhostEvent::HostDetached,
+            GhostEvent::ProveGenerationUnique,
+            GhostEvent::ProveAddinQuiesced,
+            GhostEvent::GenerationReclaimed,
+        ] {
+            machine.apply(event).unwrap();
+        }
+
+        assert!(matches!(
+            machine.apply(GhostEvent::HandlesDrained),
+            Err(GhostViolation::Precondition(_))
+        ));
+        machine.apply(GhostEvent::RemoveHandlePin).unwrap();
+        machine.apply(GhostEvent::HandlesDrained).unwrap();
     }
 
     #[test]

@@ -15,6 +15,7 @@ use super::update_event::{
     active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
 use super::{HandleRuntime, com_boundary, guid_eq};
+use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::win32::{
     CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
@@ -47,13 +48,13 @@ pub(super) struct ActiveServer {
     pub(super) class_id: GUID,
     pub(super) prog_id: String,
     pub(super) pointer: usize,
-    pub(super) generation: u64,
+    pub(super) generation: ServerGeneration,
 }
 
 pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
 pub(super) static LAST_SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-fn allocate_server_generation(last_generation: &AtomicU64) -> Option<u64> {
+fn allocate_server_generation(last_generation: &AtomicU64) -> Option<ServerGeneration> {
     // `fetch_update` returns the previous value; expose the checked successor
     // as the allocated generation and leave the counter unchanged at MAX.
     last_generation
@@ -62,6 +63,7 @@ fn allocate_server_generation(last_generation: &AtomicU64) -> Option<u64> {
         })
         .ok()
         .and_then(|last| last.checked_add(1))
+        .and_then(ServerGeneration::new)
 }
 
 #[cfg(test)]
@@ -90,7 +92,7 @@ pub(super) struct RtdServer {
     pub(super) vtable: *const RtdServerVtable,
     pub(super) references: AtomicU32,
     pub(super) start_state: AtomicU8,
-    pub(super) generation: u64,
+    pub(super) generation: ServerGeneration,
     pub(super) operations: Arc<ServerOperationBarrier>,
     pub(super) termination_worker: TerminationWorker,
     pub(super) backends: Mutex<ServerBackends>,
@@ -585,9 +587,7 @@ pub(super) fn ensure_server(
                         });
                     }
                     None => {
-                        let handle = subscriptions.register_server(
-                            crate::subscription::ServerGeneration(existing.generation),
-                        )?;
+                        let handle = subscriptions.register_server(existing.generation)?;
                         backends.subscriptions = Some(Arc::clone(subscriptions));
                         backends.subscription_server = Some(handle.clone());
                         (Some(handle.clone()), Some(handle))
@@ -641,7 +641,7 @@ pub(super) fn ensure_server(
     })?;
 
     let subscription_handle = if let Some(subscriptions) = subscriptions {
-        Some(subscriptions.register_server(crate::subscription::ServerGeneration(generation))?)
+        Some(subscriptions.register_server(generation)?)
     } else {
         None
     };
@@ -1370,7 +1370,10 @@ mod tests {
     fn server_generation_allocator_refuses_wrap_without_mutating_after_exhaustion() {
         let counter = AtomicU64::new(u64::MAX - 1);
 
-        assert_eq!(allocate_server_generation(&counter), Some(u64::MAX));
+        assert_eq!(
+            allocate_server_generation(&counter),
+            ServerGeneration::new(u64::MAX)
+        );
         assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
 
         assert_eq!(allocate_server_generation(&counter), None);
