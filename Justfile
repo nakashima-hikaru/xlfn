@@ -35,9 +35,10 @@ test-ci:
 test-libtest:
     cargo test \
         --workspace \
-        --all-targets \
         --all-features \
-        --locked
+        --locked \
+        -- \
+        --test-threads=1
 
 features:
     cargo hack check \

@@ -157,7 +157,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
         Ok(Self::from_identity(Arc::new(source), generation, sequence))
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(all(test, target_os = "windows"))]
     pub(crate) fn for_internal_shared(
         generation: RuntimeGeneration,
         source: Arc<S>,

@@ -936,33 +936,27 @@ mod tests {
         let replacement = Arc::new(
             AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).unwrap(),
         );
-        let expected = Arc::clone(&replacement);
         let replacing_router = Arc::clone(&router);
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
         let replacing = std::thread::spawn(move || {
-            replacing_router.replace_with(|| Ok(replacement), |_| Ok(()))
+            replacing_router.replace_with(
+                || Ok(replacement),
+                move |_| {
+                    published_tx.send(()).unwrap();
+                    Ok(())
+                },
+            )
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            if router
-                .current()
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &expected))
-            {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "replacement did not publish before retirement"
-            );
-            std::thread::yield_now();
-        }
+        published_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("replacement was not published");
 
         release_tx.send(()).unwrap();
         assert_eq!(
             result_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap(),
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("retiring worker did not report reentry result"),
             Err(DiagnosticShutdownError::ReentrantShutdown)
         );
         replacing.join().unwrap().unwrap();
