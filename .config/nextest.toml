@@ -13,9 +13,15 @@ global-timeout = "20m"
 # their process-global test lock, so this group is a scheduling optimization,
 # not a correctness precondition for the Windows-targeted job.
 windows-rtd = { max-threads = 1 }
+compile-ui = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(xlfn) and test(/^rtd::windows::tests::/)'
 platform = 'cfg(windows)'
 test-group = 'windows-rtd'
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = 'test(/(trait_driven_function_signatures_compile|invalid_macro_options_fail_to_compile)/)'
+test-group = 'compile-ui'
+slow-timeout = { period = "60s", terminate-after = 4 }

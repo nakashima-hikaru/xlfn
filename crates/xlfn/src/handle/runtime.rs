@@ -131,15 +131,17 @@ impl Drop for ProvisionalPublication<'_> {
         if !self.active {
             return;
         }
-        let removed = self
-            .runtime
-            .topics
-            .remove_topic_if_token(self.key, &self.token)
-            .is_some();
         let token_wire = self.runtime.refinement_token(&self.token);
         let refinement = &self.runtime.refinement;
         let key = self.key;
         let refinement_id = self.refinement_id;
+        let removed = self
+            .runtime
+            .topics
+            .remove_topic_if_token(self.key, &self.token, || {
+                refinement.observe_withdraw_and_invalidate(&key, refinement_id, token_wire);
+            })
+            .is_some();
         let _ = self.runtime.registry.remove_and_drop_with_observer(
             &self.token,
             "handle publication rollback",

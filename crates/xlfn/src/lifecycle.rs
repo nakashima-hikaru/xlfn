@@ -2779,6 +2779,8 @@ mod tests {
         quiesced: std::sync::Arc<AtomicUsize>,
         cleaned: std::sync::Arc<AtomicUsize>,
         dropped: std::sync::Arc<AtomicUsize>,
+        quiesce_entered: Option<std::sync::mpsc::Sender<()>>,
+        quiesce_release: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     }
 
     impl Drop for StagedRaceState {
@@ -2802,6 +2804,12 @@ mod tests {
 
         fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
             state.quiesced.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = state.quiesce_entered.take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = state.quiesce_release.as_ref() {
+                let _ = release.lock().unwrap().recv();
+            }
             Ok(())
         }
 
@@ -2817,11 +2825,17 @@ mod tests {
         let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
         let dropped = std::sync::Arc::new(AtomicUsize::new(0));
 
+        let (quiesce_entered_tx, quiesce_entered_rx) = std::sync::mpsc::channel();
+        let (quiesce_release_tx, quiesce_release_rx) = std::sync::mpsc::channel();
         let mut open_attempt = runtime.begin_open().unwrap();
         let state = StagedRaceState {
             quiesced: std::sync::Arc::clone(&quiesced),
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
+            quiesce_entered: Some(quiesce_entered_tx),
+            quiesce_release: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                quiesce_release_rx,
+            ))),
         };
         assert!(
             runtime
@@ -2840,12 +2854,9 @@ mod tests {
                 .unwrap();
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while runtime.phase() != crate::LifecyclePhase::Closing
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
+        quiesce_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("closer entered quiesce (Closing phase)");
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
 
         assert!(matches!(
@@ -2853,6 +2864,8 @@ mod tests {
             Err(XllError::Closing)
         ));
         assert!(!open_attempt.is_active());
+
+        quiesce_release_tx.send(()).unwrap();
 
         assert_eq!(
             closed_rx

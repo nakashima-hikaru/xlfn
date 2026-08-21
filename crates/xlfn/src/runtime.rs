@@ -1921,11 +1921,15 @@ pub(crate) mod tests {
 
         let removal_epoch = runtime.removal_epoch();
         let closing_runtime = Arc::clone(&runtime);
+        let (closing_entered_tx, closing_entered_rx) = mpsc::channel();
+        let (closing_release_tx, closing_release_rx) = mpsc::channel();
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = thread::spawn(move || {
             let _close = closing_runtime
                 .begin_final_removal()
                 .expect("the opening runtime requires final close");
+            closing_entered_tx.send(()).unwrap();
+            closing_release_rx.recv().unwrap();
             let state = match closing_runtime
                 .take_generation_for_shutdown()
                 .expect("shutdown extracts generation")
@@ -1938,10 +1942,7 @@ pub(crate) mod tests {
             closed_tx.send(()).unwrap();
         });
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
-            thread::yield_now();
-        }
+        closing_entered_rx.recv().unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
         assert_ne!(runtime.removal_epoch(), removal_epoch);
         assert!(matches!(
@@ -1950,6 +1951,8 @@ pub(crate) mod tests {
         ));
         assert_eq!(runtime.lifecycle.open_attempt(), None);
         assert!(!opening.is_active());
+
+        closing_release_tx.send(()).unwrap();
 
         closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         closer.join().unwrap();

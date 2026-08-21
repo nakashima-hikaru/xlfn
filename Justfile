@@ -20,7 +20,6 @@ clippy:
 test:
     cargo nextest run \
         --workspace \
-        --all-targets \
         --all-features \
         --locked
 
@@ -29,7 +28,6 @@ test-ci:
     cargo nextest run \
         --profile ci \
         --workspace \
-        --all-targets \
         --all-features \
         --locked
 

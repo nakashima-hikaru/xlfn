@@ -133,6 +133,18 @@ impl HandleRefinementHooks {
     }
 
     #[inline]
+    pub(crate) fn observe_withdraw_and_invalidate(
+        &self,
+        key: &HandleTopicKey,
+        runtime_id: u64,
+        token: TokenWire,
+    ) {
+        #[cfg(any(test, feature = "handle-refinement-trace"))]
+        self.trace.withdraw_and_invalidate(key, runtime_id, token);
+        let _ = (key, runtime_id, token);
+    }
+
+    #[inline]
     pub(crate) fn observe_rollback_pending(
         &self,
         key: &HandleTopicKey,

@@ -509,6 +509,7 @@ impl TopicTable {
         &self,
         key: HandleTopicKey,
         token: &str,
+        on_linearized: impl FnOnce(),
     ) -> Option<TopicRemoval> {
         let mut state = self.state.write();
         if !state
@@ -518,7 +519,11 @@ impl TopicTable {
         {
             return None;
         }
-        self.remove_topic_locked(&mut state, key)
+        let removal = self.remove_topic_locked(&mut state, key);
+        if removal.is_some() {
+            on_linearized();
+        }
+        removal
     }
 
     /// Close the canonical table and return cold initializers that must be
