@@ -8,14 +8,19 @@
 //! update is paired with a mutation of the canonical table while its lock is
 //! held.
 
-use super::*;
+use super::{FormulaBinding, HandleTopicKey, HandleTopicOwner, Topic};
 #[cfg(any(target_os = "windows", test))]
 use crate::generation::ServerGeneration;
+use crate::generation::TopicGeneration;
+use crate::{XllError, XllResult};
 use arc_swap::ArcSwapAny;
+use parking_lot::{Condvar, Mutex, RwLock};
 #[cfg(test)]
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
 
@@ -363,7 +368,7 @@ impl TopicTable {
         }
         if state.by_key.contains_key(&key) || state.by_rtd_key.contains_key(rtd_key.as_ref()) {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_TOPIC_COLLISION,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_TOPIC_COLLISION,
             });
         }
         state.by_key.insert(

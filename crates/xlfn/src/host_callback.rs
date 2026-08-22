@@ -1,5 +1,6 @@
 use crate::callback_gate::CallbackInvocationToken;
-use crate::{ExcelCallbackStatus, ExcelCallbackValue};
+use crate::callback_value::ExcelCallbackValue;
+use crate::return_value::ExcelCallbackStatus;
 use std::cell::Cell;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -218,7 +219,8 @@ mod tests {
 
     #[test]
     fn scope_closes_callback_sessions_when_the_scope_ends() {
-        let escaped = crate::with_excel_call_scope(|scope| scope.callbacks().shared_handle());
+        let escaped =
+            crate::value::with_excel_call_scope(|scope| scope.callbacks().shared_handle());
 
         assert!(!escaped.permits_callbacks());
         assert_eq!(
@@ -233,13 +235,13 @@ mod tests {
     )]
     #[test]
     fn forgetting_a_borrowed_context_does_not_keep_callbacks_open() {
-        let runtime = crate::Runtime::<()>::new();
+        let runtime = crate::runtime::Runtime::<()>::new();
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        let escaped = crate::with_excel_call_scope(|scope| {
+        let escaped = crate::value::with_excel_call_scope(|scope| {
             let state = ();
-            let context = crate::MacroSheetContext::<()>::new(&state, scope);
+            let context = crate::addin::MacroSheetContext::<()>::new(&state, scope);
             std::mem::forget(context);
             scope.callbacks().shared_handle()
         });

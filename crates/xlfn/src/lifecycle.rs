@@ -1,10 +1,12 @@
+use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
+use crate::diagnostics::AddinId;
+use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::{HostCallbackSession, HostCallbackState};
 use crate::registration::HostRegistrar;
-use crate::{
-    Addin, AddinId, BuildInfo, IntoXllError, OpenContext, RegistrationDescriptor, Runtime,
-    RuntimeConfig, XllError, XllResult,
-};
+use crate::registration::RegistrationDescriptor;
+use crate::runtime::Runtime;
+use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod boundary;
@@ -75,7 +77,7 @@ fn retry_metadata_debt<A: Addin>(
     for error in outcome.cleanup_issues {
         report_cleanup_issue(&crate::shutdown::CleanupIssue {
             component: "Excel metadata debt result",
-            kind: crate::CleanupIssueKind::HostMemoryLeak,
+            kind: crate::shutdown::CleanupIssueKind::HostMemoryLeak,
             error,
         });
     }
@@ -97,7 +99,7 @@ fn open_addin_inner<A>(
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     callbacks: &mut HostCallbackSession,
-) -> XllResult<Vec<crate::RegistrationId>>
+) -> XllResult<Vec<crate::registration::RegistrationId>>
 where
     A: Addin,
 {
@@ -108,7 +110,7 @@ where
     let registrar = HostRegistrar::connect(callbacks)
         .map_err(|error| retain_transaction_error(runtime, error))?;
     let generation = runtime.active_generation().ok_or(XllError::Internal {
-        diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
     let runtime_config = initialize_addin::<A>(runtime, &context)?;
@@ -116,7 +118,7 @@ where
     let _ = runtime_config;
     let has_async_functions = descriptors
         .iter()
-        .any(|descriptor| descriptor.signature.result == crate::ResultAbi::AsyncVoid);
+        .any(|descriptor| descriptor.signature.result == crate::registration::ResultAbi::AsyncVoid);
     if has_async_functions {
         #[cfg(feature = "async")]
         {
@@ -129,7 +131,7 @@ where
         #[cfg(not(feature = "async"))]
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::ASYNC_FEATURE,
+                diagnostic_id: crate::error::DiagnosticId::ASYNC_FEATURE,
             });
         }
     }
@@ -162,7 +164,7 @@ fn rollback_active_open<A>(
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
                 let error = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_FAILURE,
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_FAILURE,
                 };
                 report_boundary_error("xlAutoOpen rollback", &error);
                 quarantine_runtime(runtime);
@@ -201,7 +203,7 @@ where
     let opening = runtime
         .take_opening_generation()
         .ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
         })?;
 
     let opening = opening.attach_layers(layers);
@@ -302,12 +304,12 @@ where
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
         return OpenRollbackOutcome {
-            local_quiescent: runtime.phase() == crate::LifecyclePhase::Closed,
+            local_quiescent: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed,
             host_callbacks_detached: runtime.registrations().is_empty()
                 && runtime.event_registrations().is_empty(),
             host_callback_state: callbacks.state(),
             registration_state_known: !runtime.registration_state_unknown(),
-            finalized: runtime.phase() == crate::LifecyclePhase::Closed
+            finalized: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
                 && crate::rtd::logical_quiescence_certified(),
         };
     };
@@ -349,7 +351,7 @@ where
     for error in &outcome.cleanup_issues {
         report_cleanup_issue(&crate::shutdown::CleanupIssue {
             component: "Excel callback result",
-            kind: crate::CleanupIssueKind::HostMemoryLeak,
+            kind: crate::shutdown::CleanupIssueKind::HostMemoryLeak,
             error: error.clone(),
         });
     }
@@ -365,7 +367,7 @@ where
         for error in &event_outcome.cleanup_issues {
             report_cleanup_issue(&crate::shutdown::CleanupIssue {
                 component: "Excel event callback result",
-                kind: crate::CleanupIssueKind::HostMemoryLeak,
+                kind: crate::shutdown::CleanupIssueKind::HostMemoryLeak,
                 error: error.clone(),
             });
         }
@@ -452,7 +454,7 @@ where
             Ok(certificate) => Some(certificate),
             Err(_) => {
                 let error = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
+                    diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
                 };
                 report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
                 local_quiescent = false;
@@ -466,13 +468,13 @@ where
     if local_quiescent && let Some(mut state) = addin_state.take() {
         let mut report = crate::shutdown::CloseReport::default();
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            let mut reporter = crate::CleanupReporter::new(&mut report);
+            let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
             A::cleanup(&mut state, &mut reporter);
         }));
         if cleanup.is_err() {
             report.push(
                 "Addin::cleanup",
-                crate::CleanupIssueKind::DisposalPanicked,
+                crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
             runtime.quarantine_state(
@@ -483,7 +485,7 @@ where
         } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
             report.push(
                 "Addin::State::drop",
-                crate::CleanupIssueKind::DisposalPanicked,
+                crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
         }
@@ -518,7 +520,7 @@ where
 
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::REGISTRATION_UNKNOWN,
+            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
     }
@@ -786,14 +788,14 @@ where
         for debt in &outcome.metadata_debt {
             report.push(
                 "Excel registered name",
-                crate::CleanupIssueKind::HostMetadata,
+                crate::shutdown::CleanupIssueKind::HostMetadata,
                 debt.last_error().clone(),
             );
         }
         for error in outcome.cleanup_issues {
             report.push(
                 "Excel callback result",
-                crate::CleanupIssueKind::HostMemoryLeak,
+                crate::shutdown::CleanupIssueKind::HostMemoryLeak,
                 error,
             );
         }
@@ -823,7 +825,7 @@ where
     }
     if runtime.registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::REGISTRATION_UNKNOWN,
+            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoRemove registration state unknown", &error);
         unload_failure = Some((
@@ -877,7 +879,7 @@ where
         for error in event_outcome.cleanup_issues {
             report.push(
                 "Excel event callback result",
-                crate::CleanupIssueKind::HostMemoryLeak,
+                crate::shutdown::CleanupIssueKind::HostMemoryLeak,
                 error,
             );
         }
@@ -942,7 +944,7 @@ where
                     }
                     Err(generation) => {
                         let error = XllError::Internal {
-                            diagnostic_id: crate::DiagnosticId::STATE_SCAN,
+                            diagnostic_id: crate::error::DiagnosticId::STATE_SCAN,
                         };
                         report_boundary_error("xlAutoRemove state escaped", &error);
                         runtime.quarantine_shared_generation(
@@ -1020,13 +1022,13 @@ where
 
     if let Some(mut state) = addin_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            let mut reporter = crate::CleanupReporter::new(&mut report);
+            let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
             A::cleanup(&mut state, &mut reporter);
         }));
         if cleanup.is_err() {
             report.push(
                 "Addin::cleanup",
-                crate::CleanupIssueKind::DisposalPanicked,
+                crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
             runtime.quarantine_state(
@@ -1037,7 +1039,7 @@ where
         } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
             report.push(
                 "Addin::State::drop",
-                crate::CleanupIssueKind::DisposalPanicked,
+                crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
         }
@@ -1108,7 +1110,7 @@ where
                 hazard,
                 "xlAutoRemove RTD GIT quiescence",
                 &XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::RTD_GIT_QUIESCENCE,
+                    diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
                 },
             ));
         }
@@ -1390,8 +1392,10 @@ mod tests {
         type Error = XllError;
         type Layers = ();
 
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
-            Ok(crate::Opened::new((), ()))
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+            Ok(crate::addin::Opened::new((), ()))
         }
 
         fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
@@ -1399,7 +1403,7 @@ mod tests {
             Ok(())
         }
 
-        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(_: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
             assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
             LAYERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
         }
@@ -1412,7 +1416,7 @@ mod tests {
 
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
         assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     #[test]
@@ -1422,11 +1426,11 @@ mod tests {
         let mut callbacks = HostCallbackSession::new();
 
         rollback_active_open::<LayersPanic>(&runtime, None, &mut callbacks);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Opening);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         runtime.publish((), ());
         runtime.finish_open(&mut owner, Vec::new()).unwrap();
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
     }
 
     #[test]
@@ -1463,16 +1467,16 @@ mod tests {
         let first_generation = runtime.generation();
 
         assert_eq!(remove_addin::<LayersPanic>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         runtime.clear_host_intent();
         let mut second_open = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut second_open, Vec::new()).unwrap();
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
         assert!(runtime.generation() > first_generation);
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     struct ReloadFailure;
@@ -1482,9 +1486,11 @@ mod tests {
         type Error = XllError;
         type Layers = ();
 
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::OPEN_STATE,
+                diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
             })
         }
     }
@@ -1506,17 +1512,23 @@ mod tests {
             ),
             0
         );
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
         assert_eq!(host_auto_close::<ReloadFailure>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
     }
 
     #[cfg(feature = "async")]
     #[test]
     fn async_worker_policy_is_bounded_before_open() {
-        assert!(crate::AsyncWorkerCount::new(0).is_none());
-        assert!(crate::AsyncWorkerCount::new(33).is_none());
-        assert_eq!(crate::AsyncWorkerCount::new(32).unwrap().get(), 32);
+        assert!(crate::addin::AsyncWorkerCount::new(0).is_none());
+        assert!(crate::addin::AsyncWorkerCount::new(33).is_none());
+        assert_eq!(crate::addin::AsyncWorkerCount::new(32).unwrap().get(), 32);
     }
 
     impl Addin for RetryClose {
@@ -1526,19 +1538,19 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!("the close retry test publishes state directly")
         }
 
-        fn cleanup(state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
             state
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             reporter.warn(
                 "test cleanup",
-                crate::CleanupIssueKind::RegistryCleanup,
+                crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::TEST_RETRY,
+                    diagnostic_id: crate::error::DiagnosticId::TEST_RETRY,
                 },
             );
         }
@@ -1558,7 +1570,7 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         remove_addin_inner::<RetryClose>(&runtime);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(
             runtime.take_current_generation().is_none()
@@ -1581,11 +1593,13 @@ mod tests {
         type Error = XllError;
         type Layers = ();
 
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
-        fn cleanup(_: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(_: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
             panic!("injected cleanup panic");
         }
     }
@@ -1600,7 +1614,7 @@ mod tests {
 
         remove_addin_inner::<CleanupPanic>(&runtime);
 
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(drops.load(Ordering::Acquire), 0);
     }
 
@@ -1611,13 +1625,15 @@ mod tests {
         type Error = XllError;
         type Layers = ();
 
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
         fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
             Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::QUIESCENCE_FAILURE,
+                diagnostic_id: crate::error::DiagnosticId::QUIESCENCE_FAILURE,
             })
         }
     }
@@ -1633,10 +1649,16 @@ mod tests {
         let result = { remove_addin_inner::<QuiesceFailure>(&runtime) };
 
         assert!(matches!(result, RemovalSuccess::Quarantined));
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
         assert_eq!(drops.load(Ordering::Acquire), 0);
         assert_eq!(host_auto_close::<QuiesceFailure>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
     }
 
     #[test]
@@ -1660,7 +1682,7 @@ mod tests {
         );
         assert!(outcome.unload_safe());
         assert!(outcome.finalized);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(
             runtime.take_current_generation().is_none()
@@ -1677,7 +1699,7 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
     }
@@ -1691,16 +1713,16 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
-        fn cleanup(_state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(_state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
             reporter.warn(
                 "Lean checker cleanup trace",
-                crate::CleanupIssueKind::RegistryCleanup,
+                crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::LEAN_TRACE,
+                    diagnostic_id: crate::error::DiagnosticId::LEAN_TRACE,
                 },
             );
         }
@@ -1712,9 +1734,9 @@ mod tests {
 
     struct TraceSubscription;
 
-    impl crate::RtdSubscription for TraceSubscription {
-        fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
-            std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+    impl crate::subscription::RtdSubscription for TraceSubscription {
+        fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
+            std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
         }
 
         fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
@@ -1723,17 +1745,17 @@ mod tests {
     }
 
     struct TraceSource {
-        sink: std::sync::Arc<std::sync::Mutex<Option<crate::RtdSink<f64>>>>,
+        sink: std::sync::Arc<std::sync::Mutex<Option<crate::subscription::RtdSink<f64>>>>,
     }
 
-    impl crate::RtdSource for TraceSource {
+    impl crate::subscription::RtdSource for TraceSource {
         type Value = f64;
         type Subscription = TraceSubscription;
 
         fn subscribe(
             &self,
-            _topic: &crate::RtdTopic,
-            sink: crate::RtdSink<Self::Value>,
+            _topic: &crate::subscription::RtdTopic,
+            sink: crate::subscription::RtdSink<Self::Value>,
         ) -> XllResult<Self::Subscription> {
             self.sink.lock().unwrap().replace(sink);
             Ok(TraceSubscription)
@@ -1742,8 +1764,8 @@ mod tests {
 
     struct TraceDiagnosticSink;
 
-    impl crate::DiagnosticSink for TraceDiagnosticSink {
-        fn report(&self, _event: &crate::DiagnosticEvent<'_>) {}
+    impl crate::diagnostics::DiagnosticSink for TraceDiagnosticSink {
+        fn report(&self, _event: &crate::diagnostics::DiagnosticEvent<'_>) {}
     }
 
     #[test]
@@ -1790,10 +1812,10 @@ mod tests {
         crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
         crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
 
-        let pointer = crate::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
+        let pointer = crate::return_value::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
         // SAFETY: `pointer` is the live DLL-owned block returned by the
         // framework boundary above and is freed exactly once here.
-        let free = unsafe { crate::free_return_boundary(pointer) };
+        let free = unsafe { crate::return_value::free_return_boundary(pointer) };
         drop(free);
 
         let handles = runtime.handles().unwrap();
@@ -1819,7 +1841,7 @@ mod tests {
             )))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let source = crate::RtdSourceHandle::for_internal(
+        let source = crate::subscription::RtdSourceHandle::for_internal(
             runtime.generation().expect("test runtime has a generation"),
             TraceSource {
                 sink: std::sync::Arc::clone(&trace_sink),
@@ -1829,7 +1851,7 @@ mod tests {
         let prepared = subscriptions
             .prepare(
                 &source,
-                crate::RtdTopic::single("lean-checker-subscription").unwrap(),
+                crate::subscription::RtdTopic::single("lean-checker-subscription").unwrap(),
             )
             .unwrap();
         let key = *prepared.key();
@@ -1851,7 +1873,7 @@ mod tests {
         {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (cancellation, _token) = crate::cancellation::CancellationSource::new(
-                crate::CancellationGuarantee::BestEffort,
+                crate::cancellation::CancellationGuarantee::BestEffort,
             );
             runtime.start_async(1).unwrap();
             let call = runtime
@@ -1935,7 +1957,10 @@ mod tests {
             .finish_open(&mut opening, Vec::new())
             .unwrap();
         assert_eq!(host_auto_remove::<QuiesceFailure>(&failure_runtime), 1);
-        assert_eq!(failure_runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            failure_runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
         let failure_trace = failure_runtime.ghost_trace_json();
         assert!(failure_trace.contains("quarantined"));
         check("quarantine", failure_trace);
@@ -2171,12 +2196,15 @@ mod tests {
             drop(removal_attempt);
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while uncommitted.phase() != crate::LifecyclePhase::Closing
+        while uncommitted.phase() != crate::lifecycle::LifecyclePhase::Closing
             && std::time::Instant::now() < deadline
         {
             std::thread::yield_now();
         }
-        assert_eq!(uncommitted.phase(), crate::LifecyclePhase::Closing);
+        assert_eq!(
+            uncommitted.phase(),
+            crate::lifecycle::LifecyclePhase::Closing
+        );
         assert!(uncommitted.finish_open(&mut opening, Vec::new()).is_err());
         owner_rx.recv().expect("final close owner was not acquired");
         release_tx.send(()).expect("final close release signal");
@@ -2227,7 +2255,7 @@ mod tests {
         let mut reopened = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut reopened, Vec::new()).unwrap();
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
     }
 
     struct AlwaysFailClose;
@@ -2239,16 +2267,16 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
-        fn cleanup(_state: &mut Self::State, reporter: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(_state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
             reporter.warn(
                 "always fail cleanup",
-                crate::CleanupIssueKind::RegistryCleanup,
+                crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::FAILURE,
+                    diagnostic_id: crate::error::DiagnosticId::FAILURE,
                 },
             );
         }
@@ -2270,10 +2298,10 @@ mod tests {
             )
             .unload_safe()
         );
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
 
         assert_eq!(host_auto_remove::<AlwaysFailClose>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     #[test]
@@ -2307,7 +2335,7 @@ mod tests {
             1
         );
         closer.join().unwrap();
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     #[test]
@@ -2318,11 +2346,11 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         assert_eq!(host_auto_close::<CleanClose>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Open);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
         assert!(runtime.enter().is_ok());
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     #[inline(never)]
@@ -2371,7 +2399,7 @@ mod tests {
             ),
             0
         );
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(
             runtime.host_intent(),
             HostLifecycleIntent::ExplicitRemovalComplete
@@ -2394,7 +2422,7 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
         runtime.retain_registration_debt(vec![
-            crate::RegistrationId {
+            crate::registration::RegistrationId {
                 id: 1.0,
                 excel_name: "TEST.CLOSE.ORDER",
             }
@@ -2442,7 +2470,10 @@ mod tests {
         let close = remove_addin_inner::<CleanClose>(runtime);
 
         assert!(matches!(close, RemovalSuccess::Quarantined));
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Quarantined);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
         assert_eq!(
             crate::test_callback::callback_order(),
             vec![XL_ASYNC_RETURN, XLF_UNREGISTER, XL_FREE]
@@ -2471,9 +2502,9 @@ mod tests {
         events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
-    impl crate::RtdSubscription for OrderedSubscription {
-        fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
-            std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+    impl crate::subscription::RtdSubscription for OrderedSubscription {
+        fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
+            std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
         }
 
         fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
@@ -2486,14 +2517,14 @@ mod tests {
         events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
-    impl crate::RtdSource for OrderedSource {
+    impl crate::subscription::RtdSource for OrderedSource {
         type Value = f64;
         type Subscription = OrderedSubscription;
 
         fn subscribe(
             &self,
-            _topic: &crate::RtdTopic,
-            _sink: crate::RtdSink<Self::Value>,
+            _topic: &crate::subscription::RtdTopic,
+            _sink: crate::subscription::RtdSink<Self::Value>,
         ) -> XllResult<Self::Subscription> {
             Ok(OrderedSubscription {
                 events: std::sync::Arc::clone(&self.events),
@@ -2516,11 +2547,11 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.events.lock().unwrap().push("state");
         }
     }
@@ -2554,7 +2585,7 @@ mod tests {
                     .expect("non-zero test server generation"),
             )
             .unwrap();
-        let source = crate::RtdSourceHandle::for_internal(
+        let source = crate::subscription::RtdSourceHandle::for_internal(
             runtime.generation().expect("test runtime has a generation"),
             OrderedSource {
                 events: std::sync::Arc::clone(&events),
@@ -2562,7 +2593,10 @@ mod tests {
         )
         .unwrap();
         let prepared = subscriptions
-            .prepare(&source, crate::RtdTopic::single("ordered").unwrap())
+            .prepare(
+                &source,
+                crate::subscription::RtdTopic::single("ordered").unwrap(),
+            )
             .unwrap();
         let key = *prepared.key();
         prepared.commit();
@@ -2599,7 +2633,7 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
@@ -2614,7 +2648,7 @@ mod tests {
             Ok(())
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.cleaned.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -2640,7 +2674,7 @@ mod tests {
         };
         assert!(
             runtime
-                .stage_opening_state(state, crate::RuntimeConfig::new())
+                .stage_opening_state(state, crate::addin::RuntimeConfig::new())
                 .is_ok()
         );
         let opening = runtime.take_opening_generation().unwrap();
@@ -2656,12 +2690,12 @@ mod tests {
         });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while runtime.phase() != crate::LifecyclePhase::Closing
+        while runtime.phase() != crate::lifecycle::LifecyclePhase::Closing
             && std::time::Instant::now() < deadline
         {
             std::thread::yield_now();
         }
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
 
         assert!(matches!(
             runtime.finish_open(&mut open_attempt, Vec::new()),
@@ -2682,7 +2716,7 @@ mod tests {
         );
         closer.join().unwrap();
 
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(quiesced.load(Ordering::SeqCst), 1);
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -2711,7 +2745,7 @@ mod tests {
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
 
@@ -2720,7 +2754,7 @@ mod tests {
             Ok(())
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.cleaned.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -2740,7 +2774,7 @@ mod tests {
         };
         assert!(
             runtime
-                .stage_opening_state(state, crate::RuntimeConfig::new())
+                .stage_opening_state(state, crate::addin::RuntimeConfig::new())
                 .is_ok()
         );
         let opening = runtime.take_opening_generation().unwrap();
@@ -2757,7 +2791,7 @@ mod tests {
             active_runtime_generation(&runtime),
         );
         assert!(outcome.unload_safe());
-        assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
 
         assert_eq!(quiesced.load(Ordering::SeqCst), 1);
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);

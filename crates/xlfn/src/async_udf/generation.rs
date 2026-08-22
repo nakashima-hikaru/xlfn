@@ -1,4 +1,7 @@
-use super::*;
+use super::task::TaskControl;
+use parking_lot::{Condvar, Mutex};
+use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlPhase {

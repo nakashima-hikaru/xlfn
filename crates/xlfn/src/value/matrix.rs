@@ -1,7 +1,8 @@
 //! Owned rectangular and bounded collection values.
 
 use super::{EXCEL_MAX_COLUMNS, EXCEL_MAX_ROWS, MAX_ARRAY_ELEMENTS};
-use crate::{DomainErrorCode, InputError, XllError, XllResult};
+use crate::error::{DomainErrorCode, InputError};
+use crate::{XllError, XllResult};
 use std::ops::Index;
 
 #[derive(Clone, Debug, PartialEq)]

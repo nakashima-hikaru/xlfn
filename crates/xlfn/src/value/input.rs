@@ -48,7 +48,7 @@ pub struct CallContext<'call> {
 
 impl<'call> CallContext<'call> {
     pub(crate) fn new<A: crate::Addin>(
-        runtime: &'call crate::Runtime<A>,
+        runtime: &'call crate::runtime::Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
@@ -86,14 +86,14 @@ impl<'call> CallContext<'call> {
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
-    ) -> XllResult<crate::Handle<'call, T>> {
+    ) -> XllResult<crate::handle::Handle<'call, T>> {
         let scope = self.scope.ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_SCOPE_MISSING,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_SCOPE_MISSING,
         })?;
         self.handle_runtime
             .as_ref()
             .ok_or(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_NO_CONTEXT,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
             })?
             .get()?
             .lookup(scope, token)
@@ -109,7 +109,7 @@ pub struct ArgumentContext<'call> {
 
 impl<'call> ArgumentContext<'call> {
     pub fn for_return<R, A: crate::Addin>(
-        runtime: &'call crate::Runtime<A>,
+        runtime: &'call crate::runtime::Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self
     where
@@ -203,7 +203,7 @@ where
 #[doc(hidden)]
 pub unsafe fn argument_from_raw_with_context<'call, A, T>(
     _scope: &'call CallScope<'call>,
-    runtime: &'call crate::Runtime<A>,
+    runtime: &'call crate::runtime::Runtime<A>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>

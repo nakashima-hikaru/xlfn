@@ -1,4 +1,5 @@
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 use smallvec::SmallVec;
 
 pub(crate) const EXCEL_STRING_LIMIT: usize = 32_767;

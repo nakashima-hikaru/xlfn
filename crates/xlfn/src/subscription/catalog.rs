@@ -1,4 +1,10 @@
-use super::*;
+use super::identity::{SourceIdentityRegistry, SubscriptionIdentityIndex};
+use super::source::ErasedRtdSource;
+use super::topic::{RtdTopic, SubscriptionKey};
+use crate::generation::{ConnectionGeneration, ServerGeneration};
+use crate::{XllError, XllResult};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BindingStage {
@@ -33,7 +39,7 @@ impl SubscriptionCatalog {
     pub(crate) fn allocate_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
         let id = self.next_subscription_id;
         self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+            diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
         Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
     }

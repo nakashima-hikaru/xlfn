@@ -1,4 +1,12 @@
-use super::*;
+use super::executor::ExecutorShared;
+use super::task::TaskControl;
+use crate::XllError;
+use crate::cancellation::CancellationSource;
+use async_channel::Receiver;
+use async_task::Runnable;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub(crate) struct WorkerExitGuard {
     pub(crate) shared: Arc<ExecutorShared>,

@@ -1,5 +1,22 @@
-use super::*;
+use super::catalog::{SubscriptionCatalog, remove_identity_if_unbound};
+use super::delivery::{
+    DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
+    RefreshState, RtdUpdate, SERVER_LIFECYCLE_CLOSING, SERVER_LIFECYCLE_OPEN,
+    SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
+};
+use super::operation_gate::{OperationGate, OperationGuard, TerminationWaitGuard};
+use super::quota::Quota;
+use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
+use super::source::{ErasedRtdSource, RtdSubscription};
+use super::topic::{SubscriptionKey, TopicId};
+use super::value::{RtdValue, StoredRtdValue};
+use crate::generation::{ConnectionGeneration, ServerGeneration};
+use crate::{XllError, XllResult};
+use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
 pub(crate) struct RtdServerHandle {
@@ -384,7 +401,7 @@ impl PublishCore {
                 Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
                 Err(panic_payload) => {
                     let err = XllError::Internal {
-                        diagnostic_id: crate::DiagnosticId::PANIC_NOTIFY,
+                        diagnostic_id: crate::error::DiagnosticId::PANIC_NOTIFY,
                     };
                     if let Some(parent) = self.parent.upgrade() {
                         parent.record_cleanup_result(Err(err.clone()));
@@ -471,13 +488,13 @@ impl PublishCore {
         } = refresh.phase
         else {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::NO_REFERENCE,
+                diagnostic_id: crate::error::DiagnosticId::NO_REFERENCE,
             });
         };
 
         if active_id != refresh_id {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::REFERENCE_ID_MISMATCH,
+                diagnostic_id: crate::error::DiagnosticId::REFERENCE_ID_MISMATCH,
             });
         }
 
@@ -617,12 +634,12 @@ impl ServerRuntime {
             let mut refresh = self.publish.refresh.lock();
             if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::OVERLAPPED_REFERENCE,
+                    diagnostic_id: crate::error::DiagnosticId::OVERLAPPED_REFERENCE,
                 });
             }
             let refresh_id = refresh.next_refresh_id;
             refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::REFERENCE_OVERFLOW,
+                diagnostic_id: crate::error::DiagnosticId::REFERENCE_OVERFLOW,
             })?;
 
             self.publish.publish_epoch.fetch_add(1, Ordering::AcqRel);
@@ -1102,7 +1119,7 @@ pub(crate) fn disconnect_one_no_unwind(subscription: Box<dyn RtdSubscription>) -
     match catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
         Ok(result) => result,
         Err(_) => Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::PANIC_DISCONNECT,
+            diagnostic_id: crate::error::DiagnosticId::PANIC_DISCONNECT,
         }),
     }
 }
@@ -1178,10 +1195,10 @@ impl ServerReservationFailure {
     pub(crate) fn into_xll_error(self) -> XllError {
         match self {
             ServerReservationFailure::DuplicateTopicId => XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::TOPIC_ID_DUPLICATE,
+                diagnostic_id: crate::error::DiagnosticId::TOPIC_ID_DUPLICATE,
             },
             ServerReservationFailure::DuplicateKey => XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::TOPIC_KEY_DUPLICATE,
+                diagnostic_id: crate::error::DiagnosticId::TOPIC_KEY_DUPLICATE,
             },
             ServerReservationFailure::Overloaded(err) => err,
         }

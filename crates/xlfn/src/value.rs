@@ -1,6 +1,8 @@
+use crate::error::{DomainErrorCode, InputError, Shape};
 use crate::input_identity::InputIdentityEncoder;
 use crate::return_array::{XlArrayBuilder, XlArrayOutput};
-use crate::{DomainErrorCode, ExcelError, InputError, ReturnContext, Shape, XllError, XllResult};
+use crate::return_value::ReturnContext;
+use crate::{ExcelError, XllError, XllResult};
 #[cfg(test)]
 use xlfn_sys::XLOPER12Array;
 use xlfn_sys::{
@@ -538,7 +540,7 @@ impl<'call> FromExcel<'call> for ExcelValue {
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for crate::Handle<'call, T>
+impl<'call, T> ExcelParameter<'call> for crate::handle::Handle<'call, T>
 where
     T: crate::handle::ExcelHandleObject,
 {
@@ -817,7 +819,7 @@ mod tests {
     #[test]
     fn return_trait_resolves_result_aliases_without_name_matching() {
         type AliasedReturn = Result<f64, XllError>;
-        let mut context = crate::ReturnContext::new();
+        let mut context = crate::return_value::ReturnContext::new();
         let value =
             <AliasedReturn as ExcelReturn>::into_excel(Ok::<_, XllError>(4.5), &mut context)
                 .unwrap();
@@ -842,7 +844,7 @@ mod tests {
         assert_modes::<f64>();
         assert_modes::<Result<f64, XllError>>();
         assert_modes::<Matrix<f64>>();
-        assert_modes::<crate::RtdValue>();
+        assert_modes::<crate::subscription::RtdValue>();
     }
 
     #[test]
@@ -1503,7 +1505,7 @@ mod tests {
     fn handle_semantic_identity_matches_across_distinct_alias_tokens() {
         use crate::handle::{FormulaCaller, FormulaRevisionKey, HandleTopicKey};
 
-        let runtime = Box::leak(Box::new(crate::Runtime::<()>::new()));
+        let runtime = Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
         runtime.arm_test_generation();
         let handle_rt = runtime.handles().unwrap();
 
@@ -1530,8 +1532,8 @@ mod tests {
             .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))
             .unwrap();
 
-        let object = crate::with_excel_call_scope(|scope| {
-            let resolved: crate::Handle<'_, SemanticHandleTestObj> =
+        let object = crate::value::with_excel_call_scope(|scope| {
+            let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
                 handle_rt.lookup(scope, &token_a).unwrap();
             resolved.alias().into_locator()
         });
@@ -1562,38 +1564,36 @@ mod tests {
             xltype: XLTYPE_STR,
         };
 
-        let (handle_data_a, id_a, object_id_a) = crate::with_excel_call_scope(|scope| {
+        let (handle_data_a, id_a, object_id_a) = crate::value::with_excel_call_scope(|scope| {
             let mut arguments = ArgumentContext {
                 call: CallContext::new(runtime, scope),
                 inputs: Some(crate::input_identity::InputFingerprintBuilder::new()),
             };
             // SAFETY: raw_a is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<crate::Handle<'_, SemanticHandleTestObj>>(
-                    &mut arguments,
-                    "arg",
-                    &mut raw_a,
-                )
-            }
-            .unwrap();
+            let handle =
+                unsafe {
+                    argument_from_raw_with_arguments::<
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, "arg", &mut raw_a)
+                }
+                .unwrap();
             let id = arguments.inputs.unwrap().finish();
             (handle.data, id, handle.object.id)
         });
 
-        let (handle_data_b, id_b, object_id_b) = crate::with_excel_call_scope(|scope| {
+        let (handle_data_b, id_b, object_id_b) = crate::value::with_excel_call_scope(|scope| {
             let mut arguments = ArgumentContext {
                 call: CallContext::new(runtime, scope),
                 inputs: Some(crate::input_identity::InputFingerprintBuilder::new()),
             };
             // SAFETY: raw_b is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<crate::Handle<'_, SemanticHandleTestObj>>(
-                    &mut arguments,
-                    "arg",
-                    &mut raw_b,
-                )
-            }
-            .unwrap();
+            let handle =
+                unsafe {
+                    argument_from_raw_with_arguments::<
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, "arg", &mut raw_b)
+                }
+                .unwrap();
             let id = arguments.inputs.unwrap().finish();
             (handle.data, id, handle.object.id)
         });

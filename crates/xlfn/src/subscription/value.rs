@@ -1,4 +1,6 @@
-use super::*;
+use crate::value::ExcelErrorValue;
+use crate::{XllError, XllResult};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
@@ -24,7 +26,7 @@ impl RtdValue {
     pub(crate) fn validate(&self) -> XllResult<()> {
         match self {
             Self::Number(value) if !value.is_finite() => Err(XllError::Domain {
-                code: crate::DomainErrorCode::InvalidInput,
+                code: crate::error::DomainErrorCode::InvalidInput,
             }),
             Self::String(value) => {
                 crate::utf16::encode_bounded(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT)?;
@@ -47,25 +49,29 @@ impl RtdValue {
     }
 }
 
-impl TryFrom<crate::ExcelValue> for RtdValue {
+impl TryFrom<crate::value::ExcelValue> for RtdValue {
     type Error = XllError;
 
-    fn try_from(value: crate::ExcelValue) -> XllResult<Self> {
+    fn try_from(value: crate::value::ExcelValue) -> XllResult<Self> {
         let value = match value {
-            crate::ExcelValue::Scalar(crate::ExcelCellValue::Number(value)) => Self::Number(value),
-            crate::ExcelValue::Scalar(crate::ExcelCellValue::Boolean(value)) => {
+            crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Number(value)) => {
+                Self::Number(value)
+            }
+            crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Boolean(value)) => {
                 Self::Boolean(value)
             }
-            crate::ExcelValue::Scalar(crate::ExcelCellValue::String(value)) => Self::String(value),
-            crate::ExcelValue::Scalar(crate::ExcelCellValue::Error(value)) => {
-                Self::Error(crate::ExcelErrorValue(value))
+            crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::String(value)) => {
+                Self::String(value)
             }
-            crate::ExcelValue::Missing
-            | crate::ExcelValue::Scalar(crate::ExcelCellValue::Blank) => Self::Empty,
-            crate::ExcelValue::Array(_) => {
+            crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Error(value)) => {
+                Self::Error(crate::value::ExcelErrorValue(value))
+            }
+            crate::value::ExcelValue::Missing
+            | crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Blank) => Self::Empty,
+            crate::value::ExcelValue::Array(_) => {
                 return Err(XllError::input(
                     "RTD value",
-                    crate::InputError::Malformed("RTD values must be scalar"),
+                    crate::error::InputError::Malformed("RTD values must be scalar"),
                 ));
             }
         };
@@ -74,26 +80,29 @@ impl TryFrom<crate::ExcelValue> for RtdValue {
     }
 }
 
-impl crate::ExcelReturn for RtdValue {
-    fn into_excel(self, _: &mut crate::ReturnContext<'_, '_>) -> XllResult<crate::ExcelOutput> {
+impl crate::value::ExcelReturn for RtdValue {
+    fn into_excel(
+        self,
+        _: &mut crate::return_value::ReturnContext<'_, '_>,
+    ) -> XllResult<crate::value::ExcelOutput> {
         self.validate()?;
         let cell = match self {
-            Self::Number(value) => crate::ExcelCellOutput::Number(value),
-            Self::Boolean(value) => crate::ExcelCellOutput::Boolean(value),
-            Self::Integer(value) => crate::ExcelCellOutput::Number(value as f64),
-            Self::String(value) => crate::ExcelCellOutput::String(value),
-            Self::Error(value) => crate::ExcelCellOutput::Error(value.0),
-            Self::Empty => crate::ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
+            Self::Number(value) => crate::value::ExcelCellOutput::Number(value),
+            Self::Boolean(value) => crate::value::ExcelCellOutput::Boolean(value),
+            Self::Integer(value) => crate::value::ExcelCellOutput::Number(value as f64),
+            Self::String(value) => crate::value::ExcelCellOutput::String(value),
+            Self::Error(value) => crate::value::ExcelCellOutput::Error(value.0),
+            Self::Empty => crate::value::ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
         };
-        Ok(crate::ExcelOutput::Scalar(cell))
+        Ok(crate::value::ExcelOutput::Scalar(cell))
     }
 }
 
-impl crate::MainThreadReturn for RtdValue {}
-impl crate::ThreadSafeReturn for RtdValue {}
-impl crate::MacroSheetReturn for RtdValue {}
-impl crate::AsyncReturn for RtdValue {}
-impl crate::VolatileReturn for RtdValue {}
+impl crate::value::MainThreadReturn for RtdValue {}
+impl crate::value::ThreadSafeReturn for RtdValue {}
+impl crate::value::MacroSheetReturn for RtdValue {}
+impl crate::value::AsyncReturn for RtdValue {}
+impl crate::value::VolatileReturn for RtdValue {}
 
 pub trait IntoRtdValue {
     fn into_rtd_value(self) -> XllResult<RtdValue>;
@@ -111,7 +120,7 @@ impl IntoRtdValue for f64 {
             Ok(RtdValue::Number(self))
         } else {
             Err(XllError::Domain {
-                code: crate::DomainErrorCode::InvalidInput,
+                code: crate::error::DomainErrorCode::InvalidInput,
             })
         }
     }
@@ -136,13 +145,13 @@ impl IntoRtdValue for i64 {
             Ok(RtdValue::Number(self as f64))
         } else {
             Err(XllError::Domain {
-                code: crate::DomainErrorCode::Overflow,
+                code: crate::error::DomainErrorCode::Overflow,
             })
         }
     }
 }
 
-impl IntoRtdValue for crate::ExcelSerialDate {
+impl IntoRtdValue for crate::value::ExcelSerialDate {
     fn into_rtd_value(self) -> XllResult<RtdValue> {
         self.serial().into_rtd_value()
     }

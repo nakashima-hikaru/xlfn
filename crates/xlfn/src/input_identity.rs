@@ -1,4 +1,5 @@
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 
 const INLINE_ARGUMENT_BYTES: usize = 128;
 
@@ -278,7 +279,7 @@ impl InputFingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExcelCellValue, ExcelValue, Matrix, OptionalExcelValue};
+    use crate::value::{ExcelCellValue, ExcelValue, Matrix, OptionalExcelValue};
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);

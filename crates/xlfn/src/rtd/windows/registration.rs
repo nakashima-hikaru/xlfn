@@ -430,7 +430,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
     }
 
     let bytes = u32::try_from(value.len() * 2).map_err(|_| XllError::Domain {
-        code: crate::DomainErrorCode::Overflow,
+        code: crate::error::DomainErrorCode::Overflow,
     })?;
 
     // SAFETY: `key` is open, the optional name and value buffers are

@@ -1,4 +1,6 @@
-use crate::{InputError, XlValueRef, XllError, XllResult};
+use crate::error::InputError;
+use crate::value::XlValueRef;
+use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;

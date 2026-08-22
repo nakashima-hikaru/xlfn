@@ -1,4 +1,6 @@
-use super::*;
+use super::source::SourceHandleId;
+use crate::{XllError, XllResult};
+use std::sync::Arc;
 
 pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
 pub(crate) const MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
@@ -170,7 +172,7 @@ impl RtdTopic {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
                 return Err(XllError::input(
                     "RTD topic",
-                    crate::InputError::TooLarge {
+                    crate::error::InputError::TooLarge {
                         limit: MAX_RTD_TOPIC_PARTS,
                         actual: normalized.len().saturating_add(1),
                     },
@@ -180,13 +182,13 @@ impl RtdTopic {
             if part.is_empty() {
                 return Err(XllError::input(
                     "RTD topic",
-                    crate::InputError::Malformed("RTD topics require non-empty parts"),
+                    crate::error::InputError::Malformed("RTD topics require non-empty parts"),
                 ));
             }
             total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
                 XllError::input(
                     "RTD topic",
-                    crate::InputError::TooLarge {
+                    crate::error::InputError::TooLarge {
                         limit: MAX_RTD_TOPIC_BYTES,
                         actual: usize::MAX,
                     },
@@ -195,7 +197,7 @@ impl RtdTopic {
             if total_bytes > MAX_RTD_TOPIC_BYTES {
                 return Err(XllError::input(
                     "RTD topic",
-                    crate::InputError::TooLarge {
+                    crate::error::InputError::TooLarge {
                         limit: MAX_RTD_TOPIC_BYTES,
                         actual: total_bytes,
                     },
@@ -206,7 +208,7 @@ impl RtdTopic {
         if normalized.is_empty() {
             return Err(XllError::input(
                 "RTD topic",
-                crate::InputError::Malformed("RTD topics require non-empty parts"),
+                crate::error::InputError::Malformed("RTD topics require non-empty parts"),
             ));
         }
         Ok(Self {
@@ -236,13 +238,13 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
     if parts.is_empty() || parts.iter().any(String::is_empty) {
         return Err(XllError::input(
             "RTD topic",
-            crate::InputError::Malformed("RTD topics require non-empty parts"),
+            crate::error::InputError::Malformed("RTD topics require non-empty parts"),
         ));
     }
     if parts.len() > MAX_RTD_TOPIC_PARTS {
         return Err(XllError::input(
             "RTD topic",
-            crate::InputError::TooLarge {
+            crate::error::InputError::TooLarge {
                 limit: MAX_RTD_TOPIC_PARTS,
                 actual: parts.len(),
             },
@@ -255,7 +257,7 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
         if utf16_len > 32_767 {
             return Err(XllError::input(
                 "RTD topic",
-                crate::InputError::TooLarge {
+                crate::error::InputError::TooLarge {
                     limit: 32_767,
                     actual: utf16_len,
                 },
@@ -264,7 +266,7 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
         total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
             XllError::input(
                 "RTD topic",
-                crate::InputError::TooLarge {
+                crate::error::InputError::TooLarge {
                     limit: MAX_RTD_TOPIC_BYTES,
                     actual: usize::MAX,
                 },
@@ -274,7 +276,7 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
     if total_bytes > MAX_RTD_TOPIC_BYTES {
         return Err(XllError::input(
             "RTD topic",
-            crate::InputError::TooLarge {
+            crate::error::InputError::TooLarge {
                 limit: MAX_RTD_TOPIC_BYTES,
                 actual: total_bytes,
             },

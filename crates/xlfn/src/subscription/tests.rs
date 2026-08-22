@@ -872,7 +872,7 @@ impl RtdSubscription for FailingDisconnectSubscription {
     }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL,
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL,
         })
     }
 }
@@ -913,13 +913,13 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     assert!(matches!(
         res_owner,
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         }) | Err(XllError::Panic)
     ));
     assert!(matches!(
         res_waiter,
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         }) | Err(XllError::Panic)
     ));
 }
@@ -1009,7 +1009,7 @@ fn disconnect_propagates_subscription_cleanup_error() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         }
     ));
 }
@@ -1045,7 +1045,7 @@ fn rollback_records_subscription_cleanup_error() {
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         })
     ));
 }
@@ -1159,14 +1159,14 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     assert!(matches!(
         res,
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         })
     ));
 
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::error::DiagnosticId::TEST_SENTINEL
         })
     ));
 }

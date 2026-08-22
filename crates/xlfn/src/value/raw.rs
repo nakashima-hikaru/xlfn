@@ -1,8 +1,9 @@
 //! Raw and borrowed ABI views over Excel's `XLOPER12` representation.
 
 use super::{FromExcel, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMENTS, MAX_UTF16_UNITS};
+use crate::error::InputError;
 use crate::input_identity::InputIdentityEncoder;
-use crate::{ExcelError, InputError, XllError, XllResult};
+use crate::{ExcelError, XllError, XllResult};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::slice;
@@ -56,7 +57,7 @@ impl<'call> GridView<'call> {
         match self {
             Self::Scalar(value) if index == 0 => Ok(*value),
             Self::Scalar(_) => Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::GRID_INDEX,
+                diagnostic_id: crate::error::DiagnosticId::GRID_INDEX,
             }),
             Self::Multi { values, .. } => {
                 // SAFETY: `array` validation established the contiguous range,

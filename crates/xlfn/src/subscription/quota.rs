@@ -1,4 +1,5 @@
-use super::*;
+use crate::{XllError, XllResult};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use triomphe::Arc;
 
 pub(crate) struct Quota {

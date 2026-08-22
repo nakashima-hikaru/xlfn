@@ -100,92 +100,11 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
-pub use addin::{
-    Addin, AsyncWorkerCount, HandleBindingLimit, HandleConfig, OpenContext, Opened, RuntimeConfig,
-};
+pub use addin::{Addin, HandleBindingLimit, HandleConfig, OpenContext, Opened, RuntimeConfig};
+#[cfg(feature = "async")]
+pub use addin::{AsyncRuntimeConfig, AsyncWorkerCount};
 pub use error::{ExcelError, XllError, XllResult};
 
-// These aliases are crate-internal only. Keeping implementation modules on
-// their canonical paths is the public API rule; the aliases let the existing
-// low-level implementation share concise names without reopening those paths
-// to downstream crates.
-#[cfg(feature = "async")]
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use addin::AsyncContext;
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use addin::{
-    AddinMetadata, AsyncRuntimeConfig, BuildInfo, DiagnosticsSetup, MacroSheetContext,
-    MainThreadContext, RtdConfig, RtdOpenContext, ThreadSafeContext,
-};
-#[cfg(feature = "async")]
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use async_udf::{
-    async_udf_boundary_named, cancel_async_calculation, end_async_calculation,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use callback_value::{CallbackValueReleaseState, ExcelCallbackValue};
-#[cfg(any(feature = "async", test))]
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use diagnostics::{
-    AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticSink, DiagnosticStats, InvalidAddinId,
-    diagnostic_stats,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use error::{DiagnosticId, DomainErrorCode, InputError, IntoXllError, Shape};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use handle::{Handle, HandleAlias, PinnedHandle};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_ingress};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use input_identity::InputIdentityEncoder;
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use lifecycle::LifecyclePhase;
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use reference::{
-    ExcelReference, FromExcelReference, ReferenceArea, ReferenceAreas, SheetId, reference_from_raw,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use registration::{
-    ArgumentAbi, ArgumentDescriptor, FunctionVisibility, MAX_EXCEL_FUNCTION_ARGUMENTS,
-    MAX_REGISTER_ARGUMENT_HELP_ENTRIES, RegistrationDescriptor, RegistrationFlags, RegistrationId,
-    RegistrationSignature, ResultAbi,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use return_value::{
-    CallbackCleanupDebt, CleanupDebtSet, ExcelCallbackStatus, GitCookieDebt, RegistrationDebt,
-    RegistryKeyDebt, ReturnContext, ReturnFreeBoundaryGuard, ffi_boundary, ffi_boundary_void,
-    free_return, free_return_boundary, udf_boundary_named,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use runtime::{CallGuard, Runtime};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use subscription::{
-    IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
-    RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use utf16::utf16_eq_ignore_ascii_case;
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use value::{
-    ArgumentContext, AsyncReturn, BoundedVarArgs, CallContext, CallScope, CellPresence, Column,
-    ExcelCellOutput, ExcelCellValue, ExcelDateSystem, ExcelErrorValue, ExcelOutput, ExcelParameter,
-    ExcelReturn, ExcelSerialDate, ExcelValue, FromExcel, IntoExcel, MacroSheetReturn,
-    MainThreadReturn, Matrix, OptionalExcelValue, Row, ThreadSafeReturn, VolatileReturn,
-    XlArrayRef, XlStrRef, XlValueRef,
-};
-#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use value::{
-    argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
-    assert_async_parameter, assert_async_return, assert_excel_parameter, assert_macro_sheet_return,
-    assert_main_thread_return, assert_thread_safe_return, assert_volatile_return,
-    cell_presence_from_raw, with_excel_call_scope,
-};
 pub mod ingress;
 
 inventory::collect!(registration::RegistrationDescriptor);

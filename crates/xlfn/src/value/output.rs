@@ -1,6 +1,8 @@
 //! Worksheet-output conversion and return dispatch.
 
-use crate::{IntoXllError, ReturnContext, XllResult};
+use crate::XllResult;
+use crate::error::IntoXllError;
+use crate::return_value::ReturnContext;
 
 use super::{ExcelCellOutput, ExcelOutput};
 

@@ -1,5 +1,7 @@
-use super::*;
 use crate::input_identity::InputFingerprint;
+use crate::return_value::ExcelCallbackStatus;
+use crate::{XllError, XllResult};
+use std::fmt::Write as _;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {
@@ -118,7 +120,7 @@ pub(crate) fn resolve_formula_caller(
                 {
                     return Err(XllError::input(
                         "caller",
-                        crate::InputError::Malformed(
+                        crate::error::InputError::Malformed(
                             "handle-producing functions require a single-cell caller",
                         ),
                     ));
@@ -133,12 +135,13 @@ pub(crate) fn resolve_formula_caller(
                 // SAFETY: the type selects the MRef member.
                 let reference = unsafe { value.raw().value.mref };
                 // SAFETY: Excel supplies a readable reference table.
-                let table = unsafe { reference.references.as_ref() }
-                    .ok_or_else(|| XllError::input("caller", crate::InputError::NullPointer))?;
+                let table = unsafe { reference.references.as_ref() }.ok_or_else(|| {
+                    XllError::input("caller", crate::error::InputError::NullPointer)
+                })?;
                 if table.count != 1 {
                     return Err(XllError::input(
                         "caller",
-                        crate::InputError::Malformed(
+                        crate::error::InputError::Malformed(
                             "handle-producing functions require a single-cell caller",
                         ),
                     ));
@@ -147,7 +150,7 @@ pub(crate) fn resolve_formula_caller(
                 if area.rw_first != area.rw_last || area.col_first != area.col_last {
                     return Err(XllError::input(
                         "caller",
-                        crate::InputError::Malformed(
+                        crate::error::InputError::Malformed(
                             "handle-producing functions require a single-cell caller",
                         ),
                     ));
@@ -157,7 +160,7 @@ pub(crate) fn resolve_formula_caller(
             _ => {
                 return Err(XllError::input(
                     "caller",
-                    crate::InputError::Malformed(
+                    crate::error::InputError::Malformed(
                         "handle-producing functions require a worksheet caller",
                     ),
                 ));
@@ -219,7 +222,9 @@ pub(crate) fn resolve_formula_caller(
         if value.base_type() != XLTYPE_REF {
             return Err(XllError::input(
                 "caller",
-                crate::InputError::Malformed("xlSheetId did not return an external reference"),
+                crate::error::InputError::Malformed(
+                    "xlSheetId did not return an external reference",
+                ),
             ));
         }
         // SAFETY: XLTYPE_REF selects the MRef member, whose sheet_id is the

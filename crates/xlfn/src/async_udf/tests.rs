@@ -49,7 +49,9 @@ impl Addin for TestU32Addin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+    fn open(
+        _: &OpenContext,
+    ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
         unreachable!()
     }
 }
@@ -469,7 +471,9 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         type State = u32;
         type Error = XllError;
         type Layers = (ReentrantLayer,);
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
     }
@@ -710,7 +714,7 @@ fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
     assert_eq!(outcome.issues.len(), 1);
     assert_eq!(
         outcome.issues[0].kind,
-        crate::CleanupIssueKind::WorkerPanickedAfterJoin
+        crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin
     );
     let _stopped = outcome.certificate;
     assert!(manager.is_stopped());
@@ -750,7 +754,7 @@ fn lone_worker_panic_drops_tasks_left_on_the_queue() {
     assert_eq!(outcome.issues.len(), 1);
     assert_eq!(
         outcome.issues[0].kind,
-        crate::CleanupIssueKind::WorkerPanickedAfterJoin
+        crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin
     );
     assert!(manager.is_stopped());
 }
@@ -932,7 +936,9 @@ fn async_boundary_reports_handler_failures_to_layers() {
         type State = u32;
         type Error = XllError;
         type Layers = (Recorder,);
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
     }
@@ -1007,7 +1013,9 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         type State = u32;
         type Error = XllError;
         type Layers = (Recorder,);
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
     }
@@ -1148,7 +1156,7 @@ fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
 
     let invocation = crate::callback_gate::CallbackInvocationToken::new();
     let callback_gate = crate::callback_gate::enter_callback(&invocation).unwrap();
-    callback_gate.observe(crate::ExcelCallbackStatus::Abort);
+    callback_gate.observe(crate::return_value::ExcelCallbackStatus::Abort);
     drop(callback_gate);
     let callbacks_before_cancel = crate::test_callback::async_return_calls();
     cancel_async_calculation(runtime);
@@ -1767,7 +1775,9 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         type State = u32;
         type Error = XllError;
         type Layers = (PanickingLayer,);
-        fn open(_: &OpenContext) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &OpenContext,
+        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
             unreachable!()
         }
     }
@@ -1887,7 +1897,7 @@ fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::ASYNC_SPAWN
+            diagnostic_id: crate::error::DiagnosticId::ASYNC_SPAWN
         })
     ));
 }

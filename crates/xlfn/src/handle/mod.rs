@@ -1,13 +1,10 @@
-pub(crate) use crate::generation::{BindingGeneration, ObjectGeneration, TopicGeneration};
-use crate::{DomainErrorCode, ExcelCallbackStatus, ReturnContext, XllError, XllResult};
-use parking_lot::{Condvar, Mutex, RwLock};
-use rustc_hash::FxHashMap;
-use std::any::{TypeId, type_name};
-use std::cell::Cell;
-use std::fmt::Write as _;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+#![cfg_attr(
+    test,
+    allow(
+        unused_imports,
+        reason = "Test-only protocol fixtures are shared with the child test modules"
+    )
+)]
 
 mod arena;
 mod connection;
@@ -23,6 +20,31 @@ mod runtime;
 mod token;
 mod topic;
 mod typed;
+
+#[cfg(test)]
+use crate::error::DomainErrorCode;
+#[cfg(test)]
+pub(crate) use crate::generation::{BindingGeneration, ObjectGeneration, TopicGeneration};
+#[cfg(test)]
+use crate::return_value::{ExcelCallbackStatus, ReturnContext};
+#[cfg(test)]
+use crate::{XllError, XllResult};
+#[cfg(test)]
+use parking_lot::{Condvar, Mutex, RwLock};
+#[cfg(test)]
+use rustc_hash::FxHashMap;
+#[cfg(test)]
+use std::any::{TypeId, type_name};
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::fmt::Write as _;
+#[cfg(test)]
+use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 pub(crate) use arena::{BorrowedObject, PinnedObject};
 #[cfg(any(target_os = "windows", test))]

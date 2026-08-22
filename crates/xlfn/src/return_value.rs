@@ -3,7 +3,9 @@ use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 use crate::return_array::XlArrayOutput;
 use crate::return_storage::ReturnStorage;
-use crate::{ExcelCellOutput, ExcelOutput, ExcelReturn, Runtime, XllError, XllResult};
+use crate::runtime::Runtime;
+use crate::value::{ExcelCellOutput, ExcelOutput, ExcelReturn};
+use crate::{XllError, XllResult};
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -19,14 +21,11 @@ pub(crate) mod boundary;
 pub(crate) mod conversion;
 pub(crate) mod ownership;
 
-pub(crate) use conversion::{
-    CallbackCleanupDebt, CleanupDebtSet, ExcelCallbackStatus, GitCookieDebt, RegistrationDebt,
-    RegistryKeyDebt,
-};
+pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
 pub use ownership::ReturnFreeBoundaryGuard;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
-/// Call-scoped services used by [`crate::ExcelReturn`] implementations.
+/// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
 #[doc(hidden)]
 pub struct ReturnContext<'call, 'scope> {
     handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
@@ -56,7 +55,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         runtime: &'call Runtime<A>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
-        scope: &'scope crate::CallScope<'scope>,
+        scope: &'scope crate::value::CallScope<'scope>,
     ) -> Self {
         Self {
             handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
@@ -73,7 +72,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
-        scope: &'scope crate::CallScope<'scope>,
+        scope: &'scope crate::value::CallScope<'scope>,
     ) -> Self {
         Self {
             handle_runtime,
@@ -98,7 +97,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     pub fn publish_existing_alias<'handle, T>(
         &mut self,
-        operation: impl FnOnce() -> XllResult<crate::HandleAlias<'handle, T>>,
+        operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
     ) -> XllResult<String>
     where
         T: crate::handle::ExcelHandleObject,
@@ -107,18 +106,18 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
             .handle_runtime
             .as_ref()
             .ok_or(crate::XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
             })?;
         let handles = resolver.get()?;
         let arc_handles = resolver.get_arc()?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_UDF,
         })?;
         let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_DIGEST,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_DIGEST,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let object = operation()?.into_locator();
@@ -136,18 +135,18 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
             .handle_runtime
             .as_ref()
             .ok_or(crate::XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
             })?;
         let handles = resolver.get()?;
         let arc_handles = resolver.get_arc()?;
         let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_UDF,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_UDF,
         })?;
         let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_DIGEST,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_DIGEST,
         })?;
         let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_CALLBACKS,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_CALLBACKS,
         })?;
         let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
         let (token, _) = handles.prepare_observed(key, operation, |key, token| {
@@ -283,17 +282,17 @@ impl PreparedReturn {
             .payload_bytes
             .checked_add(std::mem::size_of::<ReturnBlock>())
             .ok_or(XllError::Domain {
-                code: crate::DomainErrorCode::Overflow,
+                code: crate::error::DomainErrorCode::Overflow,
             })?;
 
         enforce_return_limit(total_bytes)?;
 
         let rows = i32::try_from(encoded.rows).map_err(|_| XllError::Domain {
-            code: crate::DomainErrorCode::Overflow,
+            code: crate::error::DomainErrorCode::Overflow,
         })?;
 
         let columns = i32::try_from(encoded.columns).map_err(|_| XllError::Domain {
-            code: crate::DomainErrorCode::Overflow,
+            code: crate::error::DomainErrorCode::Overflow,
         })?;
 
         let mut cells = encoded.cells;
@@ -389,7 +388,7 @@ fn base_allocation_payload_bytes(array_cells: usize) -> XllResult<usize> {
         .checked_mul(std::mem::size_of::<XLOPER12>())
         .and_then(|array_bytes| array_bytes.checked_add(std::mem::size_of::<ReturnBlock>()))
         .ok_or(XllError::Domain {
-            code: crate::DomainErrorCode::Overflow,
+            code: crate::error::DomainErrorCode::Overflow,
         })
 }
 
@@ -419,9 +418,10 @@ fn encode_scalar(
 ) -> XllResult<XLOPER12> {
     match value {
         ExcelCellOutput::Number(number) if number.is_finite() => Ok(XLOPER12::number(number)),
-        ExcelCellOutput::Number(_) => {
-            Err(XllError::input("<return>", crate::InputError::NonFinite))
-        }
+        ExcelCellOutput::Number(_) => Err(XllError::input(
+            "<return>",
+            crate::error::InputError::NonFinite,
+        )),
         ExcelCellOutput::Boolean(boolean) => Ok(XLOPER12::boolean(boolean)),
         ExcelCellOutput::Error(error) => Ok(XLOPER12::error(error.code())),
         ExcelCellOutput::String(text) => {
@@ -433,18 +433,18 @@ fn encode_scalar(
             let string_bytes = utf16_length
                 .checked_add(1)
                 .ok_or(XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
+                    code: crate::error::DomainErrorCode::Overflow,
                 })?
                 .checked_mul(std::mem::size_of::<u16>())
                 .ok_or(XllError::Domain {
-                    code: crate::DomainErrorCode::Overflow,
+                    code: crate::error::DomainErrorCode::Overflow,
                 })?;
             let additional = string_bytes;
             *allocation_bytes =
                 allocation_bytes
                     .checked_add(additional)
                     .ok_or(XllError::Domain {
-                        code: crate::DomainErrorCode::Overflow,
+                        code: crate::error::DomainErrorCode::Overflow,
                     })?;
             enforce_return_limit(*allocation_bytes)?;
             let storage = storage.get_or_insert_with(ReturnStorage::new);
@@ -466,7 +466,7 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
     if bytes > MAX_RETURN_BYTES {
         Err(XllError::input(
             "<return>",
-            crate::InputError::TooLarge {
+            crate::error::InputError::TooLarge {
                 limit: MAX_RETURN_BYTES,
                 actual: bytes,
             },
@@ -998,7 +998,8 @@ pub(crate) fn live_return_blocks() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Addin, ExcelError, Matrix, OpenContext};
+    use crate::value::Matrix;
+    use crate::{Addin, ExcelError, OpenContext};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
@@ -1278,7 +1279,7 @@ mod tests {
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
         let error_pointer = ffi_boundary(runtime, || {
-            Err::<f64, _>(XllError::input("x", crate::InputError::NonFinite))
+            Err::<f64, _>(XllError::input("x", crate::error::InputError::NonFinite))
         });
         // SAFETY: pointer is a live encoded error.
         assert_eq!(unsafe { (*error_pointer).base_type() }, XLTYPE_ERR);
@@ -1447,7 +1448,7 @@ mod tests {
 
             fn open(
                 _: &OpenContext,
-            ) -> Result<crate::Opened<Self::State, Self::Layers>, Self::Error> {
+            ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
                 unreachable!()
             }
         }
@@ -1462,7 +1463,10 @@ mod tests {
         drop(open_attempt);
 
         let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_| {
-            Err::<f64, _>(XllError::input("value", crate::InputError::NonFinite))
+            Err::<f64, _>(XllError::input(
+                "value",
+                crate::error::InputError::NonFinite,
+            ))
         });
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(pointer) };
@@ -1503,9 +1507,10 @@ mod tests {
     #[test]
     fn scalar_returns_do_not_evaluate_input_fingerprints() {
         let runtime: Runtime<()> = Runtime::new();
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut context = ReturnContext::for_call(&runtime, "scalar", None, scope);
-            let value = <f64 as crate::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
+            let value =
+                <f64 as crate::value::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
             assert!(matches!(
                 value,
                 ExcelOutput::Scalar(ExcelCellOutput::Number(number)) if number == 4.5

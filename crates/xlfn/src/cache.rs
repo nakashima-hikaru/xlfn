@@ -1,4 +1,5 @@
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 use moka::sync::Cache;
 use parking_lot::RwLock;
 use std::any::{Any, TypeId};
@@ -65,7 +66,7 @@ impl ActiveCacheGuard {
         ACTIVE_CACHE_INITIALIZATION_DEPTH.with(|depth| {
             if depth.get() != 0 {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::CACHE_REENTRANT,
+                    diagnostic_id: crate::error::DiagnosticId::CACHE_REENTRANT,
                 });
             }
             depth.set(1);
@@ -262,7 +263,7 @@ impl CacheRegistry {
         Arc::clone(&entry.cache)
             .downcast::<StoredCache<Marker, K, V>>()
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::CACHE_TYPE,
+                diagnostic_id: crate::error::DiagnosticId::CACHE_TYPE,
             })
     }
 

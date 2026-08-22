@@ -1,9 +1,13 @@
 //! Transaction ownership for one logical open attempt.
 
 use super::{open_addin_inner, report_boundary_error, rollback_active_open};
+use crate::addin::{Addin, BuildInfo};
+use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
+use crate::registration::RegistrationDescriptor;
 use crate::runtime::OpenAttemptGuard;
-use crate::{Addin, AddinId, BuildInfo, RegistrationDescriptor, Runtime, XllError, XllResult};
+use crate::runtime::Runtime;
+use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, including the callback session that can
 /// undo host mutations made by that attempt. The caller must explicitly call
@@ -31,7 +35,10 @@ impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    pub(super) fn finish(&mut self, registrations: Vec<crate::RegistrationId>) -> XllResult<()> {
+    pub(super) fn finish(
+        &mut self,
+        registrations: Vec<crate::registration::RegistrationId>,
+    ) -> XllResult<()> {
         self.runtime.finish_open(
             self.attempt
                 .as_mut()
@@ -74,7 +81,7 @@ where
     let removal_epoch = runtime.removal_epoch();
     let mut transaction = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending {
+        if runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending {
             let mut callbacks = HostCallbackSession::new();
             let outcome = super::rollback_open::<A>(
                 runtime,
@@ -83,7 +90,7 @@ where
             );
             if !outcome.unload_safe() {
                 let error = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_PENDING,
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PENDING,
                 };
                 report_boundary_error("xlAutoOpen pending rollback", &error);
                 super::quarantine_runtime(runtime);

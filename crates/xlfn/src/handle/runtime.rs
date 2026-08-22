@@ -1,8 +1,24 @@
-use super::*;
+#[cfg(target_os = "windows")]
+use super::RtdOperationGuard;
+use super::{
+    ErasedObject, ExcelHandleObject, FormulaBinding, Handle, HandlePrepareState,
+    HandleRefinementHooks, HandleRegistry, HandleToken, HandleTopicKey, Initialization, ObjectId,
+    ObjectLocator, PendingHandleValue, PrepareDecision, PublishedTopic, PublishedTopicState,
+    TokenWire, TopicRemoval, TopicTable,
+};
+#[cfg(any(target_os = "windows", test))]
+use super::{HandleConnection, HandleTopicOwner};
 use crate::generation::RuntimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use crate::generation::ServerGeneration;
+use crate::generation::TopicGeneration;
+use crate::shutdown::HandleRegistrySealed;
+use crate::{XllError, XllResult};
+use parking_lot::{Condvar, Mutex};
+use std::cell::Cell;
 use std::cell::OnceCell;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub(crate) enum PreparedHandleObject {
     New {
@@ -643,7 +659,7 @@ impl HandleRuntime {
 
     pub fn lookup<'call, T>(
         &self,
-        scope: &'call crate::CallScope<'call>,
+        scope: &'call crate::value::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where
@@ -858,7 +874,7 @@ impl HandleRuntimeSlot {
     ) -> XllResult<HandleRuntimeSealed> {
         self.service.seal(
             generation,
-            crate::DiagnosticId::HANDLE_SLOT,
+            crate::error::DiagnosticId::HANDLE_SLOT,
             || HandleRuntimeSealed::empty(generation),
             |handles| {
                 let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));

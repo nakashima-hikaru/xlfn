@@ -1,33 +1,12 @@
 #![allow(unsafe_code, reason = "Low-level FFI interaction for async UDF tasks")]
+#![cfg_attr(
+    test,
+    allow(
+        unused_imports,
+        reason = "Test-only protocol fixtures are shared with the child test module"
+    )
+)]
 #![cfg(feature = "async")]
-
-use crate::cancellation::CancellationSource;
-use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
-use crate::return_value::AsyncReturnPointer;
-use crate::{
-    CancellationGuarantee, CancellationToken, ExcelReturn, ReturnContext, Runtime, XllError,
-    XllResult,
-};
-use arc_swap::{ArcSwapAny, ArcSwapOption};
-use async_channel::{Receiver, Sender};
-use async_task::Runnable;
-use futures_util::FutureExt;
-use futures_util::future::{AbortHandle, Abortable};
-use parking_lot::{Condvar, Mutex};
-use rustc_hash::FxHashMap;
-use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::thread::{self, JoinHandle};
-#[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant;
-use xlfn_sys::{
-    XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL,
-};
 
 mod boundary;
 mod excel_handle;
@@ -37,13 +16,75 @@ mod manager;
 mod task;
 mod worker;
 
-pub use boundary::*;
-pub(crate) use excel_handle::*;
-pub(crate) use executor::*;
-pub(crate) use generation::*;
-pub(crate) use manager::*;
-pub(crate) use task::*;
-pub(crate) use worker::*;
+pub use boundary::{async_udf_boundary_named, cancel_async_calculation, end_async_calculation};
+pub(crate) use manager::{AsyncManager, AsyncStopped};
+
+// Test modules exercise the protocol pieces directly. Keep these imports
+// scoped to tests so the production module has no ambient prelude.
+#[cfg(test)]
+use crate::cancellation::CancellationSource;
+#[cfg(test)]
+use crate::cancellation::{CancellationGuarantee, CancellationToken};
+#[cfg(test)]
+use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
+#[cfg(test)]
+use crate::return_value::{AsyncReturnPointer, ReturnContext};
+#[cfg(test)]
+use crate::runtime::Runtime;
+#[cfg(test)]
+use crate::value::ExcelReturn;
+#[cfg(test)]
+use crate::{XllError, XllResult};
+#[cfg(test)]
+use arc_swap::{ArcSwapAny, ArcSwapOption};
+#[cfg(test)]
+use async_channel::{Receiver, Sender};
+#[cfg(test)]
+use async_task::Runnable;
+#[cfg(test)]
+pub(crate) use boundary::AFTER_ASYNC_EVALUATION_HOOK;
+#[cfg(test)]
+pub(crate) use excel_handle::{AsyncCompletionTracker, OwnedAsyncHandle};
+#[cfg(test)]
+pub(crate) use executor::{Executor, ExecutorShared};
+#[cfg(test)]
+use futures_util::FutureExt;
+#[cfg(test)]
+use futures_util::future::{AbortHandle, Abortable};
+#[cfg(test)]
+pub(crate) use generation::{
+    AdmissionPermit, ControlPhase, ExecutorControl, GenerationAdmission, GenerationState,
+    TaskShard, task_shard,
+};
+#[cfg(test)]
+pub(crate) use manager::{ExecutorState, MAX_ASYNC_HANDLE_BYTES, MAX_PENDING};
+#[cfg(test)]
+use parking_lot::{Condvar, Mutex};
+#[cfg(test)]
+use rustc_hash::FxHashMap;
+#[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
+use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(test)]
+use std::ptr::NonNull;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::thread::{self, JoinHandle};
+#[cfg(test)]
+pub(crate) use task::{ActiveReservation, CompletionGuard, SpawnRejection, TaskControl};
+#[cfg(test)]
+pub(crate) use worker::{
+    WorkerExitGuard, cancel_source_no_unwind, cancel_tasks, cancelled_calculation_error,
+    release_active, run_executor,
+};
+#[cfg(test)]
+use xlfn_sys::{
+    XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL,
+};
 
 #[cfg(test)]
 mod tests;

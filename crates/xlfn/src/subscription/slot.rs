@@ -87,7 +87,7 @@ impl SubscriptionRuntimeSlot {
     ) -> crate::XllResult<SubscriptionsStopped> {
         self.service.seal(
             generation,
-            crate::DiagnosticId::RTD_SLOTS,
+            crate::error::DiagnosticId::RTD_SLOTS,
             SubscriptionsStopped::new,
             |runtime| {
                 crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))

@@ -1,4 +1,17 @@
-use super::*;
+use super::excel_handle::{AsyncCompletionTracker, OwnedAsyncHandle};
+use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
+use crate::error::InputError;
+use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
+use crate::return_value::{AsyncReturnPointer, ExcelCallbackStatus, ReturnContext};
+use crate::runtime::Runtime;
+use crate::value::ExcelReturn;
+use crate::{XllError, XllResult};
+use futures_util::{Future, FutureExt};
+use parking_lot::Mutex;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
+use std::sync::Arc;
+use xlfn_sys::{XLOPER12, XLTYPE_BOOL};
 
 /// Runs the synchronous launch portion of a native Excel async UDF.
 ///
@@ -196,10 +209,7 @@ pub(crate) unsafe fn return_error(udf_id: &'static str, handle: *mut XLOPER12, e
     let Some(handle) = NonNull::new(handle) else {
         crate::diagnostics::report_no_unwind(
             udf_id,
-            &XllError::input(
-                "async_handle",
-                crate::InputError::Malformed("null async handle"),
-            ),
+            &XllError::input("async_handle", InputError::Malformed("null async handle")),
         );
         return;
     };
@@ -229,18 +239,18 @@ pub(crate) unsafe fn async_return(
     // xlFree cleanup path.
     let (raw_status, callback_result, invoked) =
         unsafe { xlfn_sys::excel12_async_return(handle, result) };
-    let status = crate::ExcelCallbackStatus::from_raw(raw_status);
+    let status = ExcelCallbackStatus::from_raw(raw_status);
     callback_gate.observe(status);
     drop(callback_gate);
     let accepted = invoked
-        && status == crate::ExcelCallbackStatus::Success
+        && status == ExcelCallbackStatus::Success
         && callback_result.base_type() == XLTYPE_BOOL
         // SAFETY: XLTYPE_BOOL selects the boolean union field.
         && unsafe { callback_result.value.boolean != 0 };
     if !accepted {
         let error = XllError::ExcelApi {
             function: "xlAsyncReturn",
-            code: if !invoked || status == crate::ExcelCallbackStatus::Success {
+            code: if !invoked || status == ExcelCallbackStatus::Success {
                 -1
             } else {
                 status.raw_code()

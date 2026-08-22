@@ -1,10 +1,16 @@
 use super::reclamation::{EpochDomain, ObjectReadGuard, PublishedObjectPtr, RetiredStore};
-use super::*;
+use super::{ExcelHandleObject, Handle, HandleId, HandleToken, ObjectId, TokenCodec};
+use crate::error::DomainErrorCode;
+use crate::generation::{BindingGeneration, ObjectGeneration};
+use crate::{XllError, XllResult};
 use arc_swap::ArcSwapAny;
-use parking_lot::RwLockWriteGuard;
-use std::any::Any;
+use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
+use std::any::{Any, TypeId, type_name};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -409,7 +415,7 @@ impl ObjectRegistry {
         let index = self.free.last().copied().unwrap_or(self.slots.len());
 
         let slot = u32::try_from(index).map_err(|_| XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_SLOT,
         })?;
         if self.free.pop().is_none() {
             self.slots.push(ObjectSlot {
@@ -751,7 +757,7 @@ impl ObjectStore {
     fn finish_quiescence(&self) -> XllResult<()> {
         if self.active_pins.load(Ordering::Acquire) != 0 {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_PINS,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_PINS,
             });
         }
         self.reclaim();
@@ -889,7 +895,7 @@ impl BindingTable {
                     Err(_) => {
                         state.free.push(index);
                         return Err(XllError::Internal {
-                            diagnostic_id: crate::DiagnosticId::HANDLE_SLOT,
+                            diagnostic_id: crate::error::DiagnosticId::HANDLE_SLOT,
                         });
                     }
                 };
@@ -1218,13 +1224,13 @@ impl HandleRegistry {
         let mut entropy = [0_u8; 40];
         if let Err(source) = fill(&mut entropy) {
             let error = XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_ENTROPY,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_ENTROPY,
             };
             if report_failure {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     tracing::error!(
                         error = ?source,
-                        diagnostic_id = crate::DiagnosticId::HANDLE_ENTROPY.as_u64(),
+                        diagnostic_id = crate::error::DiagnosticId::HANDLE_ENTROPY.as_u64(),
                         "OS CSPRNG failed while initializing Excel handle tokens"
                     );
                 }));
@@ -1523,7 +1529,7 @@ impl HandleRegistry {
 
     pub(crate) fn lookup_handle<'call, T>(
         &self,
-        scope: &'call crate::CallScope<'call>,
+        scope: &'call crate::value::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where

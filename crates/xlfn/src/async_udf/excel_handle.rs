@@ -1,4 +1,10 @@
-use super::*;
+use super::boundary::return_error;
+use super::manager::MAX_ASYNC_HANDLE_BYTES;
+use crate::error::InputError;
+use crate::execution::{CallId, CallMetadata, CallOutcome};
+use crate::{XllError, XllResult};
+use std::ptr::NonNull;
+use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
 
 pub(crate) struct OwnedAsyncHandle {
     pub(crate) udf_id: &'static str,
@@ -16,15 +22,12 @@ impl OwnedAsyncHandle {
     pub(crate) unsafe fn from_raw(udf_id: &'static str, raw: *mut XLOPER12) -> XllResult<Self> {
         // SAFETY: the caller guarantees a live Excel async-handle argument.
         let value = unsafe { raw.as_ref() }.ok_or_else(|| {
-            XllError::input(
-                "async_handle",
-                crate::InputError::Malformed("null async handle"),
-            )
+            XllError::input("async_handle", InputError::Malformed("null async handle"))
         })?;
         if value.base_type() != XLTYPE_BIG_DATA {
             return Err(XllError::input(
                 "async_handle",
-                crate::InputError::Malformed("expected xltypeBigData"),
+                InputError::Malformed("expected xltypeBigData"),
             ));
         }
         // SAFETY: XLTYPE_BIG_DATA selects the big_data union field.
@@ -32,13 +35,13 @@ impl OwnedAsyncHandle {
         let byte_count = usize::try_from(big_data.byte_count).map_err(|_| {
             XllError::input(
                 "async_handle",
-                crate::InputError::Malformed("negative async handle size"),
+                InputError::Malformed("negative async handle size"),
             )
         })?;
         if byte_count > MAX_ASYNC_HANDLE_BYTES {
             return Err(XllError::input(
                 "async_handle",
-                crate::InputError::Malformed("async handle is too large"),
+                InputError::Malformed("async handle is too large"),
             ));
         }
         let mut bytes = if byte_count == 0 {
@@ -49,7 +52,7 @@ impl OwnedAsyncHandle {
             if data.is_null() {
                 return Err(XllError::input(
                     "async_handle",
-                    crate::InputError::Malformed("null async handle data"),
+                    InputError::Malformed("null async handle data"),
                 ));
             }
             // SAFETY: Excel promises byte_count readable bytes for this call.

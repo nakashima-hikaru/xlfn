@@ -1,5 +1,10 @@
-use super::*;
+use super::delivery::ErasedSink;
+use super::topic::RtdTopic;
+use super::value::IntoRtdValue;
 use crate::generation::RuntimeGeneration;
+use crate::{XllError, XllResult};
+use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -131,7 +136,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(source, allocator.generation, sequence))
     }
@@ -153,7 +158,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(Arc::new(source), generation, sequence))
     }
@@ -168,7 +173,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(source, generation, sequence))
     }

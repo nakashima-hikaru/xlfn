@@ -1,4 +1,21 @@
-use super::*;
+use super::generation::{ControlPhase, ExecutorControl, GenerationState, task_shard};
+use super::task::{ActiveReservation, SpawnRejection, TaskControl};
+use super::worker::{WorkerExitGuard, cancelled_calculation_error, run_executor};
+use crate::addin::AsyncWorkerCount;
+use crate::cancellation::CancellationSource;
+use crate::error::{DiagnosticId, DomainErrorCode};
+use crate::shutdown::CleanupIssueKind;
+use crate::{XllError, XllResult};
+use arc_swap::ArcSwapAny;
+use async_channel::{Receiver, Sender};
+use async_task::Runnable;
+use futures_util::future::{AbortHandle, Abortable};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
+#[cfg(test)]
+use std::time::{Duration, Instant};
 
 pub(crate) struct Executor {
     pub(crate) shared: Arc<ExecutorShared>,
@@ -74,9 +91,9 @@ impl Executor {
         generation: u64,
         fail_at: Option<usize>,
     ) -> XllResult<Self> {
-        if !(1..=crate::AsyncWorkerCount::MAX).contains(&worker_count) {
+        if !(1..=AsyncWorkerCount::MAX).contains(&worker_count) {
             return Err(XllError::Domain {
-                code: crate::DomainErrorCode::InvalidInput,
+                code: DomainErrorCode::InvalidInput,
             });
         }
         let (sender, receiver) = async_channel::unbounded::<Runnable>();
@@ -117,7 +134,7 @@ impl Executor {
         for index in 0..worker_count {
             if fail_at == Some(index) {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::ASYNC_SPAWN,
+                    diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                 });
             }
             let receiver = receiver.clone();
@@ -136,7 +153,7 @@ impl Executor {
                 Err(_) => {
                     shared.live_workers.fetch_sub(1, Ordering::AcqRel);
                     return Err(XllError::Internal {
-                        diagnostic_id: crate::DiagnosticId::ASYNC_SPAWN,
+                        diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                     });
                 }
             };
@@ -202,7 +219,7 @@ impl Executor {
             if worker.join().is_err() {
                 issues.push(crate::shutdown::CleanupIssue {
                     component: "async worker",
-                    kind: crate::CleanupIssueKind::WorkerPanickedAfterJoin,
+                    kind: CleanupIssueKind::WorkerPanickedAfterJoin,
                     error: XllError::Panic,
                 });
             }

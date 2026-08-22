@@ -1,6 +1,9 @@
 use super::source::SourceHandleId;
-use super::*;
+use super::topic::{SubscriptionIdentity, SubscriptionKey};
+use crate::{XllError, XllResult};
 use rustc_hash::FxHashSet;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ResolvedSourceIdentity {
@@ -68,7 +71,7 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
             current.checked_add(1)
         })
         .map_err(|_| XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::RTD_RT_ID_OVERFLOW,
+            diagnostic_id: crate::error::DiagnosticId::RTD_RT_ID_OVERFLOW,
         })
 }
 
@@ -90,7 +93,7 @@ impl SubscriptionIdentityIndex {
     ) -> XllResult<()> {
         if self.key_by_identity.contains_key(&identity) || self.identity_by_key.contains_key(&key) {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_INDEX_DUPLICATE,
+                diagnostic_id: crate::error::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
         }
 

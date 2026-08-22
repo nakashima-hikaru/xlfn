@@ -1,6 +1,7 @@
 //! Excel serial-date policy and semantic values.
 
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExcelDateSystem {

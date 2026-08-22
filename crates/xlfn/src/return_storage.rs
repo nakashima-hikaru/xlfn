@@ -1,6 +1,7 @@
 use std::panic::AssertUnwindSafe;
 
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 
 /// Allocation storage shared by one encoded Excel return value.
 ///

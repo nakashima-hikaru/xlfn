@@ -1,4 +1,5 @@
-use crate::{IntoXllError, XllError};
+use crate::XllError;
+use crate::error::IntoXllError;
 
 #[cfg(feature = "async")]
 pub(crate) use crate::async_udf::AsyncStopped;

@@ -1,7 +1,8 @@
-use crate::{
-    ExcelCallbackValue, FromExcel, InputError, XllError, XllResult,
-    host_callback::HostCallbackSession, return_value::ExcelCallbackStatus,
-};
+use crate::callback_value::ExcelCallbackValue;
+use crate::error::InputError;
+use crate::value::FromExcel;
+use crate::{XllError, XllResult};
+use crate::{host_callback::HostCallbackSession, return_value::ExcelCallbackStatus};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -2077,7 +2078,7 @@ mod tests {
             &mut callbacks,
             registration,
             XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::from_u64(1),
+                diagnostic_id: crate::error::DiagnosticId::from_u64(1),
             },
             |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());

@@ -8,14 +8,14 @@
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
 #[cfg(feature = "async")]
-use crate::CancellationGuarantee;
-#[cfg(feature = "async")]
 use crate::XllError;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
+use crate::cancellation::CancellationGuarantee;
+#[cfg(feature = "async")]
 use crate::cancellation::CancellationSource;
-use crate::{ExcelParameter, Matrix};
+use crate::value::{ExcelParameter, Matrix};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -158,7 +158,7 @@ fn install_benchmark_subscriber() -> tracing::dispatcher::DefaultGuard {
 }
 
 pub struct SyncBoundaryWorkerPool {
-    _runtime: &'static crate::Runtime<()>,
+    _runtime: &'static crate::runtime::Runtime<()>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -172,7 +172,8 @@ impl SyncBoundaryWorkerPool {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
         }
-        let runtime: &'static crate::Runtime<()> = Box::leak(Box::new(crate::Runtime::<()>::new()));
+        let runtime: &'static crate::runtime::Runtime<()> =
+            Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
         let removal_epoch = runtime.removal_epoch();
         let mut open_attempt = runtime
             .begin_open_if_epoch(removal_epoch)
@@ -520,23 +521,23 @@ const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
 
 #[doc(hidden)]
 pub trait BenchmarkInputIdentity {
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder);
+    fn encode_identity(&self, encoder: &mut crate::input_identity::InputIdentityEncoder);
 }
 
 impl BenchmarkInputIdentity for f64 {
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+    fn encode_identity(&self, encoder: &mut crate::input_identity::InputIdentityEncoder) {
         encoder.f64(*self);
     }
 }
 
 impl BenchmarkInputIdentity for String {
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+    fn encode_identity(&self, encoder: &mut crate::input_identity::InputIdentityEncoder) {
         encoder.string(self);
     }
 }
 
 impl<T: BenchmarkInputIdentity> BenchmarkInputIdentity for Matrix<T> {
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+    fn encode_identity(&self, encoder: &mut crate::input_identity::InputIdentityEncoder) {
         encoder.u64(self.rows() as u64);
         encoder.u64(self.columns() as u64);
         for value in self.as_slice() {
@@ -889,7 +890,7 @@ impl HandleLookupBenchmark {
                     let token_index = worker.min(worker_tokens.len() - 1);
                     let token = worker_tokens[token_index].as_ref();
                     for _ in 0..iterations_per_worker {
-                        let result = crate::with_excel_call_scope(|scope| {
+                        let result = crate::value::with_excel_call_scope(|scope| {
                             worker_runtime
                                 .lookup::<BenchHandleObject>(scope, token)
                                 .map(|handle| {
@@ -1063,10 +1064,10 @@ impl Drop for HandleDistinctKeyBenchmark {
     }
 }
 
-fn get_benchmark_runtime() -> &'static crate::Runtime<()> {
-    static RUNTIME: std::sync::OnceLock<crate::Runtime<()>> = std::sync::OnceLock::new();
+fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
+    static RUNTIME: std::sync::OnceLock<crate::runtime::Runtime<()>> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
-        let runtime = crate::Runtime::new();
+        let runtime = crate::runtime::Runtime::new();
         runtime.arm_test_generation();
         runtime
     })
@@ -1075,7 +1076,7 @@ fn get_benchmark_runtime() -> &'static crate::Runtime<()> {
 /// Benchmark harness for measuring raw Excel argument ingress conversion costs
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
-    runtime: &'static crate::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<()>,
     _handle_runtime: Option<Arc<HandleRuntime>>,
     raw: xlfn_sys::XLOPER12,
     _storage: Option<Box<dyn std::any::Any>>,
@@ -1174,7 +1175,7 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call>,
     {
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut arguments =
                 crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
@@ -1195,9 +1196,9 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call>,
     {
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut arguments = crate::value::ArgumentContext::for_return::<
-                crate::HandleAlias<'static, BenchHandleObject>,
+                crate::handle::HandleAlias<'static, BenchHandleObject>,
                 _,
             >(self.runtime, scope);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
@@ -1220,12 +1221,12 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut arguments =
                 crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<crate::Handle<'_, T>>(
+                crate::value::argument_from_raw_with_arguments::<crate::handle::Handle<'_, T>>(
                     &mut arguments,
                     "arg",
                     &mut self.raw,
@@ -1241,14 +1242,14 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut arguments = crate::value::ArgumentContext::for_return::<
-                crate::HandleAlias<'static, BenchHandleObject>,
+                crate::handle::HandleAlias<'static, BenchHandleObject>,
                 _,
             >(self.runtime, scope);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<crate::Handle<'_, T>>(
+                crate::value::argument_from_raw_with_arguments::<crate::handle::Handle<'_, T>>(
                     &mut arguments,
                     "arg",
                     &mut self.raw,
@@ -1264,7 +1265,7 @@ impl RawArgumentIngressBenchmark {
 }
 
 pub struct MultiHandleCallBenchmark {
-    runtime: &'static crate::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<()>,
     _handle_runtime: Arc<HandleRuntime>,
     raw_tokens: Vec<xlfn_sys::XLOPER12>,
     _storage: Vec<Vec<u16>>,
@@ -1309,11 +1310,11 @@ impl MultiHandleCallBenchmark {
     }
 
     pub fn run(&mut self) {
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let mut frame = crate::__private::CallFrame::new::<f64, _>(self.runtime, scope);
             for raw in &mut self.raw_tokens {
                 // SAFETY: raw points to valid benchmark storage.
-                let handle: crate::Handle<'_, BenchHandleObject> = unsafe {
+                let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {
                     frame
                         .convert_argument("arg", raw)
                         .expect("benchmark argument conversion must succeed")
@@ -1394,9 +1395,9 @@ impl Drop for ConcurrentHandleResolutionBenchmark {
 
 struct BenchmarkSubscription;
 
-impl crate::RtdSubscription for BenchmarkSubscription {
-    fn cancellation(&self) -> Arc<dyn crate::RtdCancellation> {
-        Arc::new(crate::RtdCancellationHandle::noop())
+impl crate::subscription::RtdSubscription for BenchmarkSubscription {
+    fn cancellation(&self) -> Arc<dyn crate::subscription::RtdCancellation> {
+        Arc::new(crate::subscription::RtdCancellationHandle::noop())
     }
     fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
         Ok(())
@@ -1404,19 +1405,19 @@ impl crate::RtdSubscription for BenchmarkSubscription {
 }
 
 struct BenchmarkRtdSource<T> {
-    sink: Arc<parking_lot::Mutex<Option<crate::RtdSink<T>>>>,
+    sink: Arc<parking_lot::Mutex<Option<crate::subscription::RtdSink<T>>>>,
 }
 
-impl<T: crate::IntoRtdValue + Clone + Send + Sync + 'static> crate::RtdSource
-    for BenchmarkRtdSource<T>
+impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
+    crate::subscription::RtdSource for BenchmarkRtdSource<T>
 {
     type Value = T;
     type Subscription = BenchmarkSubscription;
 
     fn subscribe(
         &self,
-        _topic: &crate::RtdTopic,
-        sink: crate::RtdSink<Self::Value>,
+        _topic: &crate::subscription::RtdTopic,
+        sink: crate::subscription::RtdSink<Self::Value>,
     ) -> crate::XllResult<Self::Subscription> {
         *self.sink.lock() = Some(sink);
         Ok(BenchmarkSubscription)
@@ -1426,7 +1427,7 @@ impl<T: crate::IntoRtdValue + Clone + Send + Sync + 'static> crate::RtdSource
 pub struct RtdPublishNumberBenchmark {
     _runtime: Arc<crate::subscription::SubscriptionRuntime>,
     server: crate::subscription::RtdServerHandle,
-    sink: crate::RtdSink<f64>,
+    sink: crate::subscription::RtdSink<f64>,
 }
 
 impl Default for RtdPublishNumberBenchmark {
@@ -1445,15 +1446,15 @@ impl RtdPublishNumberBenchmark {
             )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::RtdSourceHandle::for_internal(
+        let source = crate::subscription::RtdSourceHandle::for_internal(
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
             BenchmarkRtdSource {
                 sink: Arc::clone(&sink_slot),
             },
         )
         .expect("benchmark source handle allocation must succeed");
-        let topic =
-            crate::RtdTopic::new(["BENCH", "NUMBER"]).expect("benchmark RTD topic must be valid");
+        let topic = crate::subscription::RtdTopic::new(["BENCH", "NUMBER"])
+            .expect("benchmark RTD topic must be valid");
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");
@@ -1500,7 +1501,7 @@ impl RtdPublishNumberBenchmark {
 pub struct RtdPublishStringBenchmark {
     _runtime: Arc<crate::subscription::SubscriptionRuntime>,
     server: crate::subscription::RtdServerHandle,
-    sink: crate::RtdSink<String>,
+    sink: crate::subscription::RtdSink<String>,
 }
 
 impl Default for RtdPublishStringBenchmark {
@@ -1519,15 +1520,15 @@ impl RtdPublishStringBenchmark {
             )
             .expect("server registration must succeed");
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::RtdSourceHandle::for_internal(
+        let source = crate::subscription::RtdSourceHandle::for_internal(
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
             BenchmarkRtdSource {
                 sink: Arc::clone(&sink_slot),
             },
         )
         .expect("benchmark source handle allocation must succeed");
-        let topic =
-            crate::RtdTopic::new(["BENCH", "STRING"]).expect("benchmark RTD topic must be valid");
+        let topic = crate::subscription::RtdTopic::new(["BENCH", "STRING"])
+            .expect("benchmark RTD topic must be valid");
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");

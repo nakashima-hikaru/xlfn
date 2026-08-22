@@ -1,4 +1,6 @@
-use super::*;
+use crate::{XllError, XllResult};
+use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) struct OperationGate {
     pub(crate) state: AtomicUsize,

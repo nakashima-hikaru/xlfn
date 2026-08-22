@@ -1,4 +1,5 @@
-use crate::{DiagnosticId, IntoXllError, XllError, XllResult};
+use crate::error::{DiagnosticId, IntoXllError};
+use crate::{XllError, XllResult};
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 #[cfg(test)]
@@ -397,7 +398,7 @@ impl DiagnosticRouter {
             || !self.retiring_workers.lock().is_empty()
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::DIAGNOSTICS_RESET,
+                diagnostic_id: crate::error::DiagnosticId::DIAGNOSTICS_RESET,
             });
         }
         *phase = DiagnosticPhase::Open;
@@ -523,10 +524,10 @@ pub(crate) fn record_ghost_diagnostics_stopped(
             ghost
                 .fail_stop(crate::shutdown_refinement::GhostFailure::DiagnosticsShutdownFailed)
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::DIAGNOSTICS_FAILURE,
+                    diagnostic_id: crate::error::DiagnosticId::DIAGNOSTICS_FAILURE,
                 })?;
             Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::DIAGNOSTICS_PENDING,
+                diagnostic_id: crate::error::DiagnosticId::DIAGNOSTICS_PENDING,
             })
         } else {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::StopDiagnostics);

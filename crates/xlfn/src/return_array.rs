@@ -1,6 +1,7 @@
+use crate::error::{DomainErrorCode, InputError};
 use crate::return_storage::ReturnStorage;
 use crate::value::{ExcelCellOutput, IntoExcel, MAX_ARRAY_BYTES, validate_matrix_dimensions};
-use crate::{DomainErrorCode, InputError, XllError, XllResult};
+use crate::{XllError, XllResult};
 use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 /// An Excel array whose cells are already encoded in their final ABI form.
@@ -188,14 +189,17 @@ impl XlArrayBuilder {
     }
 }
 
-impl crate::ExcelReturn for XlArrayOutput {
-    fn into_excel(self, _: &mut crate::ReturnContext<'_, '_>) -> XllResult<crate::ExcelOutput> {
-        Ok(crate::ExcelOutput::Array(self))
+impl crate::value::ExcelReturn for XlArrayOutput {
+    fn into_excel(
+        self,
+        _: &mut crate::return_value::ReturnContext<'_, '_>,
+    ) -> XllResult<crate::value::ExcelOutput> {
+        Ok(crate::value::ExcelOutput::Array(self))
     }
 }
 
-impl crate::MainThreadReturn for XlArrayOutput {}
-impl crate::ThreadSafeReturn for XlArrayOutput {}
-impl crate::MacroSheetReturn for XlArrayOutput {}
-impl crate::AsyncReturn for XlArrayOutput {}
-impl crate::VolatileReturn for XlArrayOutput {}
+impl crate::value::MainThreadReturn for XlArrayOutput {}
+impl crate::value::ThreadSafeReturn for XlArrayOutput {}
+impl crate::value::MacroSheetReturn for XlArrayOutput {}
+impl crate::value::AsyncReturn for XlArrayOutput {}
+impl crate::value::VolatileReturn for XlArrayOutput {}

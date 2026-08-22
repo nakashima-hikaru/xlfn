@@ -1,4 +1,6 @@
-use super::*;
+use super::{BorrowedObject, LiveObjectRef, ObjectLocator, PinnedObject};
+use crate::XllResult;
+use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
@@ -9,7 +11,7 @@ use std::ops::Deref;
 /// handle token identifies that object for the token's entire lifetime.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
 
-type HandleAliasMarker<'call, T> = (&'call crate::CallScope<'call>, fn() -> T);
+type HandleAliasMarker<'call, T> = (&'call crate::value::CallScope<'call>, fn() -> T);
 
 /// A call-scoped read capability for an object owned by a formula handle.
 ///
@@ -19,7 +21,7 @@ type HandleAliasMarker<'call, T> = (&'call crate::CallScope<'call>, fn() -> T);
 pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) object: LiveObjectRef,
     pub(crate) value: BorrowedObject<'call, T>,
-    pub(crate) _call: PhantomData<&'call crate::CallScope<'call>>,
+    pub(crate) _call: PhantomData<&'call crate::value::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
@@ -106,22 +108,25 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
     }
 }
 
-impl<'call, T: ExcelHandleObject> crate::ExcelReturn for HandleAlias<'call, T> {
+impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'call, T> {
     const USES_FORMULA_REVISION: bool = true;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<crate::ExcelOutput> {
-        context
-            .publish_existing_alias(|| Ok(self))
-            .map(|token| crate::ExcelOutput::Scalar(crate::ExcelCellOutput::String(token)))
+    fn into_excel(
+        self,
+        context: &mut ReturnContext<'_, '_>,
+    ) -> XllResult<crate::value::ExcelOutput> {
+        context.publish_existing_alias(|| Ok(self)).map(|token| {
+            crate::value::ExcelOutput::Scalar(crate::value::ExcelCellOutput::String(token))
+        })
     }
 
     fn invoke(
         context: &mut ReturnContext<'_, '_>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<crate::ExcelOutput> {
-        context
-            .publish_existing_alias(operation)
-            .map(|token| crate::ExcelOutput::Scalar(crate::ExcelCellOutput::String(token)))
+    ) -> XllResult<crate::value::ExcelOutput> {
+        context.publish_existing_alias(operation).map(|token| {
+            crate::value::ExcelOutput::Scalar(crate::value::ExcelCellOutput::String(token))
+        })
     }
 }
 

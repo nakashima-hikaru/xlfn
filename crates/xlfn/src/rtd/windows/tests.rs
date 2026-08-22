@@ -1190,8 +1190,8 @@ struct DispatchTestSubscription {
 }
 
 impl RtdSubscription for DispatchTestSubscription {
-    fn cancellation(&self) -> Arc<dyn crate::RtdCancellation> {
-        Arc::new(crate::RtdCancellationHandle::noop())
+    fn cancellation(&self) -> Arc<dyn crate::subscription::RtdCancellation> {
+        Arc::new(crate::subscription::RtdCancellationHandle::noop())
     }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
@@ -1211,7 +1211,7 @@ impl DispatchTestSource {
             .lock()
             .as_ref()
             .ok_or(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_DISPATCH,
+                diagnostic_id: crate::error::DiagnosticId::RTD_DISPATCH,
             })?
             .publish(value)
     }
@@ -1394,7 +1394,9 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
         RtdUpdate::for_test(204, RtdValue::String("stream value".to_owned())),
         RtdUpdate::for_test(
             205,
-            RtdValue::Error(crate::ExcelErrorValue(crate::ExcelError::NotAvailable)),
+            RtdValue::Error(crate::value::ExcelErrorValue(
+                crate::ExcelError::NotAvailable,
+            )),
         ),
         RtdUpdate::for_test(206, RtdValue::Empty),
     ];
@@ -2311,7 +2313,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         sink: Mutex::new(None),
         disconnected: Arc::clone(&disconnected),
     });
-    let source_handle = crate::RtdSourceHandle::for_internal_shared(
+    let source_handle = crate::subscription::RtdSourceHandle::for_internal_shared(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         Arc::clone(&source),
     )

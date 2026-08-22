@@ -1,6 +1,10 @@
 #[cfg(any(target_os = "windows", test))]
-use super::*;
+use super::HandleRuntime;
+#[cfg(any(target_os = "windows", test))]
+use super::HandleTopicKey;
 use super::{HandleId, ObjectId, PublishedTopic};
+#[cfg(any(target_os = "windows", test))]
+use crate::XllResult;
 use crate::generation::ServerGeneration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,11 +1,20 @@
+#[cfg(feature = "async")]
+use crate::cancellation::{CancellationGuarantee, CancellationToken};
+use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
+use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
-use crate::{
-    AddinId, CallScope, CleanupReporter, ExcelCallbackStatus, ExcelReference, ExcelValue,
-    FromExcel, IntoXllError, Matrix, XllError, XllResult,
-};
+use crate::reference::ExcelReference;
+use crate::return_value::ExcelCallbackStatus;
+use crate::runtime::Runtime;
+use crate::shutdown::CleanupReporter;
+use crate::subscription::{RtdLimits, RtdSource, RtdSourceHandle, RtdTopic, RtdValue};
+use crate::value::{CallContext, CallScope, ExcelParameter, ExcelValue, FromExcel, Matrix};
+use crate::{XllError, XllResult};
 use std::marker::PhantomData;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
+#[cfg(feature = "async")]
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use xlfn_sys::{XL_COERCE, XL_SHEET_NM};
@@ -110,9 +119,9 @@ pub struct RtdOpenContext<'a> {
 
 impl RtdOpenContext<'_> {
     /// Registers one source and returns the handle used by subscriptions.
-    pub fn register_source<S>(&self, source: S) -> XllResult<crate::RtdSourceHandle<S>>
+    pub fn register_source<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
     where
-        S: crate::RtdSource,
+        S: RtdSource,
     {
         self.allocator.allocate(source)
     }
@@ -123,9 +132,9 @@ impl RtdOpenContext<'_> {
     pub fn register_shared_source<S>(
         &self,
         source: std::sync::Arc<S>,
-    ) -> XllResult<crate::RtdSourceHandle<S>>
+    ) -> XllResult<RtdSourceHandle<S>>
     where
-        S: crate::RtdSource,
+        S: RtdSource,
     {
         self.allocator.allocate_shared(source)
     }
@@ -139,14 +148,14 @@ pub struct DiagnosticsSetup<'a> {
 
 impl DiagnosticsSetup<'_> {
     /// Installs a basic failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
-    pub fn install_file_sink(&self) -> Result<PathBuf, crate::DiagnosticInitError> {
+    pub fn install_file_sink(&self) -> Result<PathBuf, DiagnosticInitError> {
         crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id)
     }
 
     /// Installs or replaces the process-wide diagnostic sink with a custom implementation.
-    pub fn set_sink<S>(&self, sink: S) -> Result<(), crate::DiagnosticInitError>
+    pub fn set_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
     where
-        S: crate::DiagnosticSink,
+        S: DiagnosticSink,
     {
         crate::diagnostics::set_diagnostic_sink(sink)
     }
@@ -219,6 +228,7 @@ impl Default for HandleConfig {
 pub struct RuntimeConfig {
     rtd: RtdConfig,
     handles: HandleConfig,
+    #[cfg(feature = "async")]
     async_runtime: AsyncRuntimeConfig,
 }
 
@@ -228,12 +238,13 @@ impl RuntimeConfig {
         Self {
             rtd: RtdConfig::new(),
             handles: HandleConfig::new(),
+            #[cfg(feature = "async")]
             async_runtime: AsyncRuntimeConfig::new(),
         }
     }
 
     #[must_use]
-    pub const fn with_rtd_limits(mut self, limits: crate::RtdLimits) -> Self {
+    pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
         self.rtd = self.rtd.with_limits(limits);
         self
     }
@@ -244,13 +255,14 @@ impl RuntimeConfig {
         self
     }
 
+    #[cfg(feature = "async")]
     #[must_use]
     pub const fn with_async_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
         self.async_runtime = self.async_runtime.with_worker_count(worker_count);
         self
     }
 
-    pub(crate) const fn rtd_limits(self) -> crate::RtdLimits {
+    pub(crate) const fn rtd_limits(self) -> RtdLimits {
         self.rtd.limits()
     }
 
@@ -273,24 +285,24 @@ impl Default for RuntimeConfig {
 /// RTD-specific portion of [`RuntimeConfig`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtdConfig {
-    limits: crate::RtdLimits,
+    limits: RtdLimits,
 }
 
 impl RtdConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            limits: crate::RtdLimits::standard(),
+            limits: RtdLimits::standard(),
         }
     }
 
     #[must_use]
-    pub const fn with_limits(mut self, limits: crate::RtdLimits) -> Self {
+    pub const fn with_limits(mut self, limits: RtdLimits) -> Self {
         self.limits = limits;
         self
     }
 
-    pub(crate) const fn limits(self) -> crate::RtdLimits {
+    pub(crate) const fn limits(self) -> RtdLimits {
         self.limits
     }
 }
@@ -302,9 +314,11 @@ impl Default for RtdConfig {
 }
 
 /// Bounded number of asynchronous executor workers.
+#[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AsyncWorkerCount(NonZeroUsize);
 
+#[cfg(feature = "async")]
 impl AsyncWorkerCount {
     pub const MAX: usize = 32;
     pub const DEFAULT: Self = Self(NonZeroUsize::new(4).expect("default worker count is non-zero"));
@@ -326,22 +340,25 @@ impl AsyncWorkerCount {
     }
 }
 
+#[cfg(feature = "async")]
 impl TryFrom<usize> for AsyncWorkerCount {
     type Error = crate::XllError;
 
     fn try_from(worker_count: usize) -> Result<Self, Self::Error> {
         Self::new(worker_count).ok_or(crate::XllError::Domain {
-            code: crate::DomainErrorCode::InvalidInput,
+            code: crate::error::DomainErrorCode::InvalidInput,
         })
     }
 }
 
 /// Async worker portion of [`RuntimeConfig`].
+#[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AsyncRuntimeConfig {
     worker_count: AsyncWorkerCount,
 }
 
+#[cfg(feature = "async")]
 impl AsyncRuntimeConfig {
     #[must_use]
     pub const fn new() -> Self {
@@ -356,12 +373,12 @@ impl AsyncRuntimeConfig {
         self
     }
 
-    #[cfg(feature = "async")]
     pub(crate) const fn worker_count(self) -> usize {
         self.worker_count.get()
     }
 }
 
+#[cfg(feature = "async")]
 impl Default for AsyncRuntimeConfig {
     fn default() -> Self {
         Self::new()
@@ -485,17 +502,14 @@ impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 #[cfg(feature = "async")]
 pub struct AsyncContext<A: Addin> {
     lease: crate::runtime::GenerationLease<A>,
-    cancellation: crate::CancellationToken,
+    cancellation: CancellationToken,
 }
 
 #[cfg(feature = "async")]
 impl<A: Addin> AsyncContext<A> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new(
-        lease: crate::runtime::GenerationLease<A>,
-        cancellation: crate::CancellationToken,
-    ) -> Self {
+    pub fn new(lease: crate::runtime::GenerationLease<A>, cancellation: CancellationToken) -> Self {
         Self {
             lease,
             cancellation,
@@ -508,7 +522,7 @@ impl<A: Addin> AsyncContext<A> {
     }
 
     #[must_use]
-    pub const fn cancellation(&self) -> &crate::CancellationToken {
+    pub const fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
 
@@ -521,7 +535,7 @@ impl<A: Addin> AsyncContext<A> {
     }
 
     #[must_use]
-    pub const fn cancellation_guarantee(&self) -> crate::CancellationGuarantee {
+    pub const fn cancellation_guarantee(&self) -> CancellationGuarantee {
         self.cancellation.guarantee()
     }
 }
@@ -559,7 +573,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// second generation lease and makes the ownership relationship explicit.
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::State,
-    runtime: &'call crate::Runtime<A>,
+    runtime: &'call Runtime<A>,
     callbacks: &'call HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -640,14 +654,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 code: status.raw_code(),
             }));
         }
-        let converted = <ExcelValue as crate::FromExcel>::from_excel(result.borrow()?, "reference");
+        let converted = <ExcelValue as FromExcel>::from_excel(result.borrow()?, "reference");
         result.try_release()?;
         converted
     }
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
-        T: for<'value> crate::ExcelParameter<'value>,
+        T: for<'value> ExcelParameter<'value>,
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
@@ -665,10 +679,10 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 code: status.raw_code(),
             }));
         }
-        let converted = <Matrix<T> as crate::ExcelParameter>::decode(
+        let converted = <Matrix<T> as ExcelParameter>::decode(
             result.borrow()?,
             "reference",
-            &crate::CallContext::without_runtime(),
+            &CallContext::without_runtime(),
             None,
         );
         result.try_release()?;
@@ -703,7 +717,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
     #[must_use]
     pub fn new<'ctx, 'scope>(
         state: &'ctx A::State,
-        runtime: &'ctx crate::Runtime<A>,
+        runtime: &'ctx Runtime<A>,
         scope: &'ctx CallScope<'scope>,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
@@ -723,11 +737,11 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
 
     pub fn subscribe<Source>(
         &self,
-        source: &crate::RtdSourceHandle<Source>,
-        topic: crate::RtdTopic,
-    ) -> XllResult<crate::RtdValue>
+        source: &RtdSourceHandle<Source>,
+        topic: RtdTopic,
+    ) -> XllResult<RtdValue>
     where
-        Source: crate::RtdSource,
+        Source: RtdSource,
     {
         let subscriptions = self.runtime.subscriptions()?;
         let subscriptions = subscriptions.as_arc();
@@ -778,12 +792,12 @@ mod tests {
     #[test]
     fn synchronous_contexts_expose_their_state_by_value() {
         let state = 17_u32;
-        let runtime = crate::Runtime::<TestU32Addin>::new();
+        let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish(state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let main_thread = MainThreadContext::<TestU32Addin>::new(&state, &runtime, scope);
             let macro_sheet = MacroSheetContext::<TestU32Addin>::new(&state, scope);
 
@@ -824,10 +838,10 @@ mod tests {
             xltype: XLTYPE_SREF,
         };
         // SAFETY: `raw` remains live for the reference and callback scope.
-        let reference: crate::ExcelReference<'_> =
-            unsafe { crate::reference_from_raw("reference", &mut raw) }.unwrap();
-        crate::with_excel_call_scope(|scope| {
-            let runtime = crate::Runtime::<()>::new();
+        let reference: crate::reference::ExcelReference<'_> =
+            unsafe { crate::reference::reference_from_raw("reference", &mut raw) }.unwrap();
+        crate::value::with_excel_call_scope(|scope| {
+            let runtime = crate::runtime::Runtime::<()>::new();
             let mut opening = runtime.begin_open().unwrap();
             runtime.publish((), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
@@ -853,9 +867,9 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
-        impl crate::RtdSubscription for TestSubscription {
-            fn cancellation(&self) -> std::sync::Arc<dyn crate::RtdCancellation> {
-                std::sync::Arc::new(crate::RtdCancellationHandle::noop())
+        impl crate::subscription::RtdSubscription for TestSubscription {
+            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
+                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
             }
             fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
                 self.disconnected.store(true, Ordering::Release);
@@ -867,14 +881,14 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
-        impl crate::RtdSource for TestSource {
+        impl crate::subscription::RtdSource for TestSource {
             type Value = f64;
             type Subscription = TestSubscription;
 
             fn subscribe(
                 &self,
-                _topic: &crate::RtdTopic,
-                sink: crate::RtdSink<Self::Value>,
+                _topic: &crate::subscription::RtdTopic,
+                sink: crate::subscription::RtdSink<Self::Value>,
             ) -> crate::XllResult<Self::Subscription> {
                 sink.publish(17.5)?;
                 Ok(TestSubscription {
@@ -883,21 +897,21 @@ mod tests {
             }
         }
 
-        let runtime = crate::Runtime::<()>::new();
+        let runtime = crate::runtime::Runtime::<()>::new();
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
-        let source = crate::RtdSourceHandle::for_internal(
+        let source = crate::subscription::RtdSourceHandle::for_internal(
             runtime.generation().expect("test runtime has a generation"),
             TestSource {
                 disconnected: Arc::clone(&disconnected),
             },
         )
         .unwrap();
-        let topic = crate::RtdTopic::single("shared-observation").unwrap();
+        let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
         let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
         let server = subscriptions
             .register_server(
@@ -921,7 +935,7 @@ mod tests {
         repeated.rollback();
 
         let _state = ();
-        crate::with_excel_call_scope(|scope| {
+        crate::value::with_excel_call_scope(|scope| {
             let context = MainThreadContext::new(&_state, &runtime, scope);
             assert!(matches!(
                 context.subscribe(&source, topic),
@@ -964,7 +978,7 @@ mod tests {
     #[test]
     fn async_context_checks_and_exposes_cancellation() {
         let (source, token) = crate::cancellation::CancellationSource::new(
-            crate::CancellationGuarantee::CalculationScoped,
+            crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
         let lease = crate::runtime::GenerationLease::<AsyncTestAddin> {
             generation: Arc::new(crate::runtime::OpenGeneration {
@@ -989,8 +1003,8 @@ mod tests {
 
     #[test]
     fn open_context_exposes_diagnostics_setup() {
-        let build_info = crate::BuildInfo::new(
-            crate::AddinId::parse("test-addin").unwrap(),
+        let build_info = crate::addin::BuildInfo::new(
+            crate::diagnostics::AddinId::parse("test-addin").unwrap(),
             "0.1.0",
             "x86_64-pc-windows-msvc",
         );

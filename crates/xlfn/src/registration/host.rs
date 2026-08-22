@@ -1,6 +1,8 @@
 //! Host-module discovery and Excel callback boundary helpers.
 
-use crate::{CallContext, ExcelParameter, InputError, XlValueRef, XllError, XllResult};
+use crate::error::InputError;
+use crate::value::{CallContext, ExcelParameter, XlValueRef};
+use crate::{XllError, XllResult};
 use std::path::PathBuf;
 
 pub(super) struct ModuleName {
@@ -13,7 +15,7 @@ impl<'call> ExcelParameter<'call> for ModuleName {
         value: XlValueRef<'call>,
         argument: &'static str,
         _: &CallContext,
-        _identity: Option<&mut crate::InputIdentityEncoder>,
+        _identity: Option<&mut crate::input_identity::InputIdentityEncoder>,
     ) -> XllResult<Self> {
         let units = value.utf16(argument)?.to_vec();
         #[cfg(target_os = "windows")]

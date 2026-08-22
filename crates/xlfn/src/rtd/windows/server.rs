@@ -568,7 +568,7 @@ pub(super) fn ensure_server(
                 Some(active) if Arc::ptr_eq(active, handles) => {}
                 Some(_) => {
                     return Err(XllError::Internal {
-                        diagnostic_id: crate::DiagnosticId::RTD_MULTI,
+                        diagnostic_id: crate::error::DiagnosticId::RTD_MULTI,
                     });
                 }
                 None => backends.handles = Some(Arc::clone(handles)),
@@ -583,7 +583,7 @@ pub(super) fn ensure_server(
                     }
                     Some(_) => {
                         return Err(XllError::Internal {
-                            diagnostic_id: crate::DiagnosticId::RTD_MULTI,
+                            diagnostic_id: crate::error::DiagnosticId::RTD_MULTI,
                         });
                     }
                     None => {
@@ -633,7 +633,7 @@ pub(super) fn ensure_server(
 
     let generation =
         allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
+            diagnostic_id: crate::error::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
         })?;
     let operations = ServerOperationBarrier::new().map_err(|error| XllError::ExcelApi {
         function: error.operation,
@@ -1269,9 +1269,10 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
                     &XllError::Internal {
                         diagnostic_id: match error {
                             ServerCloseError::WaitFailed(status) => {
-                                crate::DiagnosticId::RTD_WINDOW_STATUS.with_low_u32(status as u32)
+                                crate::error::DiagnosticId::RTD_WINDOW_STATUS
+                                    .with_low_u32(status as u32)
                             }
-                            _ => crate::DiagnosticId::RTD_WINDOW_FAILURE,
+                            _ => crate::error::DiagnosticId::RTD_WINDOW_FAILURE,
                         },
                     },
                 );

@@ -1,4 +1,13 @@
-use super::*;
+use super::executor::ExecutorShared;
+use super::generation::GenerationState;
+use super::manager::MAX_PENDING;
+use super::worker::release_active;
+use crate::cancellation::CancellationSource;
+use crate::error::XllError;
+use futures_util::future::AbortHandle;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub(crate) struct TaskControl {
     pub(crate) abort: AbortHandle,

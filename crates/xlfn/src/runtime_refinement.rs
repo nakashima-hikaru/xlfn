@@ -88,7 +88,7 @@ impl RuntimeRefinementHooks {
                 ghost
                     .begin_generation(attempt.get(), resources.clone())
                     .map_err(|_| XllError::Internal {
-                        diagnostic_id: crate::DiagnosticId::GHOST_GENERATION,
+                        diagnostic_id: crate::error::DiagnosticId::GHOST_GENERATION,
                     })?;
                 operation()
             })?;
@@ -119,8 +119,8 @@ impl RuntimeRefinementHooks {
     pub(crate) fn reject_open<A: Addin>(&self, runtime: &Runtime<A>, attempt: OpenAttemptId) {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
-            debug_assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
-            debug_assert_eq!(runtime.lifecycle.open_attempt(), None);
+            debug_assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+            debug_assert_eq!(runtime.lifecycle.observed_open_attempt(), None);
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
                     attempt: attempt.get(),
@@ -136,10 +136,11 @@ impl RuntimeRefinementHooks {
     pub(crate) fn fail_open<A: Addin>(&self, runtime: &Runtime<A>, attempt: OpenAttemptId) {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
-            debug_assert_eq!(runtime.lifecycle.open_attempt(), None);
+            debug_assert_eq!(runtime.lifecycle.observed_open_attempt(), None);
             debug_assert!(matches!(
                 runtime.phase(),
-                crate::LifecyclePhase::OpenRollbackPending | crate::LifecyclePhase::Closing
+                crate::lifecycle::LifecyclePhase::OpenRollbackPending
+                    | crate::lifecycle::LifecyclePhase::Closing
             ));
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FailOpen {

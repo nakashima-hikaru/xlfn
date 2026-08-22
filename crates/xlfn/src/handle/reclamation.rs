@@ -5,6 +5,11 @@
 //! resurrected, but it cannot redefine the proof that a retired payload is
 //! safe to reclaim. Call-scoped pointer witnesses and long-lived pins both
 //! use this boundary.
+//!
+//! This is a frozen safety boundary: new handle lifecycle code must consume
+//! the guards exposed here instead of reading epoch counters or retired
+//! storage directly. Changes to the reclamation algorithm belong here with
+//! its complete safety proof and concurrency tests.
 
 use super::arena::{BorrowedObject, PinnedObject};
 #[cfg(test)]
@@ -451,7 +456,7 @@ impl HandleCallGuard {
                 return Ok(ObjectReadGuard::new(registration));
             }
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
             });
         }
 
@@ -461,7 +466,7 @@ impl HandleCallGuard {
         };
         if self.registration.set(registration).is_err() {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::HANDLE_CONTEXT,
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
             });
         }
         Ok(ObjectReadGuard::new(

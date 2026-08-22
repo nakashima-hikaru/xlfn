@@ -7,6 +7,7 @@
 #[cfg(feature = "async")]
 use std::future::Future;
 
+use crate::addin::Addin;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationToken;
 use crate::error::{InputError, XllError, XllResult};
@@ -18,12 +19,13 @@ use crate::registration::{
 #[cfg(feature = "async")]
 use crate::return_value::ffi_boundary_void;
 use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
+use crate::runtime::Runtime;
+use crate::value::CallScope;
 use crate::value::{
     ArgumentContext, ExcelCellOutput, ExcelParameter, argument_from_raw,
     argument_from_raw_with_arguments, cell_presence_from_raw, with_excel_call_scope,
     with_excel_call_scope_and_state,
 };
-use crate::{Addin, CallScope, Runtime};
 
 #[doc(hidden)]
 pub const BUILD_TARGET: &str = if cfg!(all(
@@ -278,7 +280,7 @@ pub fn open_generated_addin<A: Addin>(
         Ok(newly_acquired) => newly_acquired,
         Err(error) => crate::lifecycle::fail_stop_module_residency(&error),
     };
-    let parsed_id = match crate::AddinId::parse(addin_id) {
+    let parsed_id = match crate::diagnostics::AddinId::parse(addin_id) {
         Ok(id) => id,
         Err(_) => {
             release_open_residency_after_failure(runtime, newly_acquired);
@@ -299,7 +301,7 @@ pub fn open_generated_addin<A: Addin>(
     let result = host_auto_open::<A>(runtime.runtime(), &parsed_id, version, target, &descriptors);
     if result == 0
         && newly_acquired
-        && runtime.runtime().phase() != crate::LifecyclePhase::Quarantined
+        && runtime.runtime().phase() != crate::lifecycle::LifecyclePhase::Quarantined
     {
         release_open_residency_after_failure(runtime, true);
     }

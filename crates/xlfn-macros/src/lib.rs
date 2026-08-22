@@ -16,19 +16,15 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::punctuated::Punctuated;
-use syn::{
-    DeriveInput, FnArg, ItemFn, ItemStruct, Meta, Pat, ReturnType, Token, parse_macro_input,
-};
+use syn::{DeriveInput, FnArg, ItemFn, ItemStruct, ReturnType, parse_macro_input};
 mod codegen;
 mod model;
 mod options;
 
-use model::FunctionModel;
+use model::{ExecutionMode, FunctionModel};
 use options::{
-    ArgumentOptions, ContextKind, doc_comment, gating_tokens, parse_addin_options,
-    parse_context_attribute, parse_function_options, resolve_crate_path, string_value,
-    validate_addin_metadata, validate_export_id,
+    ContextKind, doc_comment, gating_tokens, parse_addin_options, parse_context_attribute,
+    parse_function_options, resolve_crate_path, validate_addin_metadata, validate_export_id,
 };
 
 /// Attributes a function as an Excel UDF.
@@ -90,7 +86,6 @@ fn expand_excel_function(
     let options = parse_function_options(attributes)?;
     let krate = resolve_crate_path(options.krate.as_ref());
     let gating = gating_tokens(&function.attrs);
-    let is_async = function.sig.asyncness.is_some();
     let return_type = match &function.sig.output {
         ReturnType::Default => syn::parse_quote!(()),
         ReturnType::Type(_, ty) => ty.as_ref().clone(),
@@ -117,19 +112,19 @@ fn expand_excel_function(
         ));
     }
 
-    let function_ident = &function.sig.ident;
+    let function_ident = function.sig.ident.clone();
     let udf_id = options
         .id
         .clone()
         .unwrap_or_else(|| function_ident.to_string());
-    validate_export_id(&udf_id, function_ident)?;
+    validate_export_id(&udf_id, &function_ident)?;
     let excel_name = options
         .name
         .clone()
         .unwrap_or_else(|| function_ident.to_string());
     if excel_name.trim().is_empty() {
         return Err(syn::Error::new_spanned(
-            function_ident,
+            &function_ident,
             "Excel function name cannot be empty",
         ));
     }
@@ -194,195 +189,41 @@ fn expand_excel_function(
             context_type = Some(argument.ty.as_ref().clone());
         }
     }
-    let model = FunctionModel::new(&function, &options, context);
-    model.validate(&function)?;
-    let skip = usize::from(context.is_some());
-    let mut argument_options = Vec::new();
-    for input in function.sig.inputs.iter_mut().skip(skip) {
-        let FnArg::Typed(argument) = input else {
-            continue;
-        };
-        let mut options = ArgumentOptions::default();
-        let mut retained = Vec::new();
-        for attribute in std::mem::take(&mut argument.attrs) {
-            if attribute.path().is_ident("excel_arg") {
-                for entry in
-                    attribute.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?
-                {
-                    match entry {
-                        Meta::NameValue(value) if value.path.is_ident("name") => {
-                            if options.name.is_some() {
-                                return Err(syn::Error::new_spanned(
-                                    value,
-                                    "duplicate excel_arg name",
-                                ));
-                            }
-                            options.name = Some(string_value(&value.value, "name")?);
-                        }
-                        Meta::NameValue(value) if value.path.is_ident("description") => {
-                            if options.description.is_some() {
-                                return Err(syn::Error::new_spanned(
-                                    value,
-                                    "duplicate excel_arg description",
-                                ));
-                            }
-                            options.description = Some(string_value(&value.value, "description")?);
-                        }
-                        Meta::NameValue(value) if value.path.is_ident("default") => {
-                            if options.default.is_some() {
-                                return Err(syn::Error::new_spanned(
-                                    value,
-                                    "duplicate excel_arg default",
-                                ));
-                            }
-                            options.default = Some(value.value);
-                        }
-                        Meta::NameValue(value) if value.path.is_ident("blank") => {
-                            if options.blank.is_some() {
-                                return Err(syn::Error::new_spanned(
-                                    value,
-                                    "duplicate excel_arg blank policy",
-                                ));
-                            }
-                            options.blank = Some(string_value(&value.value, "blank")?);
-                        }
-                        Meta::NameValue(value) if value.path.is_ident("missing") => {
-                            if options.missing.is_some() {
-                                return Err(syn::Error::new_spanned(
-                                    value,
-                                    "duplicate excel_arg missing policy",
-                                ));
-                            }
-                            options.missing = Some(string_value(&value.value, "missing")?);
-                        }
-                        Meta::Path(path) if path.is_ident("reference") => {
-                            if options.reference {
-                                return Err(syn::Error::new_spanned(path, "duplicate `reference`"));
-                            }
-                            options.reference = true;
-                        }
-                        other => {
-                            return Err(syn::Error::new_spanned(
-                                other,
-                                "expected `name`, `description`, `default`, `blank`, `missing`, or `reference`",
-                            ));
-                        }
-                    }
-                }
-            } else {
-                retained.push(attribute);
-            }
-        }
-        argument.attrs = retained;
-        for (kind, policy) in [
-            ("blank", options.blank.as_deref()),
-            ("missing", options.missing.as_deref()),
-        ] {
-            if let Some(policy) = policy {
-                if !matches!(policy, "default" | "error") {
-                    return Err(syn::Error::new_spanned(
-                        argument,
-                        format!("`{kind}` must be \"default\" or \"error\""),
-                    ));
-                }
-                if policy == "default" && options.default.is_none() {
-                    return Err(syn::Error::new_spanned(
-                        argument,
-                        format!("`{kind} = \"default\"` requires `default = ...`"),
-                    ));
-                }
-            }
-        }
-        if options.default.is_some()
-            && options.blank.as_deref() != Some("default")
-            && options.missing.as_deref() != Some("default")
-        {
-            return Err(syn::Error::new_spanned(
-                argument,
-                "`default = ...` requires `blank = \"default\"` or `missing = \"default\"`",
-            ));
-        }
-        if options.reference
-            && (options.default.is_some() || options.blank.is_some() || options.missing.is_some())
-        {
-            return Err(syn::Error::new_spanned(
-                argument,
-                "reference arguments cannot use blank, missing, or default policies",
-            ));
-        }
-        argument_options.push(options);
-    }
-    let typed_inputs = function
-        .sig
-        .inputs
+    let validated =
+        FunctionModel::new(&function, &options, context, context_type).validate(&function)?;
+    let mode = validated.mode;
+    let context = validated.context;
+    let model = validated.with_arguments(model::validate_arguments(&mut function, mode, context)?);
+    let is_async = mode.is_async();
+    let context_type = model.context_type.as_ref();
+    let arguments = &model.arguments;
+    let argument_types = arguments
         .iter()
-        .skip(skip)
-        .map(|argument| match argument {
-            FnArg::Typed(argument) => Ok(argument),
-            FnArg::Receiver(receiver) => Err(syn::Error::new_spanned(
-                receiver,
-                "Excel functions must be free functions",
-            )),
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
-    let maximum_visible = if is_async { 254 } else { 255 };
-    if typed_inputs.len() > maximum_visible {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            format!("Excel functions support at most {maximum_visible} arguments"),
-        ));
-    }
-
-    let mut argument_names = Vec::with_capacity(typed_inputs.len());
-    let mut argument_types = Vec::with_capacity(typed_inputs.len());
-    for argument in &typed_inputs {
-        let Pat::Ident(pattern) = argument.pat.as_ref() else {
-            return Err(syn::Error::new_spanned(
-                &argument.pat,
-                "Excel function arguments must use simple identifier patterns",
-            ));
-        };
-        argument_names.push(pattern.ident.clone());
-        argument_types.push(argument.ty.as_ref().clone());
-    }
-    let raw_names = (0..argument_names.len())
-        .map(|index| format_ident!("__raw_{index}"))
+        .map(|argument| argument.ty.clone())
         .collect::<Vec<_>>();
-    let converted_names = (0..argument_names.len())
-        .map(|index| format_ident!("__argument_{index}"))
+    let argument_options = arguments
+        .iter()
+        .map(|argument| &argument.options)
         .collect::<Vec<_>>();
-    let argument_name_literals = argument_names
+    let raw_names = arguments
         .iter()
-        .zip(&argument_options)
-        .map(|(name, options)| options.name.clone().unwrap_or_else(|| name.to_string()))
+        .map(|argument| argument.raw_name.clone())
         .collect::<Vec<_>>();
-    for name in &argument_name_literals {
-        let utf16_len = name.encode_utf16().count();
-        if name.is_empty() || name.contains([',', '\0', '\r', '\n']) || utf16_len > 32_767 {
-            return Err(syn::Error::new_spanned(
-                &function.sig.inputs,
-                "Excel argument names must be non-empty counted strings without comma, NUL, CR, or LF",
-            ));
-        }
-    }
-    let joined_argument_name_len = argument_name_literals
+    let converted_names = arguments
         .iter()
-        .map(|name| name.encode_utf16().count())
-        .sum::<usize>()
-        .saturating_add(argument_name_literals.len().saturating_sub(1));
-    if joined_argument_name_len > 32_767 {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            "combined Excel argument names exceed the 32,767 UTF-16 unit counted-string limit",
-        ));
-    }
-    let argument_descriptions = argument_options
-        .iter()
-        .map(|options| options.description.clone().unwrap_or_default())
+        .map(|argument| argument.converted_name.clone())
         .collect::<Vec<_>>();
-    let reference_arguments = argument_options
+    let argument_name_literals = arguments
         .iter()
-        .map(|options| options.reference)
+        .map(|argument| argument.excel_name.clone())
+        .collect::<Vec<_>>();
+    let argument_descriptions = arguments
+        .iter()
+        .map(|argument| argument.description.clone())
+        .collect::<Vec<_>>();
+    let reference_arguments = arguments
+        .iter()
+        .map(|argument| argument.options.reference)
         .collect::<Vec<_>>();
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
@@ -403,8 +244,8 @@ fn expand_excel_function(
             quote!(#krate::__private::async_context(__lease, __cancellation))
         }
     });
-    let macro_sheet = model.effective_macro_sheet();
-    let thread_safe = model.effective_thread_safe();
+    let macro_sheet = mode.is_macro_sheet();
+    let thread_safe = mode.is_thread_safe();
     if is_async && reference_arguments.iter().any(|reference| *reference) {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
@@ -436,14 +277,17 @@ fn expand_excel_function(
         }
     });
     let volatile = options.volatile;
-    let mode_assertion = if is_async {
-        quote!(#krate::__private::assert_async_return::<#return_type>();)
-    } else if macro_sheet {
-        quote!(#krate::__private::assert_macro_sheet_return::<#return_type>();)
-    } else if thread_safe {
-        quote!(#krate::__private::assert_thread_safe_return::<#return_type>();)
-    } else {
-        quote!(#krate::__private::assert_main_thread_return::<#return_type>();)
+    let mode_assertion = match mode {
+        ExecutionMode::Async => quote!(#krate::__private::assert_async_return::<#return_type>();),
+        ExecutionMode::MacroSheet => {
+            quote!(#krate::__private::assert_macro_sheet_return::<#return_type>();)
+        }
+        ExecutionMode::ThreadSafe => {
+            quote!(#krate::__private::assert_thread_safe_return::<#return_type>();)
+        }
+        ExecutionMode::MainThread => {
+            quote!(#krate::__private::assert_main_thread_return::<#return_type>();)
+        }
     };
     let volatile_assertion =
         volatile.then(|| quote!(#krate::__private::assert_volatile_return::<#return_type>();));

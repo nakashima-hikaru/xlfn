@@ -1,6 +1,30 @@
-use super::*;
-use crate::generation::RuntimeGeneration;
+use super::catalog::{
+    ActiveKeyBinding, BindingStage, PendingSubscription, SubscriptionCatalog,
+    remove_identity_if_unbound,
+};
+use super::delivery::{
+    ActiveSubscription, ErasedSink, RefreshState, SERVER_LIFECYCLE_OPEN, TOPIC_SHARDS, TopicShard,
+    shard_index,
+};
+use super::identity::{SourceIdentityRegistry, SubscriptionIdentityIndex, allocate_runtime_id};
+use super::operation_gate::{OperationGate, OperationGuard};
+use super::quota::Quota;
+use super::server::{
+    OwnedServerOperation, PublishCore, RtdServerHandle, ServerReservationFailure, ServerRuntime,
+    ServerTerminationPhase, TerminationAdmission, TerminationCoordinator,
+    cleanup_catalog_binding_and_pending, disconnect_one_no_unwind,
+};
+use super::source::{ErasedRtdSource, RtdSource, RtdSourceHandle};
+use super::topic::{RtdLimits, RtdTopic, SourceId, SubscriptionIdentity, SubscriptionKey, TopicId};
+use super::value::StoredRtdValue;
+use crate::generation::{ConnectionGeneration, RuntimeGeneration, ServerGeneration};
+use crate::{XllError, XllResult};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -153,7 +177,7 @@ impl SubscriptionRuntime {
         let mut servers = self.servers.lock();
         if servers.contains_key(&generation) {
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_SERVER_DUE,
+                diagnostic_id: crate::error::DiagnosticId::RTD_SERVER_DUE,
             });
         }
         servers.insert(generation, Arc::clone(&server));
@@ -206,7 +230,7 @@ impl SubscriptionRuntime {
                         .live_reservations
                         .checked_add(1)
                         .ok_or(XllError::Internal {
-                            diagnostic_id: crate::DiagnosticId::RESERVATION_OVERFLOW,
+                            diagnostic_id: crate::error::DiagnosticId::RESERVATION_OVERFLOW,
                         })?;
 
                 return Ok(PreparedSubscription {
@@ -219,7 +243,7 @@ impl SubscriptionRuntime {
             }
 
             return Err(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::RTD_INDEX_ORPHAN,
+                diagnostic_id: crate::error::DiagnosticId::RTD_INDEX_ORPHAN,
             });
         }
 
@@ -304,7 +328,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }
@@ -321,7 +345,7 @@ impl SubscriptionRuntime {
         if let Some(existing_gen) = pending.server_generation {
             if existing_gen != generation {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                    diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
                 });
             }
         } else {
@@ -369,11 +393,11 @@ impl SubscriptionRuntime {
                     current.checked_add(1)
                 })
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+                    diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
                 })?,
         )
         .ok_or(XllError::Internal {
-            diagnostic_id: crate::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+            diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
 
         let (source, topic) = {
@@ -381,7 +405,7 @@ impl SubscriptionRuntime {
 
             if catalog.active_keys.contains_key(key) {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                    diagnostic_id: crate::error::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
 
@@ -391,7 +415,7 @@ impl SubscriptionRuntime {
                 if let Some(existing_gen) = pending.server_generation {
                     if existing_gen != server_handle.inner.generation {
                         return Err(XllError::Internal {
-                            diagnostic_id: crate::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                            diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
                         });
                     }
                 } else {
@@ -400,7 +424,7 @@ impl SubscriptionRuntime {
 
                 if pending.connecting_generation.is_some() {
                     return Err(XllError::Internal {
-                        diagnostic_id: crate::DiagnosticId::CONNECTION_INFLIGHT,
+                        diagnostic_id: crate::error::DiagnosticId::CONNECTION_INFLIGHT,
                     });
                 }
                 pending.connecting_generation = Some(conn_gen);
@@ -471,7 +495,7 @@ impl SubscriptionRuntime {
             Err(panic_payload) => {
                 let _ = self.rollback_connection(&server_handle.inner, topic_id, conn_gen, key);
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::PANIC_SUBSCRIPTION,
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
                 std::panic::resume_unwind(panic_payload);
             }
@@ -646,7 +670,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }
@@ -755,7 +779,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 let err = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
                 };
                 self.record_cleanup_result(Err(err.clone()));
             }
@@ -804,7 +828,7 @@ impl SubscriptionRuntime {
             && first_error.is_none()
         {
             first_error = Some(XllError::Internal {
-                diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
+                diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
             });
         }
 
@@ -900,7 +924,7 @@ impl SubscriptionRuntime {
             let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
             if res.is_err() {
                 self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::PANIC_SOURCE,
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
                 }));
             }
         }

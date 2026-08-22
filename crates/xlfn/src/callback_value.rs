@@ -1,5 +1,7 @@
 use crate::host_callback::{HostCallbackShared, HostCallbackState, observe_shared};
-use crate::{CallbackCleanupDebt, ExcelCallbackStatus, XlValueRef, XllError, XllResult};
+use crate::return_value::{CallbackCleanupDebt, ExcelCallbackStatus};
+use crate::value::XlValueRef;
+use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -147,7 +149,7 @@ impl ExcelCallbackValue {
         } else {
             Err(XllError::input(
                 "callback",
-                crate::InputError::Malformed(
+                crate::error::InputError::Malformed(
                     "callback result is unavailable after release suppression or cleanup",
                 ),
             ))
