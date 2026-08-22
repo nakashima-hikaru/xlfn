@@ -198,6 +198,8 @@ impl XlArrayBuilder {
 }
 
 impl crate::value::ExcelReturn for XlArrayOutput {
+    type InputMode = crate::value::PlainInputMode;
+
     fn into_excel(
         self,
         _: &mut crate::return_value::ReturnContext<'_, '_>,

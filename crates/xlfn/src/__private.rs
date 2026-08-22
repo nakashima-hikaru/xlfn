@@ -24,7 +24,8 @@ use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named
 use crate::runtime::Runtime;
 use crate::value::ExcelCellOutput;
 pub use crate::value::input::{
-    ArgumentContext, ExcelParameter, argument_from_raw, argument_from_raw_with_arguments,
+    ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
+    PlainInputMode, argument_from_raw, argument_from_raw_with_arguments,
     argument_from_raw_with_context, cell_presence_from_raw,
 };
 
@@ -97,7 +98,12 @@ pub use crate::value::{ExcelOutput, ExcelReturn, MainThreadReturn};
 
 /// Asserts at compile-time that `T` implements `ExcelParameter`.
 #[doc(hidden)]
-pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallFrame<'call>) {}
+pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
+where
+    R: ExcelReturn,
+    T: ExcelParameter<'call, R::InputMode>,
+{
+}
 
 /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
 #[doc(hidden)]
@@ -109,8 +115,8 @@ pub fn thread_safe_context<'state, A: Addin>(
 
 /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
 #[doc(hidden)]
-pub fn main_thread_context<'call, A: Addin>(
-    frame: &CallFrame<'call>,
+pub fn main_thread_context<'call, A: Addin, M: InputMode>(
+    frame: &CallFrame<'call, M>,
     state: &'call A::SharedState,
     runtime: &'call MacroRuntime<A>,
 ) -> crate::addin::MainThreadContext<'call, A> {
@@ -119,8 +125,8 @@ pub fn main_thread_context<'call, A: Addin>(
 
 /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
 #[doc(hidden)]
-pub fn macro_sheet_context<'call, A: Addin>(
-    frame: &CallFrame<'call>,
+pub fn macro_sheet_context<'call, A: Addin, M: InputMode>(
+    frame: &CallFrame<'call, M>,
     state: &'call A::SharedState,
 ) -> crate::addin::MacroSheetContext<'call, A> {
     crate::addin::MacroSheetContext::new(state, frame.scope)
@@ -367,42 +373,61 @@ pub unsafe fn addin_manager_info<A: Addin>(
 
 /// Calculation call frame for converted arguments and identity recording.
 #[doc(hidden)]
-pub struct CallFrame<'call> {
-    arguments: ArgumentContext<'call>,
+pub struct CallFrame<'call, M: InputMode> {
+    arguments: ArgumentContext<'call, M>,
     scope: &'call CallScope<'call>,
 }
 
-impl<'call> CallFrame<'call> {
+impl<'call, M: InputMode> CallFrame<'call, M> {
     #[doc(hidden)]
-    pub fn new<R: ExcelReturn, A: Addin>(
+    pub fn new<A: Addin>(
         runtime: &'call Runtime<A>,
         scope: &'call CallScope<'call>,
+        argument_count: usize,
     ) -> Self {
         Self {
-            arguments: ArgumentContext::for_return::<R, A>(runtime, scope),
+            arguments: ArgumentContext::new(runtime, scope, argument_count),
             scope,
         }
     }
 
     #[doc(hidden)]
-    pub fn return_context(&mut self, udf_id: &'static str) -> ReturnContext<'call, 'call> {
-        let inputs = self.arguments.finish();
+    pub fn return_context(
+        &mut self,
+        udf_id: &'static str,
+    ) -> XllResult<ReturnContext<'call, 'call>> {
+        let inputs = self.arguments.finish()?;
         let handles = self.arguments.take_handle_access();
-        ReturnContext::for_frame(handles, udf_id, inputs)
+        Ok(ReturnContext::for_frame(handles, udf_id, inputs))
+    }
+
+    #[doc(hidden)]
+    pub fn default_argument<T>(
+        &mut self,
+        index: usize,
+        name: &'static str,
+        value: T,
+    ) -> XllResult<T>
+    where
+        T: ExcelParameter<'call, M>,
+    {
+        self.arguments.record_decoded(index, name, &value)?;
+        Ok(value)
     }
 
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
     pub unsafe fn convert_argument<T>(
         &mut self,
+        index: usize,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<T>
     where
-        T: ExcelParameter<'call>,
+        T: ExcelParameter<'call, M>,
     {
         // SAFETY: raw is supplied by Excel for this call.
-        unsafe { argument_from_raw_with_arguments::<T>(&mut self.arguments, name, raw) }
+        unsafe { argument_from_raw_with_arguments::<M, T>(&mut self.arguments, index, name, raw) }
     }
 
     #[doc(hidden)]
@@ -431,23 +456,25 @@ impl<'call> CallFrame<'call> {
 /// Helper free function to convert a typed argument from a raw pointer using the active call frame.
 #[doc(hidden)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub unsafe fn convert_argument<'call, T>(
-    frame: &mut CallFrame<'call>,
+pub unsafe fn convert_argument<'call, R, T>(
+    frame: &mut CallFrame<'call, R::InputMode>,
+    index: usize,
     name: &'static str,
     raw: *mut xlfn_sys::XLOPER12,
 ) -> XllResult<T>
 where
-    T: ExcelParameter<'call>,
+    R: ExcelReturn,
+    T: ExcelParameter<'call, R::InputMode>,
 {
     // SAFETY: caller guarantees raw is live for this call.
-    unsafe { frame.convert_argument(name, raw) }
+    unsafe { frame.convert_argument(index, name, raw) }
 }
 
 /// Helper free function to convert a reference argument from a raw pointer using the active call frame.
 #[doc(hidden)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub unsafe fn convert_reference<'call>(
-    frame: &mut CallFrame<'call>,
+pub unsafe fn convert_reference<'call, M: InputMode>(
+    frame: &mut CallFrame<'call, M>,
     name: &'static str,
     raw: *mut xlfn_sys::XLOPER12,
 ) -> XllResult<ExcelReference<'call>> {
@@ -458,8 +485,8 @@ pub unsafe fn convert_reference<'call>(
 /// Helper free function to query cell presence for default/missing policies.
 #[doc(hidden)]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub unsafe fn argument_presence(
-    frame: &CallFrame<'_>,
+pub unsafe fn argument_presence<M: InputMode>(
+    frame: &CallFrame<'_, M>,
     name: &'static str,
     raw: *mut xlfn_sys::XLOPER12,
 ) -> XllResult<CellPresence> {
@@ -473,14 +500,19 @@ pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
     runtime: &'static MacroRuntime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
+    argument_count: usize,
     execute: F,
 ) -> *mut xlfn_sys::XLOPER12
 where
-    F: for<'call> FnOnce(&'call A::SharedState, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &mut CallFrame<'call, R::InputMode>,
+    ) -> XllResult<ExcelOutput>,
 {
     udf_boundary_named(runtime.runtime(), udf_id, excel_name, |state| {
         with_excel_call_scope_and_state(state, |state, scope| {
-            let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
+            let mut frame =
+                CallFrame::<R::InputMode>::new(runtime.runtime(), scope, argument_count);
             execute(state, &mut frame)
         })
     })
@@ -494,6 +526,7 @@ pub unsafe fn async_udf<A, R, F, Fut>(
     runtime: &'static MacroRuntime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
+    argument_count: usize,
     async_handle: *mut xlfn_sys::XLOPER12,
     execute: F,
 ) where
@@ -502,7 +535,7 @@ pub unsafe fn async_udf<A, R, F, Fut>(
     F: for<'call> FnOnce(
         crate::runtime::GenerationLease<A>,
         CancellationToken,
-        &mut CallFrame<'call>,
+        &mut CallFrame<'call, R::InputMode>,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<R>> + Send + 'static,
 {
@@ -515,9 +548,10 @@ pub unsafe fn async_udf<A, R, F, Fut>(
             async_handle,
             |lease, cancellation| {
                 with_excel_call_scope(|scope| {
-                    let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
+                    let mut frame =
+                        CallFrame::<R::InputMode>::new(runtime.runtime(), scope, argument_count);
                     let future = execute(lease, cancellation, &mut frame)?;
-                    let _ = frame.arguments.finish();
+                    frame.arguments.finish()?;
                     Ok(future)
                 })
             },

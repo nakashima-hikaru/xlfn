@@ -117,7 +117,7 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
 }
 
 impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'call, T> {
-    const USES_FORMULA_REVISION: bool = true;
+    type InputMode = crate::value::FormulaInputMode;
 
     fn into_excel(
         self,

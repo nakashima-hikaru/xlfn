@@ -81,6 +81,8 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
 }
 
 impl crate::value::ExcelReturn for RtdValue {
+    type InputMode = crate::value::PlainInputMode;
+
     fn into_excel(
         self,
         _: &mut crate::return_value::ReturnContext<'_, '_>,

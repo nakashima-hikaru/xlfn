@@ -5,36 +5,184 @@ use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
 use crate::{XllError, XllResult};
 use xlfn_sys::{XLOPER12, XLTYPE_MISSING, XLTYPE_NIL};
 
-use super::{ExcelReturn, XlValueRef, encode_raw_value};
+use super::{ExcelReturn, XlValueRef};
+
+/// Input conversion mode selected by the return type of the UDF.
+#[doc(hidden)]
+pub trait InputMode: Sized {
+    type Identity;
+    type Fingerprint;
+
+    #[doc(hidden)]
+    fn new_fingerprint(argument_count: usize) -> Self::Fingerprint;
+
+    #[doc(hidden)]
+    fn with_argument<R>(
+        fingerprint: &mut Self::Fingerprint,
+        index: usize,
+        argument: &'static str,
+        encode: impl FnOnce(&mut Self::Identity) -> XllResult<R>,
+    ) -> XllResult<R>;
+
+    #[doc(hidden)]
+    fn finish(fingerprint: Self::Fingerprint) -> XllResult<Option<[u8; 32]>>;
+
+    #[doc(hidden)]
+    fn tag(identity: &mut Self::Identity, value: u8);
+
+    #[doc(hidden)]
+    fn bool(identity: &mut Self::Identity, value: bool);
+
+    #[doc(hidden)]
+    fn f64(identity: &mut Self::Identity, value: f64);
+
+    #[doc(hidden)]
+    fn i64(identity: &mut Self::Identity, value: i64);
+
+    #[doc(hidden)]
+    fn u64(identity: &mut Self::Identity, value: u64);
+
+    #[doc(hidden)]
+    fn string(identity: &mut Self::Identity, value: &str);
+}
+
+/// Plain worksheet conversion, without formula-revision identity recording.
+#[doc(hidden)]
+pub struct PlainInputMode;
+
+/// Formula-revision worksheet conversion with semantic identity recording.
+#[doc(hidden)]
+pub struct FormulaInputMode;
+
+impl InputMode for PlainInputMode {
+    type Identity = ();
+    type Fingerprint = ();
+
+    fn new_fingerprint(_: usize) -> Self::Fingerprint {}
+
+    fn with_argument<R>(
+        _: &mut Self::Fingerprint,
+        _: usize,
+        _: &'static str,
+        encode: impl FnOnce(&mut Self::Identity) -> XllResult<R>,
+    ) -> XllResult<R> {
+        let mut identity = ();
+        encode(&mut identity)
+    }
+
+    fn finish(_: Self::Fingerprint) -> XllResult<Option<[u8; 32]>> {
+        Ok(None)
+    }
+
+    fn tag(_: &mut Self::Identity, _: u8) {}
+    fn bool(_: &mut Self::Identity, _: bool) {}
+    fn f64(_: &mut Self::Identity, _: f64) {}
+    fn i64(_: &mut Self::Identity, _: i64) {}
+    fn u64(_: &mut Self::Identity, _: u64) {}
+    fn string(_: &mut Self::Identity, _: &str) {}
+}
+
+impl InputMode for FormulaInputMode {
+    type Identity = InputIdentityEncoder;
+    type Fingerprint = InputFingerprintBuilder;
+
+    fn new_fingerprint(argument_count: usize) -> Self::Fingerprint {
+        InputFingerprintBuilder::new(argument_count)
+    }
+
+    fn with_argument<R>(
+        fingerprint: &mut Self::Fingerprint,
+        index: usize,
+        argument: &'static str,
+        encode: impl FnOnce(&mut Self::Identity) -> XllResult<R>,
+    ) -> XllResult<R> {
+        fingerprint.with_argument(index, argument, encode)
+    }
+
+    fn finish(fingerprint: Self::Fingerprint) -> XllResult<Option<[u8; 32]>> {
+        fingerprint
+            .finish()
+            .map(|fingerprint| Some(*fingerprint.as_bytes()))
+    }
+
+    fn tag(identity: &mut Self::Identity, value: u8) {
+        identity.tag(value);
+    }
+
+    fn bool(identity: &mut Self::Identity, value: bool) {
+        identity.bool(value);
+    }
+
+    fn f64(identity: &mut Self::Identity, value: f64) {
+        identity.f64(value);
+    }
+
+    fn i64(identity: &mut Self::Identity, value: i64) {
+        identity.i64(value);
+    }
+
+    fn u64(identity: &mut Self::Identity, value: u64) {
+        identity.u64(value);
+    }
+
+    fn string(identity: &mut Self::Identity, value: &str) {
+        identity.string(value);
+    }
+}
 
 /// Converts a call-scoped Excel value into owned Rust data.
 pub trait FromExcel<'call>: Sized {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 }
 
+/// Encodes the semantic value observed by a formula-revision UDF.
+pub trait ExcelInputIdentity {
+    fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder);
+}
+
 /// Framework-side argument dispatch used by generated ABI wrappers.
 #[doc(hidden)]
-pub trait ExcelParameter<'call>: Sized {
+pub trait ExcelParameter<'call, M: InputMode>: Sized {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
-        identity: Option<&mut InputIdentityEncoder>,
+        identity: &mut M::Identity,
     ) -> XllResult<Self>;
+
+    fn encode_decoded(&self, identity: &mut M::Identity);
 }
 
-impl<'call, T: FromExcel<'call>> ExcelParameter<'call> for T {
+impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
         _context: &CallContext<'call>,
-        identity: Option<&mut InputIdentityEncoder>,
+        _: &mut (),
+    ) -> XllResult<Self> {
+        T::from_excel(value, argument)
+    }
+
+    fn encode_decoded(&self, _: &mut ()) {}
+}
+
+impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
+where
+    T: FromExcel<'call> + ExcelInputIdentity,
+{
+    fn decode(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        _context: &CallContext<'call>,
+        identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self> {
         let result = T::from_excel(value, argument)?;
-        if let Some(identity) = identity {
-            encode_raw_value(value, false, identity);
-        }
+        result.encode_input_identity(identity);
         Ok(result)
+    }
+
+    fn encode_decoded(&self, identity: &mut InputIdentityEncoder) {
+        self.encode_input_identity(identity);
     }
 }
 
@@ -124,22 +272,20 @@ impl<'call> CallContext<'call> {
 
 /// Call-scoped argument conversion and formula-revision identity collection.
 #[doc(hidden)]
-pub struct ArgumentContext<'call> {
+pub struct ArgumentContext<'call, M: InputMode> {
     pub(crate) call: CallContext<'call>,
-    pub(crate) inputs: Option<InputFingerprintBuilder>,
+    pub(crate) inputs: Option<M::Fingerprint>,
 }
 
-impl<'call> ArgumentContext<'call> {
-    pub fn for_return<R, A: crate::Addin>(
+impl<'call, M: InputMode> ArgumentContext<'call, M> {
+    pub fn new<A: crate::Addin>(
         runtime: &'call crate::runtime::Runtime<A>,
         scope: &'call CallScope<'call>,
-    ) -> Self
-    where
-        R: ExcelReturn,
-    {
+        argument_count: usize,
+    ) -> Self {
         Self {
             call: CallContext::with_runtime(runtime, scope),
-            inputs: R::USES_FORMULA_REVISION.then(InputFingerprintBuilder::new),
+            inputs: Some(M::new_fingerprint(argument_count)),
         }
     }
 
@@ -149,8 +295,44 @@ impl<'call> ArgumentContext<'call> {
             .expect("formula argument context must retain handle access")
     }
 
-    pub fn finish(&mut self) -> Option<[u8; 32]> {
-        self.inputs.take().map(|inputs| *inputs.finish().as_bytes())
+    pub fn finish(&mut self) -> XllResult<Option<[u8; 32]>> {
+        self.inputs.take().map_or(Ok(None), M::finish)
+    }
+
+    pub(crate) fn decode<T>(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        value: XlValueRef<'call>,
+    ) -> XllResult<T>
+    where
+        T: ExcelParameter<'call, M>,
+    {
+        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+        })?;
+        let call = &self.call;
+        M::with_argument(fingerprint, index, argument, |identity| {
+            T::decode(value, argument, call, identity)
+        })
+    }
+
+    pub(crate) fn record_decoded<T>(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        value: &T,
+    ) -> XllResult<()>
+    where
+        T: ExcelParameter<'call, M>,
+    {
+        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+        })?;
+        M::with_argument(fingerprint, index, argument, |identity| {
+            T::encode_decoded(value, identity);
+            Ok(())
+        })
     }
 }
 
@@ -167,14 +349,14 @@ pub unsafe fn argument_from_raw<'call, T>(
     raw: *mut XLOPER12,
 ) -> XllResult<T>
 where
-    T: ExcelParameter<'call>,
+    T: ExcelParameter<'call, PlainInputMode>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
     let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::decode(borrowed, argument, &CallContext::plain(scope), None)
+    T::decode(borrowed, argument, &CallContext::plain(scope), &mut ())
 }
 
 #[doc(hidden)]
@@ -186,7 +368,7 @@ pub unsafe fn argument_from_raw_with_context<'call, A, T>(
 ) -> XllResult<T>
 where
     A: crate::Addin,
-    T: ExcelParameter<'call>,
+    T: ExcelParameter<'call, PlainInputMode>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
     let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
@@ -197,32 +379,28 @@ where
         borrowed,
         argument,
         &CallContext::with_runtime(runtime, scope),
-        None,
+        &mut (),
     )
 }
 
 /// Converts one raw Excel argument and records its framework identity.
 #[doc(hidden)]
-pub unsafe fn argument_from_raw_with_arguments<'call, T>(
-    arguments: &mut ArgumentContext<'call>,
+pub unsafe fn argument_from_raw_with_arguments<'call, M, T>(
+    arguments: &mut ArgumentContext<'call, M>,
+    index: usize,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
 where
-    T: ExcelParameter<'call>,
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
     let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    if let Some(inputs) = &mut arguments.inputs {
-        inputs.with_argument(argument, |identity| {
-            T::decode(borrowed, argument, &arguments.call, Some(identity))
-        })
-    } else {
-        T::decode(borrowed, argument, &arguments.call, None)
-    }
+    arguments.decode(index, argument, borrowed)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,8 +430,9 @@ pub unsafe fn cell_presence_from_raw(
 }
 
 #[doc(hidden)]
-pub fn assert_async_parameter<T>()
+pub fn assert_async_parameter<R, T>()
 where
-    T: for<'call> ExcelParameter<'call> + Send + 'static,
+    R: ExcelReturn,
+    T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
 {
 }

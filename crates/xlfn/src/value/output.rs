@@ -5,6 +5,7 @@ use crate::error::IntoXllError;
 use crate::return_array::XlArrayBuilder;
 use crate::return_value::ReturnContext;
 
+use super::input::{InputMode, PlainInputMode};
 use super::{ExcelCellOutput, ExcelOutput};
 
 /// Converts an ordinary Rust value into a semantic Excel cell.
@@ -25,8 +26,9 @@ pub trait IntoExcel {
 /// Framework-side return dispatch used by generated proc-macro code.
 #[doc(hidden)]
 pub trait ExcelReturn: Sized {
-    /// Whether this return path publishes a formula revision.
-    const USES_FORMULA_REVISION: bool = false;
+    /// Selects the input conversion contract for this return path.
+    #[doc(hidden)]
+    type InputMode: InputMode;
 
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput>;
 
@@ -60,6 +62,8 @@ pub trait AsyncReturn: ExcelReturn {}
 pub trait VolatileReturn: ExcelReturn {}
 
 impl<T: IntoExcel> ExcelReturn for T {
+    type InputMode = PlainInputMode;
+
     fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
         IntoExcel::into_excel(self).map(ExcelOutput::Scalar)
     }
@@ -76,7 +80,7 @@ where
     T: ExcelReturn,
     E: IntoXllError,
 {
-    const USES_FORMULA_REVISION: bool = T::USES_FORMULA_REVISION;
+    type InputMode = T::InputMode;
 
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
         self.map_err(IntoXllError::into_xll_error)?

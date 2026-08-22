@@ -42,28 +42,29 @@ note: the trait `xlfn::Addin` must be implemented
    | pub trait Addin: Send + Sync + 'static {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::ExcelParameter<'call>` is not satisfied
+error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
 27 |     dataset: Handle<'_, Dataset>,
-   |              ^^^^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
+   |              ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
-      but trait `ExcelParameter<'_>` is implemented for it
+help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
+      but trait `ExcelParameter<'_, xlfn::value::PlainInputMode>` is implemented for it
   --> src/value.rs
    |
-   | / impl<'call, T> ExcelParameter<'call> for crate::handle::Handle<'call, T>
+   | / impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::Handle<'call, T>
    | | where
+   | |     M: InputMode,
    | |     T: crate::handle::ExcelHandleObject,
    | |________________________________________^
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
@@ -85,11 +86,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |                                           ^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
@@ -122,11 +123,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |                                           ^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
@@ -160,11 +161,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |                                           ^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
@@ -208,11 +209,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |                                           ^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<Option<usize>>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
@@ -256,11 +257,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
 note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
-   | pub fn assert_async_parameter<T>()
+   | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
-   | where
-   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
-   |                                           ^^^^ required by this bound in `assert_async_parameter`
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0308]: mismatched types
   --> tests/ui/fail_async/async_handle_input.rs:24:1

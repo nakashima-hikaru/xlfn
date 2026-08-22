@@ -32,6 +32,13 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 
 An Excel error supplied where another type is expected is propagated as that Excel error. Ordinary conversions do not ask Excel to coerce strings, booleans, references, or arrays into unrelated types.
 
+When the return type is a formula-owned handle, input conversion also selects
+the formula-revision mode. Built-in values record semantic identities after
+conversion. A custom `T: FromExcel<'call>` must additionally implement
+`ExcelInputIdentity`; otherwise it is valid for ordinary UDFs but rejected for
+the handle-producing path. This keeps memoization tied to the Rust value the
+UDF can observe instead of to incidental Excel storage details.
+
 ## Reference conversions
 
 A parameter marked `#[excel_arg(reference)]` uses `FromExcelReference<'call>`, not `FromExcel`.

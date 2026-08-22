@@ -3,7 +3,7 @@
 use crate::XllResult;
 #[cfg(not(target_os = "windows"))]
 use crate::error::{InputError, XllError};
-use crate::value::{CallContext, ExcelParameter, XlValueRef};
+use crate::value::{CallContext, ExcelParameter, InputMode, XlValueRef};
 use std::path::PathBuf;
 
 pub(super) struct ModuleName {
@@ -11,15 +11,17 @@ pub(super) struct ModuleName {
     pub(super) units: Vec<u16>,
 }
 
-impl<'call> ExcelParameter<'call> for ModuleName {
+impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
         _: &CallContext,
-        _identity: Option<&mut crate::input_identity::InputIdentityEncoder>,
+        _: &mut M::Identity,
     ) -> XllResult<Self> {
         Self::from_value(value, argument)
     }
+
+    fn encode_decoded(&self, _: &mut M::Identity) {}
 }
 
 impl ModuleName {

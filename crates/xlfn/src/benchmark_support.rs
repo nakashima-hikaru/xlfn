@@ -547,14 +547,17 @@ impl<T: BenchmarkInputIdentity> BenchmarkInputIdentity for Matrix<T> {
 }
 
 fn fingerprint_argument<T: BenchmarkInputIdentity>(value: &T) -> [u8; 32] {
-    let mut builder = crate::input_identity::InputFingerprintBuilder::new();
+    let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
     builder
-        .with_argument("benchmark", |encoder| {
+        .with_argument(0, "benchmark", |encoder| {
             value.encode_identity(encoder);
             Ok(())
         })
         .expect("benchmark semantic argument must fingerprint successfully");
-    *builder.finish().as_bytes()
+    *builder
+        .finish()
+        .expect("benchmark fingerprint framing must be complete")
+        .as_bytes()
 }
 
 pub struct SemanticIdentityBenchmark<T> {
@@ -1324,15 +1327,19 @@ impl RawArgumentIngressBenchmark {
 
     pub fn run_plain<T>(&mut self)
     where
-        T: for<'call> ExcelParameter<'call>,
+        T: for<'call> ExcelParameter<'call, crate::value::PlainInputMode>,
     {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                self.runtime,
+                scope,
+                1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<T>(
+                crate::value::argument_from_raw_with_arguments::<crate::value::PlainInputMode, T>(
                     &mut arguments,
+                    0,
                     "arg",
                     &mut self.raw,
                 )
@@ -1345,42 +1352,48 @@ impl RawArgumentIngressBenchmark {
 
     pub fn run_with_identity<T>(&mut self) -> [u8; 32]
     where
-        T: for<'call> ExcelParameter<'call>,
+        T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
     {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::for_return::<
-                crate::handle::HandleAlias<'static, BenchHandleObject>,
-                _,
-            >(self.runtime, scope);
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    self.runtime,
+                    scope,
+                    1,
+                );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
-            let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<T>(
-                    &mut arguments,
-                    "arg",
-                    &mut self.raw,
-                )
-            }
-            .expect("benchmark raw argument ingress with identity must succeed");
+            let value =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::FormulaInputMode,
+                        T,
+                    >(&mut arguments, 0, "arg", &mut self.raw)
+                }
+                .expect("benchmark raw argument ingress with identity must succeed");
             std::hint::black_box(&value);
             arguments
                 .finish()
+                .expect("formula revision fingerprint must finish")
                 .expect("formula revision return must produce fingerprint")
         })
     }
 
     pub fn run_borrowed_str(&mut self) {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                self.runtime,
+                scope,
+                1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
-            let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<&str>(
-                    &mut arguments,
-                    "arg",
-                    &mut self.raw,
-                )
-            }
-            .expect("benchmark borrowed string ingress must succeed");
+            let value =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 0, "arg", &mut self.raw)
+                }
+                .expect("benchmark borrowed string ingress must succeed");
             std::hint::black_box(value);
             let _ = arguments.finish();
         })
@@ -1388,16 +1401,19 @@ impl RawArgumentIngressBenchmark {
 
     pub fn run_borrowed_matrix_str(&mut self) {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                self.runtime,
+                scope,
+                1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
-            let value =
-                unsafe {
-                    crate::value::argument_from_raw_with_arguments::<
-                        crate::value::MatrixRef<'_, &str>,
-                    >(&mut arguments, "arg", &mut self.raw)
-                }
-                .expect("benchmark borrowed string matrix ingress must succeed");
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::MatrixRef<'_, &str>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed string matrix ingress must succeed");
             std::hint::black_box(value);
             let _ = arguments.finish();
         })
@@ -1405,13 +1421,17 @@ impl RawArgumentIngressBenchmark {
 
     pub fn run_borrowed_mixed_cells(&mut self) {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                self.runtime,
+                scope,
+                1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
                     crate::value::MatrixRef<'_, crate::value::ExcelCellRef<'_>>,
-                >(&mut arguments, "arg", &mut self.raw)
+                >(&mut arguments, 0, "arg", &mut self.raw)
             }
             .expect("benchmark borrowed mixed-cell ingress must succeed");
             std::hint::black_box(value);
@@ -1424,15 +1444,17 @@ impl RawArgumentIngressBenchmark {
         T: ExcelHandleObject,
     {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                self.runtime,
+                scope,
+                1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<crate::handle::Handle<'_, T>>(
-                    &mut arguments,
-                    "arg",
-                    &mut self.raw,
-                )
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::handle::Handle<'_, T>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
             }
             .expect("benchmark raw handle ingress must succeed");
             std::hint::black_box(&value);
@@ -1445,22 +1467,24 @@ impl RawArgumentIngressBenchmark {
         T: ExcelHandleObject,
     {
         crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::for_return::<
-                crate::handle::HandleAlias<'static, BenchHandleObject>,
-                _,
-            >(self.runtime, scope);
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    self.runtime,
+                    scope,
+                    1,
+                );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
-                crate::value::argument_from_raw_with_arguments::<crate::handle::Handle<'_, T>>(
-                    &mut arguments,
-                    "arg",
-                    &mut self.raw,
-                )
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::FormulaInputMode,
+                    crate::handle::Handle<'_, T>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
             }
             .expect("benchmark raw handle ingress with identity must succeed");
             std::hint::black_box(&value);
             arguments
                 .finish()
+                .expect("formula revision fingerprint must finish")
                 .expect("formula revision return must produce fingerprint")
         })
     }
@@ -1513,18 +1537,20 @@ impl MultiHandleCallBenchmark {
 
     pub fn run(&mut self) {
         crate::value::with_excel_call_scope(|scope| {
-            let mut frame = crate::__private::CallFrame::new::<f64, _>(self.runtime, scope);
+            let mut frame = crate::__private::CallFrame::<
+                <f64 as crate::value::ExcelReturn>::InputMode,
+            >::new(self.runtime, scope, 1);
             for raw in &mut self.raw_tokens {
                 // SAFETY: raw points to valid benchmark storage.
                 let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {
                     frame
-                        .convert_argument("arg", raw)
+                        .convert_argument(0, "arg", raw)
                         .expect("benchmark argument conversion must succeed")
                 };
                 std::hint::black_box(handle);
             }
             let return_ctx = frame.return_context("bench_udf");
-            std::hint::black_box(return_ctx);
+            let _ = std::hint::black_box(return_ctx);
         });
     }
 }

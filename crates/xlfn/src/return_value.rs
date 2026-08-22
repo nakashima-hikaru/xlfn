@@ -1290,6 +1290,8 @@ mod tests {
         struct PanickingReturn;
 
         impl ExcelReturn for PanickingReturn {
+            type InputMode = crate::value::PlainInputMode;
+
             fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
                 panic!("injected return conversion panic")
             }
@@ -1313,6 +1315,8 @@ mod tests {
         }
 
         impl ExcelReturn for BlockingReturn {
+            type InputMode = crate::value::PlainInputMode;
+
             fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
                 self.converting.send(()).unwrap();
                 self.release.recv().unwrap();

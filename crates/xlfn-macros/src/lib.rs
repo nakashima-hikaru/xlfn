@@ -226,6 +226,7 @@ fn expand_excel_function(
         .iter()
         .map(|argument| argument.options.reference)
         .collect::<Vec<_>>();
+    let argument_count = arguments.len();
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
             quote!(#krate::__private::thread_safe_context(__state))
@@ -302,7 +303,8 @@ fn expand_excel_function(
         .zip(argument_name_literals.iter())
         .zip(raw_names.iter())
         .zip(argument_options.iter())
-        .map(|((((converted, ty), argument), raw), options)| {
+        .enumerate()
+        .map(|(index, ((((converted, ty), argument), raw), options))| {
             let conversion = if options.reference {
                 quote! {
                     // SAFETY: Excel supplies the live reference pointer for this ABI call.
@@ -312,16 +314,17 @@ fn expand_excel_function(
                 }
             } else {
                 let async_assertion = is_async.then(|| {
-                    quote!(#krate::__private::assert_async_parameter::<#ty>();)
+                    quote!(#krate::__private::assert_async_parameter::<#return_type, #ty>();)
                 });
                 quote! {
                     {
                         #async_assertion
-                        #krate::__private::assert_excel_parameter::<#ty>(__frame);
+                        #krate::__private::assert_excel_parameter::<#return_type, #ty>(__frame);
                         // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                         unsafe {
-                            #krate::__private::convert_argument::<#ty>(
+                            #krate::__private::convert_argument::<#return_type, #ty>(
                                 __frame,
+                                #index,
                                 #argument,
                                 #raw,
                             )
@@ -337,7 +340,14 @@ fn expand_excel_function(
                 let default_expr = options.default.as_ref();
                 let blank_arm = if blank_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::CellPresence::Blank => #default,)
+                    quote!(#krate::__private::CellPresence::Blank => {
+                        #krate::__private::CallFrame::default_argument(
+                            __frame,
+                            #index,
+                            #argument,
+                            #default,
+                        )?
+                    },)
                 } else if blank_error {
                     quote!(#krate::__private::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
                 } else {
@@ -345,7 +355,14 @@ fn expand_excel_function(
                 };
                 let missing_arm = if missing_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::CellPresence::Missing => #default,)
+                    quote!(#krate::__private::CellPresence::Missing => {
+                        #krate::__private::CallFrame::default_argument(
+                            __frame,
+                            #index,
+                            #argument,
+                            #default,
+                        )?
+                    },)
                 } else if missing_error {
                     quote!(#krate::__private::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
                 } else {
@@ -380,6 +397,7 @@ fn expand_excel_function(
                         &crate::__XLFN_RUNTIME,
                         #udf_id,
                         #excel_name,
+                        #argument_count,
                         __async_handle,
                         |__lease, __cancellation, __frame| {
                             #(#conversions)*
@@ -399,12 +417,13 @@ fn expand_excel_function(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
+                #argument_count,
                 |__state, __frame| {
                     #return_assertion
                     #context_setup
                     #(#conversions)*
                     let mut __return_context =
-                        __frame.return_context(#udf_id);
+                        __frame.return_context(#udf_id)?;
                     #krate::__private::ExcelReturn::invoke(
                         &mut __return_context,
                         || ::core::result::Result::Ok(#invocation),
@@ -790,9 +809,9 @@ mod tests {
         assert!(expanded.contains("eq_ignore_ascii_case"));
         assert!(expanded.contains("FromExcel"));
         assert!(!expanded.contains("ExcelParameter"));
-        assert!(!expanded.contains("ExcelInputIdentity"));
-        assert!(!expanded.contains("encode_identity"));
-        assert!(!expanded.contains("__encoder . u32"));
+        assert!(expanded.contains("ExcelInputIdentity"));
+        assert!(expanded.contains("encode_input_identity"));
+        assert!(expanded.contains("__encoder . u32"));
         assert!(!expanded.contains("__encoder . domain"));
         assert!(expanded.contains("ExcelCellOutput"));
         assert!(expanded.contains("IntoExcel"));
@@ -1095,14 +1114,14 @@ mod tests {
         .to_string();
 
         let blank = expanded
-            .find("CellPresence :: Blank => 1.0")
+            .find("CellPresence :: Blank =>")
             .expect("blank default branch must be generated");
         let missing = expanded
-            .find("CellPresence :: Missing => 1.0")
+            .find("CellPresence :: Missing =>")
             .expect("missing default branch must be generated");
         assert!(blank < missing);
         assert!(expanded.contains("sync_udf"));
-        assert!(!expanded.contains("1usize"));
+        assert!(expanded.contains("default_argument"));
     }
 
     #[test]

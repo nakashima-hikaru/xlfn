@@ -1,5 +1,7 @@
 use xlfn::prelude::*;
-use xlfn::value::{ExcelCellOutput, FromExcel, IntoExcel, XlValueRef};
+use xlfn::value::{
+    ExcelCellOutput, ExcelInputIdentity, FromExcel, InputIdentityEncoder, IntoExcel, XlValueRef,
+};
 
 struct State;
 
@@ -38,6 +40,15 @@ impl IntoExcel for Positive {
     }
 }
 
+impl ExcelInputIdentity for Positive {
+    fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.f64(self.0);
+    }
+}
+
+#[derive(ExcelHandleObject)]
+struct PositiveHandle;
+
 #[excel_function(name = "TEST.CUSTOM.CONVERSION", thread_safe)]
 fn custom_conversion(value: Positive) -> Positive {
     value
@@ -46,6 +57,12 @@ fn custom_conversion(value: Positive) -> Positive {
 #[excel_function(name = "TEST.CUSTOM.MATRIX", thread_safe)]
 fn custom_matrix(value: Positive) -> XllResult<Matrix<Positive>> {
     Matrix::new(1, 1, vec![value])
+}
+
+#[excel_function(name = "TEST.CUSTOM.HANDLE")]
+fn custom_handle(value: Positive) -> PositiveHandle {
+    let _ = value;
+    PositiveHandle
 }
 
 fn main() {}

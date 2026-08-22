@@ -118,6 +118,11 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
         .iter()
         .map(|(variant, name)| quote!(Self::#variant => #name))
         .collect::<Vec<_>>();
+    let identities = variants
+        .iter()
+        .enumerate()
+        .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
+        .collect::<Vec<_>>();
     Ok(quote! {
         impl #from_excel_impl_generics #krate::value::FromExcel<'__xlfn_call>
             for #ident #type_generics #from_excel_where_clause
@@ -152,6 +157,20 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                 ::core::result::Result::Ok(
                     #krate::value::ExcelCellOutput::String(__text.to_owned())
                 )
+            }
+        }
+
+        impl #base_impl_generics #krate::value::ExcelInputIdentity
+            for #ident #type_generics #base_where_clause
+        {
+            fn encode_input_identity(
+                &self,
+                __encoder: &mut #krate::value::InputIdentityEncoder,
+            ) {
+                let __variant = match self {
+                    #(#identities,)*
+                };
+                __encoder.u32(__variant);
             }
         }
     })

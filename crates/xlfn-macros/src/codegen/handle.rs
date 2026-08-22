@@ -35,7 +35,7 @@ pub(crate) fn expand_excel_handle_object(
         impl #impl_generics #krate::__private::ExcelReturn
             for #ident #type_generics #where_clause
         {
-            const USES_FORMULA_REVISION: bool = true;
+            type InputMode = #krate::__private::FormulaInputMode;
 
             fn invoke(
                 __context: &mut #krate::__private::ReturnContext<'_, '_>,

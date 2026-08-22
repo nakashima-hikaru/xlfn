@@ -148,7 +148,9 @@ Derive strict text conversion for a fieldless enum:
 - `#[excel_enum(ascii_case_insensitive)]` enables ASCII case-insensitive matching;
 - effective names must be non-empty and unique under the selected comparison policy.
 
-The derive implements input conversion, scalar output conversion, and all execution-mode return markers.
+The derive implements input conversion, normalized variant identity for
+formula-revision handle inputs, scalar output conversion, and all
+execution-mode return markers.
 
 ## `#[derive(ExcelHandleObject)]`
 

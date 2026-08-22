@@ -43,22 +43,25 @@ where
 }
 
 fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> InputFingerprint {
-    let mut builder = InputFingerprintBuilder::new();
+    let mut builder = InputFingerprintBuilder::new(1);
     builder
-        .with_argument("handle", |encoder| {
+        .with_argument(0, "handle", |encoder| {
             encoder.u64(value.object.id.0.0);
             Ok(())
         })
         .unwrap();
-    builder.finish()
+    builder.finish().unwrap()
 }
 
 fn reference_handle_identity(object_id: u64) -> InputFingerprint {
-    let mut root = blake3::Hasher::new();
-    root.update(&[0]);
-    root.update(&8_u64.to_le_bytes());
-    root.update(&object_id.to_le_bytes());
-    InputFingerprint::from_bytes(*root.finalize().as_bytes())
+    let mut builder = InputFingerprintBuilder::new(1);
+    builder
+        .with_argument(0, "handle", |encoder| {
+            encoder.u64(object_id);
+            Ok(())
+        })
+        .unwrap();
+    builder.finish().unwrap()
 }
 
 fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTopicKey {

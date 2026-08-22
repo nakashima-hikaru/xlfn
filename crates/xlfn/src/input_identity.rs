@@ -2,6 +2,7 @@ use crate::error::InputError;
 use crate::{XllError, XllResult};
 
 const INLINE_ARGUMENT_BYTES: usize = 128;
+const INPUT_FINGERPRINT_DOMAIN: &[u8] = b"xlfn-input-v2\0";
 
 /// Runtime-local semantic identity of one UDF argument list.
 ///
@@ -256,30 +257,56 @@ impl InputIdentityEncoder {
 }
 
 /// Builds one runtime-local input fingerprint.
-pub(crate) struct InputFingerprintBuilder {
+#[doc(hidden)]
+pub struct InputFingerprintBuilder {
     root: blake3::Hasher,
+    expected_arguments: usize,
+    next_argument: usize,
 }
 
 impl InputFingerprintBuilder {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(expected_arguments: usize) -> Self {
+        let mut root = blake3::Hasher::new();
+        root.update(INPUT_FINGERPRINT_DOMAIN);
+        root.update(&(expected_arguments as u64).to_le_bytes());
         Self {
-            root: blake3::Hasher::new(),
+            root,
+            expected_arguments,
+            next_argument: 0,
         }
     }
 
     pub(crate) fn with_argument<R>(
         &mut self,
+        index: usize,
         argument: &'static str,
         encode: impl FnOnce(&mut InputIdentityEncoder) -> XllResult<R>,
     ) -> XllResult<R> {
+        if index != self.next_argument {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        }
+        self.root.update(&[0xA0]);
+        self.root.update(&(index as u64).to_le_bytes());
+        self.root.update(&(argument.len() as u64).to_le_bytes());
+        self.root.update(argument.as_bytes());
         let mut encoder = InputIdentityEncoder::new(argument);
         let value = encode(&mut encoder)?;
         encoder.finish_into(&mut self.root)?;
+        self.next_argument += 1;
         Ok(value)
     }
 
-    pub(crate) fn finish(self) -> InputFingerprint {
-        InputFingerprint::from_bytes(*self.root.finalize().as_bytes())
+    pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
+        if self.next_argument != self.expected_arguments {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        }
+        Ok(InputFingerprint::from_bytes(
+            *self.root.finalize().as_bytes(),
+        ))
     }
 }
 
@@ -404,16 +431,16 @@ mod tests {
     where
         T: TestIdentity,
     {
-        let mut builder = InputFingerprintBuilder::new();
-        for value in values {
+        let mut builder = InputFingerprintBuilder::new(values.len());
+        for (index, value) in values.iter().enumerate() {
             builder
-                .with_argument("arg", |encoder| {
+                .with_argument(index, "arg", |encoder| {
                     value.encode_identity(encoder);
                     Ok(())
                 })
                 .unwrap();
         }
-        builder.finish()
+        builder.finish().unwrap()
     }
 
     fn append_u64(bytes: &mut Vec<u8>, value: u64) {
@@ -426,22 +453,16 @@ mod tests {
     }
 
     fn reference_fingerprint(arguments: &[&[u8]]) -> InputFingerprint {
-        let mut root = blake3::Hasher::new();
-        for argument in arguments {
-            if argument.len() <= INLINE_ARGUMENT_BYTES {
-                root.update(&[ArgumentEncoding::Inline as u8]);
-                append_u64_stream(&mut root, argument.len() as u64);
-                root.update(argument);
-            } else {
-                root.update(&[ArgumentEncoding::Hashed as u8]);
-                root.update(blake3::hash(argument).as_bytes());
-            }
+        let mut builder = InputFingerprintBuilder::new(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            builder
+                .with_argument(index, "arg", |encoder| {
+                    encoder.write(argument);
+                    Ok(())
+                })
+                .unwrap();
         }
-        InputFingerprint::from_bytes(*root.finalize().as_bytes())
-    }
-
-    fn append_u64_stream(hasher: &mut blake3::Hasher, value: u64) {
-        hasher.update(&value.to_le_bytes());
+        builder.finish().unwrap()
     }
 
     #[test]
@@ -589,5 +610,18 @@ mod tests {
             fingerprint(&[ExcelValue::Scalar(ExcelCellValue::Number(1.0))]),
             fingerprint(&[ExcelValue::Missing]),
         );
+    }
+
+    #[test]
+    fn fingerprint_builder_rejects_incomplete_or_out_of_order_arguments() {
+        let mut incomplete = InputFingerprintBuilder::new(2);
+        incomplete.with_argument(0, "first", |_| Ok(())).unwrap();
+        assert!(incomplete.finish().is_err());
+
+        let mut out_of_order = InputFingerprintBuilder::new(2);
+        assert!(out_of_order.with_argument(1, "second", |_| Ok(())).is_err());
+        out_of_order.with_argument(0, "first", |_| Ok(())).unwrap();
+        out_of_order.with_argument(1, "second", |_| Ok(())).unwrap();
+        assert!(out_of_order.finish().is_ok());
     }
 }

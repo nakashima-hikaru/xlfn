@@ -40,6 +40,29 @@ and are not custom `FromExcel` implementations. Runtime context and
 formula-fingerprint construction stay inside the framework boundary. Do not
 retain `XlValueRef` or any pointer derived from it in an owned result.
 
+### Semantic identity for handle producers
+
+A function returning a formula-owned handle is memoized by the converted
+semantic inputs. Such a parameter must therefore also implement
+`ExcelInputIdentity`; ordinary functions that do not produce a handle still
+require only `FromExcel`:
+
+```rust
+use xlfn::value::{ExcelInputIdentity, InputIdentityEncoder};
+
+impl ExcelInputIdentity for PositiveRate {
+    fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.f64(self.0);
+    }
+}
+```
+
+The identity implementation describes the Rust value observed by the UDF,
+not the original `XLOPER12` representation. Omitting this implementation for
+a custom input in a handle-producing function is a compile-time error. The
+framework supplies semantic identities for built-in conversions and derives a
+variant ordinal for `ExcelEnum` values.
+
 ## Custom cell and output conversions
 
 A value used as one cell in a returned matrix, or as a custom scalar return, implements `IntoExcel`:
