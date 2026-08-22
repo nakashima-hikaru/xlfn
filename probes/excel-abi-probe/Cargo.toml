@@ -22,6 +22,8 @@ cc = "1.2.57"
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
 linker_messages = "deny"
+dangling_pointers_from_locals = "deny"
+integer_to_ptr_transmutes = "deny"
 
 [lints.clippy]
 allow_attributes_without_reason = "deny"

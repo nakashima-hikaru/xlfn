@@ -905,6 +905,55 @@ fn base_cargo_command_does_not_rewrite_rustflags() {
 }
 
 #[test]
+fn configure_build_sets_target_dir_and_build_dir() {
+    let metadata = ProjectMetadata {
+        package_name: "test-pkg".into(),
+        package_version: "0.1.0".into(),
+        lib_name: "test_pkg".into(),
+        artifact_name: "test_pkg".into(),
+        manifest_path: PathBuf::from("Cargo.toml"),
+        manifest_directory: PathBuf::from("."),
+        target_directory: PathBuf::from("target"),
+        crt: crt::ResolvedCrtPolicy::resolve(Some(crt::CrtPolicy::Static), None),
+        resolved_features: Vec::new(),
+        lockfile_sha256: None,
+        bundle: None,
+    };
+    let mut command = cargo_command();
+    let temp_target = Path::new("target/temp-target");
+    configure_build(
+        &mut command,
+        &metadata,
+        "x86_64-pc-windows-msvc",
+        temp_target,
+    )
+    .expect("configure_build succeeds");
+    let args = command
+        .get_args()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        args.array_windows::<2>()
+            .any(|[flag, val]| flag == "--target-dir" && val == "target/temp-target")
+    );
+    let env_build_dir = command
+        .get_envs()
+        .find(|(k, _)| *k == "CARGO_BUILD_BUILD_DIR")
+        .and_then(|(_, v)| v.map(|s| s.to_string_lossy().into_owned()));
+    assert_eq!(
+        env_build_dir,
+        Some(
+            metadata
+                .crt
+                .target_directory(&metadata.target_directory)
+                .join("build-cache")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+}
+
+#[test]
 fn error_as_io_retains_the_original_error_object() {
     let io_error = error_as_io(anyhow!("root cause").context("commit failed"));
 

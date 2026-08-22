@@ -225,7 +225,7 @@ pub(crate) fn stage_package_target(
     let external_imports = bundle.external_imports().collect::<Vec<_>>();
 
     let validation_staging = xlfn_package::PrivateStagingDirectory::create(
-        &staging.path().with_extension("validation"),
+        &staging.path().with_added_extension("validation"),
     )?;
     let mut staged_bundle = xlfn_package::stage_bundle(&bundle, &validation_staging)?;
     let xll = validation_staging

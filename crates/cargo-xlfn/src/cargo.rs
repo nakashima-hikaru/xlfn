@@ -12,5 +12,11 @@ pub(crate) fn configure_build(
 ) -> Result {
     crt::validate_explicit_policy_target(metadata.crt.policy, target)?;
     command.arg("--target-dir").arg(target_directory);
+    let build_dir = metadata
+        .crt
+        .target_directory(&metadata.target_directory)
+        .join("build-cache");
+    fs::create_dir_all(&build_dir)?;
+    command.env("CARGO_BUILD_BUILD_DIR", build_dir);
     crt::configure_wrapper(command, metadata.crt, target)
 }

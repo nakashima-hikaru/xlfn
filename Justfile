@@ -63,6 +63,9 @@ semver:
         --baseline-rev 0.1.0 \
         --release-type major
 
+publish-check:
+    cargo publish --workspace --dry-run --locked
+
 quick: fmt clippy test
 
 check: fmt clippy features test bench-check deny semver
