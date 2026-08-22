@@ -1,5 +1,5 @@
 #[cfg(any(target_os = "windows", test))]
-use super::HandleRuntime;
+use super::FormulaHandleService;
 #[cfg(any(target_os = "windows", test))]
 use super::HandleTopicKey;
 use super::{HandleId, ObjectId, PublishedTopic};
@@ -34,7 +34,7 @@ pub(crate) struct HandleTopicOwner {
 /// created it. The borrow keeps commit and rollback on the same live runtime
 /// without a temporary `Weak` upgrade.
 pub(crate) struct HandleConnection<'runtime> {
-    pub(crate) runtime: &'runtime HandleRuntime,
+    pub(crate) runtime: &'runtime FormulaHandleService,
     pub(crate) owner: HandleTopicOwner,
     pub(crate) key: HandleTopicKey,
     pub(crate) token: String,

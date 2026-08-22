@@ -2,7 +2,7 @@ use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::diagnostics::AddinId;
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
-use crate::host_callback::{HostCallbackSession, HostCallbackState};
+use crate::host_callback::HostCallbackSession;
 use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::{LifecycleThreadAccess, Runtime};
@@ -280,16 +280,17 @@ fn retain_transaction_error<A: Addin>(
     *error.source
 }
 
+enum OpenRollbackStatus {
+    /// Every terminal certificate was issued and the lifecycle binding was
+    /// released. A later open may safely reuse the runtime.
+    Finalized,
+    /// Rollback did not produce the complete terminal certificate. The
+    /// caller must retain the fail-safe pending state and quarantine policy.
+    Incomplete,
+}
+
 struct OpenRollbackOutcome {
-    local_quiescent: bool,
-    host_callbacks_detached: bool,
-    #[allow(
-        dead_code,
-        reason = "Host callback session token retained for rollback outcome verification"
-    )]
-    host_callback_state: HostCallbackState,
-    registration_state_known: bool,
-    finalized: bool,
+    status: OpenRollbackStatus,
 }
 
 fn active_runtime_generation<A: Addin>(runtime: &Runtime<A>) -> Option<RuntimeGeneration> {
@@ -322,10 +323,12 @@ fn drain_execution<A: Addin>(
 
 impl OpenRollbackOutcome {
     fn unload_safe(&self) -> bool {
-        self.local_quiescent
-            && self.host_callbacks_detached
-            && self.registration_state_known
-            && self.finalized
+        matches!(self.status, OpenRollbackStatus::Finalized)
+    }
+
+    #[cfg(test)]
+    fn is_finalized(&self) -> bool {
+        self.unload_safe()
     }
 }
 
@@ -341,13 +344,16 @@ where
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
+        let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+            && runtime.host_callbacks_detached()
+            && !runtime.registration_state_unknown()
+            && crate::rtd::logical_quiescence_certified();
         return OpenRollbackOutcome {
-            local_quiescent: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed,
-            host_callbacks_detached: runtime.host_callbacks_detached(),
-            host_callback_state: callbacks.state(),
-            registration_state_known: !runtime.registration_state_unknown(),
-            finalized: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-                && crate::rtd::logical_quiescence_certified(),
+            status: if finalized {
+                OpenRollbackStatus::Finalized
+            } else {
+                OpenRollbackStatus::Incomplete
+            },
         };
     };
     crate::ingress::global_ingress().begin_close_with(|| {});
@@ -491,7 +497,7 @@ where
     }
 
     let mut handles_sealed = if local_quiescent {
-        match runtime.seal_handles() {
+        match runtime.seal_formula_handle_service() {
             Ok(token) => Some(token),
             Err(error) => {
                 report_boundary_error("xlAutoOpen handle rollback", &error);
@@ -590,8 +596,8 @@ where
         );
     }
 
-    let handles_quiescent = if local_quiescent {
-        match runtime.finish_handle_quiescence(
+    let handle_store_quiescent = if local_quiescent {
+        match runtime.finish_formula_handle_quiescence(
             handles_sealed
                 .take()
                 .expect("handle seal token is present when rollback is local-quiescent"),
@@ -652,7 +658,7 @@ where
             },
             subscriptions_stopped: subscriptions_stopped
                 .expect("subscription certificate is present when rollback is local-quiescent"),
-            handles_quiescent: handles_quiescent
+            handle_store_quiescent: handle_store_quiescent
                 .expect("handle certificate is present when rollback is local-quiescent"),
             diagnostics_stopped: diagnostics_stopped
                 .expect("diagnostic certificate is present when rollback is local-quiescent"),
@@ -673,21 +679,19 @@ where
                         "xlAutoOpen lifecycle binding release",
                         &lifecycle_access_error(error),
                     );
-                    local_quiescent = false;
                 }
             },
             Err(error) => {
                 report_boundary_error("xlAutoOpen rollback certification", &error);
-                local_quiescent = false;
             }
         }
     }
     OpenRollbackOutcome {
-        local_quiescent,
-        host_callbacks_detached,
-        host_callback_state: callbacks.state(),
-        registration_state_known,
-        finalized,
+        status: if finalized {
+            OpenRollbackStatus::Finalized
+        } else {
+            OpenRollbackStatus::Incomplete
+        },
     }
 }
 
@@ -1150,12 +1154,12 @@ where
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
     }
 
-    let handles_sealed = match runtime.seal_handles() {
+    let handles_sealed = match runtime.seal_formula_handle_service() {
         Ok(token) => token,
         Err(error) => {
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
                 "xlAutoRemove handle table shutdown",
                 &error,
             ));
@@ -1255,12 +1259,12 @@ where
         ));
     }
 
-    let handles_quiescent = match runtime.finish_handle_quiescence(handles_sealed) {
+    let handle_store_quiescent = match runtime.finish_formula_handle_quiescence(handles_sealed) {
         Ok(certificate) => certificate,
         Err(error) => {
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::HandleRuntimeNotQuiescent,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
                 "xlAutoRemove handle pin quiescence",
                 &error,
             ));
@@ -1331,7 +1335,7 @@ where
             host_callbacks,
             async_stopped,
             subscriptions_stopped,
-            handles_quiescent,
+            handle_store_quiescent,
             diagnostics_stopped,
             addin_quiesced,
             generation_reclaimed,
@@ -2006,7 +2010,7 @@ mod tests {
             active_runtime_generation(&runtime),
         );
         assert!(outcome.unload_safe());
-        assert!(outcome.finalized);
+        assert!(outcome.is_finalized());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(
@@ -2154,7 +2158,7 @@ mod tests {
         let free = unsafe { crate::return_value::free_return_boundary(pointer) };
         drop(free);
 
-        let handles = runtime.handles().unwrap();
+        let handles = runtime.formula_handle_service().unwrap();
         handles
             .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
                 Ok(TraceHandle)
@@ -2923,7 +2927,7 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime
-            .handles()
+            .formula_handle_service()
             .unwrap()
             .prepare(crate::handle::test_topic_key("ordered"), || {
                 Ok(OrderedHandle {

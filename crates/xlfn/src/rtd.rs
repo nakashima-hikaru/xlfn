@@ -1,7 +1,7 @@
 #[cfg(not(target_os = "windows"))]
 use crate::XllError;
 use crate::XllResult;
-use crate::handle::HandleRuntime;
+use crate::handle::FormulaHandleService;
 use crate::host_callback::HostCallbackSession;
 pub use crate::subscription::{
     IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
@@ -84,7 +84,7 @@ pub(crate) struct RtdQuiescenceError {
 }
 
 pub(crate) fn observe(
-    handles: &Arc<HandleRuntime>,
+    handles: &Arc<FormulaHandleService>,
     key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
@@ -126,7 +126,7 @@ pub(crate) fn observe_subscription(
     }
 }
 
-pub(crate) fn shutdown(handles: Arc<HandleRuntime>) -> XllResult<()> {
+pub(crate) fn shutdown(handles: Arc<FormulaHandleService>) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
         windows::shutdown(handles)

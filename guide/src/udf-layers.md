@@ -2,12 +2,10 @@
 
 Execution layers provide bounded admission control and instrumentation around every exported UDF. They observe call metadata before argument conversion and receive a classified outcome after completion.
 
-This API is currently behind the explicit `unstable` crate feature.
-
 Import from:
 
 ```rust
-use xlfn::unstable::execution::{
+use xlfn::execution::{
     CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers, UdfResultKind,
 };
 ```

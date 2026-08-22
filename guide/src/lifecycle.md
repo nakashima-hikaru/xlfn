@@ -27,9 +27,10 @@ storage and bound to the Excel lifecycle thread for the open generation, so it
 may own thread-affine resources. `RuntimeConfig` can
 select RTD limits and, with the `async` feature, the async worker count.
 
-The stable default uses `type Layers = ();`. Custom UDF layers and other
-lower-level execution APIs require the explicit `unstable` feature and are
-documented separately in [UDF execution layers](udf-layers.md).
+The stable default uses `type Layers = ();`. Custom UDF layers are part of the
+stable execution contract and are documented separately in [UDF execution
+layers](udf-layers.md). Other lower-level APIs remain behind the explicit
+`unstable` feature.
 
 ## Open
 

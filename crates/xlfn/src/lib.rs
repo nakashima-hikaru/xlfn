@@ -60,7 +60,8 @@ mod composition_refinement;
 mod crt;
 pub mod diagnostics;
 pub mod error;
-mod execution;
+/// Stable execution-layer contracts and per-call metadata.
+pub mod execution;
 mod generation;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod handle;
@@ -471,14 +472,6 @@ pub mod unstable {
     pub mod cache {
         pub use crate::cache::{
             BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
-        };
-    }
-
-    /// Exported-function execution metadata and instrumentation.
-    pub mod execution {
-        pub use crate::execution::{
-            CalculationId, CallId, CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers,
-            UdfResultKind,
         };
     }
 

@@ -2,7 +2,7 @@
 use crate::XllError;
 #[cfg(test)]
 use crate::XllResult;
-use crate::handle::HandleRuntime;
+use crate::handle::FormulaHandleService;
 #[cfg(test)]
 use crate::subscription::RtdValue;
 #[cfg(test)]

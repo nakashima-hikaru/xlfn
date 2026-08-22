@@ -55,7 +55,7 @@ The `xlfn` crate has no default features.
 | Feature | Adds | Use when |
 |---|---|---|
 | `async` | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel |
-| `unstable` | lower-level cache, execution-layer, and array-output APIs | the add-in explicitly accepts experimental API evolution |
+| `unstable` | lower-level cache and array-output APIs | the add-in explicitly accepts experimental API evolution |
 
 Examples:
 

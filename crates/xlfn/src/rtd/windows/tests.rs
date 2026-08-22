@@ -755,7 +755,7 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
 #[test]
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the allocation throughout
@@ -795,7 +795,7 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
 #[test]
 fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -857,7 +857,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
 #[test]
 fn deferred_termination_spawn_failure_rolls_back_atomically() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -911,7 +911,7 @@ fn termination_worker_can_finish_before_handle_registration() {
 #[test]
 fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -987,7 +987,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     use std::sync::atomic::AtomicI32;
 
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let server_address = server as usize;
@@ -1063,7 +1063,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     use std::sync::Barrier;
 
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let _generation = ensured.active.generation;
@@ -1618,7 +1618,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
 #[test]
 fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     assert!(ensured.newly_created);
 
@@ -1673,7 +1673,7 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
 #[test]
 fn create_instance_nulls_output_on_every_rejected_request() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
@@ -1754,7 +1754,7 @@ fn create_instance_nulls_output_on_every_rejected_request() {
 #[test]
 fn com_query_failures_clear_stale_output_pointers() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let class_factory_iid = iid_iclass_factory_from_fields();
     let unknown_iid = iid_iunknown_from_fields();
@@ -1896,7 +1896,7 @@ fn com_query_failures_clear_stale_output_pointers() {
 #[test]
 fn idispatch_resolves_names_and_invokes_heartbeat() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
@@ -2070,7 +2070,7 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
 #[test]
 fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
@@ -2500,7 +2500,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
 #[test]
 fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let _active = ensure_server(Some(&handles), None).unwrap();
     let wrong = GUID::from_u128(1);
     let class_factory_iid = iid_iclass_factory_from_fields();
@@ -2525,7 +2525,7 @@ fn wrong_clsid_is_not_served() {
 #[test]
 fn existing_server_attaches_each_backend_without_replacement() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(HandleRuntime::new(4));
+    let handles = Arc::new(FormulaHandleService::new(4));
     let subscriptions = Arc::new(SubscriptionRuntime::new());
 
     let first = ensure_server(Some(&handles), None).unwrap();

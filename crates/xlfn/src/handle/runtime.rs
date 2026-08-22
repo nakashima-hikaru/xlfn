@@ -2,9 +2,8 @@
 use super::RtdOperationGuard;
 use super::{
     ErasedObject, ExcelHandleObject, FormulaBinding, Handle, HandlePrepareState,
-    HandleRefinementHooks, HandleRegistry, HandleToken, HandleTopicKey, Initialization, ObjectId,
-    ObjectLocator, PendingHandleValue, PrepareDecision, PublishedTopic, PublishedTopicState,
-    TokenWire, TopicRemoval, TopicTable,
+    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, ObjectId, ObjectLocator,
+    PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{HandleConnection, HandleTopicOwner};
@@ -60,7 +59,7 @@ impl Drop for HandleInitializationGuard {
 /// waiters, so the rollback protocol is no longer encoded in a closure hidden
 /// in the middle of `prepare_observed_object`.
 struct TopicReservation<'runtime> {
-    runtime: &'runtime HandleRuntime,
+    runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     initialization: Arc<Initialization>,
     active: bool,
@@ -68,7 +67,7 @@ struct TopicReservation<'runtime> {
 
 impl<'runtime> TopicReservation<'runtime> {
     fn new(
-        runtime: &'runtime HandleRuntime,
+        runtime: &'runtime FormulaHandleService,
         key: HandleTopicKey,
         initialization: Arc<Initialization>,
     ) -> Self {
@@ -110,7 +109,7 @@ impl Drop for TopicReservation<'_> {
 /// collision.  This is the cold-path transaction boundary for handle
 /// publication.
 struct ProvisionalPublication<'runtime> {
-    runtime: &'runtime HandleRuntime,
+    runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     token: String,
     refinement_id: u64,
@@ -119,7 +118,7 @@ struct ProvisionalPublication<'runtime> {
 
 impl<'runtime> ProvisionalPublication<'runtime> {
     fn new(
-        runtime: &'runtime HandleRuntime,
+        runtime: &'runtime FormulaHandleService,
         key: HandleTopicKey,
         token: String,
         refinement_id: u64,
@@ -154,7 +153,7 @@ impl Drop for ProvisionalPublication<'_> {
                 refinement.observe_withdraw_and_invalidate(&key, refinement_id, token_wire);
             })
             .is_some();
-        let _ = self.runtime.registry.remove_and_drop_with_observer(
+        let _ = self.runtime.store.remove_and_drop_with_observer(
             &self.token,
             "handle publication rollback",
             move |reusable| {
@@ -168,15 +167,15 @@ impl Drop for ProvisionalPublication<'_> {
 
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
-pub(crate) struct HandleRuntime {
-    pub(crate) registry: HandleRegistry,
-    pub(crate) topics: TopicTable,
-    pub(crate) prepares: HandlePrepareState,
-    pub(crate) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    pub(crate) refinement: HandleRefinementHooks,
+pub(crate) struct FormulaHandleService {
+    pub(super) store: HandleStore,
+    pub(super) topics: TopicTable,
+    pub(super) prepares: HandlePrepareState,
+    pub(super) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
+    pub(super) refinement: HandleRefinementHooks,
 }
 
-impl HandleRuntime {
+impl FormulaHandleService {
     #[cfg(test)]
     pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
         Self::try_new_with_ingress(maximum_bindings, None)
@@ -186,10 +185,10 @@ impl HandleRuntime {
         maximum_bindings: usize,
         module_ingress: Option<&'static crate::ingress::ExportIngress>,
     ) -> XllResult<Self> {
-        let registry = HandleRegistry::try_new(maximum_bindings)?;
-        let registry_session = registry.codec.session;
+        let store = HandleStore::try_new(maximum_bindings)?;
+        let registry_session = store.session();
         Ok(Self {
-            registry,
+            store,
             topics: TopicTable::new(),
             prepares: HandlePrepareState::new(),
             _module_ingress: module_ingress,
@@ -199,23 +198,11 @@ impl HandleRuntime {
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.registry.set_ghost(ghost);
+        self.store.set_ghost(ghost);
     }
 
-    fn refinement_token(&self, token: &str) -> TokenWire {
-        let parsed = self
-            .registry
-            .codec
-            .parse(
-                std::ptr::from_ref(&self.registry).addr(),
-                HandleToken::new(token),
-            )
-            .expect("H4 trace token must be authenticated");
-        TokenWire {
-            session: self.registry.codec.session,
-            slot: u64::from(parsed.id.slot),
-            generation: parsed.id.generation.get(),
-        }
+    fn refinement_token(&self, token: &str) -> super::TokenWire {
+        self.store.refinement_token(token)
     }
 
     #[cfg(test)]
@@ -226,7 +213,7 @@ impl HandleRuntime {
     #[cfg(target_os = "windows")]
     pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
-        let ghost = self.registry.ghost_handle();
+        let ghost = self.store.ghost_handle();
 
         let ingress_guard = if let Some(ingress) = self._module_ingress {
             let (guard, accepted) = ingress.enter_with(|| {
@@ -323,7 +310,7 @@ impl HandleRuntime {
             || {
                 create().map(|value| PreparedHandleObject::New {
                     object_id: None,
-                    value: ErasedObject::new(value, Arc::clone(&self.registry.cleanup)),
+                    value: self.store.erase(value),
                 })
             },
             observe,
@@ -457,17 +444,9 @@ impl HandleRuntime {
         //
         let (token, binding_id, object_id, reused) = match create()? {
             PreparedHandleObject::New { object_id, value } => {
-                let mut pending = PendingHandleValue::new(
-                    &self.registry,
-                    value,
-                    "unpublished handle formula value",
-                );
-                self.registry
-                    .insert_pending_object_with_kind::<T>(pending.slot(), object_id)?
+                self.store.insert_pending::<T>(value, object_id)?
             }
-            PreparedHandleObject::Existing { object } => {
-                self.registry.insert_existing_object_binding::<T>(object)?
-            }
+            PreparedHandleObject::Existing { object } => self.store.insert_existing::<T>(object)?,
         };
         let binding = FormulaBinding {
             id: binding_id,
@@ -625,19 +604,17 @@ impl HandleRuntime {
         let refinement = &self.refinement;
         let was_provisional = removed.was_provisional;
         let initialization_id = removed.initialization_id;
-        let _ = self.registry.remove_and_drop_with_observer(
-            &removed.token,
-            operation,
-            move |reusable| {
-                if was_provisional {
-                    if let Some(runtime_id) = initialization_id {
-                        refinement.observe_drain_pending(token_wire, runtime_id, reusable);
+        let _ =
+            self.store
+                .remove_and_drop_with_observer(&removed.token, operation, move |reusable| {
+                    if was_provisional {
+                        if let Some(runtime_id) = initialization_id {
+                            refinement.observe_drain_pending(token_wire, runtime_id, reusable);
+                        }
+                    } else {
+                        refinement.observe_drain_published(token_wire, reusable);
                     }
-                } else {
-                    refinement.observe_drain_published(token_wire, reusable);
-                }
-            },
-        );
+                });
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -661,12 +638,12 @@ impl HandleRuntime {
     where
         T: ExcelHandleObject,
     {
-        self.registry.lookup_handle(scope, token)
+        self.store.lookup(scope, token)
     }
 
     pub fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
         self.prepares.close_admission();
-        self.registry.begin_close();
+        self.store.begin_close();
         let initializations = self.topics.close();
         self.refinement.observe_seal_for_close();
 
@@ -691,7 +668,7 @@ impl HandleRuntime {
         //
         self.prepares.wait_for_idle();
 
-        let result = self.registry.seal();
+        let result = self.store.seal();
         self.refinement.observe_close_registry();
         self.refinement.observe_finish_close();
         if result.is_ok() {
@@ -720,16 +697,16 @@ impl HandleRuntime {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.registry.len()
+        self.store.len()
     }
 }
 
 /// The handle runtime has stopped accepting work and its registry has moved
 /// every payload root to the retired store. The token keeps the runtime alive
 /// until add-in state cleanup has completed and pin quiescence is certified.
-pub(crate) struct HandleRuntimeSealed {
+pub(crate) struct FormulaHandleServiceSealed {
     generation: Option<RuntimeGeneration>,
-    runtime: Option<Arc<HandleRuntime>>,
+    service: Option<Arc<FormulaHandleService>>,
     registry: Option<HandleRegistrySealed>,
 }
 
@@ -737,12 +714,12 @@ pub(crate) struct HandleRuntimeSealed {
 /// remaining pins. The generation identity travels with the proof so a
 /// certificate cannot be silently reused for a different service instance.
 #[derive(Debug)]
-pub(crate) struct HandlesQuiescent {
+pub(crate) struct HandleStoreQuiescent {
     generation: Option<RuntimeGeneration>,
 }
 
-impl HandlesQuiescent {
-    fn new(generation: Option<RuntimeGeneration>) -> Self {
+impl HandleStoreQuiescent {
+    pub(super) fn new(generation: Option<RuntimeGeneration>) -> Self {
         Self { generation }
     }
 
@@ -756,47 +733,51 @@ impl HandlesQuiescent {
     }
 }
 
-impl HandleRuntimeSealed {
+impl FormulaHandleServiceSealed {
     fn empty(generation: Option<RuntimeGeneration>) -> Self {
         Self {
             generation,
-            runtime: None,
+            service: None,
             registry: None,
         }
     }
 
-    fn from_runtime(
+    fn from_service(
         generation: Option<RuntimeGeneration>,
-        runtime: Arc<HandleRuntime>,
+        service: Arc<FormulaHandleService>,
         registry: crate::shutdown::HandleRegistrySealed,
     ) -> Self {
         Self {
             generation,
-            runtime: Some(runtime),
+            service: Some(service),
             registry: Some(registry),
         }
     }
 
-    pub(crate) fn finish(self) -> XllResult<HandlesQuiescent> {
-        if let (Some(runtime), Some(registry)) = (self.runtime, self.registry) {
-            runtime.registry.finish_quiescence(&registry)?;
+    pub(crate) fn finish(self) -> XllResult<HandleStoreQuiescent> {
+        let generation = self.generation;
+        if let (Some(service), Some(registry)) = (self.service, self.registry) {
+            service.store.quiescent(&registry, generation)
+        } else {
+            Ok(HandleStoreQuiescent::new(generation))
         }
-        Ok(HandlesQuiescent::new(self.generation))
     }
 }
 
-pub(crate) struct HandleRuntimeSlot {
-    service: crate::runtime_components::GenerationServiceSlot<crate::HandleConfig, HandleRuntime>,
+pub(crate) struct FormulaHandleServiceSlot {
+    service:
+        crate::runtime_components::GenerationServiceSlot<crate::HandleConfig, FormulaHandleService>,
     #[cfg(any(test, feature = "shutdown-refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
 /// A read capability that holds an `arc_swap::Guard` over a published
-/// `HandleRuntime`.  The warm path acquires this without any `Mutex` or
+/// `FormulaHandleService`.  The warm path acquires this without any `Mutex` or
 /// `Arc::clone`.
-pub(crate) type HandleRuntimeRead = crate::runtime_components::GenerationServiceRead<HandleRuntime>;
+pub(crate) type FormulaHandleServiceRead =
+    crate::runtime_components::GenerationServiceRead<FormulaHandleService>;
 
-impl HandleRuntimeSlot {
+impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: crate::runtime_components::GenerationServiceSlot::new(),
@@ -832,15 +813,15 @@ impl HandleRuntimeSlot {
         self.service.is_none()
     }
 
-    /// Acquire a read guard over the published `HandleRuntime`.
+    /// Acquire a read guard over the published `FormulaHandleService`.
     ///
     /// The warm path (runtime already initialized) performs a single
     /// `ArcSwap::load` with no `Mutex` and no `Arc::clone`.
     #[inline]
-    pub(crate) fn read(&self) -> XllResult<HandleRuntimeRead> {
+    pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead> {
         self.service.read(
             |config| {
-                HandleRuntime::try_new_with_ingress(
+                FormulaHandleService::try_new_with_ingress(
                     usize::try_from(config.maximum_bindings())
                         .expect("handle capacity fits the platform usize"),
                     Some(crate::ingress::global_ingress()),
@@ -857,9 +838,9 @@ impl HandleRuntimeSlot {
     }
 
     /// Owned `Arc` escape for test/benchmark code that needs to hold a
-    /// `HandleRuntime` beyond a call scope.
+    /// `FormulaHandleService` beyond a call scope.
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn get_owned(&self) -> XllResult<Arc<HandleRuntime>> {
+    pub(crate) fn get_owned(&self) -> XllResult<Arc<FormulaHandleService>> {
         let read = self.read()?;
         Ok(Arc::clone(read.as_arc()))
     }
@@ -867,42 +848,42 @@ impl HandleRuntimeSlot {
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
-    ) -> XllResult<HandleRuntimeSealed> {
+    ) -> XllResult<FormulaHandleServiceSealed> {
         self.service.seal(
             generation,
             crate::error::DiagnosticId::HANDLE_SLOT,
-            || HandleRuntimeSealed::empty(generation),
+            || FormulaHandleServiceSealed::empty(generation),
             |handles| {
                 let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
                 let handle_result = handles.seal();
                 rtd_result.and(handle_result).map(|registry| {
-                    HandleRuntimeSealed::from_runtime(generation, handles, registry)
+                    FormulaHandleServiceSealed::from_service(generation, handles, registry)
                 })
             },
         )
     }
 }
 
-pub(crate) struct HandleRuntimeResolver<'call> {
-    slot: &'call HandleRuntimeSlot,
-    resolved: OnceCell<XllResult<HandleRuntimeRead>>,
+pub(crate) struct FormulaHandleServiceResolver<'call> {
+    slot: &'call FormulaHandleServiceSlot,
+    resolved: OnceCell<XllResult<FormulaHandleServiceRead>>,
 }
 
-impl<'call> HandleRuntimeResolver<'call> {
+impl<'call> FormulaHandleServiceResolver<'call> {
     #[inline]
-    pub(crate) fn new(slot: &'call HandleRuntimeSlot) -> Self {
+    pub(crate) fn new(slot: &'call FormulaHandleServiceSlot) -> Self {
         Self {
             slot,
             resolved: OnceCell::new(),
         }
     }
 
-    /// Returns a shared reference to the `HandleRuntime`.
+    /// Returns a shared reference to the `FormulaHandleService`.
     ///
     /// The first call performs an `ArcSwap::load`; subsequent calls within the
     /// same UDF invocation return the cached guard with zero atomic operations.
     #[inline]
-    pub(crate) fn get(&self) -> XllResult<&HandleRuntime> {
+    pub(crate) fn get(&self) -> XllResult<&FormulaHandleService> {
         match self.resolved.get_or_init(|| self.slot.read()) {
             Ok(runtime) => Ok(runtime),
             Err(error) => Err(error.clone()),
@@ -912,7 +893,7 @@ impl<'call> HandleRuntimeResolver<'call> {
     /// Returns a reference to the underlying `Arc` for paths that need
     /// ownership escape (RTD observation, `ensure_server`).
     #[inline]
-    pub(crate) fn get_arc(&self) -> XllResult<&Arc<HandleRuntime>> {
+    pub(crate) fn get_arc(&self) -> XllResult<&Arc<FormulaHandleService>> {
         match self.resolved.get_or_init(|| self.slot.read()) {
             Ok(runtime) => Ok(runtime.as_arc()),
             Err(error) => Err(error.clone()),

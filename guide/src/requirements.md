@@ -60,7 +60,7 @@ xlfn = { version = "0.2", features = ["async"] }
 | Feature | Adds |
 |---|---|
 | `async` | native asynchronous UDF runtime, `AsyncContext`, cancellation tokens, and calculation-event exports |
-| `unstable` | lower-level cache, execution-layer, and array-output APIs with an explicitly unstable contract |
+| `unstable` | lower-level cache and array-output APIs with an explicitly unstable contract |
 
 ## Project shape
 

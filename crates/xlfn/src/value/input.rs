@@ -198,7 +198,7 @@ where
 
 /// Runtime services that travel together through one Excel-visible call.
 pub(crate) struct HandleCallAccess<'call> {
-    pub(crate) runtime: crate::handle::HandleRuntimeResolver<'call>,
+    pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
     pub(crate) scope: &'call CallScope<'call>,
 }
 
@@ -229,7 +229,9 @@ impl<'call> CallContext<'call> {
     ) -> Self {
         Self {
             access: CallAccess::Handles(HandleCallAccess {
-                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
+                runtime: crate::handle::FormulaHandleServiceResolver::new(
+                    runtime.formula_handle_service_slot(),
+                ),
                 scope,
             }),
         }
@@ -249,7 +251,7 @@ impl<'call> CallContext<'call> {
     #[cfg(test)]
     pub(crate) fn from_access(
         scope: &'call CallScope<'call>,
-        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+        handle_runtime: Option<crate::handle::FormulaHandleServiceResolver<'call>>,
     ) -> Self {
         Self {
             access: match handle_runtime {

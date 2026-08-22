@@ -99,7 +99,7 @@ impl RuntimeRefinementHooks {
                 .set_ghost(Arc::clone(&ghost));
             runtime
                 .generation_services
-                .handles
+                .formula_handles
                 .set_ghost(Arc::clone(&ghost));
             runtime
                 .generation_services

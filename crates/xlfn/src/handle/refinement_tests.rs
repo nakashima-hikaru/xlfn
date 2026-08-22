@@ -15,7 +15,7 @@ fn create_value() -> XllResult<TraceValue> {
     Ok(TraceValue)
 }
 
-fn write_trace(runtime: &HandleRuntime, name: &str) {
+fn write_trace(runtime: &FormulaHandleService, name: &str) {
     let Some(directory) = std::env::var_os("XLFN_HANDLE_REFINEMENT_TRACE_DIR") else {
         return;
     };
@@ -26,7 +26,7 @@ fn write_trace(runtime: &HandleRuntime, name: &str) {
 }
 
 fn cold_success_trace() {
-    let runtime = HandleRuntime::new(8);
+    let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("h4-cold-success");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -36,7 +36,7 @@ fn cold_success_trace() {
 }
 
 fn cold_failure_trace() {
-    let runtime = HandleRuntime::new(8);
+    let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("h4-cold-failure");
     let result = runtime.prepare_observed(key, create_value, |_, _| Err(XllError::Panic));
     assert!(matches!(result, Err(XllError::Panic)));
@@ -45,7 +45,7 @@ fn cold_failure_trace() {
 }
 
 fn warm_disconnect_trace() {
-    let runtime = Arc::new(HandleRuntime::new(8));
+    let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("h4-warm-disconnect");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -77,7 +77,7 @@ fn warm_disconnect_trace() {
 }
 
 fn warm_generation_termination_trace() {
-    let runtime = Arc::new(HandleRuntime::new(8));
+    let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("h4-warm-termination");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -112,7 +112,7 @@ fn warm_generation_termination_trace() {
 }
 
 fn same_key_aba_trace() {
-    let runtime = Arc::new(HandleRuntime::new(8));
+    let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("h4-same-key-aba");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -150,7 +150,7 @@ fn same_key_aba_trace() {
 }
 
 fn warm_close_trace() {
-    let runtime = Arc::new(HandleRuntime::new(8));
+    let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("h4-warm-close");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
@@ -210,7 +210,7 @@ fn rust_handle_refinement_traces_are_production_path_replays() {
 
 #[test]
 fn refinement_trace_uses_input_fingerprint_wire_name() {
-    let runtime = HandleRuntime::new(8);
+    let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("h4-wire-schema");
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))

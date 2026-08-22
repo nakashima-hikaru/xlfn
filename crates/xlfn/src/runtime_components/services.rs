@@ -7,7 +7,7 @@ use crate::generation::RuntimeGeneration;
 /// [`crate::runtime::OpenGeneration`], while these slots carry the reusable
 /// service state.
 pub(crate) struct GenerationServices {
-    pub(crate) handles: crate::handle::HandleRuntimeSlot,
+    pub(crate) formula_handles: crate::handle::FormulaHandleServiceSlot,
     pub(crate) subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot,
 }
 
@@ -53,7 +53,7 @@ impl Drop for ArmedServices<'_> {
 impl GenerationServices {
     pub(crate) const fn new() -> Self {
         Self {
-            handles: crate::handle::HandleRuntimeSlot::new(),
+            formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
             subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot::new(),
         }
     }
@@ -63,7 +63,8 @@ impl GenerationServices {
         generation: RuntimeGeneration,
         config: crate::addin::RuntimeConfig,
     ) -> crate::XllResult<ArmedServices<'_>> {
-        self.handles.arm(generation, config.handle_config())?;
+        self.formula_handles
+            .arm(generation, config.handle_config())?;
         let armed = ArmedServices {
             services: self,
             generation,
@@ -86,7 +87,7 @@ impl GenerationServices {
     }
 
     pub(crate) fn disarm_generation(&self, generation: RuntimeGeneration) -> crate::XllResult<()> {
-        let handle_result = self.handles.disarm(generation);
+        let handle_result = self.formula_handles.disarm(generation);
         let subscription_result = self.subscriptions.disarm(generation);
         handle_result.and(subscription_result)
     }

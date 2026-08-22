@@ -1068,7 +1068,7 @@ pub(crate) struct QuiescenceProof {
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
     pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    pub(crate) handles_quiescent: crate::shutdown::HandlesQuiescent,
+    pub(crate) handle_store_quiescent: crate::shutdown::HandleStoreQuiescent,
     pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
     pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
     pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
@@ -1145,7 +1145,7 @@ fn composition_resources_from_quiescence_proof(
         &proof.host_callbacks,
         &proof.async_stopped,
         &proof.subscriptions_stopped,
-        &proof.handles_quiescent,
+        &proof.handle_store_quiescent,
         &proof.diagnostics_stopped,
         &proof.addin_quiesced,
         &proof.generation_reclaimed,
@@ -1159,7 +1159,7 @@ impl<A: crate::Addin> Runtime<A> {
         proof: QuiescenceProof,
     ) -> XllResult<TerminalCertificate<K>> {
         let control = self.lifecycle.lock();
-        let services_stopped = self.generation_services.handles.is_none()
+        let services_stopped = self.generation_services.formula_handles.is_none()
             && self.generation_services.subscriptions.is_none();
         #[cfg(feature = "async")]
         let async_stopped = self.executors.async_manager.is_stopped();
@@ -1167,7 +1167,7 @@ impl<A: crate::Addin> Runtime<A> {
         let async_stopped = true;
         let handles_match_generation = control
             .known_generation
-            .is_none_or(|generation| proof.handles_quiescent.generation() == Some(generation));
+            .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
 
         let certified = K::accepts_phase(control.canonical_state().phase())
             && control.canonical_state().open_attempt().is_none()
@@ -1330,24 +1330,28 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn handles(&self) -> XllResult<Arc<crate::handle::HandleRuntime>> {
-        self.generation_services.handles.get_owned()
+    pub(crate) fn formula_handle_service(
+        &self,
+    ) -> XllResult<Arc<crate::handle::FormulaHandleService>> {
+        self.generation_services.formula_handles.get_owned()
     }
 
-    pub(crate) fn handle_runtime_slot(&self) -> &crate::handle::HandleRuntimeSlot {
-        &self.generation_services.handles
+    pub(crate) fn formula_handle_service_slot(&self) -> &crate::handle::FormulaHandleServiceSlot {
+        &self.generation_services.formula_handles
     }
 
-    pub(crate) fn seal_handles(&self) -> XllResult<crate::handle::HandleRuntimeSealed> {
+    pub(crate) fn seal_formula_handle_service(
+        &self,
+    ) -> XllResult<crate::handle::FormulaHandleServiceSealed> {
         self.generation_services
-            .handles
+            .formula_handles
             .seal(self.active_generation())
     }
 
-    pub(crate) fn finish_handle_quiescence(
+    pub(crate) fn finish_formula_handle_quiescence(
         &self,
-        sealed: crate::handle::HandleRuntimeSealed,
-    ) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        sealed: crate::handle::FormulaHandleServiceSealed,
+    ) -> XllResult<crate::shutdown::HandleStoreQuiescent> {
         sealed.finish()
     }
 
@@ -1590,8 +1594,8 @@ pub(crate) mod tests {
         let exports = ingress.seal_and_drain();
         let _ = runtime.close_subscriptions();
         let _ = runtime
-            .seal_handles()
-            .and_then(|sealed| runtime.finish_handle_quiescence(sealed));
+            .seal_formula_handle_service()
+            .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed));
         // This helper validates Runtime's close certificate in isolation. It
         // deliberately does not synthesize lifecycle ghost milestones; those
         // are exercised by the real lifecycle close path.
@@ -1604,7 +1608,7 @@ pub(crate) mod tests {
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
+                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
@@ -1632,7 +1636,7 @@ pub(crate) mod tests {
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
+                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
@@ -1657,15 +1661,15 @@ pub(crate) mod tests {
         runtime.publish(1_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &1);
-        let old_handles = runtime.handles().unwrap();
+        let old_handles = runtime.formula_handle_service().unwrap();
         let (old_token, _) = old_handles
             .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
             .unwrap();
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime
-            .seal_handles()
-            .and_then(|sealed| runtime.finish_handle_quiescence(sealed))
+            .seal_formula_handle_service()
+            .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed))
             .unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
         finish_test_close(&runtime);
@@ -1675,7 +1679,7 @@ pub(crate) mod tests {
         runtime.publish(2_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &2);
-        let new_handles = runtime.handles().unwrap();
+        let new_handles = runtime.formula_handle_service().unwrap();
         let (new_token, _) = new_handles
             .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
             .unwrap();
@@ -1807,8 +1811,8 @@ pub(crate) mod tests {
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime.wait_for_returns();
         runtime
-            .seal_handles()
-            .and_then(|sealed| runtime.finish_handle_quiescence(sealed))
+            .seal_formula_handle_service()
+            .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed))
             .unwrap();
         runtime.close_subscriptions().unwrap();
         assert!(runtime.take_current_generation().is_some());
@@ -1830,7 +1834,7 @@ pub(crate) mod tests {
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
+                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
@@ -1930,8 +1934,8 @@ pub(crate) mod tests {
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime.wait_for_returns();
         runtime
-            .seal_handles()
-            .and_then(|sealed| runtime.finish_handle_quiescence(sealed))
+            .seal_formula_handle_service()
+            .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed))
             .unwrap();
         runtime.close_subscriptions().unwrap();
         let ingress = crate::ingress::global_ingress();
@@ -1951,7 +1955,7 @@ pub(crate) mod tests {
                     host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                     async_stopped: crate::shutdown::AsyncStopped::for_test(),
                     subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                    handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
+                    handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
                         crate::generation::RuntimeGeneration::new(1).unwrap()
                     ),),
                     diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),

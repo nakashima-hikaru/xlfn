@@ -296,7 +296,7 @@ impl Drop for SyncBoundaryWorkerPool {
 // ---------------------------------------------------------------------------
 
 use crate::handle::{
-    ExcelHandleObject, FormulaCaller, FormulaRevisionKey, HandleRuntime, HandleTopicKey,
+    ExcelHandleObject, FormulaCaller, FormulaHandleService, FormulaRevisionKey, HandleTopicKey,
     resolve_formula_caller,
 };
 use crate::host_callback::HostCallbackSession;
@@ -321,14 +321,14 @@ fn benchmark_revision_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
     ))
 }
 
-fn cleanup_handle_runtime(runtime: &HandleRuntime) {
+fn cleanup_handle_runtime(runtime: &FormulaHandleService) {
     runtime.terminate_all_topics();
     let _ = runtime.seal();
 }
 
 /// A batch whose runtime and formula keys are prepared before the timed call.
 pub struct HandleColdBatch {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     keys: Vec<HandleTopicKey>,
 }
 
@@ -336,7 +336,7 @@ impl HandleColdBatch {
     pub fn new(iterations: usize) -> Self {
         Self {
             runtime: Arc::new(
-                HandleRuntime::try_new_with_ingress(iterations.max(1), None)
+                FormulaHandleService::try_new_with_ingress(iterations.max(1), None)
                     .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..iterations)
@@ -369,14 +369,14 @@ impl Drop for HandleColdBatch {
 
 /// A warm-hit benchmark with its seed publication outside the timed section.
 pub struct HandleWarmBenchmark {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     key: HandleTopicKey,
 }
 
 impl HandleWarmBenchmark {
     pub fn new() -> Self {
         let runtime = Arc::new(
-            HandleRuntime::try_new_with_ingress(1, None)
+            FormulaHandleService::try_new_with_ingress(1, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let key = benchmark_revision_key("BENCH.WARM", 0);
@@ -417,7 +417,7 @@ impl Drop for HandleWarmBenchmark {
 
 /// A cold-growth benchmark that inserts `N` unique topic keys into a single runtime.
 pub struct HandleColdGrowthBenchmark {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     keys: Vec<HandleTopicKey>,
 }
 
@@ -425,7 +425,7 @@ impl HandleColdGrowthBenchmark {
     pub fn new(count: usize) -> Self {
         Self {
             runtime: Arc::new(
-                HandleRuntime::try_new_with_ingress(count.max(1), None)
+                FormulaHandleService::try_new_with_ingress(count.max(1), None)
                     .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..count)
@@ -457,7 +457,7 @@ impl Drop for HandleColdGrowthBenchmark {
 
 /// A revision-churn benchmark that repeatedly updates the same `N` topics with new objects.
 pub struct HandleRevisionChurnBenchmark {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     keys: Vec<HandleTopicKey>,
     churn_cycles: usize,
 }
@@ -465,7 +465,7 @@ pub struct HandleRevisionChurnBenchmark {
 impl HandleRevisionChurnBenchmark {
     pub fn new(topics: usize, churn_cycles: usize) -> Self {
         let runtime = Arc::new(
-            HandleRuntime::try_new_with_ingress(topics.max(1), None)
+            FormulaHandleService::try_new_with_ingress(topics.max(1), None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let keys: Vec<_> = (0..topics)
@@ -578,7 +578,7 @@ impl<T> SemanticIdentityBenchmark<T> {
 }
 
 pub struct FormulaRevisionBenchmark<T> {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     argument: T,
     caller: FormulaCaller,
     factory_calls: AtomicUsize,
@@ -595,7 +595,7 @@ where
             column: 11,
         };
         let runtime = Arc::new(
-            HandleRuntime::try_new_with_ingress(1, None)
+            FormulaHandleService::try_new_with_ingress(1, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let factory_calls = AtomicUsize::new(0);
@@ -841,7 +841,7 @@ impl HandleLookupBenchCase {
 }
 
 pub struct HandleLookupBenchmark {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     worker_count: usize,
     iterations_per_worker: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
@@ -859,7 +859,7 @@ impl HandleLookupBenchmark {
         assert!(iterations_per_worker != 0);
 
         let runtime = Arc::new(
-            HandleRuntime::try_new_with_ingress(worker_count, None)
+            FormulaHandleService::try_new_with_ingress(worker_count, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let mut tokens = Vec::with_capacity(worker_count);
@@ -1035,7 +1035,7 @@ impl Drop for ArcHandleLookupBenchmark {
 /// before measurement. Each timed batch therefore exercises concurrent
 /// `TopicState` access without paying for cold publication or thread creation.
 pub struct HandleDistinctKeyBenchmark {
-    runtime: Arc<HandleRuntime>,
+    runtime: Arc<FormulaHandleService>,
     iterations_per_worker: usize,
     factory_calls: Arc<AtomicUsize>,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
@@ -1049,7 +1049,7 @@ impl HandleDistinctKeyBenchmark {
         assert!(iterations_per_worker != 0);
 
         let runtime = Arc::new(
-            HandleRuntime::try_new_with_ingress(worker_count, None)
+            FormulaHandleService::try_new_with_ingress(worker_count, None)
                 .expect("benchmark host provides an OS CSPRNG"),
         );
         let factory_calls = Arc::new(AtomicUsize::new(0));
@@ -1162,7 +1162,7 @@ fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
     runtime: &'static crate::runtime::Runtime<()>,
-    _handle_runtime: Option<Arc<HandleRuntime>>,
+    _handle_runtime: Option<Arc<FormulaHandleService>>,
     raw: xlfn_sys::XLOPER12,
     _storage: Option<Box<dyn std::any::Any>>,
 }
@@ -1297,7 +1297,7 @@ impl RawArgumentIngressBenchmark {
     pub fn handle() -> Self {
         let runtime = get_benchmark_runtime();
         let handle_runtime = runtime
-            .handles()
+            .formula_handle_service()
             .expect("benchmark handle runtime must initialize");
         let key = benchmark_revision_key("BENCH.INGRESS.HANDLE", 1);
         let token = handle_runtime
@@ -1492,7 +1492,7 @@ impl RawArgumentIngressBenchmark {
 
 pub struct MultiHandleCallBenchmark {
     runtime: &'static crate::runtime::Runtime<()>,
-    _handle_runtime: Arc<HandleRuntime>,
+    _handle_runtime: Arc<FormulaHandleService>,
     raw_tokens: Vec<xlfn_sys::XLOPER12>,
     _storage: Vec<Vec<u16>>,
 }
@@ -1501,7 +1501,7 @@ impl MultiHandleCallBenchmark {
     pub fn new(count: usize) -> Self {
         let runtime = get_benchmark_runtime();
         let handle_runtime = runtime
-            .handles()
+            .formula_handle_service()
             .expect("benchmark handle runtime must initialize");
         let mut raw_tokens = Vec::with_capacity(count);
         let mut storage = Vec::with_capacity(count);
@@ -1556,7 +1556,7 @@ impl MultiHandleCallBenchmark {
 }
 
 pub struct ConcurrentHandleResolutionBenchmark {
-    _slot: &'static crate::handle::HandleRuntimeSlot,
+    _slot: &'static crate::handle::FormulaHandleServiceSlot,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -1567,9 +1567,9 @@ impl ConcurrentHandleResolutionBenchmark {
     pub fn new(threads: usize, iterations_per_thread: usize) -> Self {
         let runtime = get_benchmark_runtime();
         let _ = runtime
-            .handles()
+            .formula_handle_service()
             .expect("benchmark handle runtime must initialize");
-        let slot = runtime.handle_runtime_slot();
+        let slot = runtime.formula_handle_service_slot();
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);
@@ -1583,7 +1583,7 @@ impl ConcurrentHandleResolutionBenchmark {
             let handle = std::thread::spawn(move || {
                 while s_rx.recv().is_ok() {
                     for _ in 0..iterations_per_thread {
-                        let resolver = crate::handle::HandleRuntimeResolver::new(slot);
+                        let resolver = crate::handle::FormulaHandleServiceResolver::new(slot);
                         let rt = resolver.get().expect("handle runtime must resolve");
                         std::hint::black_box(rt);
                     }

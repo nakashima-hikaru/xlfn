@@ -1,7 +1,7 @@
 use super::registration::TemporaryRegistration;
 use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server};
 use crate::error::{ExcelApiFailure, ExcelApiFunction};
-use crate::handle::HandleRuntime;
+use crate::handle::FormulaHandleService;
 use crate::host_callback::HostCallbackSession;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::{ExcelValue, FromExcel};
@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 pub(crate) fn observe(
-    handles: &Arc<HandleRuntime>,
+    handles: &Arc<FormulaHandleService>,
     rtd_key: &str,
     token: &str,
     callbacks: &HostCallbackSession,

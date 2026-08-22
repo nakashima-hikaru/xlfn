@@ -19,6 +19,7 @@ mod refinement_hooks;
 mod refinement_wire;
 mod registry;
 mod runtime;
+mod store;
 mod token;
 mod topic;
 mod transaction;
@@ -75,10 +76,14 @@ pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]
 pub(crate) use registry::HandleRegistryPhase;
-pub(crate) use registry::{HandleRegistry, HandleRegistrySealed, PendingHandleValue};
+pub(crate) use registry::HandleRegistrySealed;
+#[cfg(test)]
+pub(crate) use registry::{HandleRegistry, PendingHandleValue};
 pub(crate) use runtime::{
-    HandleRuntime, HandleRuntimeResolver, HandleRuntimeSealed, HandleRuntimeSlot, HandlesQuiescent,
+    FormulaHandleService, FormulaHandleServiceResolver, FormulaHandleServiceSealed,
+    FormulaHandleServiceSlot, HandleStoreQuiescent,
 };
+pub(crate) use store::HandleStore;
 pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,

@@ -58,11 +58,6 @@ impl HostCallbackSession {
     }
 
     #[must_use]
-    pub(crate) fn state(&self) -> HostCallbackState {
-        self.shared.state()
-    }
-
-    #[must_use]
     pub(crate) fn permits_callbacks(&self) -> bool {
         self.shared.permits_callbacks()
     }

@@ -138,9 +138,9 @@ Handle shutdown has two distinct obligations. `handles = 0` means that no
 formula binding roots remain; `handlePins = 0` means that no `HandleLease`
 can still retain a retired payload. The model therefore permits
 the registry to be sealed before pin drain, but admits `handlesDrained` only
-after both counters are zero. This matches the Rust order: `HandleRuntime::seal`
+after both counters are zero. This matches the Rust order: `FormulaHandleService::seal`
 retires bindings, Add-in cleanup drops generation state, and only then can
-`HandlesQuiescent` be issued.
+`HandleStoreQuiescent` be issued.
 
 The Rust shutdown refinement trace carries the same `handlePins` counter and
 `addHandlePin`/`removeHandlePin` events, so the executable trace checker observes

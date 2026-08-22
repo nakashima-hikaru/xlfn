@@ -3,7 +3,7 @@ use crate::error::IntoXllError;
 
 #[cfg(feature = "async")]
 pub(crate) use crate::async_udf::AsyncStopped;
-pub(crate) use crate::handle::{HandleRegistrySealed, HandlesQuiescent};
+pub(crate) use crate::handle::{HandleRegistrySealed, HandleStoreQuiescent};
 #[cfg(not(feature = "async"))]
 pub(crate) use crate::lifecycle::AsyncStopped;
 pub(crate) use crate::lifecycle::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
@@ -87,7 +87,7 @@ pub(crate) enum UnloadHazard {
     )]
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
-    HandleRuntimeNotQuiescent,
+    HandleStoreNotQuiescent,
     AddinGenerationEscaped,
     AddinQuiesceFailed,
     AddinCleanupFailed,
@@ -113,7 +113,7 @@ impl UnloadHazard {
             | Self::RtdGitRevocationDebt => {
                 crate::shutdown_refinement::GhostFailure::RtdShutdownFailed
             }
-            Self::HandleRuntimeNotQuiescent => {
+            Self::HandleStoreNotQuiescent => {
                 crate::shutdown_refinement::GhostFailure::HandleShutdownFailed
             }
             Self::AddinGenerationEscaped => {

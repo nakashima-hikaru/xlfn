@@ -14,7 +14,7 @@ use super::update_event::{
     GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent, ServerCallbacks,
     active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
-use super::{HandleRuntime, com_boundary, guid_eq};
+use super::{FormulaHandleService, com_boundary, guid_eq};
 use crate::error::InputError;
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
@@ -168,7 +168,7 @@ impl Drop for OwnedServerReference {
 }
 
 pub(super) struct ServerBackends {
-    pub(super) handles: Option<Arc<HandleRuntime>>,
+    pub(super) handles: Option<Arc<FormulaHandleService>>,
     pub(super) subscriptions: Option<Arc<SubscriptionRuntime>>,
     pub(super) subscription_server: Option<crate::subscription::RtdServerHandle>,
 }
@@ -314,7 +314,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     unsafe { server_release(server) };
 }
 
-pub(crate) fn shutdown(handles: Arc<HandleRuntime>) -> XllResult<()> {
+pub(crate) fn shutdown(handles: Arc<FormulaHandleService>) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -513,7 +513,7 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
 }
 
 pub(super) fn ensure_server(
-    handles: Option<&Arc<HandleRuntime>>,
+    handles: Option<&Arc<FormulaHandleService>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();

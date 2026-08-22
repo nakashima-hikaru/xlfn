@@ -2141,7 +2141,7 @@ mod tests {
 
         let runtime = Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
         runtime.arm_test_generation();
-        let handle_rt = runtime.handles().unwrap();
+        let handle_rt = runtime.formula_handle_service().unwrap();
 
         let topic_a = HandleTopicKey::Formula(FormulaRevisionKey::new(
             FormulaCaller {

@@ -29,13 +29,17 @@ pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuar
 /// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
 #[doc(hidden)]
 pub struct ReturnContext<'call, 'scope> {
-    formula: Option<FormulaReturnAccess<'call, 'scope>>,
+    publisher: Option<FormulaPublisher<'call, 'scope>>,
     lifetime: PhantomData<Rc<()>>,
 }
 
-/// All services required to publish a formula-revision handle result.
-pub(crate) struct FormulaReturnAccess<'call, 'scope> {
-    pub(crate) runtime: crate::handle::HandleRuntimeResolver<'call>,
+/// Capability for publishing a handle result for one formula revision.
+///
+/// Formula identity, RTD observation, and single-flight publication belong to
+/// this capability. [`ReturnContext`] only carries it when the return type
+/// actually needs formula-owned handle publication.
+pub(crate) struct FormulaPublisher<'call, 'scope> {
+    pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
     pub(crate) udf_id: &'static str,
     pub(crate) inputs: InputFingerprint,
     pub(crate) callbacks: &'scope HostCallbackSession,
@@ -46,7 +50,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            formula: None,
+            publisher: None,
             lifetime: PhantomData,
         }
     }
@@ -61,8 +65,10 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         scope: &'scope crate::call::CallScope<'scope>,
     ) -> Self {
         Self {
-            formula: inputs.map(|inputs| FormulaReturnAccess {
-                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
+            publisher: inputs.map(|inputs| FormulaPublisher {
+                runtime: crate::handle::FormulaHandleServiceResolver::new(
+                    runtime.formula_handle_service_slot(),
+                ),
                 udf_id,
                 inputs: InputFingerprint::from_bytes(inputs),
                 callbacks: scope.callbacks(),
@@ -71,8 +77,8 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         }
     }
 
-    fn formula_access(&self) -> XllResult<&FormulaReturnAccess<'call, 'scope>> {
-        self.formula.as_ref().ok_or(crate::XllError::Internal {
+    fn publisher(&self) -> XllResult<&FormulaPublisher<'call, 'scope>> {
+        self.publisher.as_ref().ok_or(crate::XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
         })
     }
@@ -84,31 +90,20 @@ impl<'call> ReturnContext<'call, 'call> {
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
     ) -> Self {
-        let formula = inputs.map(|inputs| FormulaReturnAccess {
+        let publisher = inputs.map(|inputs| FormulaPublisher {
             runtime: handles.runtime,
             udf_id,
             inputs: InputFingerprint::from_bytes(inputs),
             callbacks: handles.scope.callbacks(),
         });
         Self {
-            formula,
+            publisher,
             lifetime: PhantomData,
         }
     }
 }
 
 impl<'call, 'scope> ReturnContext<'call, 'scope> {
-    #[doc(hidden)]
-    pub fn publish_new_handle<T>(
-        &mut self,
-        operation: impl FnOnce() -> XllResult<T>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        self.publish_handle(operation)
-    }
-
     #[doc(hidden)]
     pub fn publish_existing_alias<'handle, T>(
         &mut self,
@@ -117,7 +112,31 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let access = self.formula_access()?;
+        let publisher = self.publisher()?;
+        publisher.publish_existing_alias(operation)
+    }
+
+    #[doc(hidden)]
+    pub fn publish_new_handle<T>(
+        &mut self,
+        operation: impl FnOnce() -> XllResult<T>,
+    ) -> XllResult<String>
+    where
+        T: crate::handle::ExcelHandleObject,
+    {
+        self.publisher()?.publish_new_handle(operation)
+    }
+}
+
+impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
+    fn publish_existing_alias<'handle, T>(
+        &self,
+        operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
+    ) -> XllResult<String>
+    where
+        T: crate::handle::ExcelHandleObject,
+    {
+        let access = self;
         let handles = access.runtime.get()?;
         let arc_handles = access.runtime.get_arc()?;
         let key =
@@ -129,11 +148,11 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         Ok(token)
     }
 
-    fn publish_handle<T>(&mut self, operation: impl FnOnce() -> XllResult<T>) -> XllResult<String>
+    fn publish_new_handle<T>(&self, operation: impl FnOnce() -> XllResult<T>) -> XllResult<String>
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let access = self.formula_access()?;
+        let access = self;
         let handles = access.runtime.get()?;
         let arc_handles = access.runtime.get_arc()?;
         let key =
