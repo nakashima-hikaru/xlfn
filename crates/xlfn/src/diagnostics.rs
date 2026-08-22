@@ -89,7 +89,7 @@ struct DiagnosticRouter {
     sink: ArcSwapOption<AsyncDiagnosticSink>,
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
@@ -120,7 +120,7 @@ impl DiagnosticRouter {
             .retain(|worker| *worker != sink.worker_thread_id);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.ghost.lock() = Some(Arc::clone(&ghost));
         if let Some(sink) = self.sink.load().as_ref() {
@@ -128,7 +128,7 @@ impl DiagnosticRouter {
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()
     }
@@ -208,7 +208,7 @@ impl DiagnosticRouter {
             }
             Err(DiagnosticShutdownError::WorkerPanicked) => {
                 self.unmark_retiring(&previous);
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 if let Some(ghost) = self.ghost_handle() {
                     record_ghost_diagnostics_cleanup_issue(ghost);
                 }
@@ -234,7 +234,7 @@ impl DiagnosticRouter {
         self.sink.load()
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     fn ghost_snapshot(&self) -> GhostDiagnosticsSnapshot {
         let sink = self.sink.load();
         GhostDiagnosticsSnapshot {
@@ -246,7 +246,7 @@ impl DiagnosticRouter {
     #[cfg(test)]
     fn record_stop_diagnostics(&self) {
         crate::ingress::with_diagnostic_linearization(|| {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(ghost) = self.ghost_handle()
                 && ghost.state().resources.diagnostics_running
             {
@@ -309,7 +309,7 @@ impl DiagnosticRouter {
         if result.is_ok() && self.sink.load().is_none() {
             self.record_stop_diagnostics();
         } else if matches!(result, Err(DiagnosticShutdownError::WorkerPanicked)) {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(ghost) = self.ghost_handle() {
                 record_ghost_diagnostics_cleanup_issue(ghost);
             }
@@ -408,7 +408,7 @@ static ROUTER: LazyLock<DiagnosticRouter> = LazyLock::new(|| DiagnosticRouter {
     sink: ArcSwapOption::const_empty(),
     transition: Mutex::new(DiagnosticPhase::Closed),
     retiring_workers: Mutex::new(Vec::new()),
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: Mutex::new(None),
 });
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -430,9 +430,9 @@ fn admit_published_sink(
     if !ingress.allows_diagnostic_mutation() {
         return Err(DiagnosticInitError::RouterClosed);
     }
-    #[cfg(not(any(test, feature = "shutdown-refinement")))]
+    #[cfg(not(any(test, feature = "unstable")))]
     let _ = (router, had_sink);
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     if let Some(ghost) = router.ghost_handle()
         && !had_sink
         && ghost.active()
@@ -461,7 +461,7 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
     router.replace_with(
         || {
             let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(ghost) = router.ghost_handle() {
                 sink.set_ghost(ghost);
             }
@@ -486,14 +486,14 @@ pub(crate) fn reset_diagnostic_router() -> XllResult<()> {
     router().reset()
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 #[derive(Clone, Copy)]
 pub(crate) struct GhostDiagnosticsSnapshot {
     pub(crate) running: bool,
     pub(crate) pending: u64,
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) fn connect_ghost<F>(
     ghost: crate::shutdown_refinement::GhostHandle,
     initialize: F,
@@ -509,7 +509,7 @@ where
     })
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) fn record_ghost_diagnostics_stopped(
     ghost: crate::shutdown_refinement::GhostHandle,
 ) -> XllResult<()> {
@@ -534,7 +534,7 @@ pub(crate) fn record_ghost_diagnostics_stopped(
     })
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 fn record_ghost_diagnostics_cleanup_issue(ghost: crate::shutdown_refinement::GhostHandle) {
     crate::ingress::with_diagnostic_linearization(|| {
         if ghost.active() {

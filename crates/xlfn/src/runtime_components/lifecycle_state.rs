@@ -5,7 +5,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use super::services::GenerationServicesLease;
+use super::services::GenerationServices;
 use crate::generation::{OpenAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::ModuleEpochLease;
@@ -67,7 +67,7 @@ impl LifecycleStateKind {
 /// projects `generation` from this bundle.
 pub(crate) struct OpenBundle<A: crate::Addin> {
     generation: Arc<OpenGeneration<A>>,
-    services: GenerationServicesLease,
+    services: Arc<GenerationServices>,
     module_epoch: ModuleEpochLease,
 }
 
@@ -77,7 +77,7 @@ pub(crate) struct OpenBundle<A: crate::Addin> {
 /// prove that the add-in state did not escape, but the two protocol leases
 /// remain coupled until terminal certification consumes this value.
 struct OpenRetirement {
-    services: GenerationServicesLease,
+    services: Arc<GenerationServices>,
     module_epoch: ModuleEpochLease,
 }
 
@@ -180,13 +180,11 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.current.is_some()
     }
 
-    pub(crate) fn generation_services_lease_generation(&self) -> Option<RuntimeGeneration> {
-        self.retiring
-            .as_ref()
-            .map(|retirement| retirement.services.generation())
+    pub(crate) fn has_module_epoch(&self) -> bool {
+        self.retiring.is_some()
     }
 
-    pub(crate) fn has_module_epoch(&self) -> bool {
+    pub(crate) const fn has_retirement(&self) -> bool {
         self.retiring.is_some()
     }
 
@@ -215,6 +213,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
 pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
     current: ArcSwapOption<OpenGeneration<A>>,
+    services: ArcSwapOption<GenerationServices>,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
     #[cfg(test)]
@@ -231,6 +230,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
             current: ArcSwapOption::const_empty(),
+            services: ArcSwapOption::const_empty(),
             core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
             #[cfg(test)]
@@ -470,7 +470,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
         core: &mut LifecycleCore<A>,
         generation: RuntimeGeneration,
-        services: GenerationServicesLease,
+        services: Arc<GenerationServices>,
         module_epoch: ModuleEpochLease,
     ) -> Result<(), PublishOpeningError<A>> {
         if core.has_current_generation() {
@@ -499,10 +499,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
         core.install_open_bundle(OpenBundle {
             generation: Arc::clone(&published),
-            services,
+            services: Arc::clone(&services),
             module_epoch,
         });
         self.current.store(Some(published));
+        self.services.store(Some(services));
         Ok(())
     }
 
@@ -514,7 +515,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
         core: &mut LifecycleCore<A>,
     ) -> Option<ModuleEpochLease> {
-        core.take_open_retirement().map(|retirement| {
+        let retirement = core.take_open_retirement();
+        if retirement.is_some() {
+            self.services.store(None);
+        }
+        retirement.map(|retirement| {
             let OpenRetirement {
                 services: _services,
                 module_epoch,
@@ -537,6 +542,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
     ) -> arc_swap::Guard<Option<Arc<OpenGeneration<A>>>> {
         self.current.load()
+    }
+
+    pub(crate) fn load_generation_services(
+        &self,
+    ) -> arc_swap::Guard<Option<Arc<GenerationServices>>> {
+        self.services.load()
     }
 
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
@@ -565,6 +576,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         current
     }
 
+    #[cfg(any(test, feature = "unstable"))]
+    pub(crate) fn install_test_generation_services(&self, services: Arc<GenerationServices>) {
+        self.services.store(Some(services));
+    }
+
     pub(crate) fn take_generation_for_shutdown(
         &self,
     ) -> Option<crate::runtime::ShutdownGeneration<A>> {
@@ -579,9 +595,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             } = bundle;
             debug_assert!(core.retiring.is_none());
             core.retiring = Some(OpenRetirement {
-                services,
+                services: Arc::clone(&services),
                 module_epoch,
             });
+            self.services.store(Some(services));
             return Some(crate::runtime::ShutdownGeneration::Open(generation));
         }
         core.opening

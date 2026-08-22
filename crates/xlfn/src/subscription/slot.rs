@@ -7,7 +7,7 @@ pub(crate) struct SubscriptionRuntimeSlot {
         SubscriptionRuntimeConfig,
         SubscriptionRuntime,
     >,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -17,7 +17,7 @@ pub(crate) struct SubscriptionsStopped {
 }
 
 impl SubscriptionsStopped {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { _private: () }
     }
 
@@ -40,7 +40,7 @@ impl SubscriptionRuntimeSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: crate::runtime_components::GenerationServiceSlot::new(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
@@ -51,11 +51,11 @@ impl SubscriptionRuntimeSlot {
         limits: RtdLimits,
     ) -> crate::XllResult<()> {
         self.service
-            .arm(generation, SubscriptionRuntimeConfig { generation, limits })
+            .arm(SubscriptionRuntimeConfig { generation, limits })
     }
 
-    pub(crate) fn disarm(&self, generation: RuntimeGeneration) -> crate::XllResult<()> {
-        self.service.disarm(generation)
+    pub(crate) fn disarm(&self) -> crate::XllResult<()> {
+        self.service.disarm()
     }
 
     #[inline]
@@ -68,7 +68,7 @@ impl SubscriptionRuntimeSlot {
                 )))
             },
             |_runtime| {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 if let Some(ghost) = self.ghost.get() {
                     _runtime.set_ghost(ghost.clone());
                 }
@@ -81,12 +81,8 @@ impl SubscriptionRuntimeSlot {
         self.service.is_none()
     }
 
-    pub(crate) fn seal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-    ) -> crate::XllResult<SubscriptionsStopped> {
+    pub(crate) fn seal(&self) -> crate::XllResult<SubscriptionsStopped> {
         self.service.seal(
-            generation,
             crate::error::DiagnosticId::RTD_SLOTS,
             SubscriptionsStopped::new,
             |runtime| {
@@ -96,7 +92,7 @@ impl SubscriptionRuntimeSlot {
         )
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost.clone());
         self.service.with_published(|runtime| {
@@ -113,14 +109,14 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
 
-    fn generation(raw: u64) -> RuntimeGeneration {
-        RuntimeGeneration::new(raw).expect("test generation is non-zero")
+    fn generation() -> RuntimeGeneration {
+        RuntimeGeneration::new(1).expect("test generation is non-zero")
     }
 
     #[test]
     fn subscription_slot_reuses_published_runtime() {
         let slot = SubscriptionRuntimeSlot::new();
-        slot.arm(generation(1), RtdLimits::standard()).unwrap();
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
 
         let first = slot.read().unwrap();
         let second = slot.read().unwrap();
@@ -131,7 +127,7 @@ mod tests {
     #[test]
     fn subscription_slot_initializes_once_under_contention() {
         let slot = Arc::new(SubscriptionRuntimeSlot::new());
-        slot.arm(generation(1), RtdLimits::standard()).unwrap();
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let mut handles = Vec::new();
 
@@ -155,12 +151,12 @@ mod tests {
     #[test]
     fn subscription_slot_seal_unpublishes_runtime() {
         let slot = SubscriptionRuntimeSlot::new();
-        slot.arm(generation(1), RtdLimits::standard()).unwrap();
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
         let read = slot.read().unwrap();
         drop(read);
 
         assert!(!slot.is_none());
-        slot.seal(Some(generation(1))).unwrap();
+        slot.seal().unwrap();
         assert!(slot.is_none());
         assert!(matches!(slot.read(), Err(crate::XllError::Closing)));
     }
@@ -168,37 +164,29 @@ mod tests {
     #[test]
     fn subscription_slot_can_reopen_after_close() {
         let slot = SubscriptionRuntimeSlot::new();
-        slot.arm(generation(1), RtdLimits::standard()).unwrap();
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
 
         let first = slot.read().unwrap();
         let first_runtime = Arc::clone(first.as_arc());
         drop(first);
 
-        slot.seal(Some(generation(1))).unwrap();
+        slot.seal().unwrap();
 
-        slot.arm(generation(2), RtdLimits::standard()).unwrap();
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
         let second = slot.read().unwrap();
 
         assert!(!Arc::ptr_eq(&first_runtime, second.as_arc()));
     }
 
     #[test]
-    fn subscription_slot_requires_matching_generation_for_seal() {
+    fn subscription_slot_seal_is_local_to_its_generation_bundle() {
         let slot = SubscriptionRuntimeSlot::new();
         assert!(matches!(slot.read(), Err(crate::XllError::Closing)));
 
-        slot.arm(generation(7), RtdLimits::standard()).unwrap();
-        assert!(matches!(
-            slot.seal(Some(generation(6))),
-            Err(crate::XllError::Closing)
-        ));
+        slot.arm(generation(), RtdLimits::standard()).unwrap();
         assert!(slot.read().is_ok());
-        assert!(matches!(
-            slot.disarm(generation(6)),
-            Err(crate::XllError::Closing)
-        ));
 
-        slot.seal(Some(generation(7))).unwrap();
+        slot.seal().unwrap();
         assert!(slot.is_none());
     }
 }

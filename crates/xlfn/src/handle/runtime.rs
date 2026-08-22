@@ -11,6 +11,7 @@ use crate::generation::RuntimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use crate::generation::ServerGeneration;
 use crate::generation::TopicGeneration;
+use crate::runtime_components::GenerationServices;
 use crate::shutdown::HandleRegistrySealed;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
@@ -196,7 +197,7 @@ impl FormulaHandleService {
         })
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.store.set_ghost(ghost);
     }
@@ -212,12 +213,12 @@ impl FormulaHandleService {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         let ghost = self.store.ghost_handle();
 
         let ingress_guard = if let Some(ingress) = self._module_ingress {
             let (guard, accepted) = ingress.enter_with(|| {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 if let Some(ghost) = ghost.as_ref() {
                     ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
                 }
@@ -232,7 +233,7 @@ impl FormulaHandleService {
 
         Ok(RtdOperationGuard {
             _ingress_guard: ingress_guard,
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost,
         })
     }
@@ -704,10 +705,15 @@ impl FormulaHandleService {
 /// The handle runtime has stopped accepting work and its registry has moved
 /// every payload root to the retired store. The token keeps the runtime alive
 /// until add-in state cleanup has completed and pin quiescence is certified.
-pub(crate) struct FormulaHandleServiceSealed {
-    generation: Option<RuntimeGeneration>,
-    service: Option<Arc<FormulaHandleService>>,
-    registry: Option<HandleRegistrySealed>,
+pub(crate) enum FormulaHandleServiceSealed {
+    Absent {
+        generation: Option<RuntimeGeneration>,
+    },
+    Present {
+        generation: RuntimeGeneration,
+        service: Arc<FormulaHandleService>,
+        registry: HandleRegistrySealed,
+    },
 }
 
 /// Proof that the handle registry for one specific runtime generation has no
@@ -734,12 +740,8 @@ impl HandleStoreQuiescent {
 }
 
 impl FormulaHandleServiceSealed {
-    fn empty(generation: Option<RuntimeGeneration>) -> Self {
-        Self {
-            generation,
-            service: None,
-            registry: None,
-        }
+    pub(crate) fn empty(generation: Option<RuntimeGeneration>) -> Self {
+        Self::Absent { generation }
     }
 
     fn from_service(
@@ -747,19 +749,21 @@ impl FormulaHandleServiceSealed {
         service: Arc<FormulaHandleService>,
         registry: crate::shutdown::HandleRegistrySealed,
     ) -> Self {
-        Self {
-            generation,
-            service: Some(service),
-            registry: Some(registry),
+        Self::Present {
+            generation: generation.expect("a published formula handle service has a generation"),
+            service,
+            registry,
         }
     }
 
     pub(crate) fn finish(self) -> XllResult<HandleStoreQuiescent> {
-        let generation = self.generation;
-        if let (Some(service), Some(registry)) = (self.service, self.registry) {
-            service.store.quiescent(&registry, generation)
-        } else {
-            Ok(HandleStoreQuiescent::new(generation))
+        match self {
+            Self::Absent { generation } => Ok(HandleStoreQuiescent::new(generation)),
+            Self::Present {
+                generation,
+                service,
+                registry,
+            } => service.store.quiescent(&registry, Some(generation)),
         }
     }
 }
@@ -767,7 +771,7 @@ impl FormulaHandleServiceSealed {
 pub(crate) struct FormulaHandleServiceSlot {
     service:
         crate::runtime_components::GenerationServiceSlot<crate::HandleConfig, FormulaHandleService>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -781,24 +785,20 @@ impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: crate::runtime_components::GenerationServiceSlot::new(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
 
-    pub(crate) fn arm(
-        &self,
-        generation: RuntimeGeneration,
-        config: crate::HandleConfig,
-    ) -> XllResult<()> {
-        self.service.arm(generation, config)
+    pub(crate) fn arm(&self, config: crate::HandleConfig) -> XllResult<()> {
+        self.service.arm(config)
     }
 
-    pub(crate) fn disarm(&self, generation: RuntimeGeneration) -> XllResult<()> {
-        self.service.disarm(generation)
+    pub(crate) fn disarm(&self) -> XllResult<()> {
+        self.service.disarm()
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost.clone());
         self.service.with_published(|runtime| {
@@ -829,7 +829,7 @@ impl FormulaHandleServiceSlot {
                 .map(Arc::new)
             },
             |_runtime| {
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 if let Some(ghost) = self.ghost.get() {
                     _runtime.set_ghost(Arc::clone(ghost));
                 }
@@ -839,7 +839,7 @@ impl FormulaHandleServiceSlot {
 
     /// Owned `Arc` escape for test/benchmark code that needs to hold a
     /// `FormulaHandleService` beyond a call scope.
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn get_owned(&self) -> XllResult<Arc<FormulaHandleService>> {
         let read = self.read()?;
         Ok(Arc::clone(read.as_arc()))
@@ -850,7 +850,6 @@ impl FormulaHandleServiceSlot {
         generation: Option<RuntimeGeneration>,
     ) -> XllResult<FormulaHandleServiceSealed> {
         self.service.seal(
-            generation,
             crate::error::DiagnosticId::HANDLE_SLOT,
             || FormulaHandleServiceSealed::empty(generation),
             |handles| {
@@ -865,15 +864,17 @@ impl FormulaHandleServiceSlot {
 }
 
 pub(crate) struct FormulaHandleServiceResolver<'call> {
-    slot: &'call FormulaHandleServiceSlot,
+    services: Arc<GenerationServices>,
+    _call: std::marker::PhantomData<&'call ()>,
     resolved: OnceCell<XllResult<FormulaHandleServiceRead>>,
 }
 
 impl<'call> FormulaHandleServiceResolver<'call> {
     #[inline]
-    pub(crate) fn new(slot: &'call FormulaHandleServiceSlot) -> Self {
+    pub(crate) fn new(services: Arc<GenerationServices>) -> Self {
         Self {
-            slot,
+            services,
+            _call: std::marker::PhantomData,
             resolved: OnceCell::new(),
         }
     }
@@ -884,7 +885,10 @@ impl<'call> FormulaHandleServiceResolver<'call> {
     /// same UDF invocation return the cached guard with zero atomic operations.
     #[inline]
     pub(crate) fn get(&self) -> XllResult<&FormulaHandleService> {
-        match self.resolved.get_or_init(|| self.slot.read()) {
+        match self
+            .resolved
+            .get_or_init(|| self.services.formula_handle_slot().read())
+        {
             Ok(runtime) => Ok(runtime),
             Err(error) => Err(error.clone()),
         }
@@ -894,7 +898,10 @@ impl<'call> FormulaHandleServiceResolver<'call> {
     /// ownership escape (RTD observation, `ensure_server`).
     #[inline]
     pub(crate) fn get_arc(&self) -> XllResult<&Arc<FormulaHandleService>> {
-        match self.resolved.get_or_init(|| self.slot.read()) {
+        match self
+            .resolved
+            .get_or_init(|| self.services.formula_handle_slot().read())
+        {
             Ok(runtime) => Ok(runtime.as_arc()),
             Err(error) => Err(error.clone()),
         }

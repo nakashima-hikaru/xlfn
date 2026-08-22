@@ -98,7 +98,7 @@ pub(crate) enum UnloadHazard {
     RtdGitRevocationDebt,
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 impl UnloadHazard {
     pub(crate) fn ghost_failure(self) -> crate::shutdown_refinement::GhostFailure {
         match self {

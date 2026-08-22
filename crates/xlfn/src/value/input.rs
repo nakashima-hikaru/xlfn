@@ -230,7 +230,9 @@ impl<'call> CallContext<'call> {
         Self {
             access: CallAccess::Handles(HandleCallAccess {
                 runtime: crate::handle::FormulaHandleServiceResolver::new(
-                    runtime.formula_handle_service_slot(),
+                    runtime.generation_services().unwrap_or_else(|_| {
+                        std::sync::Arc::new(crate::runtime_components::GenerationServices::new())
+                    }),
                 ),
                 scope,
             }),

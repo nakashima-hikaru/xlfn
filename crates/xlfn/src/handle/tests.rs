@@ -1,9 +1,5 @@
 use super::*;
 
-fn generation(raw: u64) -> crate::generation::RuntimeGeneration {
-    crate::generation::RuntimeGeneration::new(raw).expect("test generation is non-zero")
-}
-
 fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
     crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
 }
@@ -2720,13 +2716,13 @@ fn alias_capability_does_not_extend_object_lifetime() {
 
 #[test]
 fn resolver_does_not_initialize_slot_when_unused() {
-    let slot = FormulaHandleServiceSlot::new();
-    assert!(slot.is_none());
+    let services = Arc::new(crate::runtime_components::GenerationServices::new());
+    assert!(services.formula_handle_slot().is_none());
 
-    let resolver = FormulaHandleServiceResolver::new(&slot);
-    assert!(slot.is_none());
+    let resolver = FormulaHandleServiceResolver::new(Arc::clone(&services));
+    assert!(services.formula_handle_slot().is_none());
     drop(resolver);
-    assert!(slot.is_none());
+    assert!(services.formula_handle_slot().is_none());
 }
 
 #[test]
@@ -2738,20 +2734,20 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     struct TestObj(u32);
     impl ExcelHandleObject for TestObj {}
 
-    let slot: &'static FormulaHandleServiceSlot =
-        Box::leak(Box::new(FormulaHandleServiceSlot::new()));
-    assert!(slot.is_none());
-
-    slot.arm(generation(1), crate::HandleConfig::default())
-        .unwrap();
-    let handle_rt = slot.get_owned().unwrap();
+    let services = crate::runtime_components::GenerationServices::arm_generation(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        crate::RuntimeConfig::new(),
+    )
+    .unwrap()
+    .commit();
+    let handle_rt = services.formula_handle_slot().get_owned().unwrap();
     let key = test_topic_key("resolver_test");
     let (token, _) = handle_rt
         .prepare_observed(key, || Ok(TestObj(123)), |_, _| Ok(()))
         .unwrap();
 
     crate::value::with_excel_call_scope(|scope| {
-        let resolver = FormulaHandleServiceResolver::new(slot);
+        let resolver = FormulaHandleServiceResolver::new(Arc::clone(&services));
         let mut call_ctx = crate::value::CallContext::from_access(scope, Some(resolver));
 
         // First handle resolution initializes resolver OnceCell
@@ -2787,8 +2783,7 @@ fn concurrent_first_use_initializes_exactly_once() {
     let slot: &'static FormulaHandleServiceSlot =
         Box::leak(Box::new(FormulaHandleServiceSlot::new()));
     assert!(slot.is_none());
-    slot.arm(generation(1), crate::HandleConfig::default())
-        .unwrap();
+    slot.arm(crate::HandleConfig::default()).unwrap();
 
     let barrier = Arc::new(std::sync::Barrier::new(16));
     let handles: Vec<_> = (0..16)
@@ -2818,16 +2813,16 @@ fn close_resets_to_closed_for_reopen() {
     let slot = FormulaHandleServiceSlot::new();
     assert!(slot.is_none());
 
-    slot.arm(generation(1), crate::HandleConfig::default())
-        .unwrap();
+    slot.arm(crate::HandleConfig::default()).unwrap();
     let rt1 = slot.get_owned().unwrap();
     assert!(!slot.is_none());
 
-    slot.seal(Some(generation(1))).map(|_| ()).unwrap();
+    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+        .map(|_| ())
+        .unwrap();
     assert!(slot.is_none());
 
-    slot.arm(generation(2), crate::HandleConfig::default())
-        .unwrap();
+    slot.arm(crate::HandleConfig::default()).unwrap();
     let rt2 = slot.get_owned().unwrap();
     assert!(!slot.is_none());
 
@@ -2835,20 +2830,16 @@ fn close_resets_to_closed_for_reopen() {
 }
 
 #[test]
-fn handle_slot_requires_matching_generation_for_seal() {
+fn handle_slot_seal_is_local_to_its_generation_bundle() {
     let slot = FormulaHandleServiceSlot::new();
     assert!(matches!(slot.read(), Err(XllError::Closing)));
 
-    slot.arm(generation(7), crate::HandleConfig::default())
-        .unwrap();
-    assert!(matches!(
-        slot.seal(Some(generation(6))),
-        Err(XllError::Closing)
-    ));
+    slot.arm(crate::HandleConfig::default()).unwrap();
     assert!(slot.get_owned().is_ok());
-    assert!(matches!(slot.disarm(generation(6)), Err(XllError::Closing)));
+    assert!(matches!(slot.disarm(), Err(XllError::Closing)));
 
-    slot.seal(Some(generation(7))).unwrap();
+    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+        .unwrap();
     assert!(slot.is_none());
 }
 

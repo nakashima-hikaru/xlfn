@@ -42,19 +42,19 @@ pub(crate) struct SubscriptionRuntime {
     pub(crate) next_preparation_id: AtomicU64,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
 
 impl SubscriptionRuntime {
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn new() -> Self {
         Self::with_limits(RtdLimits::standard())
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn with_limits(limits: RtdLimits) -> Self {
         Self::with_limits_and_ingress(
             RuntimeGeneration::new(1).expect("test generation is non-zero"),
@@ -94,7 +94,7 @@ impl SubscriptionRuntime {
             next_preparation_id: AtomicU64::new(1),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
@@ -106,12 +106,12 @@ impl SubscriptionRuntime {
         *self.test_enter_hook.lock() = hook;
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.ghost.lock() = Some(ghost);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
@@ -677,7 +677,7 @@ impl SubscriptionRuntime {
             server.publish.drive_notification(attempt);
         }
 
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
 
         Ok(())
@@ -805,7 +805,7 @@ impl SubscriptionRuntime {
             (active.key, active.generation)
         };
 
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
 
         let removed_source = {
@@ -899,7 +899,7 @@ impl SubscriptionRuntime {
 
         let pending_sources = {
             let mut catalog = self.catalog.lock();
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             {
                 for _ in 0..catalog.active_keys.len() {
                     self.record_ghost_event(

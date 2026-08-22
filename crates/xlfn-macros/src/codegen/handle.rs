@@ -32,31 +32,31 @@ pub(crate) fn expand_excel_handle_object(
             for #ident #type_generics #where_clause
         {}
 
-        impl #impl_generics #krate::__private::ExcelReturn
+        impl #impl_generics #krate::__private::v1::ExcelReturn
             for #ident #type_generics #where_clause
         {
-            type InputMode = #krate::__private::FormulaInputMode;
+            type InputMode = #krate::__private::v1::FormulaInputMode;
 
             fn invoke(
-                __context: &mut #krate::__private::ReturnContext<'_, '_>,
+                __context: &mut #krate::__private::v1::ReturnContext<'_, '_>,
                 __operation: impl ::core::ops::FnOnce()
                     -> #krate::error::XllResult<Self>,
-            ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
-                #krate::__private::publish_new_handle(__context, __operation)
+            ) -> #krate::error::XllResult<#krate::__private::v1::ExcelOutput> {
+                #krate::__private::v1::publish_new_handle(__context, __operation)
             }
 
             fn into_excel(
                 self,
-                __context: &mut #krate::__private::ReturnContext<'_, '_>,
-            ) -> #krate::error::XllResult<#krate::__private::ExcelOutput> {
-                #krate::__private::publish_new_handle(
+                __context: &mut #krate::__private::v1::ReturnContext<'_, '_>,
+            ) -> #krate::error::XllResult<#krate::__private::v1::ExcelOutput> {
+                #krate::__private::v1::publish_new_handle(
                     __context,
                     || ::core::result::Result::Ok(self),
                 )
             }
         }
 
-        impl #impl_generics #krate::__private::MainThreadReturn
+        impl #impl_generics #krate::__private::v1::MainThreadReturn
             for #ident #type_generics #where_clause
         {}
     })

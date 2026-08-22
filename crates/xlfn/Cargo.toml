@@ -11,66 +11,62 @@ readme = "README.md"
 
 [features]
 default = []
-shutdown-refinement = []
-shutdown-trace = ["shutdown-refinement"]
-handle-refinement-trace = []
 async = [
     "dep:async-channel",
     "dep:async-task",
     "dep:futures-util",
 ]
-bench-internals = ["xlfn-sys/abi-probe"]
-unstable = []
+unstable = ["xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["unstable", "async"]
 
 [[bench]]
 name = "sync_boundary"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "handle_prepare"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "formula_revision"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "handle_lookup"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "input_identity"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "formula_caller"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "argument_ingress"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "rtd_publish"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [[bench]]
 name = "handle_call_resolution"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["unstable"]
 
 [dependencies]
 xlfn-macros.workspace = true

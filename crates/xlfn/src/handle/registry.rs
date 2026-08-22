@@ -15,7 +15,7 @@ use super::transaction::{RegistryRemovalTxn, RegistryWriteTxn};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::{XllError, XllResult};
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -58,7 +58,7 @@ pub(crate) struct HandleRegistry {
     pub(super) bindings: BindingTable,
     pub(super) cleanup: Arc<HandleCleanupState>,
     pub(super) objects: Arc<ObjectStore>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
@@ -149,25 +149,25 @@ impl HandleRegistry {
             bindings: BindingTable::new(maximum_bindings),
             cleanup,
             objects,
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: Mutex::new(None),
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.objects.set_ghost(Arc::clone(&ghost));
         *self.ghost.lock() = Some(ghost);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
         }
     }
 
-    #[cfg(all(target_os = "windows", any(test, feature = "shutdown-refinement")))]
+    #[cfg(all(target_os = "windows", any(test, feature = "unstable")))]
     pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()
     }
@@ -289,7 +289,7 @@ impl HandleRegistry {
             },
             object_ref,
         );
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
@@ -361,7 +361,7 @@ impl HandleRegistry {
             },
             object_ref,
         );
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
@@ -537,7 +537,7 @@ impl HandleRegistry {
         if let Some(value) = value {
             self.objects.retire(value, "handle registry test removal");
         }
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(())
     }
@@ -563,7 +563,7 @@ impl HandleRegistry {
         if let Some(value) = value {
             self.objects.retire(value, operation);
         }
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(reusable)
     }
@@ -591,7 +591,7 @@ impl HandleRegistry {
         self.objects.seal();
         let values = self.objects.lock_live().take_all();
         self.objects.retire_all(values, "handle registry close");
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }

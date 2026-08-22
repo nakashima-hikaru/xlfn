@@ -5,7 +5,7 @@ use super::worker::release_active;
 use crate::cancellation::CancellationSource;
 use crate::error::XllError;
 use futures_util::future::AbortHandle;
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -54,9 +54,9 @@ impl<'a> ActiveReservation<'a> {
             shared: Arc::clone(shared),
             generation,
             id,
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: None,
         }
     }
@@ -74,16 +74,16 @@ pub(crate) struct CompletionGuard {
     pub(crate) shared: Arc<ExecutorShared>,
     pub(crate) generation: triomphe::Arc<GenerationState>,
     pub(crate) id: u64,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) completion: Mutex<crate::shutdown_refinement::Completion>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         self.generation.remove_task(self.id);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if let Some(ghost) = self.ghost.as_ref() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::EndAsyncTask(
                 *self.completion.lock(),

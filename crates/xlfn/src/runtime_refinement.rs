@@ -5,28 +5,28 @@
 //! enabled. Keeping the build configuration here prevents production and
 //! refinement builds from carrying separate state-transition implementations.
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 use crate::XllError;
 use crate::generation::OpenAttemptId;
 use crate::runtime::Runtime;
 use crate::{Addin, XllResult};
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 use std::sync::Arc;
 
 pub(crate) struct RuntimeRefinementHooks {
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     formal: crate::runtime_components::FormalState,
 }
 
 impl RuntimeRefinementHooks {
     pub(crate) const fn new() -> Self {
         Self {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             formal: crate::runtime_components::FormalState::new(),
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn ghost_handle(&self) -> crate::shutdown_refinement::GhostHandle {
         Arc::clone(
             self.formal
@@ -35,7 +35,7 @@ impl RuntimeRefinementHooks {
         )
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn composition_trace(&self) -> &crate::composition_refinement::CompositionTrace {
         let trace = self
             .formal
@@ -51,7 +51,7 @@ impl RuntimeRefinementHooks {
         sampled_epoch: u64,
         attempt: OpenAttemptId,
     ) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             let ghost = runtime.ghost_handle();
             if ghost.active() {
@@ -59,7 +59,7 @@ impl RuntimeRefinementHooks {
             }
             runtime.record_composition_begin_open(sampled_epoch, attempt.get());
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         {
             let _ = (runtime, sampled_epoch, attempt);
         }
@@ -71,7 +71,7 @@ impl RuntimeRefinementHooks {
         attempt: OpenAttemptId,
         operation: impl FnOnce() -> XllResult<()>,
     ) -> XllResult<()> {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             let ghost = runtime.ghost_handle();
             let mut resources = crate::shutdown_refinement::GhostResources::opened(
@@ -97,14 +97,11 @@ impl RuntimeRefinementHooks {
                 .return_protocol
                 .returns
                 .set_ghost(Arc::clone(&ghost));
-            runtime
-                .generation_services
-                .formula_handles
-                .set_ghost(Arc::clone(&ghost));
-            runtime
-                .generation_services
-                .subscriptions
-                .set_ghost(Arc::clone(&ghost));
+            let services = runtime
+                .generation_services()
+                .expect("committed open generation publishes its services");
+            services.formula_handle_slot().set_ghost(Arc::clone(&ghost));
+            services.subscriptions_slot().set_ghost(Arc::clone(&ghost));
             #[cfg(feature = "async")]
             runtime
                 .executors
@@ -118,7 +115,7 @@ impl RuntimeRefinementHooks {
             );
             Ok(())
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         {
             let _ = (runtime, attempt);
             operation()
@@ -126,7 +123,7 @@ impl RuntimeRefinementHooks {
     }
 
     pub(crate) fn reject_open<A: Addin>(&self, runtime: &Runtime<A>, attempt: OpenAttemptId) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             debug_assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
             debug_assert_eq!(runtime.open_attempt(), None);
@@ -136,14 +133,14 @@ impl RuntimeRefinementHooks {
                 },
             );
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         {
             let _ = (runtime, attempt);
         }
     }
 
     pub(crate) fn fail_open<A: Addin>(&self, runtime: &Runtime<A>, attempt: OpenAttemptId) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             debug_assert_eq!(runtime.open_attempt(), None);
             debug_assert!(matches!(
@@ -157,57 +154,57 @@ impl RuntimeRefinementHooks {
                 },
             );
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         {
             let _ = (runtime, attempt);
         }
     }
 
     pub(crate) fn request_final_close<A: Addin>(&self, runtime: &Runtime<A>, recorded: &mut bool) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if !*recorded {
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::RequestFinalClose,
             );
             *recorded = true;
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         {
             let _ = (runtime, recorded);
         }
     }
 
     pub(crate) fn acquire_final_close_owner<A: Addin>(&self, runtime: &Runtime<A>) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_composition_event(
             crate::composition_refinement::CompositionEvent::AcquireFinalCloseOwner,
         );
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         let _ = runtime;
     }
 
     pub(crate) fn acquire_open_rollback_owner<A: Addin>(&self, runtime: &Runtime<A>) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_composition_event(
             crate::composition_refinement::CompositionEvent::AcquireOpenRollbackOwner,
         );
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         let _ = runtime;
     }
 
     pub(crate) fn release_cleanup_owner<A: Addin>(&self, runtime: &Runtime<A>) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::ReleaseCleanupOwner,
             );
             runtime.finish_composition_return();
         }
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         let _ = runtime;
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn retire_committed_shutdown<A: Addin>(&self, runtime: &Runtime<A>) {
         runtime.record_composition_event(
             crate::composition_refinement::CompositionEvent::RetireCommittedShutdown,

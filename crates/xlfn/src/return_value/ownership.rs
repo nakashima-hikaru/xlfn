@@ -95,7 +95,7 @@ pub(crate) struct ReturnTracker {
     stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
     wait_lock: Mutex<()>,
     quiescent: Condvar,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -104,7 +104,7 @@ pub(crate) struct ReturnObligation<'tracker> {
     tracker: &'tracker ReturnTracker,
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 impl<'tracker> ReturnObligation<'tracker> {
     pub(crate) fn tracker(&self) -> &'tracker ReturnTracker {
         self.tracker
@@ -129,17 +129,17 @@ impl ReturnTracker {
             stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
             wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.get() {
             ghost.record_event(event);
@@ -212,7 +212,7 @@ impl<'tracker> ReturnProducerGuard<'tracker> {
 
 impl ReturnProducerGuard<'static> {
     pub(crate) fn transfer_to_block(&mut self) -> ReturnObligation<'static> {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             let _obligation = self
                 .obligation
@@ -246,7 +246,7 @@ pub struct ReturnFreeBoundaryGuard {
 
 impl Drop for ReturnFreeGuard {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.obligation
             .tracker()
             .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);

@@ -25,10 +25,10 @@ pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 pub mod raw;
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) use crate::call::with_excel_call_scope;
 pub use crate::input_identity::InputIdentityEncoder;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
 pub(crate) use input::{CallContext, ExcelParameter};
 pub use input::{ExcelInputIdentity, FormulaInputMode, FromExcel, InputMode, PlainInputMode};
@@ -1012,12 +1012,12 @@ where
             .scratch()
             .decode_utf16(value.utf16(argument)?, argument)?;
         let handle = context.resolve_handle::<T>(token)?.pin()?;
-        M::u64(identity, handle.object_id());
+        M::u64(identity, handle.object_id().raw());
         Ok(handle)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
-        M::u64(identity, self.object_id());
+        M::u64(identity, self.object_id().raw());
     }
 }
 

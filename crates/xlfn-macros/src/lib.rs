@@ -229,21 +229,21 @@ fn expand_excel_function(
     let argument_count = arguments.len();
     let generated_context_expression = context.map(|kind| match kind {
         ContextKind::ThreadSafe => {
-            quote!(#krate::__private::thread_safe_context(__state))
+            quote!(#krate::__private::v1::thread_safe_context(__state))
         }
-        ContextKind::MainThread => quote!(#krate::__private::main_thread_context(
+        ContextKind::MainThread => quote!(#krate::__private::v1::main_thread_context(
             __frame,
             __state,
             &crate::__XLFN_RUNTIME,
         )),
         ContextKind::MacroSheet => {
-            quote!(#krate::__private::macro_sheet_context(
+            quote!(#krate::__private::v1::macro_sheet_context(
                 __frame,
                 __state,
             ))
         }
         ContextKind::Async => {
-            quote!(#krate::__private::async_context(&__lease, &__cancellation))
+            quote!(#krate::__private::v1::async_context(&__lease, &__cancellation))
         }
     });
     let macro_sheet = mode.is_macro_sheet();
@@ -280,19 +280,21 @@ fn expand_excel_function(
     });
     let volatile = options.volatile;
     let mode_assertion = match mode {
-        ExecutionMode::Async => quote!(#krate::__private::assert_async_return::<#return_type>();),
+        ExecutionMode::Async => {
+            quote!(#krate::__private::v1::assert_async_return::<#return_type>();)
+        }
         ExecutionMode::MacroSheet => {
-            quote!(#krate::__private::assert_macro_sheet_return::<#return_type>();)
+            quote!(#krate::__private::v1::assert_macro_sheet_return::<#return_type>();)
         }
         ExecutionMode::ThreadSafe => {
-            quote!(#krate::__private::assert_thread_safe_return::<#return_type>();)
+            quote!(#krate::__private::v1::assert_thread_safe_return::<#return_type>();)
         }
         ExecutionMode::MainThread => {
-            quote!(#krate::__private::assert_main_thread_return::<#return_type>();)
+            quote!(#krate::__private::v1::assert_main_thread_return::<#return_type>();)
         }
     };
     let volatile_assertion =
-        volatile.then(|| quote!(#krate::__private::assert_volatile_return::<#return_type>();));
+        volatile.then(|| quote!(#krate::__private::v1::assert_volatile_return::<#return_type>();));
     let return_assertion = quote! {
         #mode_assertion
         #volatile_assertion
@@ -309,20 +311,20 @@ fn expand_excel_function(
                 quote! {
                     // SAFETY: Excel supplies the live reference pointer for this ABI call.
                     unsafe {
-                        #krate::__private::convert_reference(__frame, #argument, #raw)
+                        #krate::__private::v1::convert_reference(__frame, #argument, #raw)
                     }
                 }
             } else {
                 let async_assertion = is_async.then(|| {
-                    quote!(#krate::__private::assert_async_parameter::<#return_type, #ty>();)
+                    quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
                 });
                 quote! {
                     {
                         #async_assertion
-                        #krate::__private::assert_excel_parameter::<#return_type, #ty>(__frame);
+                        #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
                         // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                         unsafe {
-                            #krate::__private::convert_argument::<#return_type, #ty>(
+                            #krate::__private::v1::convert_argument::<#return_type, #ty>(
                                 __frame,
                                 #index,
                                 #argument,
@@ -340,8 +342,8 @@ fn expand_excel_function(
                 let default_expr = options.default.as_ref();
                 let blank_arm = if blank_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::CellPresence::Blank => {
-                        #krate::__private::CallFrame::default_argument(
+                    quote!(#krate::__private::v1::CellPresence::Blank => {
+                        #krate::__private::v1::CallFrame::default_argument(
                             __frame,
                             #index,
                             #argument,
@@ -349,14 +351,14 @@ fn expand_excel_function(
                         )?
                     },)
                 } else if blank_error {
-                    quote!(#krate::__private::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
+                    quote!(#krate::__private::v1::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
                 } else {
                     quote!()
                 };
                 let missing_arm = if missing_default {
                     let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::CellPresence::Missing => {
-                        #krate::__private::CallFrame::default_argument(
+                    quote!(#krate::__private::v1::CellPresence::Missing => {
+                        #krate::__private::v1::CallFrame::default_argument(
                             __frame,
                             #index,
                             #argument,
@@ -364,7 +366,7 @@ fn expand_excel_function(
                         )?
                     },)
                 } else if missing_error {
-                    quote!(#krate::__private::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
+                    quote!(#krate::__private::v1::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
                 } else {
                     quote!()
                 };
@@ -372,7 +374,7 @@ fn expand_excel_function(
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
                     let #converted: #ty = match unsafe {
-                        #krate::__private::argument_presence(__frame, #argument, #raw)
+                        #krate::__private::v1::argument_presence(__frame, #argument, #raw)
                     }? {
                         #blank_arm
                         #missing_arm
@@ -389,11 +391,11 @@ fn expand_excel_function(
 
     let boundary = if is_async {
         quote! {
-            #krate::__private::__xlfn_async_only! {
+            #krate::__private::v1::__xlfn_async_only! {
                 // SAFETY: `__async_handle` is provided by Excel via the extern "system"
                 // entry point generated by this macro and points to a valid async handle.
                 unsafe {
-                    #krate::__private::async_udf::<_, #return_type, _, _>(
+                    #krate::__private::v1::async_udf::<_, #return_type, _, _>(
                         &crate::__XLFN_RUNTIME,
                         #udf_id,
                         #excel_name,
@@ -413,7 +415,7 @@ fn expand_excel_function(
         }
     } else {
         quote! {
-            #krate::__private::sync_udf::<_, #return_type, _>(
+            #krate::__private::v1::sync_udf::<_, #return_type, _>(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
@@ -424,7 +426,7 @@ fn expand_excel_function(
                     #(#conversions)*
                     let mut __return_context =
                         __frame.return_context(#udf_id)?;
-                    #krate::__private::ExcelReturn::invoke(
+                    #krate::__private::v1::ExcelReturn::invoke(
                         &mut __return_context,
                         || ::core::result::Result::Ok(#invocation),
                     )
@@ -441,8 +443,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::__private::XLOPER12,)*
-                __async_handle: *mut #krate::__private::XLOPER12,
+                #(#raw_names: *mut #krate::__private::v1::XLOPER12,)*
+                __async_handle: *mut #krate::__private::v1::XLOPER12,
             ) {
                 #boundary
             }
@@ -456,8 +458,8 @@ fn expand_excel_function(
             #[doc = "Every argument pointer must be a live XLOPER12 supplied by Excel for this call."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::__private::XLOPER12),*
-            ) -> *mut #krate::__private::XLOPER12 {
+                #(#raw_names: *mut #krate::__private::v1::XLOPER12),*
+            ) -> *mut #krate::__private::v1::XLOPER12 {
                 #boundary
             }
         }
@@ -465,9 +467,9 @@ fn expand_excel_function(
 
     let argument_abi_tokens = reference_arguments.iter().map(|&is_ref| {
         if is_ref {
-            quote!(#krate::__private::ArgumentAbi::RawReference)
+            quote!(#krate::__private::v1::ArgumentAbi::RawReference)
         } else {
-            quote!(#krate::__private::ArgumentAbi::CoercedValue)
+            quote!(#krate::__private::v1::ArgumentAbi::CoercedValue)
         }
     });
 
@@ -477,8 +479,8 @@ fn expand_excel_function(
         #gating
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
-        static #descriptor_ident: #krate::__private::FunctionRegistration =
-            #krate::__private::FunctionRegistration::new(
+        static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
+            #krate::__private::v1::FunctionRegistration::new(
                 stringify!(#export_ident),
                 #excel_name,
                 #category,
@@ -486,7 +488,7 @@ fn expand_excel_function(
                 #help_topic,
                 &[
                     #(
-                        #krate::__private::ArgumentDescriptor {
+                        #krate::__private::v1::ArgumentDescriptor {
                             name: #argument_name_literals,
                             description: #argument_descriptions,
                         },
@@ -503,7 +505,7 @@ fn expand_excel_function(
             );
 
         #gating
-        #krate::__private::submit_registration! {
+        #krate::__private::v1::submit_registration! {
             #descriptor_ident
         }
 
@@ -545,9 +547,9 @@ fn expand_excel_addin(
 
         #gating
         #[doc(hidden)]
-        static __XLFN_RUNTIME: #krate::__private::MacroRuntime<
+        static __XLFN_RUNTIME: #krate::__private::v1::MacroRuntime<
             #ident,
-        > = #krate::__private::MacroRuntime::new();
+        > = #krate::__private::v1::MacroRuntime::new();
 
         #gating
         #[used]
@@ -557,18 +559,18 @@ fn expand_excel_addin(
             *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
 
         #gating
-        #krate::__private::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
+        #krate::__private::v1::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
-            #krate::__private::open_generated_addin::<#ident>(
+            #krate::__private::v1::open_generated_addin::<#ident>(
                 &crate::__XLFN_RUNTIME,
                 #id,
                 #display_name,
                 #category,
                 env!("CARGO_PKG_VERSION"),
-                #krate::__private::BUILD_TARGET,
+                #krate::__private::v1::BUILD_TARGET,
                 xlAutoOpen as *const (),
             )
         }
@@ -576,13 +578,13 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
-            #krate::__private::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoRemove() -> i32 {
-            #krate::__private::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -592,10 +594,10 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoFree12(
-            __pointer: *mut #krate::__private::XLOPER12,
+            __pointer: *mut #krate::__private::v1::XLOPER12,
         ) {
             // SAFETY: Excel passes the live return pointer produced by this XLL.
-            unsafe { #krate::__private::free_generated_return(__pointer) };
+            unsafe { #krate::__private::v1::free_generated_return(__pointer) };
         }
 
         /// Supplies Add-in metadata to Excel's Add-in Manager.
@@ -605,11 +607,11 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAddInManagerInfo12(
-            __action: *mut #krate::__private::XLOPER12,
-        ) -> *mut #krate::__private::XLOPER12 {
+            __action: *mut #krate::__private::v1::XLOPER12,
+        ) -> *mut #krate::__private::v1::XLOPER12 {
             // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
             unsafe {
-                #krate::__private::addin_manager_info(
+                #krate::__private::v1::addin_manager_info(
                     &crate::__XLFN_RUNTIME,
                     #display_name,
                     __action,
@@ -627,7 +629,7 @@ fn expand_excel_addin(
             // SAFETY: Excel/COM supplies the three live ABI pointers for this
             // entry point, and the boundary validates their use.
             unsafe {
-                #krate::__private::dll_get_class_object(
+                #krate::__private::v1::dll_get_class_object(
                     __class_id,
                     __interface_id,
                     __output,
@@ -638,7 +640,7 @@ fn expand_excel_addin(
         #gating
         #[unsafe(no_mangle)]
         pub extern "system" fn DllCanUnloadNow() -> i32 {
-            #krate::__private::dll_can_unload_now(&crate::__XLFN_RUNTIME)
+            #krate::__private::v1::dll_can_unload_now(&crate::__XLFN_RUNTIME)
         }
     })
 }
@@ -1218,7 +1220,7 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(func_expanded.contains("my_custom_xlfn :: __private"));
+        assert!(func_expanded.contains("my_custom_xlfn :: __private :: v1"));
         assert!(!func_expanded.contains("my_custom_xlfn :: convert"));
 
         let addin_item: ItemStruct = syn::parse2(quote!(
@@ -1228,7 +1230,9 @@ mod tests {
         let addin_expanded = expand_excel_addin(quote!(crate = my_custom_xlfn), addin_item)
             .unwrap()
             .to_string();
-        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: open_generated_addin"));
-        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: MacroRuntime"));
+        assert!(
+            addin_expanded.contains("my_custom_xlfn :: __private :: v1 :: open_generated_addin")
+        );
+        assert!(addin_expanded.contains("my_custom_xlfn :: __private :: v1 :: MacroRuntime"));
     }
 }

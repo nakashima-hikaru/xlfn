@@ -76,7 +76,7 @@ impl Drop for GitRevocationDebtClaim {
 pub(crate) struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
@@ -95,17 +95,17 @@ impl ComModuleLifetime {
                 git_revocation_debt: Vec::new(),
             }),
             quiescent: Condvar::new(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: Mutex::new(None),
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(super) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.ghost.lock() = Some(ghost);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
@@ -174,7 +174,7 @@ impl ComModuleLifetime {
 
     pub(super) fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
         let (ingress_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
         });
         let mut inner = self.inner.lock();
@@ -184,7 +184,7 @@ impl ComModuleLifetime {
             ComModuleCallGuard {
                 lifetime: self,
                 _ingress_guard: ingress_guard,
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 record_ghost: accepted,
             },
             accepted,
@@ -198,7 +198,7 @@ impl ComModuleLifetime {
             ComObjectKind::Server => Self::increment(&mut inner.state.live_servers),
         }
         drop(inner);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(match kind {
             ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::AddRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::AddRtdServer,
@@ -212,7 +212,7 @@ impl ComModuleLifetime {
             ComObjectKind::Server => Self::decrement(&mut inner.state.live_servers),
         }
         drop(inner);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(match kind {
             ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::RemoveRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::RemoveRtdServer,
@@ -233,7 +233,7 @@ impl ComModuleLifetime {
             true
         };
         drop(inner);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if changed {
             self.record_ghost_event(if lock {
                 crate::shutdown_refinement::GhostEvent::LockRtdServer
@@ -296,7 +296,7 @@ impl ComModuleLifetime {
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportCallGuard<'static>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     record_ghost: bool,
 }
 
@@ -306,7 +306,7 @@ impl Drop for ComModuleCallGuard {
         ComModuleLifetime::decrement(&mut inner.state.in_flight_calls);
         self.lifetime.quiescent.notify_all();
         drop(inner);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if self.record_ghost {
             self.lifetime
                 .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);

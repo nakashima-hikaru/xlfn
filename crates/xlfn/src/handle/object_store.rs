@@ -435,7 +435,7 @@ pub(crate) struct ObjectStore {
     pub(super) epoch: Arc<EpochDomain>,
     active_pins: AtomicUsize,
     sealed: AtomicBool,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -451,17 +451,17 @@ impl ObjectStore {
             epoch: Arc::new(EpochDomain::new()),
             active_pins: AtomicUsize::new(0),
             sealed: AtomicBool::new(false),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(super) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost);
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(super) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.get() {
             ghost.record_event(event);
@@ -577,7 +577,7 @@ impl ObjectStore {
             .expect("object pin type was validated before installation");
 
         self.active_pins.fetch_add(1, Ordering::AcqRel);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandlePin);
 
         Ok((
@@ -707,7 +707,7 @@ impl ObjectPin {
 impl Drop for ObjectPin {
     fn drop(&mut self) {
         self.store.release_pin(self.object);
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         self.store
             .record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandlePin);
     }

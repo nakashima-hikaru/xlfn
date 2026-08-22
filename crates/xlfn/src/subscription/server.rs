@@ -131,11 +131,11 @@ impl std::fmt::Debug for ServerRuntime {
 pub(crate) struct ScopedServerOperation<'a> {
     pub(crate) _gate_guard: OperationGuard<'a>,
     pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) parent: Weak<SubscriptionRuntime>,
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 impl Drop for ScopedServerOperation<'_> {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.upgrade() {
@@ -147,14 +147,14 @@ impl Drop for ScopedServerOperation<'_> {
 pub(crate) struct OwnedServerOperation {
     pub(crate) server: Arc<ServerRuntime>,
     pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) parent: Weak<SubscriptionRuntime>,
 }
 
 impl Drop for OwnedServerOperation {
     fn drop(&mut self) {
         self.server.publish.server_gate.leave();
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if let Some(parent) = self.parent.upgrade() {
             parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
         }
@@ -219,7 +219,7 @@ impl PublishCore {
             let (ingress_guard, accepted) = ingress.enter_with(|| match self.server_gate.enter() {
                 Ok(guard) => {
                     gate_guard = Some(guard);
-                    #[cfg(any(test, feature = "shutdown-refinement"))]
+                    #[cfg(any(test, feature = "unstable"))]
                     if let Some(parent) = self.parent.upgrade() {
                         parent.record_ghost_event(
                             crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
@@ -238,12 +238,12 @@ impl PublishCore {
             Ok(ScopedServerOperation {
                 _gate_guard: gate_guard.expect("gate guard is acquired"),
                 _ingress_guard: Some(ingress_guard),
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 parent: self.parent.clone(),
             })
         } else {
             let gate_guard = self.server_gate.enter()?;
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
                     .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
@@ -251,7 +251,7 @@ impl PublishCore {
             Ok(ScopedServerOperation {
                 _gate_guard: gate_guard,
                 _ingress_guard: None,
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 parent: self.parent.clone(),
             })
         }
@@ -272,7 +272,7 @@ impl PublishCore {
                 ingress.enter_with(|| match self.server_gate.acquire() {
                     Ok(()) => {
                         acquired = true;
-                        #[cfg(any(test, feature = "shutdown-refinement"))]
+                        #[cfg(any(test, feature = "unstable"))]
                         if let Some(parent) = self.parent.upgrade() {
                             parent.record_ghost_event(
                                 crate::shutdown_refinement::GhostEvent::BeginRtdOperation,
@@ -292,12 +292,12 @@ impl PublishCore {
             Ok(OwnedServerOperation {
                 server,
                 _ingress_guard: Some(ingress_guard),
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 parent: self.parent.clone(),
             })
         } else {
             self.server_gate.acquire()?;
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
                     .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
@@ -305,7 +305,7 @@ impl PublishCore {
             Ok(OwnedServerOperation {
                 server,
                 _ingress_guard: None,
-                #[cfg(any(test, feature = "shutdown-refinement"))]
+                #[cfg(any(test, feature = "unstable"))]
                 parent: self.parent.clone(),
             })
         }
@@ -380,12 +380,12 @@ impl PublishCore {
         mut attempt: NotificationAttempt<crate::rtd::RtdNotifier>,
     ) {
         loop {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
             }
             let res = catch_unwind(AssertUnwindSafe(|| attempt.notifier.notify()));
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
             }
@@ -976,7 +976,7 @@ impl<'a> ServerTermination<'a> {
             (late_notifier, active_entries)
         };
 
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if let Some(parent) = self.server.parent.upgrade() {
             for _ in 0..self.initial_subscriptions.len() {
                 parent

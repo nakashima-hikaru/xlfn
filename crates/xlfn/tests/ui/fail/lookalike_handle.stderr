@@ -46,7 +46,7 @@ help: the trait `IntoExcel` is not implemented for `Handle`
             i64
             std::string::String
   = note: required for `Handle` to implement `xlfn::value::MainThreadReturn`
-note: required by a bound in `xlfn::__private::assert_main_thread_return`
+note: required by a bound in `value::output::assert_main_thread_return`
  --> src/value/output.rs
   |
   | pub fn assert_main_thread_return<T: MainThreadReturn>() {}

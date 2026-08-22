@@ -13,7 +13,7 @@ mod object_access;
 mod object_store;
 mod prepare;
 mod reclamation;
-#[cfg(any(test, feature = "handle-refinement-trace"))]
+#[cfg(any(test, feature = "unstable"))]
 mod refinement;
 mod refinement_hooks;
 mod refinement_wire;
@@ -55,11 +55,11 @@ pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaBinding, HandleTopicOwner, Topic};
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) use formula::FormulaCaller;
-#[cfg(any(test, feature = "bench-internals", feature = "handle-refinement-trace"))]
+#[cfg(any(test, feature = "unstable", feature = "unstable"))]
 pub(crate) use formula::FormulaRevisionKey;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
@@ -88,7 +88,7 @@ pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
-pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease};
+pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
 
 #[cfg(test)]
 mod refinement_tests;

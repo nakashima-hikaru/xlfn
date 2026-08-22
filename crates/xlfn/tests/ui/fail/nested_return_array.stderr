@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::value::ExcelReturn` is not satisfied
- --> tests/ui/fail/nested_return_array.rs:6:13
+ --> tests/ui/fail/nested_return_array.rs:7:13
   |
-6 | fn bad() -> Matrix<Matrix<f64>> {
+7 | fn bad() -> Matrix<Matrix<f64>> {
   |             ^^^^^^^^^^^^^^^^^^^ the trait `xlfn::value::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
   |
 help: the trait `xlfn::value::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
@@ -11,16 +11,16 @@ help: the trait `xlfn::value::ExcelReturn` is conditionally implemented for `xlf
   | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
   |         unsatisfied requirement introduced here: `xlfn::value::Matrix<f64>: IntoExcel`
-note: required by a bound in `xlfn::__private::sync_udf`
+note: required by a bound in `xlfn::__private::v1::sync_udf`
  --> src/__private.rs
   |
-  | pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
-  |                              ^^^^^^^^^^^ required by this bound in `sync_udf`
+  |     pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
+  |                                  ^^^^^^^^^^^ required by this bound in `sync_udf`
 
 error[E0277]: `xlfn::value::Matrix<xlfn::value::Matrix<f64>>` cannot be returned from a main-thread Excel worksheet function
- --> tests/ui/fail/nested_return_array.rs:6:13
+ --> tests/ui/fail/nested_return_array.rs:7:13
   |
-6 | fn bad() -> Matrix<Matrix<f64>> {
+7 | fn bad() -> Matrix<Matrix<f64>> {
   |             ^^^^^^^^^^^^^^^^^^^ `xlfn::value::Matrix<xlfn::value::Matrix<f64>>` is not a valid return type for a main-thread UDF
   |
   = help: the trait `xlfn::value::MainThreadReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
@@ -32,16 +32,16 @@ help: the trait `xlfn::value::MainThreadReturn` is conditionally implemented for
   | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
   |         unsatisfied requirement introduced here: `xlfn::value::Matrix<f64>: IntoExcel`
-note: required by a bound in `xlfn::__private::assert_main_thread_return`
+note: required by a bound in `value::output::assert_main_thread_return`
  --> src/value/output.rs
   |
   | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
   |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`
 
 error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::value::ExcelReturn` is not satisfied
- --> tests/ui/fail/nested_return_array.rs:5:1
+ --> tests/ui/fail/nested_return_array.rs:6:1
   |
-5 | #[excel_function(name = "FAIL.NESTED.ARRAY")]
+6 | #[excel_function(name = "FAIL.NESTED.ARRAY")]
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::value::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
   |
 help: the trait `xlfn::value::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`

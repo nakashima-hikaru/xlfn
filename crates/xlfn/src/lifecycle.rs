@@ -121,7 +121,7 @@ where
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
     let registrar = HostRegistrar::connect(transaction.callbacks_mut())
         .map_err(|error| retain_transaction_error(runtime, error))?;
-    let generation = runtime.active_generation().ok_or(XllError::Internal {
+    let generation = runtime.protocol_generation().ok_or(XllError::Internal {
         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
@@ -279,7 +279,7 @@ struct OpenRollbackOutcome {
 }
 
 fn active_runtime_generation<A: Addin>(runtime: &Runtime<A>) -> Option<RuntimeGeneration> {
-    runtime.active_generation()
+    runtime.protocol_generation()
 }
 
 /// Shared execution-drain stage for rollback and final removal. The ghost
@@ -291,14 +291,14 @@ fn drain_execution<A: Addin>(
 ) -> crate::ingress::ExportsDrained {
     let exports_drained = crate::module_runtime::global().seal_and_drain();
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     if _record_ghost {
         runtime.record_ghost_event_linearized(crate::shutdown_refinement::GhostEvent::CallsDrained);
     }
 
     runtime.wait_for_returns();
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     if _record_ghost {
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReturnsDrained);
     }
@@ -704,17 +704,17 @@ where
                 report_boundary_error("xlAutoRemove closed lifecycle binding", &error);
                 quarantine_runtime(runtime);
             }
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             runtime.record_composition_already_closed_return();
             1
         }
         RemovalSuccess::Quarantined => 1,
-        #[cfg(not(any(test, feature = "shutdown-refinement")))]
+        #[cfg(not(any(test, feature = "unstable")))]
         RemovalSuccess::Closed {
             witness: _witness,
             removal_attempt: _removal_attempt,
         } => 1,
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         RemovalSuccess::Closed {
             witness,
             removal_attempt: _removal_attempt,
@@ -828,7 +828,7 @@ where
         return Ok(RemovalSuccess::AlreadyClosed);
     };
     crate::module_runtime::global().begin_close(|| {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if runtime.ghost_generation_active() {
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
         }
@@ -862,9 +862,9 @@ where
     #[cfg(not(feature = "async"))]
     let async_stopped = crate::shutdown::AsyncStopped::new();
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_async_stopped();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::AsyncDrained);
 
     let subscriptions_stopped = match runtime.close_subscriptions() {
@@ -879,7 +879,7 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::SubscriptionsDrained);
 
     let registrations = runtime.registrations();
@@ -912,7 +912,7 @@ where
                 error,
             );
         }
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         for _ in &outcome.succeeded {
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::UnregisterFunction);
         }
@@ -996,7 +996,7 @@ where
                 error,
             );
         }
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         for _ in &event_outcome.succeeded {
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::UnregisterEvent);
         }
@@ -1017,7 +1017,7 @@ where
     // cleanup is provably callback-free.
     crate::module_runtime::global().close_callbacks();
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::CloseCallbackGate);
 
     if let Some((hazard, boundary, error)) = unload_failure.take() {
@@ -1025,7 +1025,7 @@ where
     }
 
     let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HostDetached);
 
     let mut addin_shared_state = None;
@@ -1127,7 +1127,7 @@ where
     let addin_quiesced = crate::shutdown::AddinQuiesced::new();
     let generation_reclaimed = crate::shutdown::GenerationReclaimed::new();
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     {
         runtime.record_ghost_generation_unique();
         runtime.record_ghost_addin_quiesced();
@@ -1219,7 +1219,7 @@ where
         }
     }
     for issue in report.issues() {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
         report_cleanup_issue(issue);
     }
@@ -1251,12 +1251,12 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HandlesDrained);
 
     let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router().map(|outcome| {
         for issue in outcome.issues {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
             report_cleanup_issue(&issue);
         }
@@ -1274,7 +1274,7 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     if let Err(error) = runtime.record_ghost_diagnostics_stopped() {
         return Err(handle_unload_hazard(
             runtime,
@@ -1283,7 +1283,7 @@ where
             &error,
         ));
     }
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::DiagnosticsDrained);
 
     let rtd_quiescent = match crate::rtd::wait_for_module_quiescence() {
@@ -1305,7 +1305,7 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RtdDrained);
 
     let certificate =
@@ -1381,7 +1381,7 @@ fn handle_unload_hazard<A: Addin>(
         tracing::error!(?hazard, %error, "unload safety could not be established");
     }));
     if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         _runtime.ghost_fail_stop(hazard.ghost_failure());
         fail_stop_invariant(boundary, error);
     }
@@ -1412,14 +1412,14 @@ fn commit_removal_control<A: Addin>(
 
 fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
     runtime.quarantine();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.ghost_quarantine(crate::shutdown_refinement::GhostFailure::BoundaryPanic);
     quarantine_runtime_resources(runtime);
 }
 
 fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdown::UnloadHazard) {
     runtime.quarantine();
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.ghost_quarantine(_hazard.ghost_failure());
     quarantine_runtime_resources(runtime);
 }

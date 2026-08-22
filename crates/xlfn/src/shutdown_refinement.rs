@@ -308,7 +308,7 @@ impl GhostOutcome {
     }
 }
 
-#[cfg(any(test, feature = "shutdown-trace"))]
+#[cfg(any(test, feature = "unstable"))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct GhostTrace {
     pub(crate) generation: u64,
@@ -849,15 +849,15 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
 pub(crate) struct GhostMachine {
     initial: GhostState,
     state: GhostState,
-    #[cfg(any(test, feature = "shutdown-trace"))]
+    #[cfg(any(test, feature = "unstable"))]
     events: Vec<GhostEvent>,
-    #[cfg(any(test, feature = "shutdown-trace"))]
+    #[cfg(any(test, feature = "unstable"))]
     trace_truncated: bool,
     returned_success: bool,
     active: bool,
 }
 
-#[cfg(any(test, feature = "shutdown-trace"))]
+#[cfg(any(test, feature = "unstable"))]
 const MAX_TRACE_EVENTS: usize = 16_384;
 
 impl GhostMachine {
@@ -873,9 +873,9 @@ impl GhostMachine {
         Self {
             initial: Self::empty_state(),
             state: Self::empty_state(),
-            #[cfg(any(test, feature = "shutdown-trace"))]
+            #[cfg(any(test, feature = "unstable"))]
             events: Vec::new(),
-            #[cfg(any(test, feature = "shutdown-trace"))]
+            #[cfg(any(test, feature = "unstable"))]
             trace_truncated: false,
             returned_success: false,
             active: false,
@@ -897,7 +897,7 @@ impl GhostMachine {
         };
         self.initial = state.clone();
         self.state = state;
-        #[cfg(any(test, feature = "shutdown-trace"))]
+        #[cfg(any(test, feature = "unstable"))]
         {
             // Releasing the old vector prevents a high-water mark from being
             // retained across reopen cycles.
@@ -921,7 +921,7 @@ impl GhostMachine {
         }
         let after = transition(&self.state, &event)?;
         self.state = after;
-        #[cfg(any(test, feature = "shutdown-trace"))]
+        #[cfg(any(test, feature = "unstable"))]
         if self.events.len() < MAX_TRACE_EVENTS {
             self.events.push(event);
         } else {
@@ -970,7 +970,7 @@ impl GhostMachine {
         result
     }
 
-    #[cfg(any(test, feature = "shutdown-trace"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn trace(&self) -> GhostTrace {
         let outcome = if self.returned_success {
             GhostOutcome::ReturnedSuccess
@@ -1077,7 +1077,7 @@ impl ShutdownGhost {
         self.inner.lock().record_returned_success()
     }
 
-    #[cfg(any(test, feature = "shutdown-trace"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn trace_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(&self.inner.lock().trace())
     }

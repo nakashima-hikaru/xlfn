@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `CustomRate: xlfn::__private::ExcelParameter<'_, xlfn::value::FormulaInputMode>` is not satisfied
+error[E0277]: the trait bound `CustomRate: value::input::ExcelParameter<'_, xlfn::value::FormulaInputMode>` is not satisfied
   --> tests/ui/fail/formula_identity_missing.rs:22:15
    |
 22 | fn bad(value: CustomRate) -> Dataset {
@@ -19,12 +19,12 @@ help: the trait `ExcelInputIdentity` is not implemented for `CustomRate`
              f64
              i32
            and $N others
-   = note: required for `CustomRate` to implement `xlfn::__private::ExcelParameter<'_, xlfn::value::FormulaInputMode>`
-note: required by a bound in `xlfn::__private::assert_excel_parameter`
+   = note: required for `CustomRate` to implement `value::input::ExcelParameter<'_, xlfn::value::FormulaInputMode>`
+note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
   --> src/__private.rs
    |
-   | pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
-   |        ---------------------- required by a bound in this function
+   |     pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
+   |            ---------------------- required by a bound in this function
 ...
-   |     T: ExcelParameter<'call, R::InputMode>,
-   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
+   |         T: ExcelParameter<'call, R::InputMode>,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`

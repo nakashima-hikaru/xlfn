@@ -21,7 +21,7 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i64
              std::string::String
    = note: required for `Dataset` to implement `xlfn::value::VolatileReturn`
-note: required by a bound in `xlfn::__private::assert_volatile_return`
+note: required by a bound in `value::output::assert_volatile_return`
   --> src/value/output.rs
    |
    | pub fn assert_volatile_return<T: VolatileReturn>() {}

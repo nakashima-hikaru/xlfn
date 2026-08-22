@@ -99,7 +99,7 @@ pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
     crate::module_runtime::global().com_module_lifetime()
 }
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(super) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
     module_lifetime().set_ghost(ghost);
 }

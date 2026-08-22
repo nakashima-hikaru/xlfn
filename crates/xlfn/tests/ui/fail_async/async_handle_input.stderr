@@ -42,7 +42,7 @@ note: the trait `xlfn::Addin` must be implemented
    | pub trait Addin: Send + Sync + 'static {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
 27 |     dataset: Handle<'_, Dataset>,
@@ -57,7 +57,7 @@ help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not impl
    | |     M: InputMode,
    | |     T: crate::handle::ExcelHandleObject,
    | |________________________________________^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()
@@ -83,7 +83,7 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()
@@ -98,19 +98,19 @@ error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared bet
 27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
    |
-   = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
 note: required because it appears within the type `xlfn::host_callback::HostCallbackSession`
   --> src/host_callback.rs
    |
    | pub(crate) struct HostCallbackSession {
    |                   ^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn::__private::CallScope<'_>`
+note: required because it appears within the type `xlfn::call::CallScope<'_>`
   --> src/call.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn::__private::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn::__private::CallScope<'_>>`
+   = note: required for `&xlfn::call::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::call::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
@@ -120,7 +120,7 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()
@@ -135,20 +135,20 @@ error[E0277]: `OnceCell<handle::reclamation::CallRegistration>` cannot be shared
 27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
    |
-   = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `OnceCell<handle::reclamation::CallRegistration>`
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `OnceCell<handle::reclamation::CallRegistration>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::OnceLock` instead
 note: required because it appears within the type `handle::reclamation::HandleCallGuard`
   --> src/handle/reclamation.rs
    |
    | pub(crate) struct HandleCallGuard {
    |                   ^^^^^^^^^^^^^^^
-note: required because it appears within the type `xlfn::__private::CallScope<'_>`
+note: required because it appears within the type `xlfn::call::CallScope<'_>`
   --> src/call.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn::__private::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn::__private::CallScope<'_>>`
+   = note: required for `&xlfn::call::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::call::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
@@ -158,7 +158,7 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()
@@ -173,7 +173,7 @@ error[E0277]: `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between thr
 27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
    |
-   = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<NonNull<bumpalo::ChunkFooter>>`
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<NonNull<bumpalo::ChunkFooter>>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock`
 note: required because it appears within the type `bumpalo::Bump`
   --> $CARGO/bumpalo-$VERSION/src/lib.rs
@@ -190,13 +190,13 @@ note: required because it appears within the type `xlfn::call::CallScratch`
    |
    | pub(crate) struct CallScratch {
    |                   ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::__private::CallScope<'_>`
+note: required because it appears within the type `xlfn::call::CallScope<'_>`
   --> src/call.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn::__private::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn::__private::CallScope<'_>>`
+   = note: required for `&xlfn::call::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::call::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
@@ -206,7 +206,7 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()
@@ -221,7 +221,7 @@ error[E0277]: `Cell<Option<usize>>` cannot be shared between threads safely
 27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<Option<usize>>` cannot be shared between threads safely
    |
-   = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<Option<usize>>`
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<Option<usize>>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock`
 note: required because it appears within the type `bumpalo::Bump`
   --> $CARGO/bumpalo-$VERSION/src/lib.rs
@@ -238,13 +238,13 @@ note: required because it appears within the type `xlfn::call::CallScratch`
    |
    | pub(crate) struct CallScratch {
    |                   ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::__private::CallScope<'_>`
+note: required because it appears within the type `xlfn::call::CallScope<'_>`
   --> src/call.rs
    |
    | pub struct CallScope<'call> {
    |            ^^^^^^^^^
-   = note: required for `&xlfn::__private::CallScope<'_>` to implement `Send`
-note: required because it appears within the type `PhantomData<&xlfn::__private::CallScope<'_>>`
+   = note: required for `&xlfn::call::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::call::CallScope<'_>>`
   --> $RUST/core/src/marker.rs
    |
    | pub struct PhantomData<T: PointeeSized>;
@@ -254,7 +254,7 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Data
    |
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
-note: required by a bound in `xlfn::__private::assert_async_parameter`
+note: required by a bound in `value::input::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<R, T>()

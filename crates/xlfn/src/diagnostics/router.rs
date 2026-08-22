@@ -10,7 +10,7 @@ pub(crate) use super::{
     set_diagnostic_sink,
 };
 
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 pub(crate) use super::connect_ghost;
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub use source::{
 pub use topic::{RtdLimits, RtdTopic};
 pub use value::{IntoRtdValue, RtdValue};
 
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(target_os = "windows", test, feature = "unstable"))]
 pub(crate) use crate::generation::ServerGeneration;
 #[cfg(test)]
 pub(crate) use crate::generation::{ConnectionGeneration, RuntimeGeneration};
@@ -41,7 +41,7 @@ pub(crate) use catalog::{
     ActiveKeyBinding, BindingStage, PendingSubscription, SubscriptionCatalog,
     remove_identity_if_unbound,
 };
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(target_os = "windows", test, feature = "unstable"))]
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(target_os = "windows")]
 pub(crate) use delivery::RtdUpdate;
@@ -68,7 +68,7 @@ pub(crate) use runtime::SubscriptionConnection;
 pub(crate) use runtime::SubscriptionRuntime;
 #[cfg(test)]
 pub(crate) use runtime::{OperationEnterHook, PreparedSubscription};
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(target_os = "windows", test, feature = "unstable"))]
 pub(crate) use server::RtdServerHandle;
 #[cfg(test)]
 pub(crate) use server::{
@@ -94,7 +94,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
 pub(crate) use topic::SubscriptionKey;
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(target_os = "windows", test, feature = "unstable"))]
 pub(crate) use topic::TopicId;
 #[cfg(test)]
 pub(crate) use topic::{

@@ -99,7 +99,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             .collect::<Vec<_>>();
         if ascii_case_insensitive {
             quote! {
-                if #krate::__private::utf16_eq_ignore_ascii_case(
+                if #krate::__private::v1::utf16_eq_ignore_ascii_case(
                     __text.as_utf16(),
                     &[#(#units),*],
                 ) {

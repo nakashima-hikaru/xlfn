@@ -33,7 +33,7 @@ pub mod __private;
 mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
-#[cfg(feature = "bench-internals")]
+#[cfg(feature = "unstable")]
 #[doc(hidden)]
 pub mod benchmark_support;
 #[cfg_attr(
@@ -54,7 +54,7 @@ mod callback_gate;
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 mod composition_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod crt;
@@ -95,7 +95,7 @@ mod runtime;
 mod runtime_components;
 mod runtime_refinement;
 mod shutdown;
-#[cfg(any(test, feature = "shutdown-refinement"))]
+#[cfg(any(test, feature = "unstable"))]
 mod shutdown_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod subscription;
@@ -433,13 +433,13 @@ macro_rules! __xlfn_private_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::__private::cancel_async_calculation($runtime);
+            $crate::__private::v1::cancel_async_calculation($runtime);
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::end_async_calculation($runtime);
+            $crate::__private::v1::end_async_calculation($runtime);
         }
     };
 }
@@ -478,7 +478,7 @@ pub mod prelude {
     };
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
-    pub use crate::handle::{Handle, HandleAlias, HandleLease};
+    pub use crate::handle::{Handle, HandleAlias, HandleLease, HandleObjectId};
     pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{

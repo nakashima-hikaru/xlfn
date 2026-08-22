@@ -1,9 +1,9 @@
 //! Benchmark support utilities for internal crate testing and performance measurement.
 //!
 //! This module is hidden from public API documentation and is enabled only when
-//! compiling with the `bench-internals` feature.
+//! compiling with the `unstable` feature.
 
-#![cfg(feature = "bench-internals")]
+#![cfg(feature = "unstable")]
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
@@ -1537,7 +1537,7 @@ impl MultiHandleCallBenchmark {
 
     pub fn run(&mut self) {
         crate::value::with_excel_call_scope(|scope| {
-            let mut frame = crate::__private::CallFrame::<
+            let mut frame = crate::__private::v1::CallFrame::<
                 <f64 as crate::value::ExcelReturn>::InputMode,
             >::new(self.runtime, scope, 1);
             for raw in &mut self.raw_tokens {
@@ -1556,7 +1556,7 @@ impl MultiHandleCallBenchmark {
 }
 
 pub struct ConcurrentHandleResolutionBenchmark {
-    _slot: &'static crate::handle::FormulaHandleServiceSlot,
+    _services: Arc<crate::runtime_components::GenerationServices>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -1569,7 +1569,9 @@ impl ConcurrentHandleResolutionBenchmark {
         let _ = runtime
             .formula_handle_service()
             .expect("benchmark handle runtime must initialize");
-        let slot = runtime.formula_handle_service_slot();
+        let services = runtime
+            .generation_services()
+            .expect("benchmark handle runtime must publish its services");
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);
@@ -1578,12 +1580,14 @@ impl ConcurrentHandleResolutionBenchmark {
         for _ in 0..threads {
             let (s_tx, s_rx) = std::sync::mpsc::sync_channel::<()>(1);
             let d_tx = done_tx.clone();
+            let services = Arc::clone(&services);
             start_tx.push(s_tx);
 
             let handle = std::thread::spawn(move || {
                 while s_rx.recv().is_ok() {
                     for _ in 0..iterations_per_thread {
-                        let resolver = crate::handle::FormulaHandleServiceResolver::new(slot);
+                        let resolver =
+                            crate::handle::FormulaHandleServiceResolver::new(Arc::clone(&services));
                         let rt = resolver.get().expect("handle runtime must resolve");
                         std::hint::black_box(rt);
                     }
@@ -1594,7 +1598,7 @@ impl ConcurrentHandleResolutionBenchmark {
         }
 
         Self {
-            _slot: slot,
+            _services: services,
             threads,
             start_tx,
             done_rx,

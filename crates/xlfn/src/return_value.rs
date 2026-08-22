@@ -67,7 +67,9 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         Self {
             publisher: inputs.map(|inputs| FormulaPublisher {
                 runtime: crate::handle::FormulaHandleServiceResolver::new(
-                    runtime.formula_handle_service_slot(),
+                    runtime.generation_services().unwrap_or_else(|_| {
+                        std::sync::Arc::new(crate::runtime_components::GenerationServices::new())
+                    }),
                 ),
                 udf_id,
                 inputs: InputFingerprint::from_bytes(inputs),
@@ -572,7 +574,7 @@ where
     T: ExcelReturn,
 {
     let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
     if !accepted {
@@ -581,13 +583,13 @@ where
     let _call = match runtime.enter() {
         Ok(call) => call,
         Err(_) => {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
             return closing_error_pointer();
         }
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
         return closing_error_pointer();
     };
@@ -605,7 +607,7 @@ where
             allocate_excel_error(&XllError::Panic, &mut producer)
         }
     };
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
     result
 }
@@ -618,7 +620,7 @@ where
 #[doc(hidden)]
 pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
     let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
     if !accepted {
@@ -627,13 +629,13 @@ pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl 
     let _call = match runtime.enter() {
         Ok(call) => call,
         Err(_) => {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
             return;
         }
     };
     let _ = catch_unwind(AssertUnwindSafe(operation));
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
 }
 
@@ -651,7 +653,7 @@ where
     T: ExcelReturn,
 {
     let (_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
     if !accepted {
@@ -660,13 +662,13 @@ where
     let call = match runtime.enter() {
         Ok(call) => call,
         Err(_) => {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
             return closing_error_pointer();
         }
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
         return closing_error_pointer();
     };
@@ -683,7 +685,7 @@ where
     };
     drop(producer);
     drop(call);
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveExternal);
     result
 }
@@ -895,7 +897,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     let ownership = unsafe { &mut (*block).ownership };
     match ownership {
         ReturnOwnership::Excel(slot) => {
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             {
                 let _obligation = slot
                     .as_ref()
@@ -931,7 +933,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
         ReturnOwnership::Excel(slot) => {
             debug_assert!(slot.is_none());
             let _operation = operation.expect("Excel return destruction owns a free guard");
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             _operation
                 .obligation
                 .tracker()

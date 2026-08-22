@@ -15,6 +15,21 @@ pub trait ExcelHandleObject: Send + Sync + 'static {}
 
 type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -> T);
 
+/// Opaque identity of a registry-owned handle payload.
+///
+/// The value is stable only within the runtime that issued it. It is intended
+/// for in-process correlation and diagnostics, not for persistence or wire
+/// serialization. Keeping the representation private leaves the identity
+/// format free to evolve without making `u64` part of the public contract.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct HandleObjectId(u64);
+
+impl HandleObjectId {
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// A call-scoped read capability for an object owned by a formula handle.
 ///
 /// The handle borrows an object-registry entry for the generated Excel call
@@ -84,8 +99,8 @@ pub struct HandleLease<T: ExcelHandleObject> {
 
 impl<T: ExcelHandleObject> HandleLease<T> {
     /// Returns the stable runtime-local object identity.
-    pub fn object_id(&self) -> u64 {
-        self.lease.object_id()
+    pub fn object_id(&self) -> HandleObjectId {
+        HandleObjectId(self.lease.object_id())
     }
 }
 

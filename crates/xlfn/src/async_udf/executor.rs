@@ -62,7 +62,7 @@ pub(crate) struct ExecutorShared {
     pub(crate) control: Mutex<ExecutorControl>,
     pub(crate) wait_lock: Mutex<()>,
     pub(crate) idle: Condvar,
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     pub(crate) before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -112,7 +112,7 @@ impl Executor {
             }),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
             before_task_schedule_hook: Mutex::new(None),
@@ -167,7 +167,7 @@ impl Executor {
         })
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.shared.ghost.lock() = Some(ghost);
     }
@@ -324,7 +324,7 @@ impl ExecutorShared {
 
         drop(admission);
 
-        #[cfg(any(test, feature = "shutdown-refinement"))]
+        #[cfg(any(test, feature = "unstable"))]
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncTask);
             completion.ghost = Some(ghost);
@@ -332,9 +332,9 @@ impl ExecutorShared {
 
         let wrapped = async move {
             let _completion = completion;
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             let result = Abortable::new(future, registration).await;
-            #[cfg(any(test, feature = "shutdown-refinement"))]
+            #[cfg(any(test, feature = "unstable"))]
             {
                 *_completion.completion.lock() = if result.is_ok() {
                     crate::shutdown_refinement::Completion::Completed
@@ -342,7 +342,7 @@ impl ExecutorShared {
                     crate::shutdown_refinement::Completion::Canceled
                 };
             }
-            #[cfg(not(any(test, feature = "shutdown-refinement")))]
+            #[cfg(not(any(test, feature = "unstable")))]
             let _ = Abortable::new(future, registration).await;
         };
         #[cfg(test)]

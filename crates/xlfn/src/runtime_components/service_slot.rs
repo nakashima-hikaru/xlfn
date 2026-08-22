@@ -6,32 +6,21 @@ use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::generation::RuntimeGeneration;
-
 /// Shared lifecycle vocabulary for generation-scoped lazy services. The
 /// service modules keep their own initialization and teardown policy, while
 /// this state machine prevents their public phase vocabulary from diverging.
 pub(crate) enum GenerationServiceState<C, T> {
     Closed,
     Cold {
-        generation: RuntimeGeneration,
         config: C,
     },
-    Initializing {
-        generation: RuntimeGeneration,
-    },
-    Ready {
-        generation: RuntimeGeneration,
-    },
-    Sealing {
-        generation: RuntimeGeneration,
-    },
+    Initializing,
+    Ready,
+    Sealing,
     InitFaulted {
-        generation: RuntimeGeneration,
         error: crate::XllError,
     },
     TeardownFaulted {
-        generation: RuntimeGeneration,
         error: crate::XllError,
         runtime: ManuallyDrop<Arc<T>>,
     },
@@ -75,7 +64,6 @@ impl<R> GenerationServiceRead<R> {
 /// `Initializing` when it unwinds.
 struct InitializingTxn<'slot, C, R> {
     slot: &'slot GenerationServiceSlot<C, R>,
-    generation: RuntimeGeneration,
     committed: bool,
 }
 
@@ -92,13 +80,10 @@ impl<C, R> InitializingTxn<'_, C, R> {
 
         let mut state = self.slot.state.lock();
         match &*state {
-            GenerationServiceState::Initializing { generation }
-                if *generation == self.generation => {}
+            GenerationServiceState::Initializing => {}
             _ => unreachable!("initialization transaction lost its state owner"),
         }
-        *state = GenerationServiceState::Ready {
-            generation: self.generation,
-        };
+        *state = GenerationServiceState::Ready;
         self.committed = true;
         self.slot.changed.notify_all();
         drop(state);
@@ -116,15 +101,8 @@ impl<C, R> InitializingTxn<'_, C, R> {
 
     fn record_fault(&mut self, error: crate::XllError) {
         let mut state = self.slot.state.lock();
-        if matches!(
-            &*state,
-            GenerationServiceState::Initializing { generation }
-                if *generation == self.generation
-        ) {
-            *state = GenerationServiceState::InitFaulted {
-                generation: self.generation,
-                error,
-            };
+        if matches!(&*state, GenerationServiceState::Initializing) {
+            *state = GenerationServiceState::InitFaulted { error };
             self.slot.changed.notify_all();
         }
     }
@@ -145,7 +123,6 @@ impl<C, R> Drop for InitializingTxn<'_, C, R> {
 /// same resource root as an ordinary shutdown error.
 struct SealingTxn<'slot, C, R> {
     slot: &'slot GenerationServiceSlot<C, R>,
-    generation: RuntimeGeneration,
     runtime: Option<Arc<R>>,
     committed: bool,
 }
@@ -177,7 +154,6 @@ impl<C, R> SealingTxn<'_, C, R> {
                     .take()
                     .expect("a sealing transaction retains its runtime root");
                 *state = GenerationServiceState::TeardownFaulted {
-                    generation: self.generation,
                     error: error.clone(),
                     runtime: ManuallyDrop::new(runtime),
                 };
@@ -193,13 +169,8 @@ impl<C, R> SealingTxn<'_, C, R> {
             return;
         };
         let mut state = self.slot.state.lock();
-        if matches!(
-            &*state,
-            GenerationServiceState::Sealing { generation }
-                if *generation == self.generation
-        ) {
+        if matches!(&*state, GenerationServiceState::Sealing) {
             *state = GenerationServiceState::TeardownFaulted {
-                generation: self.generation,
                 error: crate::XllError::Panic,
                 runtime: ManuallyDrop::new(runtime),
             };
@@ -238,22 +209,20 @@ impl<C, R> GenerationServiceSlot<C, R> {
         }
     }
 
-    pub(crate) fn arm(&self, generation: RuntimeGeneration, config: C) -> crate::XllResult<()> {
+    pub(crate) fn arm(&self, config: C) -> crate::XllResult<()> {
         let mut state = self.state.lock();
         if !matches!(*state, GenerationServiceState::Closed) {
             return Err(crate::XllError::Closing);
         }
-        *state = GenerationServiceState::Cold { generation, config };
+        *state = GenerationServiceState::Cold { config };
         self.changed.notify_all();
         Ok(())
     }
 
-    pub(crate) fn disarm(&self, generation: RuntimeGeneration) -> crate::XllResult<()> {
+    pub(crate) fn disarm(&self) -> crate::XllResult<()> {
         let mut state = self.state.lock();
         match &*state {
-            GenerationServiceState::Cold {
-                generation: active, ..
-            } if *active == generation => {
+            GenerationServiceState::Cold { .. } => {
                 *state = GenerationServiceState::Closed;
                 self.changed.notify_all();
                 Ok(())
@@ -271,7 +240,7 @@ impl<C, R> GenerationServiceSlot<C, R> {
             )
     }
 
-    #[cfg(any(test, feature = "shutdown-refinement"))]
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn with_published(&self, callback: impl FnOnce(Option<&Arc<R>>)) {
         let published = self.published.load();
         callback(published.as_ref());
@@ -306,33 +275,30 @@ impl<C, R> GenerationServiceSlot<C, R> {
 
         loop {
             match &*state {
-                GenerationServiceState::Ready { .. } => {
+                GenerationServiceState::Ready => {
                     drop(state);
                     let guard = self.published.load();
                     debug_assert!(guard.is_some());
                     return Ok(GenerationServiceRead { guard });
                 }
-                GenerationServiceState::InitFaulted { error, .. }
+                GenerationServiceState::InitFaulted { error }
                 | GenerationServiceState::TeardownFaulted { error, .. } => {
                     return Err(error.clone());
                 }
-                GenerationServiceState::Initializing { generation }
-                | GenerationServiceState::Sealing { generation } => {
-                    let _ = generation;
+                GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
                     self.changed.wait(&mut state);
                 }
                 GenerationServiceState::Cold { .. } => {
-                    let GenerationServiceState::Cold { generation, config } =
+                    let GenerationServiceState::Cold { config } =
                         std::mem::replace(&mut *state, GenerationServiceState::Closed)
                     else {
                         unreachable!("the service state remains Cold while holding its lock");
                     };
-                    *state = GenerationServiceState::Initializing { generation };
+                    *state = GenerationServiceState::Initializing;
                     drop(state);
 
                     let transaction = InitializingTxn {
                         slot: self,
-                        generation,
                         committed: false,
                     };
 
@@ -361,7 +327,6 @@ impl<C, R> GenerationServiceSlot<C, R> {
 
     pub(crate) fn seal<S>(
         &self,
-        generation: Option<RuntimeGeneration>,
         missing_runtime_diagnostic: crate::error::DiagnosticId,
         empty: impl FnOnce() -> S,
         shutdown: impl FnOnce(Arc<R>) -> crate::XllResult<S>,
@@ -370,50 +335,31 @@ impl<C, R> GenerationServiceSlot<C, R> {
             let mut state = self.state.lock();
             while matches!(
                 *state,
-                GenerationServiceState::Initializing { .. }
-                    | GenerationServiceState::Sealing { .. }
+                GenerationServiceState::Initializing | GenerationServiceState::Sealing
             ) {
                 self.changed.wait(&mut state);
             }
 
             match &*state {
-                GenerationServiceState::Ready { generation: active } => {
-                    if generation != Some(*active) {
-                        return Err(crate::XllError::Closing);
-                    }
+                GenerationServiceState::Ready => {
                     let runtime = self.published.swap(None);
-                    *state = GenerationServiceState::Sealing {
-                        generation: *active,
-                    };
+                    *state = GenerationServiceState::Sealing;
                     runtime
                 }
-                GenerationServiceState::Cold {
-                    generation: active, ..
-                }
-                | GenerationServiceState::InitFaulted {
-                    generation: active, ..
-                } => {
-                    if generation != Some(*active) {
-                        return Err(crate::XllError::Closing);
-                    }
+                GenerationServiceState::Cold { .. }
+                | GenerationServiceState::InitFaulted { .. } => {
                     *state = GenerationServiceState::Closed;
                     self.changed.notify_all();
                     return Ok(empty());
                 }
                 GenerationServiceState::Closed => return Ok(empty()),
-                GenerationServiceState::TeardownFaulted {
-                    generation: active,
-                    error,
-                    runtime,
-                } => {
+                GenerationServiceState::TeardownFaulted { error, runtime } => {
                     let _ = runtime;
-                    if generation != Some(*active) {
-                        return Err(crate::XllError::Closing);
-                    }
                     return Err(error.clone());
                 }
-                GenerationServiceState::Initializing { .. }
-                | GenerationServiceState::Sealing { .. } => unreachable!(),
+                GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
+                    unreachable!()
+                }
             }
         };
 
@@ -423,7 +369,6 @@ impl<C, R> GenerationServiceSlot<C, R> {
             };
             let mut state = self.state.lock();
             *state = GenerationServiceState::InitFaulted {
-                generation: generation.expect("a sealing state has a generation"),
                 error: error.clone(),
             };
             self.changed.notify_all();
@@ -432,7 +377,6 @@ impl<C, R> GenerationServiceSlot<C, R> {
 
         SealingTxn {
             slot: self,
-            generation: generation.expect("a live service runtime has a generation"),
             runtime: Some(runtime),
             committed: false,
         }
@@ -443,7 +387,6 @@ impl<C, R> GenerationServiceSlot<C, R> {
 #[cfg(test)]
 mod tests {
     use super::{GenerationServiceSlot, GenerationServiceState};
-    use crate::generation::RuntimeGeneration;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
 
@@ -453,8 +396,7 @@ mod tests {
     #[test]
     fn initialization_moves_a_non_copy_config_once() {
         let slot = GenerationServiceSlot::<NonCopyConfig, Service>::new();
-        let generation = RuntimeGeneration::new(1).expect("test generation is non-zero");
-        slot.arm(generation, NonCopyConfig("moved once".to_owned()))
+        slot.arm(NonCopyConfig("moved once".to_owned()))
             .expect("service slot can be armed");
 
         let read = slot
@@ -472,8 +414,7 @@ mod tests {
     #[test]
     fn initialization_panic_is_retained_and_wakes_waiters() {
         let slot = GenerationServiceSlot::<(), Service>::new();
-        let generation = RuntimeGeneration::new(2).expect("test generation is non-zero");
-        slot.arm(generation, ()).expect("service slot can be armed");
+        slot.arm(()).expect("service slot can be armed");
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let _ = slot.read(
@@ -485,9 +426,8 @@ mod tests {
         assert!(matches!(
             &*slot.state.lock(),
             GenerationServiceState::InitFaulted {
-                generation: active,
                 error: crate::XllError::Panic,
-            } if *active == generation
+            }
         ));
         assert!(matches!(
             slot.read(|_| Ok(Arc::new(Service)), |_| {}),
@@ -498,15 +438,13 @@ mod tests {
     #[test]
     fn shutdown_panic_retains_runtime_as_teardown_fault() {
         let slot = GenerationServiceSlot::<(), Service>::new();
-        let generation = RuntimeGeneration::new(3).expect("test generation is non-zero");
-        slot.arm(generation, ()).expect("service slot can be armed");
+        slot.arm(()).expect("service slot can be armed");
         let _read = slot
             .read(|_| Ok(Arc::new(Service)), |_| {})
             .expect("service slot initializes");
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let _ = slot.seal(
-                Some(generation),
                 crate::error::DiagnosticId::HANDLE_SLOT,
                 || (),
                 |_| -> crate::XllResult<()> { panic!("injected shutdown panic") },
@@ -516,14 +454,12 @@ mod tests {
         assert!(matches!(
             &*slot.state.lock(),
             GenerationServiceState::TeardownFaulted {
-                generation: active,
                 error: crate::XllError::Panic,
                 ..
-            } if *active == generation
+            }
         ));
         assert!(matches!(
             slot.seal(
-                Some(generation),
                 crate::error::DiagnosticId::HANDLE_SLOT,
                 || (),
                 |_| { Ok(()) }
