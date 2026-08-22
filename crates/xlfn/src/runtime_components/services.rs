@@ -11,6 +11,22 @@ pub(crate) struct GenerationServices {
     pub(crate) subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot,
 }
 
+/// Owned witness that one generation's service slots were committed together.
+///
+/// The lifecycle core retains this value until the generation's shutdown
+/// certificate consumes it. The service slots still own their runtime
+/// payloads; this token owns the cross-slot arming decision and prevents that
+/// decision from disappearing when the open transaction returns.
+pub(crate) struct GenerationServicesLease {
+    generation: RuntimeGeneration,
+}
+
+impl GenerationServicesLease {
+    pub(crate) const fn generation(&self) -> RuntimeGeneration {
+        self.generation
+    }
+}
+
 /// Runtime-owned executors whose lifecycle is independent from generation
 /// service arming.
 #[cfg(feature = "async")]
@@ -32,8 +48,11 @@ pub(crate) struct ArmedServices<'a> {
 }
 
 impl ArmedServices<'_> {
-    pub(crate) fn commit(mut self) {
+    pub(crate) fn commit(mut self) -> GenerationServicesLease {
         self.committed = true;
+        GenerationServicesLease {
+            generation: self.generation,
+        }
     }
 
     pub(crate) fn rollback(mut self) {

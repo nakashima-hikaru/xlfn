@@ -10,9 +10,9 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
-    GenerationServices, HostLedger, LifecycleState, LifecycleStateKind, ModuleResidency,
-    QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess, ThreadAffineError,
-    ThreadAffineInstallError,
+    GenerationServices, HostLedger, LifecycleCore, LifecycleState, LifecycleStateKind,
+    ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess,
+    ThreadAffineError, ThreadAffineInstallError,
 };
 use crate::runtime_refinement::RuntimeRefinementHooks;
 
@@ -442,11 +442,15 @@ impl<A: crate::Addin> Runtime<A> {
                 "test runtime has one lifecycle state"
             );
         }
-        *self.lifecycle.opening.lock() = Some(OpeningGeneration::Ready {
-            shared_state: state,
-            layers,
-            config: crate::addin::RuntimeConfig::new(),
-        });
+        assert!(
+            self.lifecycle
+                .stage_opening_generation(OpeningGeneration::Ready {
+                    shared_state: state,
+                    layers,
+                    config: crate::addin::RuntimeConfig::new(),
+                })
+                .is_ok()
+        );
     }
 
     pub(crate) fn stage_opening_state(
@@ -507,15 +511,22 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.restore_opening_generation(opening)
     }
 
-    pub(crate) fn publish_opening_generation(&self, attempt_id: OpenAttemptId) -> XllResult<()> {
+    pub(crate) fn publish_opening_generation(
+        &self,
+        control: &mut LifecycleCore<A>,
+        attempt_id: OpenAttemptId,
+    ) -> XllResult<()> {
         let generation = attempt_id.into_runtime_generation();
-        let config = self.lifecycle.opening_config().ok_or(XllError::Internal {
+        let config = control.opening_config().ok_or(XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
         })?;
         let armed_services = self
             .generation_services
             .arm_generation(generation, config)?;
-        if let Err(failure) = self.lifecycle.publish_opening_generation(generation) {
+        if let Err(failure) = self
+            .lifecycle
+            .publish_opening_generation_locked(control, generation)
+        {
             armed_services.rollback();
             if let Some(opening) = failure.opening {
                 self.quarantine_opening_generation(
@@ -526,7 +537,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
             return Err(failure.error);
         }
-        armed_services.commit();
+        control.install_generation_services_lease(armed_services.commit());
         Ok(())
     }
 
@@ -544,13 +555,17 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn arm_test_generation(&self) {
-        self.generation_services
+        let lease = self
+            .generation_services
             .arm_generation(
                 crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
                 crate::addin::RuntimeConfig::new(),
             )
             .expect("test runtime generation can be armed once")
             .commit();
+        self.lifecycle
+            .lock()
+            .install_generation_services_lease(lease);
     }
 
     pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
@@ -602,7 +617,7 @@ impl<A: crate::Addin> Runtime<A> {
             let ingress = crate::ingress::global_ingress();
             ingress
                 .complete_open(|| {
-                    self.publish_opening_generation(attempt.attempt_id)?;
+                    self.publish_opening_generation(&mut control, attempt.attempt_id)?;
                     let generation = attempt.attempt_id.into_runtime_generation();
                     self.refinement.commit_open(self, attempt.attempt_id, || {
                         self.lifecycle
@@ -661,7 +676,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     fn reject_open_attempt(
         &self,
-        control: &mut crate::runtime_components::LifecycleControl,
+        control: &mut LifecycleCore<A>,
         attempt: &mut OpenAttemptGuard<'_, A>,
     ) {
         let state = match control.canonical_state().phase() {
@@ -721,7 +736,7 @@ impl<A: crate::Addin> Runtime<A> {
                 return Err(XllError::Closing);
             }
 
-            let generation = self.lifecycle.current.load();
+            let generation = self.lifecycle.load_current_generation();
             if generation.is_none() {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
@@ -1158,7 +1173,7 @@ impl<A: crate::Addin> Runtime<A> {
         &self,
         proof: QuiescenceProof,
     ) -> XllResult<TerminalCertificate<K>> {
-        let control = self.lifecycle.lock();
+        let mut control = self.lifecycle.lock();
         let services_stopped = self.generation_services.formula_handles.is_none()
             && self.generation_services.subscriptions.is_none();
         #[cfg(feature = "async")]
@@ -1168,6 +1183,9 @@ impl<A: crate::Addin> Runtime<A> {
         let handles_match_generation = control
             .known_generation
             .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
+        let services_lease_matches_generation = control
+            .generation_services_lease_generation()
+            .is_none_or(|generation| Some(generation) == control.known_generation);
 
         let certified = K::accepts_phase(control.canonical_state().phase())
             && control.canonical_state().open_attempt().is_none()
@@ -1175,14 +1193,20 @@ impl<A: crate::Addin> Runtime<A> {
             && self.returns_closed_and_quiescent()
             && async_stopped
             && services_stopped
-            && self.lifecycle.opening.lock().is_none()
-            && self.lifecycle.current.load_full().is_none()
+            && !control.has_opening_generation()
+            && !control.has_current_generation()
+            && services_lease_matches_generation
             && self.host.is_quiescent();
         let certified = certified && handles_match_generation;
 
         if !certified {
             return Err(K::error());
         }
+
+        // The lease is the canonical owner of the cross-slot generation
+        // arming decision. Once every service slot is stopped and all other
+        // quiescence proofs hold, consuming it linearizes generation teardown.
+        let _ = control.take_generation_services_lease();
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);

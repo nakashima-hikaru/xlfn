@@ -5,6 +5,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use super::services::GenerationServicesLease;
 use crate::generation::{OpenAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::runtime::{OpenGeneration, OpeningGeneration};
@@ -58,14 +59,19 @@ impl LifecycleStateKind {
     }
 }
 
-/// All mutable lifecycle decisions are made while this value is locked.
+/// Canonical owner of every mutable lifecycle decision and generation root.
 ///
 /// `known_generation` intentionally survives the transition to `Closed`: it
 /// identifies the last generation whose teardown was certified and is used by
 /// shutdown certificates and diagnostics. The currently active generation is
-/// still exposed separately through the `Open` state and the ArcSwap root.
-pub(crate) struct LifecycleControl {
+/// represented by `current` and the `Open` state. Both generation roots live
+/// in this same mutex-protected value; the ArcSwap in [`LifecycleState`] is
+/// only a read-side projection of `current`.
+pub(crate) struct LifecycleCore<A: crate::Addin> {
     state: LifecycleStateKind,
+    opening: Option<OpeningGeneration<A>>,
+    current: Option<Arc<OpenGeneration<A>>>,
+    generation_services: Option<GenerationServicesLease>,
     pub(crate) host_intent: HostLifecycleIntent,
     pub(crate) next_lifecycle_attempt: u64,
     pub(crate) known_generation: Option<RuntimeGeneration>,
@@ -73,10 +79,13 @@ pub(crate) struct LifecycleControl {
     pub(crate) removal_attempt_active: bool,
 }
 
-impl LifecycleControl {
+impl<A: crate::Addin> LifecycleCore<A> {
     const fn new() -> Self {
         Self {
             state: LifecycleStateKind::Closed,
+            opening: None,
+            current: None,
+            generation_services: None,
             host_intent: HostLifecycleIntent::None,
             next_lifecycle_attempt: 1,
             known_generation: None,
@@ -90,16 +99,47 @@ impl LifecycleControl {
     pub(crate) const fn canonical_state(&self) -> LifecycleStateKind {
         self.state
     }
+
+    pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
+        self.opening.as_ref().map(|opening| match opening {
+            OpeningGeneration::SharedStateOnly { config, .. }
+            | OpeningGeneration::Ready { config, .. } => *config,
+        })
+    }
+
+    pub(crate) const fn has_opening_generation(&self) -> bool {
+        self.opening.is_some()
+    }
+
+    pub(crate) const fn has_current_generation(&self) -> bool {
+        self.current.is_some()
+    }
+
+    pub(crate) fn generation_services_lease_generation(&self) -> Option<RuntimeGeneration> {
+        self.generation_services
+            .as_ref()
+            .map(GenerationServicesLease::generation)
+    }
+
+    pub(crate) fn install_generation_services_lease(&mut self, lease: GenerationServicesLease) {
+        debug_assert!(self.generation_services.is_none());
+        self.generation_services = Some(lease);
+    }
+
+    pub(crate) fn take_generation_services_lease(&mut self) -> Option<GenerationServicesLease> {
+        self.generation_services.take()
+    }
 }
 
-/// Lifecycle synchronization state: ownership remains in the opening slot
-/// and ArcSwap root, while all lifecycle writes are serialized by one control
-/// mutex. Only phase is projected for lock-free read-side admission.
+/// Lifecycle synchronization state.
+///
+/// `core` is the canonical ownership boundary. `phase` and `current` are
+/// read-side projections used by hot-path admission and generation access;
+/// lifecycle writers must mutate the corresponding fields in `core` first.
 pub(crate) struct LifecycleState<A: crate::Addin> {
     phase: AtomicU8,
-    pub(crate) opening: Mutex<Option<OpeningGeneration<A>>>,
-    pub(crate) current: ArcSwapOption<OpenGeneration<A>>,
-    control: Mutex<LifecycleControl>,
+    current: ArcSwapOption<OpenGeneration<A>>,
+    core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
@@ -114,21 +154,20 @@ impl<A: crate::Addin> LifecycleState<A> {
     pub(crate) const fn new() -> Self {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
-            opening: Mutex::new(None),
             current: ArcSwapOption::const_empty(),
-            control: Mutex::new(LifecycleControl::new()),
+            core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, LifecycleControl> {
-        self.control.lock()
+    pub(crate) fn lock(&self) -> MutexGuard<'_, LifecycleCore<A>> {
+        self.core.lock()
     }
 
-    pub(crate) fn wait<'a>(&self, control: &mut MutexGuard<'a, LifecycleControl>) {
-        self.changed.wait(control);
+    pub(crate) fn wait<'a>(&self, core: &mut MutexGuard<'a, LifecycleCore<A>>) {
+        self.changed.wait(core);
     }
 
     pub(crate) fn notify_all(&self) {
@@ -137,7 +176,7 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     /// Returns the read-side phase projection.
     ///
-    /// Lifecycle writers must inspect [`LifecycleControl::state`] instead;
+    /// Lifecycle writers must inspect [`LifecycleCore::state`] instead;
     /// this method is intentionally named to make that distinction visible.
     pub(crate) fn observed_phase(&self) -> LifecyclePhase {
         LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
@@ -150,58 +189,58 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     pub(crate) fn set_host_intent_locked(
         &self,
-        control: &mut LifecycleControl,
+        core: &mut LifecycleCore<A>,
         intent: HostLifecycleIntent,
     ) {
-        control.host_intent = intent;
-        self.refresh_projection(control);
+        core.host_intent = intent;
+        self.refresh_projection(core);
     }
 
-    pub(crate) fn set_state(&self, control: &mut LifecycleControl, state: LifecycleStateKind) {
-        control.state = state;
-        self.refresh_projection(control);
+    pub(crate) fn set_state(&self, core: &mut LifecycleCore<A>, state: LifecycleStateKind) {
+        core.state = state;
+        self.refresh_projection(core);
     }
 
     pub(crate) fn set_known_generation(
         &self,
-        control: &mut LifecycleControl,
+        core: &mut LifecycleCore<A>,
         generation: Option<RuntimeGeneration>,
     ) {
-        control.known_generation = generation;
-        self.refresh_projection(control);
+        core.known_generation = generation;
+        self.refresh_projection(core);
     }
 
-    pub(crate) fn set_removal_attempt_active(&self, control: &mut LifecycleControl, active: bool) {
-        control.removal_attempt_active = active;
-        self.refresh_projection(control);
+    pub(crate) fn set_removal_attempt_active(&self, core: &mut LifecycleCore<A>, active: bool) {
+        core.removal_attempt_active = active;
+        self.refresh_projection(core);
     }
 
-    pub(crate) fn advance_removal_epoch(&self, control: &mut LifecycleControl) {
-        control.removal_epoch = control.removal_epoch.checked_add(1).unwrap_or_else(|| {
+    pub(crate) fn advance_removal_epoch(&self, core: &mut LifecycleCore<A>) {
+        core.removal_epoch = core.removal_epoch.checked_add(1).unwrap_or_else(|| {
             tracing::error!("lifecycle close epoch exhausted; fail-stopping");
             std::process::abort();
         });
-        self.refresh_projection(control);
+        self.refresh_projection(core);
     }
 
     pub(crate) fn next_lifecycle_attempt_id(
         &self,
-        control: &mut LifecycleControl,
+        core: &mut LifecycleCore<A>,
     ) -> crate::XllResult<OpenAttemptId> {
-        let attempt_id = control.next_lifecycle_attempt;
+        let attempt_id = core.next_lifecycle_attempt;
         let next = attempt_id.checked_add(1).ok_or(crate::XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::ATTEMPT_OVERFLOW,
         })?;
         let attempt = OpenAttemptId::new(attempt_id).ok_or(crate::XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::ATTEMPT_ZERO,
         })?;
-        control.next_lifecycle_attempt = next;
+        core.next_lifecycle_attempt = next;
         Ok(attempt)
     }
 
-    fn refresh_projection(&self, control: &LifecycleControl) {
+    fn refresh_projection(&self, core: &LifecycleCore<A>) {
         self.phase
-            .store(control.state.phase() as u8, Ordering::Release);
+            .store(core.state.phase() as u8, Ordering::Release);
     }
 
     pub(crate) fn stage_opening_state(
@@ -209,8 +248,8 @@ impl<A: crate::Addin> LifecycleState<A> {
         state: A::SharedState,
         config: crate::addin::RuntimeConfig,
     ) -> Result<(), (crate::XllError, A::SharedState)> {
-        let mut slot = self.opening.lock();
-        if slot.is_some() || self.current.load().is_some() {
+        let mut core = self.lock();
+        if core.has_opening_generation() || core.has_current_generation() {
             return Err((
                 crate::XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
@@ -218,19 +257,20 @@ impl<A: crate::Addin> LifecycleState<A> {
                 state,
             ));
         }
-        *slot = Some(OpeningGeneration::SharedStateOnly {
+        core.opening = Some(OpeningGeneration::SharedStateOnly {
             shared_state: state,
             config,
         });
         Ok(())
     }
 
-    pub(crate) fn restore_opening_generation(
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn stage_opening_generation(
         &self,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
-        let mut slot = self.opening.lock();
-        if slot.is_some() {
+        let mut core = self.lock();
+        if core.has_opening_generation() || core.has_current_generation() {
             return Err((
                 crate::XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
@@ -238,15 +278,41 @@ impl<A: crate::Addin> LifecycleState<A> {
                 opening,
             ));
         }
-        *slot = Some(opening);
+        core.opening = Some(opening);
         Ok(())
     }
 
-    pub(crate) fn publish_opening_generation(
+    pub(crate) fn restore_opening_generation(
         &self,
+        opening: OpeningGeneration<A>,
+    ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
+        let mut core = self.lock();
+        if core.has_opening_generation() || core.has_current_generation() {
+            return Err((
+                crate::XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                },
+                opening,
+            ));
+        }
+        core.opening = Some(opening);
+        Ok(())
+    }
+
+    pub(crate) fn publish_opening_generation_locked(
+        &self,
+        core: &mut LifecycleCore<A>,
         generation: RuntimeGeneration,
     ) -> Result<(), PublishOpeningError<A>> {
-        let opening = self.opening.lock().take().ok_or(PublishOpeningError {
+        if core.has_current_generation() {
+            return Err(PublishOpeningError {
+                error: crate::XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                },
+                opening: core.opening.take(),
+            });
+        }
+        let opening = core.opening.take().ok_or(PublishOpeningError {
             error: crate::XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
             },
@@ -267,45 +333,57 @@ impl<A: crate::Addin> LifecycleState<A> {
                 });
             }
         };
-        self.current.store(Some(Arc::new(OpenGeneration {
+        let published = Arc::new(OpenGeneration {
             id: generation,
             shared_state,
             layers,
-        })));
+        });
+        core.current = Some(Arc::clone(&published));
+        self.current.store(Some(published));
         Ok(())
     }
 
-    pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
-        self.opening.lock().as_ref().map(|opening| match opening {
-            OpeningGeneration::SharedStateOnly { config, .. }
-            | OpeningGeneration::Ready { config, .. } => *config,
-        })
-    }
-
+    #[cfg(test)]
     pub(crate) fn has_opening_generation(&self) -> bool {
-        self.opening.lock().is_some()
+        self.lock().has_opening_generation()
     }
 
+    #[cfg(test)]
     pub(crate) fn has_current_generation(&self) -> bool {
-        self.current.load().is_some()
+        self.lock().has_current_generation()
+    }
+
+    pub(crate) fn load_current_generation(
+        &self,
+    ) -> arc_swap::Guard<Option<Arc<OpenGeneration<A>>>> {
+        self.current.load()
     }
 
     pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
-        self.opening.lock().take()
+        self.lock().opening.take()
     }
 
+    #[cfg(test)]
     pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<A>>> {
-        self.current.swap(None)
+        let mut core = self.lock();
+        let current = core.current.take();
+        if current.is_some() {
+            self.current.store(None);
+        }
+        current
     }
 
     pub(crate) fn take_generation_for_shutdown(
         &self,
     ) -> Option<crate::runtime::ShutdownGeneration<A>> {
-        debug_assert!(!(self.has_opening_generation() && self.has_current_generation()));
-        if let Some(generation) = self.take_current_generation() {
+        let mut core = self.lock();
+        debug_assert!(!(core.has_opening_generation() && core.has_current_generation()));
+        if let Some(generation) = core.current.take() {
+            self.current.store(None);
             return Some(crate::runtime::ShutdownGeneration::Open(generation));
         }
-        self.take_opening_generation()
+        core.opening
+            .take()
             .map(crate::runtime::ShutdownGeneration::Opening)
     }
 }

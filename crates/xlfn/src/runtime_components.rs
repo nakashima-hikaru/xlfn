@@ -17,7 +17,7 @@ mod thread_affine;
 #[cfg(any(test, feature = "shutdown-refinement"))]
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
-pub(crate) use lifecycle_state::{LifecycleControl, LifecycleState, LifecycleStateKind};
+pub(crate) use lifecycle_state::{LifecycleCore, LifecycleState, LifecycleStateKind};
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
