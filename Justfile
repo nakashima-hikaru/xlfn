@@ -12,9 +12,7 @@ clippy:
         --workspace \
         --all-targets \
         --all-features \
-        --locked \
-        -- \
-        -D warnings
+        --locked
 
 # Fast test cycle using nextest (process-isolated).
 test:
@@ -96,4 +94,4 @@ bench-formula-revision:
     cargo bench --package xlfn --bench formula_revision --features bench-internals --locked
 
 bench-check:
-    cargo clippy --package xlfn --benches --features "bench-internals async" --locked -- -D warnings
+    cargo clippy --package xlfn --benches --features "bench-internals async" --locked

@@ -74,6 +74,7 @@ windows-link = "=0.2.1"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+linker_messages = "deny"
 
 [workspace.lints.clippy]
 allow_attributes_without_reason = "deny"

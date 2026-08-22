@@ -21,6 +21,7 @@ cc = "1.2.57"
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+linker_messages = "deny"
 
 [lints.clippy]
 allow_attributes_without_reason = "deny"
