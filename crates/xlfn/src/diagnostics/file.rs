@@ -115,8 +115,13 @@ impl RotatingLog {
         generations: usize,
     ) -> io::Result<Self> {
         let _lock = LogLock::acquire(&path)?;
-        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= maximum_bytes) {
-            rotate_log_files(&path, generations)?;
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.len() >= maximum_bytes => {
+                rotate_log_files(&path, generations)?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         let file = fs::OpenOptions::new()
             .create(true)
@@ -164,7 +169,7 @@ impl RotatingLog {
 
 fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
     if generations == 0 {
-        if path.exists() {
+        if fs::exists(path)? {
             fs::remove_file(path)?;
         }
         return Ok(());
@@ -175,16 +180,16 @@ fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
         path.with_file_name(name)
     };
     let oldest = rotated(generations);
-    if oldest.exists() {
+    if fs::exists(&oldest)? {
         fs::remove_file(&oldest)?;
     }
     for generation in (1..generations).rev() {
         let source = rotated(generation);
-        if source.exists() {
+        if fs::exists(&source)? {
             fs::rename(source, rotated(generation + 1))?;
         }
     }
-    if path.exists() {
+    if fs::exists(path)? {
         fs::rename(path, rotated(1))?;
     }
     Ok(())

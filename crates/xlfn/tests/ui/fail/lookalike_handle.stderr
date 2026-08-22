@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `Handle: IntoExcel` is not satisfied
+error[E0277]: `Handle` cannot be converted into an Excel return value
  --> tests/ui/fail/lookalike_handle.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.LOOKALIKE")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Handle` does not implement `IntoExcel`
   |
 help: the trait `IntoExcel` is not implemented for `Handle`
  --> tests/ui/fail/lookalike_handle.rs:3:1
   |
 3 | struct Handle;
   | ^^^^^^^^^^^^^
+  = note: implement `IntoExcel` for `Handle` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput
@@ -22,17 +23,18 @@ help: the trait `IntoExcel` is not implemented for `Handle`
   = note: required for `Handle` to implement `xlfn::value::ExcelReturn`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: the trait bound `Handle: xlfn::value::MainThreadReturn` is not satisfied
+error[E0277]: `Handle` cannot be returned from a main-thread Excel worksheet function
  --> tests/ui/fail/lookalike_handle.rs:8:13
   |
 8 | fn bad() -> Handle {
-  |             ^^^^^^ unsatisfied trait bound
+  |             ^^^^^^ `Handle` is not a valid return type for a main-thread UDF
   |
 help: the trait `IntoExcel` is not implemented for `Handle`
  --> tests/ui/fail/lookalike_handle.rs:3:1
   |
 3 | struct Handle;
   | ^^^^^^^^^^^^^
+  = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `Handle`
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput

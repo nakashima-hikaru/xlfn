@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `Dataset: xlfn::value::AsyncReturn` is not satisfied
+error[E0277]: `Dataset` cannot be returned from an asynchronous Excel function
   --> tests/ui/fail_async/handle_return_async.rs:10:19
    |
 10 | async fn bad() -> Dataset {
-   |                   ^^^^^^^ unsatisfied trait bound
+   |                   ^^^^^^^ `Dataset` is not a valid return type for an async UDF
    |
 help: the trait `IntoExcel` is not implemented for `Dataset`
   --> tests/ui/fail_async/handle_return_async.rs:4:1
    |
  4 | struct Dataset;
    | ^^^^^^^^^^^^^^
+   = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `Dataset`
    = help: the following other types implement trait `IntoExcel`:
              &str
              ExcelCellOutput

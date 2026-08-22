@@ -141,6 +141,11 @@ impl Iterator for ReferenceAreas<'_> {
     }
 }
 
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be constructed from an Excel cell reference",
+    label = "`{Self}` does not implement `FromExcelReference`",
+    note = "implement `FromExcelReference` for `{Self}` to accept reference arguments"
+)]
 pub trait FromExcelReference<'call>: Sized {
     fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 }

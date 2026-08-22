@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `Dataset: xlfn::value::MacroSheetReturn` is not satisfied
+error[E0277]: `Dataset` cannot be returned from a macro-sheet Excel function
   --> tests/ui/fail/handle_return_macro_sheet.rs:10:13
    |
 10 | fn bad() -> Dataset {
-   |             ^^^^^^^ unsatisfied trait bound
+   |             ^^^^^^^ `Dataset` is not a valid return type for a macro-sheet function
    |
 help: the trait `IntoExcel` is not implemented for `Dataset`
   --> tests/ui/fail/handle_return_macro_sheet.rs:4:1
    |
  4 | struct Dataset;
    | ^^^^^^^^^^^^^^
+   = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `Dataset`
    = help: the following other types implement trait `IntoExcel`:
              &str
              ExcelCellOutput

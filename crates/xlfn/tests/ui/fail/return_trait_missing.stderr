@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `NotAReturn: IntoExcel` is not satisfied
+error[E0277]: `NotAReturn` cannot be converted into an Excel return value
  --> tests/ui/fail/return_trait_missing.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.RETURN")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `NotAReturn` does not implement `IntoExcel`
   |
 help: the trait `IntoExcel` is not implemented for `NotAReturn`
  --> tests/ui/fail/return_trait_missing.rs:3:1
   |
 3 | struct NotAReturn;
   | ^^^^^^^^^^^^^^^^^
+  = note: implement `IntoExcel` for `NotAReturn` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput
@@ -22,17 +23,18 @@ help: the trait `IntoExcel` is not implemented for `NotAReturn`
   = note: required for `NotAReturn` to implement `xlfn::value::ExcelReturn`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: the trait bound `NotAReturn: xlfn::value::MainThreadReturn` is not satisfied
+error[E0277]: `NotAReturn` cannot be returned from a main-thread Excel worksheet function
  --> tests/ui/fail/return_trait_missing.rs:8:13
   |
 8 | fn bad() -> NotAReturn {
-  |             ^^^^^^^^^^ unsatisfied trait bound
+  |             ^^^^^^^^^^ `NotAReturn` is not a valid return type for a main-thread UDF
   |
 help: the trait `IntoExcel` is not implemented for `NotAReturn`
  --> tests/ui/fail/return_trait_missing.rs:3:1
   |
 3 | struct NotAReturn;
   | ^^^^^^^^^^^^^^^^^
+  = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `NotAReturn`
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput

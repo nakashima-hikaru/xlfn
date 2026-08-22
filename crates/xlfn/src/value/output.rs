@@ -9,6 +9,11 @@ use super::input::{InputMode, PlainInputMode};
 use super::{ExcelCellOutput, ExcelOutput};
 
 /// Converts an ordinary Rust value into a semantic Excel cell.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be converted into an Excel return value",
+    label = "`{Self}` does not implement `IntoExcel`",
+    note = "implement `IntoExcel` for `{Self}` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)"
+)]
 pub trait IntoExcel {
     fn into_excel(self) -> XllResult<ExcelCellOutput>;
 
@@ -43,22 +48,47 @@ pub trait ExcelReturn: Sized {
 
 /// Return values supported by ordinary main-thread worksheet functions.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned from a main-thread Excel worksheet function",
+    label = "`{Self}` is not a valid return type for a main-thread UDF",
+    note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
+)]
 pub trait MainThreadReturn: ExcelReturn {}
 
 /// Return values supported by Excel multi-threaded recalculation.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned from a thread-safe Excel worksheet function",
+    label = "`{Self}` is not a valid return type for a thread-safe UDF",
+    note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
+)]
 pub trait ThreadSafeReturn: ExcelReturn {}
 
 /// Return values supported by macro-sheet functions.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned from a macro-sheet Excel function",
+    label = "`{Self}` is not a valid return type for a macro-sheet function",
+    note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
+)]
 pub trait MacroSheetReturn: ExcelReturn {}
 
 /// Return values supported by native asynchronous functions.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned from an asynchronous Excel function",
+    label = "`{Self}` is not a valid return type for an async UDF",
+    note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
+)]
 pub trait AsyncReturn: ExcelReturn {}
 
 /// Return values supported by volatile functions.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be returned from a volatile Excel worksheet function",
+    label = "`{Self}` is not a valid return type for a volatile UDF",
+    note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
+)]
 pub trait VolatileReturn: ExcelReturn {}
 
 impl<T: IntoExcel> ExcelReturn for T {

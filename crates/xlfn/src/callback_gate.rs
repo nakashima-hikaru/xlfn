@@ -1,6 +1,7 @@
 use crate::return_value::ExcelCallbackStatus;
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::cell::{Cell, RefCell};
+#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,8 +9,9 @@ use xlfn_sys::XLRET_FAILED;
 
 #[cfg(test)]
 static GATE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-static GATES: parking_lot::Mutex<Option<HashMap<u64, &'static CallbackGate>>> =
-    parking_lot::Mutex::new(None);
+#[cfg(test)]
+static GATES: std::sync::LazyLock<parking_lot::Mutex<HashMap<u64, &'static CallbackGate>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CallbackGateLifecycle {
@@ -83,7 +85,7 @@ impl CallbackGate {
             id,
             state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
         }));
-        GATES.lock().get_or_insert_default().insert(id, gate);
+        GATES.lock().insert(id, gate);
         gate
     }
 
@@ -212,16 +214,17 @@ fn finish_invocation(invocation: &CallbackInvocationToken) {
         return;
     };
     let gate_id = invocation.gate_id.take().unwrap_or(0);
-    if gate_id == 0 {
-        decrement_scope(&MODULE_CALLBACK_GATE.state, status);
-    } else {
+    #[cfg(test)]
+    if gate_id != 0 {
         let map = GATES.lock();
-        if let Some(map) = map.as_ref()
-            && let Some(gate) = map.get(&gate_id)
-        {
+        if let Some(gate) = map.get(&gate_id) {
             decrement_scope(&gate.state, status);
         }
+        return;
     }
+    #[cfg(not(test))]
+    let _ = gate_id;
+    decrement_scope(&MODULE_CALLBACK_GATE.state, status);
 }
 
 fn decrement_scope(

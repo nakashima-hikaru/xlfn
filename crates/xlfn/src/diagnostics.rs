@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 /// Public diagnostic events, sink configuration, and observable statistics.
@@ -404,7 +404,13 @@ impl DiagnosticRouter {
     }
 }
 
-static ROUTER: OnceLock<DiagnosticRouter> = OnceLock::new();
+static ROUTER: LazyLock<DiagnosticRouter> = LazyLock::new(|| DiagnosticRouter {
+    sink: ArcSwapOption::const_empty(),
+    transition: Mutex::new(DiagnosticPhase::Closed),
+    retiring_workers: Mutex::new(Vec::new()),
+    #[cfg(any(test, feature = "shutdown-refinement"))]
+    ghost: Mutex::new(None),
+});
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 use event::{DROPPED_EVENTS, FAILED_WRITES};
@@ -413,13 +419,7 @@ use event::{DROPPED_EVENTS, FAILED_WRITES};
 pub(crate) static DIAGNOSTIC_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn router() -> &'static DiagnosticRouter {
-    ROUTER.get_or_init(|| DiagnosticRouter {
-        sink: ArcSwapOption::const_empty(),
-        transition: Mutex::new(DiagnosticPhase::Closed),
-        retiring_workers: Mutex::new(Vec::new()),
-        #[cfg(any(test, feature = "shutdown-refinement"))]
-        ghost: Mutex::new(None),
-    })
+    &ROUTER
 }
 
 fn admit_published_sink(

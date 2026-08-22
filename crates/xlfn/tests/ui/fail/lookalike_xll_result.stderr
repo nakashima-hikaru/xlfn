@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `XllResult: IntoExcel` is not satisfied
+error[E0277]: `XllResult` cannot be converted into an Excel return value
  --> tests/ui/fail/lookalike_xll_result.rs:7:1
   |
 7 | #[excel_function(name = "FAIL.LOOKALIKE")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `XllResult` does not implement `IntoExcel`
   |
 help: the trait `IntoExcel` is not implemented for `XllResult`
  --> tests/ui/fail/lookalike_xll_result.rs:3:1
   |
 3 | struct XllResult;
   | ^^^^^^^^^^^^^^^^
+  = note: implement `IntoExcel` for `XllResult` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput
@@ -22,17 +23,18 @@ help: the trait `IntoExcel` is not implemented for `XllResult`
   = note: required for `XllResult` to implement `xlfn::value::ExcelReturn`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: the trait bound `XllResult: xlfn::value::MainThreadReturn` is not satisfied
+error[E0277]: `XllResult` cannot be returned from a main-thread Excel worksheet function
  --> tests/ui/fail/lookalike_xll_result.rs:8:13
   |
 8 | fn bad() -> XllResult {
-  |             ^^^^^^^^^ unsatisfied trait bound
+  |             ^^^^^^^^^ `XllResult` is not a valid return type for a main-thread UDF
   |
 help: the trait `IntoExcel` is not implemented for `XllResult`
  --> tests/ui/fail/lookalike_xll_result.rs:3:1
   |
 3 | struct XllResult;
   | ^^^^^^^^^^^^^^^^
+  = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `XllResult`
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput

@@ -239,9 +239,7 @@ impl<'call> XlValueRef<'call> {
         if elements != 0 && array.values.is_null() {
             return Err(XllError::input(argument, InputError::NullPointer));
         }
-        if elements != 0
-            && !(array.values as usize).is_multiple_of(std::mem::align_of::<XLOPER12>())
-        {
+        if elements != 0 && !array.values.is_aligned() {
             return Err(XllError::input(
                 argument,
                 InputError::Malformed("misaligned array pointer"),

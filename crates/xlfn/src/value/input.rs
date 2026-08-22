@@ -131,11 +131,21 @@ impl InputMode for FormulaInputMode {
 }
 
 /// Converts a call-scoped Excel value into owned Rust data.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be converted from an Excel argument",
+    label = "`{Self}` does not implement `FromExcel`",
+    note = "implement `FromExcel` for this argument type or use a supported argument type"
+)]
 pub trait FromExcel<'call>: Sized {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 }
 
 /// Encodes the semantic value observed by a formula-revision UDF.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be hashed as a formula-revision input identity",
+    label = "`{Self}` does not implement `ExcelInputIdentity`",
+    note = "implement `ExcelInputIdentity` for `{Self}` to support formula revision tracking"
+)]
 pub trait ExcelInputIdentity {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder);
 }
