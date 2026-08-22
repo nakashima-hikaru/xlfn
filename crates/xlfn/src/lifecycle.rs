@@ -155,7 +155,7 @@ where
 fn rollback_active_open<A>(
     runtime: &Runtime<A>,
     lifecycle: &LifecycleThreadAccess<'_, A>,
-    attempt: Option<&mut crate::runtime::OpenAttemptGuard<'_, A>>,
+    attempt: Option<&mut crate::runtime::OpeningTxn<'_, A>>,
     callbacks: &mut HostCallbackSession,
 ) where
     A: Addin,
@@ -757,7 +757,7 @@ enum RemovalSuccess<'runtime, A: Addin> {
     Quarantined,
     Closed {
         witness: crate::runtime::ClosedWitness,
-        removal_attempt: crate::runtime::RemovalAttemptGuard<'runtime, A>,
+        removal_attempt: crate::runtime::RemovalOwner<'runtime, A>,
     },
 }
 
@@ -775,7 +775,7 @@ enum RemovalControl {
 struct RemovalTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
-    attempt: Option<crate::runtime::RemovalAttemptGuard<'runtime, A>>,
+    attempt: Option<crate::runtime::RemovalOwner<'runtime, A>>,
 }
 
 impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
@@ -795,7 +795,7 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    fn into_attempt(mut self) -> crate::runtime::RemovalAttemptGuard<'runtime, A> {
+    fn into_attempt(mut self) -> crate::runtime::RemovalOwner<'runtime, A> {
         self.attempt
             .take()
             .expect("a removal transaction always owns its attempt")

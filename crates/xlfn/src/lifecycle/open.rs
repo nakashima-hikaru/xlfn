@@ -5,7 +5,7 @@ use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::{LifecycleThreadAccess, OpenAttemptGuard, Runtime};
+use crate::runtime::{LifecycleThreadAccess, OpeningTxn, Runtime};
 use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, its host registrations, and the callback
@@ -17,7 +17,7 @@ use crate::{XllError, XllResult};
 pub(super) struct OpeningTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
-    attempt: Option<OpenAttemptGuard<'runtime, A>>,
+    attempt: Option<OpeningTxn<'runtime, A>>,
     registrations: Vec<crate::registration::RegistrationId>,
 }
 
@@ -74,11 +74,7 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
 
 impl<A: Addin> Drop for OpeningTransaction<'_, A> {
     fn drop(&mut self) {
-        if self
-            .attempt
-            .as_ref()
-            .is_some_and(OpenAttemptGuard::is_active)
-        {
+        if self.attempt.as_ref().is_some_and(OpeningTxn::is_active) {
             // A dropped transaction must not call Excel. It is an unrecovered
             // protocol failure, so retain the fail-safe terminal state for a
             // later explicit removal/reload decision.
