@@ -324,11 +324,25 @@ unsafe fn collect_dispatch_arguments(
         return Err(E_POINTER);
     }
 
+    let raw_variants: &mut [VARIANT] = if expected != 0 {
+        // SAFETY: `parameters.rgvarg` is non-null and points to `argument_count`
+        // VARIANT values kept live by COM for the duration of Invoke.
+        unsafe { std::slice::from_raw_parts_mut(parameters.rgvarg, argument_count) }
+    } else {
+        &mut []
+    };
+
+    let named_dispid_slice: &[i32] = if named_count != 0 {
+        // SAFETY: `parameters.rgdispidNamedArgs` is non-null and points to
+        // `named_count` DISPIDs (i32) kept live by COM for the duration of Invoke.
+        unsafe { std::slice::from_raw_parts(parameters.rgdispidNamedArgs, named_count) }
+    } else {
+        &[]
+    };
+
     let mut arguments: [*mut VARIANT; 3] = [ptr::null_mut(); 3];
 
-    for named_index in 0..named_count {
-        // SAFETY: both arrays contain at least `named_count` elements.
-        let parameter_id = unsafe { *parameters.rgdispidNamedArgs.add(named_index) };
+    for (named_index, &parameter_id) in named_dispid_slice.iter().enumerate() {
         let Ok(parameter_index) = usize::try_from(parameter_id) else {
             if !argument_error.is_null() {
                 // SAFETY: `argument_error` is an optional writable output.
@@ -345,17 +359,13 @@ unsafe fn collect_dispatch_arguments(
             return Err(DISP_E_PARAMNOTFOUND);
         }
 
-        // SAFETY: rgvarg contains `argument_count` elements and named
-        // arguments occupy its first `named_count` entries.
-        arguments[parameter_index] = unsafe { parameters.rgvarg.add(named_index) };
+        arguments[parameter_index] = &mut raw_variants[named_index] as *mut VARIANT;
     }
 
     let mut value_index = named_count;
     for parameter_index in (0..expected).rev() {
         if arguments[parameter_index].is_null() {
-            // SAFETY: exact argument-count validation and the named-argument
-            // checks ensure each remaining positional element is consumed once.
-            arguments[parameter_index] = unsafe { parameters.rgvarg.add(value_index) };
+            arguments[parameter_index] = &mut raw_variants[value_index] as *mut VARIANT;
             value_index += 1;
         }
     }
@@ -368,16 +378,21 @@ unsafe fn set_dispatch_argument_error(
     argument: *mut VARIANT,
     argument_error: *mut u32,
 ) {
-    if argument_error.is_null() {
+    if argument_error.is_null() || argument.is_null() {
         return;
     }
-
-    // SAFETY: `argument` was selected from `parameters.rgvarg`, so both
-    // pointers belong to the same allocation and offset_from is defined.
-    let index = unsafe { argument.offset_from(parameters.rgvarg) };
-    // SAFETY: the optional output is writable. A valid DISPPARAMS index is
-    // non-negative and fits in u32 because cArgs itself is u32.
-    unsafe { *argument_error = index as u32 };
+    let count = parameters.cArgs as usize;
+    if count == 0 || parameters.rgvarg.is_null() {
+        return;
+    }
+    // SAFETY: `parameters.rgvarg` points to `count` elements of VARIANT.
+    let variants = unsafe { std::slice::from_raw_parts(parameters.rgvarg, count) };
+    // SAFETY: `argument` is a non-null pointer provided by the caller.
+    let target = unsafe { &*argument };
+    if let Some(index) = variants.element_offset(target) {
+        // SAFETY: `argument_error` was checked as non-null and is writable.
+        unsafe { *argument_error = index as u32 };
+    }
 }
 
 unsafe fn dispatch_i4_value(argument: *mut VARIANT) -> Option<i32> {

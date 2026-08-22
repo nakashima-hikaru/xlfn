@@ -211,8 +211,8 @@ fn wrapper_arguments(
 }
 
 fn is_cdylib_link(args: &[OsString]) -> bool {
-    args.windows(2)
-        .any(|pair| pair[0] == "--crate-type" && pair[1] == "cdylib")
+    args.array_windows::<2>()
+        .any(|[flag, value]| flag == "--crate-type" && value == "cdylib")
         || args.iter().any(|argument| {
             argument
                 .to_str()
@@ -222,8 +222,8 @@ fn is_cdylib_link(args: &[OsString]) -> bool {
 }
 
 fn rustc_invocation_targets(args: &[OsString], selected_target: &OsStr) -> bool {
-    args.windows(2)
-        .any(|pair| pair[0] == "--target" && pair[1] == selected_target)
+    args.array_windows::<2>()
+        .any(|[flag, value]| flag == "--target" && value == selected_target)
         || args.iter().any(|argument| {
             argument
                 .to_str()

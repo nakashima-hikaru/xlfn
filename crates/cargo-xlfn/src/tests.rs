@@ -873,8 +873,8 @@ fn metadata_uses_the_same_feature_and_resolution_constraints_as_build() {
         .collect::<Vec<_>>();
     assert!(
         arguments
-            .windows(2)
-            .any(|pair| { pair[0] == "--features" && pair[1] == "feat1,feat2" })
+            .array_windows::<2>()
+            .any(|[flag, value]| flag == "--features" && value == "feat1,feat2")
     );
     assert!(
         arguments
