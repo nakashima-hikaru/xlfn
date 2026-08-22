@@ -31,7 +31,7 @@ impl<'a> ActiveReservation<'a> {
     pub(crate) fn try_acquire(shared: &'a ExecutorShared) -> Option<Self> {
         shared
             .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAX_PENDING).then_some(active + 1)
             })
             .ok()?;

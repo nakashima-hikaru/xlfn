@@ -387,7 +387,7 @@ impl SubscriptionRuntime {
         let operation = server_handle.inner.enter_owned_operation()?;
         let conn_gen = ConnectionGeneration::new(
             self.next_connection_generation
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_add(1)
                 })
                 .map_err(|_| XllError::Internal {

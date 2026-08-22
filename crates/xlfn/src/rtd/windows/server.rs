@@ -56,10 +56,10 @@ pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
 pub(super) static LAST_SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn allocate_server_generation(last_generation: &AtomicU64) -> Option<ServerGeneration> {
-    // `fetch_update` returns the previous value; expose the checked successor
+    // `try_update` returns the previous value; expose the checked successor
     // as the allocated generation and leave the counter unchanged at MAX.
     last_generation
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
             last.checked_add(1)
         })
         .ok()

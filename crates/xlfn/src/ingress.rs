@@ -52,29 +52,22 @@ impl IngressStripe {
     }
 
     fn try_enter(&self) -> bool {
-        let mut observed = self.active.load(Ordering::Acquire);
-        loop {
-            if observed & STRIPE_SEALED != 0 {
-                return false;
-            }
-            if observed & STRIPE_COUNT_MASK == STRIPE_COUNT_MASK {
-                std::process::abort();
-            }
-            match self.active.compare_exchange_weak(
-                observed,
-                observed + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(current) => observed = current,
-            }
-        }
+        self.active
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |state| {
+                if state & STRIPE_SEALED != 0 {
+                    return None;
+                }
+                if state & STRIPE_COUNT_MASK == STRIPE_COUNT_MASK {
+                    std::process::abort();
+                }
+                Some(state + 1)
+            })
+            .is_ok()
     }
 
     fn enter_udf(&self) {
         self.udf_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());
@@ -82,7 +75,7 @@ impl IngressStripe {
 
     fn leave_udf(&self) {
         self.udf_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_sub(1)
             })
             .unwrap_or_else(|_| std::process::abort());
@@ -90,7 +83,7 @@ impl IngressStripe {
 
     fn leave(&self) {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 let active = state & STRIPE_COUNT_MASK;
                 active
                     .checked_sub(1)
@@ -100,21 +93,15 @@ impl IngressStripe {
     }
 
     fn seal(&self) {
-        let mut observed = self.active.load(Ordering::Acquire);
-        loop {
-            if observed & STRIPE_SEALED != 0 {
-                return;
-            }
-            match self.active.compare_exchange_weak(
-                observed,
-                observed | STRIPE_SEALED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(current) => observed = current,
-            }
-        }
+        let _ = self
+            .active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                if state & STRIPE_SEALED != 0 {
+                    None
+                } else {
+                    Some(state | STRIPE_SEALED)
+                }
+            });
     }
 
     fn reopen(&self) {
@@ -318,7 +305,7 @@ impl ExportIngress {
             );
         }
         self.epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                 epoch.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());

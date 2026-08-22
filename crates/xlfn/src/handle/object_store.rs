@@ -479,7 +479,7 @@ impl ObjectStore {
 
     pub(super) fn allocate_object_id(&self) -> XllResult<ObjectId> {
         self.next_object_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
             .map(ObjectId)

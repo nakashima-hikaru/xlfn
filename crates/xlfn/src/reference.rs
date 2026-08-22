@@ -21,12 +21,12 @@ impl SheetId {
     }
 }
 
+use core::range::RangeInclusive;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReferenceArea {
-    first_row: u32,
-    last_row: u32,
-    first_column: u32,
-    last_column: u32,
+    rows: RangeInclusive<u32>,
+    columns: RangeInclusive<u32>,
 }
 
 impl ReferenceArea {
@@ -44,28 +44,40 @@ impl ReferenceArea {
             ));
         }
         Ok(Self {
-            first_row: raw.rw_first as u32,
-            last_row: raw.rw_last as u32,
-            first_column: raw.col_first as u32,
-            last_column: raw.col_last as u32,
+            rows: RangeInclusive {
+                start: raw.rw_first as u32,
+                last: raw.rw_last as u32,
+            },
+            columns: RangeInclusive {
+                start: raw.col_first as u32,
+                last: raw.col_last as u32,
+            },
         })
     }
 
     #[must_use]
     pub const fn first_row(self) -> u32 {
-        self.first_row
+        self.rows.start
     }
     #[must_use]
     pub const fn last_row(self) -> u32 {
-        self.last_row
+        self.rows.last
     }
     #[must_use]
     pub const fn first_column(self) -> u32 {
-        self.first_column
+        self.columns.start
     }
     #[must_use]
     pub const fn last_column(self) -> u32 {
-        self.last_column
+        self.columns.last
+    }
+    #[must_use]
+    pub const fn rows(self) -> RangeInclusive<u32> {
+        self.rows
+    }
+    #[must_use]
+    pub const fn columns(self) -> RangeInclusive<u32> {
+        self.columns
     }
 }
 
@@ -239,10 +251,8 @@ mod tests {
         assert_eq!(
             reference.areas().collect::<Vec<_>>(),
             vec![ReferenceArea {
-                first_row: 2,
-                last_row: 4,
-                first_column: 1,
-                last_column: 3,
+                rows: RangeInclusive { start: 2, last: 4 },
+                columns: RangeInclusive { start: 1, last: 3 },
             }]
         );
     }

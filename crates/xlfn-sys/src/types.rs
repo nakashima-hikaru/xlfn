@@ -180,31 +180,27 @@ static_assertions::const_assert_eq!(
     core::mem::size_of::<usize>()
 );
 
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12MRef>(), 8);
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12MRef, sheet_id), 4);
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12Flow>(), 16);
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, row), 4);
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, column), 8);
-#[cfg(target_pointer_width = "32")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, flow), 12);
-
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12MRef>(), 16);
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12MRef, sheet_id), 8);
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12Flow>(), 24);
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, row), 8);
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, column), 12);
-#[cfg(target_pointer_width = "64")]
-static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, flow), 16);
+core::cfg_select! {
+    target_pointer_width = "32" => {
+        static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12MRef>(), 8);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12MRef, sheet_id), 4);
+        static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12Flow>(), 16);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, row), 4);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, column), 8);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, flow), 12);
+    }
+    target_pointer_width = "64" => {
+        static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12MRef>(), 16);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12MRef, sheet_id), 8);
+        static_assertions::const_assert_eq!(core::mem::size_of::<XLOPER12Flow>(), 24);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, row), 8);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, column), 12);
+        static_assertions::const_assert_eq!(core::mem::offset_of!(XLOPER12Flow, flow), 16);
+    }
+    _ => {
+        compile_error!("xlfn supports only 32-bit and 64-bit targets");
+    }
+}
 
 impl XLOPER12 {
     #[must_use]

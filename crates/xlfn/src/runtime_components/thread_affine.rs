@@ -68,7 +68,7 @@ static NEXT_SLOT_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn allocate_slot_id() -> ThreadAffineSlotId {
     let raw = NEXT_SLOT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         })
         .unwrap_or_else(|_| {

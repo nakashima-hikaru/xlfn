@@ -52,7 +52,7 @@ impl HandlePrepareState {
         }
         let stripe_index = current_handle_prepare_stripe();
         self.stripes[stripe_index]
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .expect("handle prepare count cannot overflow");
@@ -102,7 +102,7 @@ pub(crate) struct HandlePrepareGuard<'a> {
 impl Drop for HandlePrepareGuard<'_> {
     fn drop(&mut self) {
         self.state.stripes[self.stripe_index]
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_sub(1)
             })
             .expect("handle prepare count remains balanced");

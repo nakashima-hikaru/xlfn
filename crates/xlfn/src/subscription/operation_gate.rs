@@ -38,7 +38,7 @@ impl OperationGate {
     #[inline]
     pub(crate) fn acquire(&self) -> XllResult<()> {
         self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |val| {
                 if (val & CLOSING_BIT) != 0 {
                     None
                 } else {

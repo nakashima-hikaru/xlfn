@@ -46,24 +46,17 @@ impl ReturnStripe {
     }
 
     fn try_enter(&self) -> bool {
-        let mut observed = self.state.load(Ordering::Acquire);
-        loop {
-            if observed & RETURN_STRIPE_SEALED != 0 {
-                return false;
-            }
-            if observed & RETURN_STRIPE_COUNT_MASK == RETURN_STRIPE_COUNT_MASK {
-                std::process::abort();
-            }
-            match self.state.compare_exchange_weak(
-                observed,
-                observed + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(current) => observed = current,
-            }
-        }
+        self.state
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |state| {
+                if state & RETURN_STRIPE_SEALED != 0 {
+                    return None;
+                }
+                if state & RETURN_STRIPE_COUNT_MASK == RETURN_STRIPE_COUNT_MASK {
+                    std::process::abort();
+                }
+                Some(state + 1)
+            })
+            .is_ok()
     }
 
     fn release(&self) -> bool {
@@ -75,21 +68,15 @@ impl ReturnStripe {
     }
 
     fn seal(&self) {
-        let mut observed = self.state.load(Ordering::Acquire);
-        loop {
-            if observed & RETURN_STRIPE_SEALED != 0 {
-                return;
-            }
-            match self.state.compare_exchange_weak(
-                observed,
-                observed | RETURN_STRIPE_SEALED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(current) => observed = current,
-            }
-        }
+        let _ = self
+            .state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                if state & RETURN_STRIPE_SEALED != 0 {
+                    None
+                } else {
+                    Some(state | RETURN_STRIPE_SEALED)
+                }
+            });
     }
 
     fn reopen(&self) {

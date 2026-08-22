@@ -17,7 +17,7 @@ impl Quota {
 
     pub(crate) fn try_acquire(this: &Arc<Self>) -> XllResult<QuotaPermit> {
         this.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 (used < this.limit).then_some(used + 1)
             })
             .map_err(|_| XllError::Overloaded)?;

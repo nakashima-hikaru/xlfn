@@ -152,10 +152,10 @@ impl Default for ReturnContext<'_, '_> {
 }
 
 const RETURN_MAGIC: u64 = 0x584c_4c52_4554_3132;
-#[cfg(target_pointer_width = "32")]
-const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(not(target_pointer_width = "32"))]
-const MAX_RETURN_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RETURN_BYTES: usize = core::cfg_select! {
+    target_pointer_width = "32" => 64 * 1024 * 1024,
+    _ => 256 * 1024 * 1024,
+};
 
 enum ReturnOwnership {
     Excel(Option<ReturnObligation<'static>>),

@@ -39,28 +39,19 @@ impl GenerationAdmission {
     }
 
     pub(crate) fn try_enter(&self) -> Option<AdmissionPermit<'_>> {
-        loop {
-            let state = self.state.load(Ordering::Acquire);
-
-            if state & ADMISSION_CLOSED != 0 {
-                return None;
-            }
-
-            let active = state & ADMISSION_COUNT_MASK;
-            if active == ADMISSION_COUNT_MASK {
-                std::process::abort();
-            }
-
-            let next = state + 1;
-
-            if self
-                .state
-                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(AdmissionPermit { admission: self });
-            }
-        }
+        self.state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                if state & ADMISSION_CLOSED != 0 {
+                    return None;
+                }
+                let active = state & ADMISSION_COUNT_MASK;
+                if active == ADMISSION_COUNT_MASK {
+                    std::process::abort();
+                }
+                Some(state + 1)
+            })
+            .ok()
+            .map(|_| AdmissionPermit { admission: self })
     }
 
     pub(crate) fn close(&self) {

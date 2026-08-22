@@ -129,7 +129,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
     ) -> XllResult<Self> {
         let sequence = allocator
             .next_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
@@ -151,7 +151,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn for_internal(generation: RuntimeGeneration, source: S) -> XllResult<Self> {
         let sequence = NEXT_INTERNAL_SOURCE_SEQUENCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
@@ -166,7 +166,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
         source: Arc<S>,
     ) -> XllResult<Self> {
         let sequence = NEXT_INTERNAL_SOURCE_SEQUENCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {

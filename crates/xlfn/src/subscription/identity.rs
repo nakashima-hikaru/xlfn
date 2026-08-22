@@ -66,7 +66,7 @@ pub(crate) static NEXT_RTD_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
     NEXT_RTD_RUNTIME_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| XllError::Internal {

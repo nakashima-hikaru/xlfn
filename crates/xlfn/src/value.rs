@@ -48,14 +48,14 @@ pub use raw::{XlArrayRef, XlStrRef, XlValueRef};
 const MAX_UTF16_UNITS: usize = 32_767;
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;
-#[cfg(target_pointer_width = "32")]
-const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
-#[cfg(not(target_pointer_width = "32"))]
-const MAX_ARRAY_ELEMENTS: usize = 4_000_000;
-#[cfg(target_pointer_width = "32")]
-pub(crate) const MAX_ARRAY_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(not(target_pointer_width = "32"))]
-pub(crate) const MAX_ARRAY_BYTES: usize = 256 * 1024 * 1024;
+const MAX_ARRAY_ELEMENTS: usize = core::cfg_select! {
+    target_pointer_width = "32" => 1_000_000,
+    _ => 4_000_000,
+};
+pub(crate) const MAX_ARRAY_BYTES: usize = core::cfg_select! {
+    target_pointer_width = "32" => 64 * 1024 * 1024,
+    _ => 256 * 1024 * 1024,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExcelErrorValue(pub ExcelError);

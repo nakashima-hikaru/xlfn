@@ -318,7 +318,7 @@ impl EpochDomain {
 
     pub(super) fn retire_epoch(&self) -> u64 {
         self.current
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                 epoch.checked_add(1).filter(|next| *next != EPOCH_INACTIVE)
             })
             .unwrap_or_else(|_| {
