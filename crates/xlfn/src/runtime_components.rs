@@ -475,6 +475,7 @@ pub(crate) enum LifecycleStateKind {
     },
     Closing {
         generation: Option<RuntimeGeneration>,
+        open_attempt: Option<OpenAttemptId>,
     },
     OpenRollbackPending {
         generation: Option<RuntimeGeneration>,
@@ -497,9 +498,9 @@ impl LifecycleStateKind {
     pub(crate) const fn open_attempt(self) -> Option<OpenAttemptId> {
         match self {
             Self::Opening { attempt } => Some(attempt),
+            Self::Closing { open_attempt, .. } => open_attempt,
             Self::Closed
             | Self::Open { .. }
-            | Self::Closing { .. }
             | Self::OpenRollbackPending { .. }
             | Self::Quarantined => None,
         }

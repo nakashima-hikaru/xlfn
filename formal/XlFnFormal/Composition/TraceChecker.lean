@@ -242,27 +242,33 @@ private def parseTrace (json : Json) : Except String WireTrace := do
     outcome := (← field json "outcome")
   }
 
-private def checkEventWithProof (current : State) (event : Event) :
+private def checkEventWithProof (index : Nat) (current : State) (event : Event) :
     Except String (Subtype fun next => wireRefinement.concreteStep current event next) := do
   match h : apply? current event with
-  | none => throw "event is rejected by the formal composition transition"
+  | none => throw s!"event #{index} rejected: {repr event}; state: {repr current}"
   | some next =>
       have hStep : wireRefinement.concreteStep current event next := by
         exact h
       return ⟨next, hStep⟩
 
-private def replayEvents :
+private def replayEventsAux :
+    (index : Nat) →
     (events : List Event) →
     (current : State) →
     Except String (Subtype fun final =>
       ConcreteSteps wireRefinement current events final)
-  | [], current => return ⟨current, .refl current⟩
-  | event :: rest, current => do
-      let step ← checkEventWithProof current event
+  | _, [], current => return ⟨current, .refl current⟩
+  | index, event :: rest, current => do
+      let step ← checkEventWithProof index current event
       let ⟨middle, hStep⟩ := step
-      let result ← replayEvents rest middle
+      let result ← replayEventsAux (index + 1) rest middle
       let ⟨final, hRest⟩ := result
       return ⟨final, .cons hStep trivial hRest⟩
+
+private def replayEvents (events : List Event) (current : State) :
+    Except String (Subtype fun final =>
+      ConcreteSteps wireRefinement current events final) :=
+  replayEventsAux 0 events current
 
 private def checkReturnedSuccess
     {initial final : State}

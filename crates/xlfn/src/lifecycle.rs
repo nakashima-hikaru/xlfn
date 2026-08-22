@@ -1980,7 +1980,7 @@ mod tests {
             });
             assert!(
                 output.status.success(),
-                "Lean checker rejected {label} Rust trace: {}",
+                "Lean checker rejected {label} Rust trace: {}\ntrace:\n{trace}",
                 String::from_utf8_lossy(&output.stderr)
             );
         };
@@ -2307,7 +2307,10 @@ mod tests {
             .expect("failed to wait for composition_trace_checker");
         assert!(
             output.status.success(),
-            "Lean checker rejected Rust composition takeover trace: {}\n{}",
+            "Lean checker rejected Rust composition takeover trace:\n\
+             stdout:\n{}\n\
+             stderr:\n{}\n\
+             trace:\n{trace}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -2350,7 +2353,10 @@ mod tests {
             });
             assert!(
                 output.status.success(),
-                "Lean checker rejected {label} Rust composition trace: {}\n{}",
+                "Lean checker rejected {label} Rust composition trace:\n\
+                 stdout:\n{}\n\
+                 stderr:\n{}\n\
+                 trace:\n{trace}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -2854,9 +2860,12 @@ mod tests {
                 .unwrap();
         });
 
-        quiesce_entered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("closer entered quiesce (Closing phase)");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runtime.phase() != crate::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closing);
 
         assert!(matches!(
@@ -2865,6 +2874,9 @@ mod tests {
         ));
         assert!(!open_attempt.is_active());
 
+        quiesce_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("closer entered quiesce (Closing phase)");
         quiesce_release_tx.send(()).unwrap();
 
         assert_eq!(

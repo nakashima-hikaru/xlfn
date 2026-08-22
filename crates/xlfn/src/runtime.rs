@@ -667,6 +667,7 @@ impl<A: crate::Addin> Runtime<A> {
         let state = match control.state.phase() {
             LifecyclePhase::Closing => LifecycleStateKind::Closing {
                 generation: control.known_generation,
+                open_attempt: None,
             },
             LifecyclePhase::OpenRollbackPending => LifecycleStateKind::OpenRollbackPending {
                 generation: control.known_generation,
@@ -706,10 +707,18 @@ impl<A: crate::Addin> Runtime<A> {
                 true
             }
             LifecyclePhase::OpenRollbackPending => true,
-            LifecyclePhase::Closed
-            | LifecyclePhase::Open
-            | LifecyclePhase::Closing
-            | LifecyclePhase::Quarantined => false,
+            LifecyclePhase::Closing => {
+                let generation = control.known_generation;
+                self.lifecycle.set_state(
+                    &mut control,
+                    LifecycleStateKind::Closing {
+                        generation,
+                        open_attempt: None,
+                    },
+                );
+                false
+            }
+            LifecyclePhase::Closed | LifecyclePhase::Open | LifecyclePhase::Quarantined => false,
         };
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
@@ -762,8 +771,14 @@ impl<A: crate::Addin> Runtime<A> {
             ) {
                 self.return_protocol.close_admission();
                 let generation = control.known_generation;
-                self.lifecycle
-                    .set_state(&mut control, LifecycleStateKind::Closing { generation });
+                let open_attempt = control.state.open_attempt();
+                self.lifecycle.set_state(
+                    &mut control,
+                    LifecycleStateKind::Closing {
+                        generation,
+                        open_attempt,
+                    },
+                );
                 true
             } else {
                 false
@@ -803,9 +818,13 @@ impl<A: crate::Addin> Runtime<A> {
                         }
                         if !wait_guard.removal_attempt_active {
                             let generation = wait_guard.known_generation;
+                            let open_attempt = wait_guard.state.open_attempt();
                             self.lifecycle.set_state(
                                 &mut wait_guard,
-                                LifecycleStateKind::Closing { generation },
+                                LifecycleStateKind::Closing {
+                                    generation,
+                                    open_attempt,
+                                },
                             );
                         }
                     }
@@ -814,9 +833,13 @@ impl<A: crate::Addin> Runtime<A> {
                     | LifecyclePhase::Open
                     | LifecyclePhase::OpenRollbackPending => {
                         let generation = wait_guard.known_generation;
+                        let open_attempt = wait_guard.state.open_attempt();
                         self.lifecycle.set_state(
                             &mut wait_guard,
-                            LifecycleStateKind::Closing { generation },
+                            LifecycleStateKind::Closing {
+                                generation,
+                                open_attempt,
+                            },
                         );
                     }
                     LifecyclePhase::Quarantined => return Some(false),
@@ -1942,7 +1965,10 @@ pub(crate) mod tests {
             closed_tx.send(()).unwrap();
         });
 
-        closing_entered_rx.recv().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
+            thread::yield_now();
+        }
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
         assert_ne!(runtime.removal_epoch(), removal_epoch);
         assert!(matches!(
@@ -1952,9 +1978,10 @@ pub(crate) mod tests {
         assert_eq!(runtime.lifecycle.open_attempt(), None);
         assert!(!opening.is_active());
 
+        closing_entered_rx.recv().unwrap();
         closing_release_tx.send(()).unwrap();
 
-        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         closer.join().unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
