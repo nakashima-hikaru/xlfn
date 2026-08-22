@@ -56,22 +56,19 @@ pub(crate) struct SourceHandleAllocator {
 }
 
 impl SourceHandleAllocator {
-    pub(crate) fn new(generation: RuntimeGeneration) -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) const fn new(generation: RuntimeGeneration) -> Self {
+        Self {
             generation,
             next_id: AtomicU64::new(1),
-        })
+        }
     }
 
-    pub(crate) fn allocate<S: RtdSource>(
-        self: &Arc<Self>,
-        source: S,
-    ) -> XllResult<RtdSourceHandle<S>> {
+    pub(crate) fn allocate<S: RtdSource>(&self, source: S) -> XllResult<RtdSourceHandle<S>> {
         RtdSourceHandle::from_arc_and_allocator(Arc::new(source), self)
     }
 
     pub(crate) fn allocate_shared<S: RtdSource>(
-        self: &Arc<Self>,
+        &self,
         source: Arc<S>,
     ) -> XllResult<RtdSourceHandle<S>> {
         RtdSourceHandle::from_arc_and_allocator(source, self)
@@ -128,7 +125,7 @@ impl<S: RtdSource> std::fmt::Debug for RtdSourceHandle<S> {
 impl<S: RtdSource> RtdSourceHandle<S> {
     fn from_arc_and_allocator(
         source: Arc<S>,
-        allocator: &Arc<SourceHandleAllocator>,
+        allocator: &SourceHandleAllocator,
     ) -> XllResult<Self> {
         let sequence = allocator
             .next_id

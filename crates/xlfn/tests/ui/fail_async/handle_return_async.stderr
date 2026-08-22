@@ -20,7 +20,7 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i64
              std::string::String
    = note: required for `Dataset` to implement `xlfn::value::AsyncReturn`
-note: required by a bound in `xlfn::value::assert_async_return`
+note: required by a bound in `xlfn::__private::assert_async_return`
   --> src/value/output.rs
    |
    | pub fn assert_async_return<T: AsyncReturn>() {}

@@ -2712,7 +2712,11 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
 
     crate::value::with_excel_call_scope(|scope| {
         let resolver = HandleRuntimeResolver::new(slot);
-        let mut call_ctx = crate::value::CallContext::from_resolver(Some(resolver), Some(scope));
+        let mut call_ctx =
+            crate::value::CallContext::from_access(Some(crate::value::input::HandleCallAccess {
+                runtime: resolver,
+                scope,
+            }));
 
         // First handle resolution initializes resolver OnceCell
         let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
@@ -2723,15 +2727,14 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         assert_eq!(h2.0, 123);
 
         // Take resolver and move to ReturnContext
-        let moved_resolver = call_ctx.take_handle_runtime();
-        assert!(call_ctx.take_handle_runtime().is_none());
+        let moved_access = call_ctx.take_handle_access();
+        assert!(call_ctx.take_handle_access().is_none());
 
-        let res_ref = moved_resolver.as_ref().unwrap();
+        let res_ref = &moved_access.as_ref().unwrap().runtime;
         assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
         assert!(std::ptr::eq(&**res_ref.get_arc().unwrap(), &*handle_rt));
 
-        let mut return_ctx =
-            ReturnContext::for_frame(moved_resolver, "test_udf", Some([0; 32]), scope);
+        let mut return_ctx = ReturnContext::for_frame(moved_access, "test_udf", Some([0; 32]));
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))
             .unwrap_err();
@@ -2811,9 +2814,9 @@ fn handle_slot_requires_matching_generation_for_seal() {
 #[test]
 fn handle_config_rejects_an_unbounded_dense_publication_table() {
     let slot = HandleRuntimeSlot::new();
-    let config = crate::HandleConfig::new()
-        .with_max_bindings(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
+    let invalid_limit =
+        crate::HandleBindingLimit::try_from(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
 
-    assert!(config.is_none());
+    assert!(invalid_limit.is_err());
     assert!(slot.is_none());
 }

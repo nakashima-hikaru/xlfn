@@ -20,7 +20,7 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i64
              std::string::String
    = note: required for `Dataset` to implement `xlfn::value::MacroSheetReturn`
-note: required by a bound in `xlfn::value::assert_macro_sheet_return`
+note: required by a bound in `xlfn::__private::assert_macro_sheet_return`
   --> src/value/output.rs
    |
    | pub fn assert_macro_sheet_return<T: MacroSheetReturn>() {}

@@ -92,13 +92,12 @@ fn retain(dataset: Handle<'_, Dataset>) -> XllResult<PinnedHandle<Dataset>> {
 }
 ```
 
-`PinnedHandle<T>` is the long-lived synchronous registry lease, while
-`AsyncHandle<T>` marks the same ownership model as safe to move into a
-`Send + 'static` future:
+`PinnedHandle<T>` is the long-lived registry lease and may be moved into a
+`Send + 'static` future when `T` is safe for that future:
 
 ```rust
-fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<AsyncHandle<Dataset>> {
-    dataset.into_async()
+fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<PinnedHandle<Dataset>> {
+    dataset.pin()
 }
 ```
 
@@ -106,9 +105,8 @@ These types own a registry pin, not an `Arc<T>`. The registry remains the sole
 owner of the payload, and the payload is released when its formula bindings and
 all explicit pins are gone. A pin may therefore survive formula disconnect or
 terminal runtime close, but it must be dropped when the application no longer
-needs it. `PinnedHandle` and `AsyncHandle` are not Excel return values.
-`AsyncHandle<T>` is the only promoted handle type with automatic Excel input
-conversion; it is intended for asynchronous UDF parameters.
+needs it. `PinnedHandle` is not an Excel return value. It is the owned handle
+type used when a value must cross Excel calls or enter an asynchronous UDF.
 
 ## Re-evaluation semantics
 
@@ -211,10 +209,10 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 `HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
 `Handle<'_, T>` is an input capability only and is not a valid return type.
 
-`AsyncHandle<T>` is intentionally not call-borrowed: it is an owned `'static`
-input that pins the registry payload before an async future is scheduled. It is
-the async counterpart to `Handle<'_, T>`; it does not make a borrowed handle
-safe to capture.
+`PinnedHandle<T>` is intentionally not call-borrowed: it is an owned input that
+pins the registry payload before an async future is scheduled. It can also be
+used synchronously; it does not make a borrowed `Handle<'_, T>` safe to capture
+without an explicit call to `Handle::pin()`.
 
 ## Caller restrictions
 

@@ -15,7 +15,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()
@@ -48,7 +48,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()
@@ -86,7 +86,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()
@@ -124,7 +124,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()
@@ -167,7 +167,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()
@@ -210,7 +210,7 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `xlfn::value::assert_async_parameter`
+note: required by a bound in `xlfn::__private::assert_async_parameter`
   --> src/value/input.rs
    |
    | pub fn assert_async_parameter<T>()

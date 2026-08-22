@@ -4,6 +4,7 @@ use crate::input_identity::InputFingerprint;
 use crate::return_array::XlArrayOutput;
 use crate::return_storage::ReturnStorage;
 use crate::runtime::Runtime;
+use crate::value::input::HandleCallAccess;
 use crate::value::{ExcelCellOutput, ExcelOutput, ExcelReturn};
 use crate::{XllError, XllResult};
 use std::cell::{Cell, UnsafeCell};
@@ -28,11 +29,16 @@ pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuar
 /// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
 #[doc(hidden)]
 pub struct ReturnContext<'call, 'scope> {
-    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
-    udf_id: Option<&'static str>,
-    inputs: Option<InputFingerprint>,
-    callbacks: Option<&'scope HostCallbackSession>,
+    formula: Option<FormulaReturnAccess<'call, 'scope>>,
     lifetime: PhantomData<Rc<()>>,
+}
+
+/// All services required to publish a formula-revision handle result.
+pub(crate) struct FormulaReturnAccess<'call, 'scope> {
+    pub(crate) runtime: crate::handle::HandleRuntimeResolver<'call>,
+    pub(crate) udf_id: &'static str,
+    pub(crate) inputs: InputFingerprint,
+    pub(crate) callbacks: &'scope HostCallbackSession,
 }
 
 impl<'call, 'scope> ReturnContext<'call, 'scope> {
@@ -40,10 +46,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            handle_runtime: None,
-            udf_id: None,
-            inputs: None,
-            callbacks: None,
+            formula: None,
             lifetime: PhantomData,
         }
     }
@@ -58,31 +61,46 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         scope: &'scope crate::value::CallScope<'scope>,
     ) -> Self {
         Self {
-            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
-                runtime.handle_runtime_slot(),
-            )),
-            udf_id: Some(udf_id),
-            inputs: inputs.map(InputFingerprint::from_bytes),
-            callbacks: Some(scope.callbacks()),
+            formula: inputs.map(|inputs| FormulaReturnAccess {
+                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
+                udf_id,
+                inputs: InputFingerprint::from_bytes(inputs),
+                callbacks: scope.callbacks(),
+            }),
             lifetime: PhantomData,
         }
     }
 
+    fn formula_access(&self) -> XllResult<&FormulaReturnAccess<'call, 'scope>> {
+        self.formula.as_ref().ok_or(crate::XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
+        })
+    }
+}
+
+impl<'call> ReturnContext<'call, 'call> {
     pub(crate) fn for_frame(
-        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+        handles: Option<HandleCallAccess<'call>>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
-        scope: &'scope crate::value::CallScope<'scope>,
     ) -> Self {
+        let formula = match (handles, inputs) {
+            (Some(access), Some(inputs)) => Some(FormulaReturnAccess {
+                runtime: access.runtime,
+                udf_id,
+                inputs: InputFingerprint::from_bytes(inputs),
+                callbacks: access.scope.callbacks(),
+            }),
+            _ => None,
+        };
         Self {
-            handle_runtime,
-            udf_id: Some(udf_id),
-            inputs: inputs.map(InputFingerprint::from_bytes),
-            callbacks: Some(scope.callbacks()),
+            formula,
             lifetime: PhantomData,
         }
     }
+}
 
+impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     pub fn publish_new_handle<T>(
         &mut self,
@@ -102,27 +120,14 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let resolver = self
-            .handle_runtime
-            .as_ref()
-            .ok_or(crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
-            })?;
-        let handles = resolver.get()?;
-        let arc_handles = resolver.get_arc()?;
-        let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_UDF,
-        })?;
-        let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_DIGEST,
-        })?;
-        let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_CALLBACKS,
-        })?;
-        let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
+        let access = self.formula_access()?;
+        let handles = access.runtime.get()?;
+        let arc_handles = access.runtime.get_arc()?;
+        let key =
+            crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
         let object = operation()?.into_locator();
         let (token, _) = handles.prepare_observed_alias::<T, _>(key, object, |key, token| {
-            crate::rtd::observe(arc_handles, key, token, callbacks)
+            crate::rtd::observe(arc_handles, key, token, access.callbacks)
         })?;
         Ok(token)
     }
@@ -131,26 +136,13 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     where
         T: crate::handle::ExcelHandleObject,
     {
-        let resolver = self
-            .handle_runtime
-            .as_ref()
-            .ok_or(crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
-            })?;
-        let handles = resolver.get()?;
-        let arc_handles = resolver.get_arc()?;
-        let udf_id = self.udf_id.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_UDF,
-        })?;
-        let inputs = self.inputs.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_DIGEST,
-        })?;
-        let callbacks = self.callbacks.ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_CALLBACKS,
-        })?;
-        let key = crate::handle::formula_revision_key(callbacks, udf_id, inputs)?;
+        let access = self.formula_access()?;
+        let handles = access.runtime.get()?;
+        let arc_handles = access.runtime.get_arc()?;
+        let key =
+            crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
         let (token, _) = handles.prepare_observed(key, operation, |key, token| {
-            crate::rtd::observe(arc_handles, key, token, callbacks)
+            crate::rtd::observe(arc_handles, key, token, access.callbacks)
         })?;
         Ok(token)
     }

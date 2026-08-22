@@ -45,21 +45,22 @@ Async functions are registered as thread-safe by the generated boundary. They ca
 
 ### Async handle inputs
 
-An async UDF that needs a formula-owned object must accept `AsyncHandle<T>`, not
+An async UDF that needs a formula-owned object must accept `PinnedHandle<T>`, not
 `Handle<'_, T>`:
 
 ```rust
 #[excel_function(name = "DATASET.ASYNC_EVALUATE")]
-async fn async_evaluate(dataset: AsyncHandle<Dataset>, time: f64) -> XllResult<f64> {
+async fn async_evaluate(dataset: PinnedHandle<Dataset>, time: f64) -> XllResult<f64> {
     dataset.evaluate(time)
 }
 ```
 
-`AsyncHandle<T>` is converted and pinned before the future is scheduled, so it is
-`Send + Sync + 'static`. Its registry pin remains active while the future owns
-the value and is released on normal completion, cancellation, or shutdown.
+`PinnedHandle<T>` is converted and pinned before the future is scheduled, so it
+is an owned, call-independent value. Its registry pin remains active while the
+future owns the value and is released on normal completion, cancellation, or
+shutdown.
 `Handle<'_, T>` remains call-scoped and is rejected by the async parameter
-assertion. Use `Handle::into_async()` when an explicit synchronous call needs to
+assertion. Use `Handle::pin()` when an explicit synchronous call needs to
 promote a resolved handle before constructing a future.
 
 The add-in controls executor size:

@@ -135,8 +135,8 @@ servers, and server locks. `SubscriptionsDrained` owns the separate
 subscription/callback postcondition.
 
 Handle shutdown has two distinct obligations. `handles = 0` means that no
-formula binding roots remain; `handlePins = 0` means that no `PinnedHandle` or
-`AsyncHandle` can still retain a retired payload. The model therefore permits
+formula binding roots remain; `handlePins = 0` means that no `PinnedHandle`
+can still retain a retired payload. The model therefore permits
 the registry to be sealed before pin drain, but admits `handlesDrained` only
 after both counters are zero. This matches the Rust order: `HandleRuntime::seal`
 retires bindings, Add-in cleanup drops generation state, and only then can
@@ -258,7 +258,7 @@ non-owning publication pointer, and epoch-retired queue:
   object registry or in the epoch-retired queue; reclamation is permitted only
   after every active call epoch has advanced beyond the retirement epoch and
   the explicit pin count is zero. `PinHeld` models the long-lived ownership
-  edge used by `PinnedHandle` and `AsyncHandle`; close may move
+  edge used by `PinnedHandle`; close may move
   a pinned payload to the retired queue without reclaiming it.
   Retired-object resurrection preserves `ObjectId` while assigning a fresh
   `ObjectKey`, and is permitted only for an unpinned retired payload, which is

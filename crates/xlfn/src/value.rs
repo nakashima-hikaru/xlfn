@@ -18,24 +18,24 @@ pub mod date;
 #[doc(hidden)]
 pub mod identity;
 /// Input conversion traits and presence/default handling.
-pub mod input;
+pub(crate) mod input;
 /// Owned rectangular and bounded collection values.
 pub mod matrix;
 /// Output conversion traits and return-cell representations.
-pub mod output;
+pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 pub mod raw;
 
-pub(crate) use input::with_excel_call_scope_and_state;
-pub use input::{
-    ArgumentContext, CallContext, CallScope, CellPresence, ExcelParameter, FromExcel,
-    argument_from_raw, argument_from_raw_with_arguments, argument_from_raw_with_context,
-    assert_async_parameter, assert_excel_parameter, cell_presence_from_raw, with_excel_call_scope,
+pub use input::FromExcel;
+pub(crate) use input::{
+    ArgumentContext, CallContext, CallScope, ExcelParameter, argument_from_raw_with_arguments,
+    with_excel_call_scope,
 };
+#[cfg(test)]
+pub(crate) use input::{argument_from_raw, argument_from_raw_with_context};
 pub use output::{
     AsyncReturn, ExcelReturn, IntoExcel, MacroSheetReturn, MainThreadReturn, ThreadSafeReturn,
-    VolatileReturn, assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
-    assert_thread_safe_return, assert_volatile_return,
+    VolatileReturn,
 };
 
 pub use date::{ExcelDateSystem, ExcelSerialDate};

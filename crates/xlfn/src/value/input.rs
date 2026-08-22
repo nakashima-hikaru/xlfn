@@ -39,11 +39,16 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call> for T {
     }
 }
 
+/// Runtime services that travel together through one Excel-visible call.
+pub(crate) struct HandleCallAccess<'call> {
+    pub(crate) runtime: crate::handle::HandleRuntimeResolver<'call>,
+    pub(crate) scope: &'call CallScope<'call>,
+}
+
 /// Runtime services available while converting one Excel-visible argument.
 #[doc(hidden)]
 pub struct CallContext<'call> {
-    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
-    scope: Option<&'call CallScope<'call>>,
+    handles: Option<HandleCallAccess<'call>>,
 }
 
 impl<'call> CallContext<'call> {
@@ -52,51 +57,34 @@ impl<'call> CallContext<'call> {
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
-            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
-                runtime.handle_runtime_slot(),
-            )),
-            scope: Some(scope),
+            handles: Some(HandleCallAccess {
+                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
+                scope,
+            }),
         }
     }
 
     pub(crate) const fn without_runtime() -> Self {
-        Self {
-            handle_runtime: None,
-            scope: None,
-        }
+        Self { handles: None }
     }
 
     #[cfg(test)]
-    pub(crate) fn from_resolver(
-        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
-        scope: Option<&'call CallScope<'call>>,
-    ) -> Self {
-        Self {
-            handle_runtime,
-            scope,
-        }
+    pub(crate) const fn from_access(handles: Option<HandleCallAccess<'call>>) -> Self {
+        Self { handles }
     }
 
-    pub(crate) fn take_handle_runtime(
-        &mut self,
-    ) -> Option<crate::handle::HandleRuntimeResolver<'call>> {
-        self.handle_runtime.take()
+    pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
+        self.handles.take()
     }
 
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        let scope = self.scope.ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_SCOPE_MISSING,
+        let access = self.handles.as_ref().ok_or(XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
         })?;
-        self.handle_runtime
-            .as_ref()
-            .ok_or(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
-            })?
-            .get()?
-            .lookup(scope, token)
+        access.runtime.get()?.lookup(access.scope, token)
     }
 }
 
@@ -121,10 +109,8 @@ impl<'call> ArgumentContext<'call> {
         }
     }
 
-    pub(crate) fn take_handle_runtime(
-        &mut self,
-    ) -> Option<crate::handle::HandleRuntimeResolver<'call>> {
-        self.call.take_handle_runtime()
+    pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
+        self.call.take_handle_access()
     }
 
     pub fn finish(&mut self) -> Option<[u8; 32]> {
@@ -268,9 +254,6 @@ pub unsafe fn cell_presence_from_raw(
         _ => CellPresence::Value,
     })
 }
-
-#[doc(hidden)]
-pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallScope<'call>) {}
 
 #[doc(hidden)]
 pub fn assert_async_parameter<T>()

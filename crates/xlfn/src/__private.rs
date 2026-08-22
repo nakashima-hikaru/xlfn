@@ -20,11 +20,12 @@ use crate::registration::{
 use crate::return_value::ffi_boundary_void;
 use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
 use crate::runtime::Runtime;
-use crate::value::CallScope;
-use crate::value::{
-    ArgumentContext, ExcelCellOutput, ExcelParameter, argument_from_raw,
-    argument_from_raw_with_arguments, cell_presence_from_raw, with_excel_call_scope,
-    with_excel_call_scope_and_state,
+use crate::value::ExcelCellOutput;
+use crate::value::input::with_excel_call_scope_and_state;
+pub use crate::value::input::{
+    ArgumentContext, CallScope, ExcelParameter, argument_from_raw,
+    argument_from_raw_with_arguments, argument_from_raw_with_context, cell_presence_from_raw,
+    with_excel_call_scope,
 };
 
 #[doc(hidden)]
@@ -83,11 +84,16 @@ pub use crate::__xlfn_private_async_only as __xlfn_async_only;
 #[doc(hidden)]
 pub use crate::utf16::utf16_eq_ignore_ascii_case;
 #[doc(hidden)]
-pub use crate::value::{
-    CellPresence, ExcelOutput, ExcelReturn, MainThreadReturn, assert_async_parameter,
+pub use crate::value::input::CellPresence;
+#[doc(hidden)]
+pub use crate::value::input::assert_async_parameter;
+#[doc(hidden)]
+pub use crate::value::output::{
     assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
     assert_thread_safe_return, assert_volatile_return,
 };
+#[doc(hidden)]
+pub use crate::value::{ExcelOutput, ExcelReturn, MainThreadReturn};
 
 /// Asserts at compile-time that `T` implements `ExcelParameter`.
 #[doc(hidden)]
@@ -381,8 +387,8 @@ impl<'call> CallFrame<'call> {
     #[doc(hidden)]
     pub fn return_context(&mut self, udf_id: &'static str) -> ReturnContext<'call, 'call> {
         let inputs = self.arguments.finish();
-        let handle_runtime = self.arguments.take_handle_runtime();
-        ReturnContext::for_frame(handle_runtime, udf_id, inputs, self.scope)
+        let handles = self.arguments.take_handle_access();
+        ReturnContext::for_frame(handles, udf_id, inputs)
     }
 
     #[doc(hidden)]

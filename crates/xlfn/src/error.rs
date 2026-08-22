@@ -133,11 +133,8 @@ impl DiagnosticId {
     pub(crate) const REGISTRY: Self = Self::from_ascii8(*b"REGISTRY");
     pub(crate) const REGISTRATION_SIGNATURE: Self = Self::from_ascii8(*b"REGSIGNA");
     pub(crate) const STRING_LENGTH: Self = Self::from_ascii8(*b"STRINGLE");
-    pub(crate) const HANDLE_CALLBACKS: Self = Self::from_ascii8(*b"HANDCBKS");
     pub(crate) const HANDLE_CONTEXT: Self = Self::from_ascii8(*b"HANDCTXT");
     pub(crate) const HANDLE_PINS: Self = Self::from_ascii8(*b"HANDPINS");
-    pub(crate) const HANDLE_DIGEST: Self = Self::from_ascii8(*b"HANDDIGE");
-    pub(crate) const HANDLE_UDF: Self = Self::from_ascii8(*b"HANDUDFI");
     pub(crate) const RETURN_REOPEN: Self = Self::from_ascii8(*b"RTNREOPN");
     pub(crate) const RTD_HANDLE: Self = Self::from_ascii8(*b"RTDHANDL");
     pub(crate) const RTD_MULTI: Self = Self::from_ascii8(*b"RTDMULTI");
@@ -182,7 +179,6 @@ impl DiagnosticId {
     pub(crate) const TOPIC_KEY_DUPLICATE: Self = Self::from_ascii8(*b"TOPICKEY");
     pub(crate) const GRID_INDEX: Self = Self::from_ascii8(*b"GRIDINDX");
     pub(crate) const HANDLE_NO_CONTEXT: Self = Self::from_ascii8(*b"HANDNOCT");
-    pub(crate) const HANDLE_SCOPE_MISSING: Self = Self::from_ascii8(*b"HANDSCOP");
     pub(crate) const RTD_WINDOW_STATUS: Self = Self::from_ascii8(*b"RTDW\0\0\0\0");
     pub(crate) const RTD_WINDOW_FAILURE: Self = Self::from_ascii8(*b"RTDWFAIL");
     pub(crate) const RTD_SERVER_GENERATION_EXHAUSTED: Self = Self::from_ascii8(*b"SRVGENEX");

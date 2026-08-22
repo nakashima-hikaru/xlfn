@@ -56,12 +56,12 @@ impl BuildInfo {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OpenContext {
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
-    source_allocator: std::sync::Arc<crate::subscription::SourceHandleAllocator>,
+    source_allocator: crate::subscription::SourceHandleAllocator,
 }
 
 impl OpenContext {
@@ -114,7 +114,7 @@ impl OpenContext {
 /// Capability for registering opaque RTD source identities during open.
 #[derive(Clone, Copy, Debug)]
 pub struct RtdOpenContext<'a> {
-    allocator: &'a std::sync::Arc<crate::subscription::SourceHandleAllocator>,
+    allocator: &'a crate::subscription::SourceHandleAllocator,
 }
 
 impl RtdOpenContext<'_> {
@@ -182,6 +182,16 @@ impl HandleBindingLimit {
     }
 }
 
+impl TryFrom<u32> for HandleBindingLimit {
+    type Error = crate::XllError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(crate::XllError::Domain {
+            code: crate::error::DomainErrorCode::InvalidInput,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleConfig {
     maximum_bindings: HandleBindingLimit,
@@ -205,11 +215,9 @@ impl HandleConfig {
     }
 
     #[must_use]
-    pub const fn with_max_bindings(self, maximum_bindings: u32) -> Option<Self> {
-        let Some(maximum_bindings) = HandleBindingLimit::new(maximum_bindings) else {
-            return None;
-        };
-        Some(Self { maximum_bindings })
+    pub const fn with_binding_limit(mut self, maximum_bindings: HandleBindingLimit) -> Self {
+        self.maximum_bindings = maximum_bindings;
+        self
     }
 
     pub(crate) const fn maximum_bindings(self) -> u32 {
@@ -774,6 +782,7 @@ mod tests {
     assert_impl_all!(MainThreadContext<'static, ()>: Clone);
     assert_impl_all!(MacroSheetContext<'static, ()>: Clone);
     assert_impl_all!(DiagnosticsSetup<'static>: Copy, Clone, Send, Sync);
+    assert_not_impl_any!(super::OpenContext: Clone);
     assert_not_impl_any!(MainThreadContext<'static, ()>: Send, Sync);
     assert_not_impl_any!(MacroSheetContext<'static, ()>: Send, Sync);
 
