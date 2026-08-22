@@ -1597,7 +1597,7 @@ fn parent_runtime_drop_causes_fail_closed_on_server() {
         server.inner.publish.publish(
             TopicId(1),
             ConnectionGeneration::new(1).unwrap(),
-            RtdValue::Number(1.0),
+            RtdValue::Number(1.0).into_stored().unwrap(),
         ),
         Err(XllError::Closing)
     ));

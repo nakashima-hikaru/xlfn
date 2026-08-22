@@ -1,8 +1,7 @@
 use super::source::SourceHandleId;
 use super::topic::{SubscriptionIdentity, SubscriptionKey};
 use crate::{XllError, XllResult};
-use rustc_hash::FxHashSet;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug)]
@@ -77,8 +76,8 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
 
 #[derive(Default)]
 pub(crate) struct SubscriptionIdentityIndex {
-    pub(crate) key_by_identity: HashMap<SubscriptionIdentity, SubscriptionKey>,
-    pub(crate) identity_by_key: HashMap<SubscriptionKey, SubscriptionIdentity>,
+    pub(crate) key_by_identity: FxHashMap<SubscriptionIdentity, SubscriptionKey>,
+    pub(crate) identity_by_key: FxHashMap<SubscriptionKey, SubscriptionIdentity>,
 }
 
 impl SubscriptionIdentityIndex {

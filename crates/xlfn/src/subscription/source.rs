@@ -195,9 +195,8 @@ where
     T: IntoRtdValue,
 {
     pub fn publish(&self, value: T) -> XllResult<()> {
-        let value = value.into_rtd_value()?;
-        value.validate()?;
-        self.sink.publish(value)
+        let value = value.into_rtd_value()?.into_stored()?;
+        self.sink.publish_stored(value)
     }
 }
 

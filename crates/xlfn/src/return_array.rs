@@ -99,7 +99,15 @@ impl XlArrayBuilder {
         self.push_oper(XLOPER12::number(value))
     }
 
-    fn push_string(&mut self, text: String) -> XllResult<()> {
+    pub(crate) fn push_bool(&mut self, value: bool) -> XllResult<()> {
+        self.push_oper(XLOPER12::boolean(value))
+    }
+
+    pub(crate) fn push_error(&mut self, value: crate::ExcelError) -> XllResult<()> {
+        self.push_oper(XLOPER12::error(value.code()))
+    }
+
+    pub(crate) fn push_string(&mut self, text: String) -> XllResult<()> {
         let utf16_length = crate::utf16::checked_utf16_len(
             &text,
             "<array output>",
@@ -148,7 +156,7 @@ impl XlArrayBuilder {
         Ok(())
     }
 
-    fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
+    pub(crate) fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
         match value {
             ExcelCellOutput::Number(value) if value.is_finite() => {
                 self.push_oper(XLOPER12::number(value))
@@ -161,7 +169,7 @@ impl XlArrayBuilder {
     }
 
     pub fn push<T: IntoExcel>(&mut self, value: T) -> XllResult<()> {
-        self.push_cell(value.into_excel()?)
+        value.push_into(self)
     }
 
     pub fn finish(self) -> XllResult<XlArrayOutput> {

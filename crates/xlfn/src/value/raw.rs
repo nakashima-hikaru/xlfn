@@ -26,8 +26,7 @@ pub(crate) enum GridView<'call> {
     Multi {
         rows: usize,
         columns: usize,
-        values: *mut XLOPER12,
-        _lifetime: PhantomData<&'call XLOPER12>,
+        values: &'call [XLOPER12],
     },
 }
 
@@ -35,11 +34,18 @@ impl<'call> GridView<'call> {
     pub(crate) fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() == XLTYPE_MULTI {
             let array = value.array(argument)?;
+            let len = (array.rows as usize) * (array.columns as usize);
+            let values = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: `XlValueRef::array` validated the non-null pointer,
+                // alignment, byte size, and contiguous element range.
+                unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
+            };
             Ok(Self::Multi {
                 rows: array.rows as usize,
                 columns: array.columns as usize,
-                values: array.values,
-                _lifetime: PhantomData,
+                values,
             })
         } else {
             Ok(Self::Scalar(value))
@@ -53,17 +59,10 @@ impl<'call> GridView<'call> {
         }
     }
 
-    pub(crate) fn element(&self, index: usize) -> XllResult<XlValueRef<'call>> {
+    pub(crate) fn cells(&self) -> &'call [XLOPER12] {
         match self {
-            Self::Scalar(value) if index == 0 => Ok(*value),
-            Self::Scalar(_) => Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::GRID_INDEX,
-            }),
-            Self::Multi { values, .. } => {
-                // SAFETY: `array` validation established the contiguous range,
-                // and callers only request indices within the validated shape.
-                unsafe { XlValueRef::from_raw(values.add(index)) }
-            }
+            Self::Scalar(value) => slice::from_ref(value.raw),
+            Self::Multi { values, .. } => values,
         }
     }
 }
@@ -80,6 +79,10 @@ impl<'call> XlValueRef<'call> {
         // SAFETY: The caller guarantees a live, aligned XLOPER12 for 'call.
         let raw = unsafe { raw.as_ref() }
             .ok_or_else(|| XllError::input("<raw>", InputError::NullPointer))?;
+        Self::from_array_cell(raw)
+    }
+
+    pub(crate) fn from_array_cell(raw: &'call XLOPER12) -> XllResult<Self> {
         if raw.xltype & !(XLTYPE_MASK | XLBIT_XL_FREE | XLBIT_DLL_FREE) != 0 {
             return Err(XllError::input(
                 "<raw>",

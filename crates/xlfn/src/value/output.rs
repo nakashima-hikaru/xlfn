@@ -2,6 +2,7 @@
 
 use crate::XllResult;
 use crate::error::IntoXllError;
+use crate::return_array::XlArrayBuilder;
 use crate::return_value::ReturnContext;
 
 use super::{ExcelCellOutput, ExcelOutput};
@@ -9,6 +10,16 @@ use super::{ExcelCellOutput, ExcelOutput};
 /// Converts an ordinary Rust value into a semantic Excel cell.
 pub trait IntoExcel {
     fn into_excel(self) -> XllResult<ExcelCellOutput>;
+
+    /// Encodes directly into an array builder when the value has a primitive
+    /// ABI representation. Custom conversions keep the semantic fallback.
+    #[doc(hidden)]
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()>
+    where
+        Self: Sized,
+    {
+        builder.push_cell(self.into_excel()?)
+    }
 }
 
 /// Framework-side return dispatch used by generated proc-macro code.

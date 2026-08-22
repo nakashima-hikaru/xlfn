@@ -191,7 +191,6 @@ impl TokenCodec {
 pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
 const VERIFIED_TOKEN_CACHE_SIZE: usize = 8;
 
-#[derive(Clone, Copy)]
 struct VerifiedTokenCacheEntry {
     registry_address: usize,
     session: u64,
@@ -204,7 +203,7 @@ thread_local! {
     static VERIFIED_TOKEN_CACHE: RefCell<[
         Option<VerifiedTokenCacheEntry>;
         VERIFIED_TOKEN_CACHE_SIZE
-    ]> = const { RefCell::new([None; VERIFIED_TOKEN_CACHE_SIZE]) };
+    ]> = const { RefCell::new([const { None }; VERIFIED_TOKEN_CACHE_SIZE]) };
 }
 
 #[inline]
@@ -229,8 +228,8 @@ pub(crate) fn verified_token_cache_lookup(
     let bytes = token.as_bytes();
     let index = verified_token_cache_index(bytes)?;
     VERIFIED_TOKEN_CACHE.with(|cache| {
-        let entry = cache.borrow()[index];
-        entry.and_then(|entry| {
+        let cache = cache.borrow();
+        cache[index].as_ref().and_then(|entry| {
             (entry.registry_address == registry_address
                 && entry.session == session
                 && entry.secret == *secret

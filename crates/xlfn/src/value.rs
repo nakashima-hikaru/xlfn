@@ -290,8 +290,8 @@ where
     }
 
     let mut data = Vec::with_capacity(element_count);
-    for index in 0..element_count {
-        let element = grid.element(index)?;
+    for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
+        let element = element?;
         if element.base_type() == XLTYPE_MULTI {
             return Err(XllError::input(
                 argument,
@@ -366,7 +366,7 @@ where
     }
 
     context.scratch().collect_copy(element_count, |index| {
-        let element = grid.element(index)?;
+        let element = XlValueRef::from_array_cell(&grid.cells()[index])?;
         if element.base_type() == XLTYPE_MULTI {
             return Err(XllError::input(
                 argument,
@@ -728,8 +728,8 @@ where
     }
 
     let mut data = Vec::with_capacity(element_count);
-    for index in 0..element_count {
-        let element = grid.element(index)?;
+    for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
+        let element = element?;
         if element.base_type() == XLTYPE_MULTI {
             return Err(XllError::input(
                 argument,
@@ -822,6 +822,10 @@ impl IntoExcel for ExcelCellOutput {
         }
         Ok(self)
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_cell(self)
+    }
 }
 
 impl IntoExcel for f64 {
@@ -834,17 +838,29 @@ impl IntoExcel for f64 {
             })
         }
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_f64(self)
+    }
 }
 
 impl IntoExcel for bool {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::Boolean(self))
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_bool(self)
+    }
 }
 
 impl IntoExcel for i32 {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::Number(self as f64))
+    }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_f64(self as f64)
     }
 }
 
@@ -859,11 +875,26 @@ impl IntoExcel for i64 {
             })
         }
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        const EXACT_LIMIT: i64 = 1_i64 << 53;
+        if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
+            builder.push_f64(self as f64)
+        } else {
+            Err(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })
+        }
+    }
 }
 
 impl IntoExcel for ExcelSerialDate {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         IntoExcel::into_excel(self.serial)
+    }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_f64(self.serial)
     }
 }
 
@@ -871,17 +902,29 @@ impl IntoExcel for String {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::String(self))
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_string(self)
+    }
 }
 
 impl IntoExcel for &str {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::String(self.to_owned()))
     }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_string(self.to_owned())
+    }
 }
 
 impl IntoExcel for ExcelErrorValue {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::Error(self.0))
+    }
+
+    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+        builder.push_error(self.0)
     }
 }
 

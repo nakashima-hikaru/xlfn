@@ -1,7 +1,9 @@
 use super::quota::QuotaPermit;
 use super::server::PublishCore;
 use super::topic::{SubscriptionKey, TopicId};
-use super::value::{RtdValue, StoredRtdValue};
+#[cfg(test)]
+use super::value::RtdValue;
+use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
@@ -15,7 +17,7 @@ pub(crate) struct ErasedSink {
 
 impl ErasedSink {
     #[inline]
-    pub(crate) fn publish(&self, value: RtdValue) -> XllResult<()> {
+    pub(crate) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
         self.publish
             .publish(self.topic_id, self.connection_generation, value)
     }

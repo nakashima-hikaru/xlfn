@@ -1,5 +1,7 @@
 use super::source::SourceHandleId;
 use crate::{XllError, XllResult};
+use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
@@ -159,15 +161,17 @@ fn parse_fixed_hex(value: &str) -> Option<u64> {
         .flatten()
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RtdTopic {
-    pub(crate) parts: Arc<[String]>,
+    parts: Arc<[String]>,
+    byte_len: usize,
+    hash: u64,
+    protocol_error: Option<usize>,
 }
 
 impl RtdTopic {
     pub fn new(parts: impl IntoIterator<Item = impl Into<String>>) -> XllResult<Self> {
         let mut normalized = Vec::new();
-        let mut total_bytes = 0_usize;
         for part in parts {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
                 return Err(XllError::input(
@@ -185,24 +189,6 @@ impl RtdTopic {
                     crate::error::InputError::Malformed("RTD topics require non-empty parts"),
                 ));
             }
-            total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
-                XllError::input(
-                    "RTD topic",
-                    crate::error::InputError::TooLarge {
-                        limit: MAX_RTD_TOPIC_BYTES,
-                        actual: usize::MAX,
-                    },
-                )
-            })?;
-            if total_bytes > MAX_RTD_TOPIC_BYTES {
-                return Err(XllError::input(
-                    "RTD topic",
-                    crate::error::InputError::TooLarge {
-                        limit: MAX_RTD_TOPIC_BYTES,
-                        actual: total_bytes,
-                    },
-                ));
-            }
             normalized.push(part);
         }
         if normalized.is_empty() {
@@ -211,8 +197,16 @@ impl RtdTopic {
                 crate::error::InputError::Malformed("RTD topics require non-empty parts"),
             ));
         }
+        let (byte_len, hash) = measure_topic_parts(&normalized)?;
+        let protocol_error = normalized
+            .iter()
+            .map(|part| part.encode_utf16().count())
+            .find(|&length| length > 32_767);
         Ok(Self {
             parts: Arc::from(normalized),
+            byte_len,
+            hash,
+            protocol_error,
         })
     }
 
@@ -226,15 +220,39 @@ impl RtdTopic {
     }
 
     pub(crate) fn validate_protocol(&self) -> XllResult<()> {
-        validate_topic_parts(&self.parts)
+        let Some(actual) = self.protocol_error else {
+            return Ok(());
+        };
+        Err(XllError::input(
+            "RTD topic",
+            crate::error::InputError::TooLarge {
+                limit: 32_767,
+                actual,
+            },
+        ))
     }
 
     pub(crate) fn byte_len(&self) -> usize {
-        self.parts.iter().map(String::len).sum()
+        self.byte_len
     }
 }
 
-fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
+impl PartialEq for RtdTopic {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.parts, &other.parts)
+            || (self.hash == other.hash && self.parts == other.parts)
+    }
+}
+
+impl Eq for RtdTopic {}
+
+impl Hash for RtdTopic {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+fn measure_topic_parts(parts: &[String]) -> XllResult<(usize, u64)> {
     if parts.is_empty() || parts.iter().any(String::is_empty) {
         return Err(XllError::input(
             "RTD topic",
@@ -252,17 +270,9 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
     }
 
     let mut total_bytes = 0_usize;
+    let mut hasher = FxHasher::default();
+    parts.len().hash(&mut hasher);
     for part in parts {
-        let utf16_len = part.encode_utf16().count();
-        if utf16_len > 32_767 {
-            return Err(XllError::input(
-                "RTD topic",
-                crate::error::InputError::TooLarge {
-                    limit: 32_767,
-                    actual: utf16_len,
-                },
-            ));
-        }
         total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
             XllError::input(
                 "RTD topic",
@@ -272,6 +282,7 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
                 },
             )
         })?;
+        part.hash(&mut hasher);
     }
     if total_bytes > MAX_RTD_TOPIC_BYTES {
         return Err(XllError::input(
@@ -282,5 +293,5 @@ fn validate_topic_parts(parts: &[String]) -> XllResult<()> {
             },
         ));
     }
-    Ok(())
+    Ok((total_bytes, hasher.finish()))
 }

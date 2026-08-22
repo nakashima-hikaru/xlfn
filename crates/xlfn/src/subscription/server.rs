@@ -9,7 +9,7 @@ use super::quota::Quota;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::{ErasedRtdSource, RtdSubscription};
 use super::topic::{SubscriptionKey, TopicId};
-use super::value::{RtdValue, StoredRtdValue};
+use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
@@ -315,10 +315,9 @@ impl PublishCore {
         &self,
         topic_id: TopicId,
         generation: ConnectionGeneration,
-        value: RtdValue,
+        value: StoredRtdValue,
     ) -> XllResult<()> {
         let _operation = self.enter_operation()?;
-        let value = value.into_stored()?;
 
         let shard_index = shard_index(topic_id);
 
@@ -335,46 +334,40 @@ impl PublishCore {
                 continue;
             }
 
-            let conn_gen = {
-                let active = shard
-                    .active_by_topic
-                    .get(&topic_id)
-                    .filter(|active| active.generation == generation)
-                    .ok_or(XllError::Closing)?;
-                active.generation
-            };
-
-            let is_new_update = !shard.pending[buffer].contains_key(&topic_id);
-
-            let permit = if is_new_update {
-                Some(Quota::try_acquire(&self.queued_update_quota)?)
-            } else {
-                None
-            };
-
-            let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
-
-            match shard.pending[buffer].entry(topic_id) {
+            let TopicShard {
+                active_by_topic,
+                pending: pending_buffers,
+                ..
+            } = &mut *shard;
+            let pending = &mut pending_buffers[buffer];
+            let pending_entry = pending.entry(topic_id);
+            let active = active_by_topic
+                .get_mut(&topic_id)
+                .filter(|active| active.generation == generation)
+                .ok_or(XllError::Closing)?;
+            let conn_gen = active.generation;
+            match pending_entry {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
                     let existing = entry.get_mut();
                     existing.connection_generation = conn_gen;
                     existing.sequence = sequence;
                     existing.value = value.clone();
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
+                    let permit = Quota::try_acquire(&self.queued_update_quota)?;
+                    let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
                     entry.insert(QueuedUpdate {
                         connection_generation: conn_gen,
                         sequence,
                         value: value.clone(),
-                        _permit: permit.expect("new update owns quota permit"),
+                        _permit: permit,
                     });
                     self.pending_updates.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
-            if let Some(active) = shard.active_by_topic.get_mut(&topic_id) {
-                active.latest = value;
-            }
+            active.latest = value;
             break epoch;
         };
 

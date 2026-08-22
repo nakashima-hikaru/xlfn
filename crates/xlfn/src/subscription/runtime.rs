@@ -21,7 +21,6 @@ use crate::generation::{ConnectionGeneration, RuntimeGeneration, ServerGeneratio
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -81,10 +80,10 @@ impl SubscriptionRuntime {
             module_ingress,
             runtime_gate: Arc::new(OperationGate::new()),
             catalog: Mutex::new(SubscriptionCatalog {
-                pending: HashMap::new(),
+                pending: FxHashMap::default(),
                 pending_topic_bytes: 0,
                 sources: SourceIdentityRegistry::new(),
-                active_keys: HashMap::new(),
+                active_keys: FxHashMap::default(),
                 identities: SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
@@ -201,7 +200,6 @@ impl SubscriptionRuntime {
             return Err(XllError::StaleHandle);
         }
         topic.validate_protocol()?;
-
         let mut catalog = self.catalog.lock();
 
         let source_identity = catalog

@@ -49,12 +49,10 @@ enum ArgumentSink {
     },
 }
 
+#[cfg(test)]
 enum ArgumentIdentity {
-    Inline {
-        bytes: [u8; INLINE_ARGUMENT_BYTES],
-        len: usize,
-    },
-    Hashed([u8; 32]),
+    Inline { len: usize },
+    Hashed,
 }
 
 pub struct InputIdentityEncoder {
@@ -192,18 +190,44 @@ impl InputIdentityEncoder {
         *buffered = 0;
     }
 
-    fn finish(self) -> XllResult<ArgumentIdentity> {
+    fn finish_into(self, root: &mut blake3::Hasher) -> XllResult<()> {
         match self.error {
             Some(error) => Err(error),
             None => match self.sink {
-                ArgumentSink::Inline { bytes, len } => Ok(ArgumentIdentity::Inline { bytes, len }),
+                ArgumentSink::Inline { bytes, len } => {
+                    root.update(&[ArgumentEncoding::Inline as u8]);
+                    root.update(&(len as u64).to_le_bytes());
+                    root.update(&bytes[..len]);
+                    Ok(())
+                }
                 ArgumentSink::Hashed {
                     mut hasher,
                     buffer,
                     mut buffered,
                 } => {
                     Self::flush_hashed(&mut hasher, &buffer, &mut buffered);
-                    Ok(ArgumentIdentity::Hashed(*hasher.finalize().as_bytes()))
+                    root.update(&[ArgumentEncoding::Hashed as u8]);
+                    root.update(hasher.finalize().as_bytes());
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn finish(self) -> XllResult<ArgumentIdentity> {
+        match self.error {
+            Some(error) => Err(error),
+            None => match self.sink {
+                ArgumentSink::Inline { len, .. } => Ok(ArgumentIdentity::Inline { len }),
+                ArgumentSink::Hashed {
+                    mut hasher,
+                    buffer,
+                    mut buffered,
+                } => {
+                    Self::flush_hashed(&mut hasher, &buffer, &mut buffered);
+                    let _ = hasher.finalize();
+                    Ok(ArgumentIdentity::Hashed)
                 }
             },
         }
@@ -231,22 +255,6 @@ impl InputIdentityEncoder {
     }
 }
 
-impl ArgumentIdentity {
-    fn update_root(self, root: &mut blake3::Hasher) {
-        match self {
-            Self::Inline { bytes, len } => {
-                root.update(&[ArgumentEncoding::Inline as u8]);
-                root.update(&(len as u64).to_le_bytes());
-                root.update(&bytes[..len]);
-            }
-            Self::Hashed(digest) => {
-                root.update(&[ArgumentEncoding::Hashed as u8]);
-                root.update(&digest);
-            }
-        }
-    }
-}
-
 /// Builds one runtime-local input fingerprint.
 pub(crate) struct InputFingerprintBuilder {
     root: blake3::Hasher,
@@ -266,8 +274,7 @@ impl InputFingerprintBuilder {
     ) -> XllResult<R> {
         let mut encoder = InputIdentityEncoder::new(argument);
         let value = encode(&mut encoder)?;
-        let identity = encoder.finish()?;
-        identity.update_root(&mut self.root);
+        encoder.finish_into(&mut self.root)?;
         Ok(value)
     }
 
@@ -535,7 +542,7 @@ mod tests {
         encoder_129.write(&[0; 129]);
         assert!(matches!(
             encoder_129.finish().unwrap(),
-            ArgumentIdentity::Hashed(_)
+            ArgumentIdentity::Hashed
         ));
     }
 

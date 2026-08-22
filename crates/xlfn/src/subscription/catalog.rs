@@ -3,7 +3,7 @@ use super::source::ErasedRtdSource;
 use super::topic::{RtdTopic, SubscriptionKey};
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,10 +27,10 @@ pub(crate) struct PendingSubscription {
 }
 
 pub(crate) struct SubscriptionCatalog {
-    pub(crate) pending: HashMap<SubscriptionKey, PendingSubscription>,
+    pub(crate) pending: FxHashMap<SubscriptionKey, PendingSubscription>,
     pub(crate) pending_topic_bytes: usize,
     pub(crate) sources: SourceIdentityRegistry,
-    pub(crate) active_keys: HashMap<SubscriptionKey, ActiveKeyBinding>,
+    pub(crate) active_keys: FxHashMap<SubscriptionKey, ActiveKeyBinding>,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
 }
