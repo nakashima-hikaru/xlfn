@@ -975,7 +975,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
                     return Err(XllError::InvalidHandle);
                 }
 
-                let _value = VariantGuard(NonNull::from(&mut value));
+                let _value = VariantGuard(NonNull::from_mut(&mut value));
 
                 // SAFETY: SafeArrayGetElement successfully initialized `value`,
                 // so its VARIANT header and discriminated payload may be read.

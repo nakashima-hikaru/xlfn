@@ -80,6 +80,30 @@ pub(crate) struct RotatingLog {
     pub(crate) generations: usize,
 }
 
+struct LogLock(fs::File);
+
+impl LogLock {
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
+        lock_name.push(".lock");
+        let lock_path = path.with_file_name(lock_name);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for LogLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 impl RotatingLog {
     pub(crate) fn open(path: PathBuf) -> io::Result<Self> {
         Self::open_with_policy(path, LOG_MAX_BYTES, LOG_GENERATIONS)
@@ -90,6 +114,7 @@ impl RotatingLog {
         maximum_bytes: u64,
         generations: usize,
     ) -> io::Result<Self> {
+        let _lock = LogLock::acquire(&path)?;
         if fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= maximum_bytes) {
             rotate_log_files(&path, generations)?;
         }
@@ -115,6 +140,7 @@ impl RotatingLog {
                 "log record exceeds the maximum log size",
             ));
         }
+        let _lock = LogLock::acquire(&self.path)?;
         if self.size > 0 && self.size.saturating_add(incoming) > self.maximum_bytes {
             self.file.take();
             rotate_log_files(&self.path, self.generations)?;

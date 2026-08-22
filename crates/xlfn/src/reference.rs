@@ -119,7 +119,7 @@ impl ExcelReference<'_> {
     }
 
     pub(crate) fn raw_pointer(&self) -> NonNull<XLOPER12> {
-        NonNull::from(self.raw)
+        NonNull::from_ref(self.raw)
     }
 }
 

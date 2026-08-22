@@ -60,7 +60,7 @@ impl ErasedObject {
         cleanup: Arc<HandleCleanupState>,
     ) -> Self {
         let owner: Box<dyn Any + Send + Sync> = Box::new(value);
-        let ptr = NonNull::from(owner.as_ref()).cast::<()>();
+        let ptr = NonNull::from_ref(owner.as_ref()).cast::<()>();
         Self {
             owner: Some(owner),
             ptr,

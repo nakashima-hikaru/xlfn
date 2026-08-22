@@ -310,7 +310,7 @@ fn verify_callback_abi() {
         install_callback_for_abi_probe(xlfn_callback_probe as *const () as *mut c_void);
     }
     let mut argument = XLOPER12::integer(7);
-    let arguments = [std::ptr::NonNull::from(&mut argument)];
+    let arguments = [std::ptr::NonNull::from_mut(&mut argument)];
     // SAFETY: one live, non-null argument pointer is supplied to the linked
     // trampoline for the duration of the call.
     let (status, result) = unsafe { excel12(0x1234, &arguments) };

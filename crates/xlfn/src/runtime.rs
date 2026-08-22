@@ -582,7 +582,6 @@ impl<A: crate::Addin> Runtime<A> {
         registrations: &mut Vec<RegistrationId>,
     ) -> XllResult<()> {
         let mut control = self.lifecycle.lock();
-        self.lifecycle.notify_all();
         if control.canonical_state().open_attempt() != Some(attempt.attempt_id) {
             attempt.active = false;
             return Err(XllError::Closing);
@@ -619,16 +618,13 @@ impl<A: crate::Addin> Runtime<A> {
                     Ok::<(), XllError>(())
                 })
                 .unwrap_or_else(|_| opening_publication_lost())?;
-        }
-
-        if !can_commit {
-            self.reject_open_attempt(&mut control, attempt);
-            self.refinement.reject_open(self, attempt.attempt_id);
-        }
-
-        if can_commit {
+            self.lifecycle.notify_all();
             Ok(())
         } else {
+            self.reject_open_attempt(&mut control, attempt);
+            self.lifecycle.notify_all();
+            drop(control);
+            self.refinement.reject_open(self, attempt.attempt_id);
             Err(XllError::Closing)
         }
     }
@@ -713,8 +709,9 @@ impl<A: crate::Addin> Runtime<A> {
             }
             LifecyclePhase::Closed | LifecyclePhase::Open | LifecyclePhase::Quarantined => false,
         };
-        self.refinement.fail_open(self, attempt_id);
         self.lifecycle.notify_all();
+        drop(control);
+        self.refinement.fail_open(self, attempt_id);
         should_rollback
     }
 

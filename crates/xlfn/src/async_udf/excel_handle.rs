@@ -86,7 +86,7 @@ impl OwnedAsyncHandle {
 
     pub(crate) fn pointer(&mut self) -> NonNull<XLOPER12> {
         let _ = &self.bytes;
-        NonNull::from(&mut self.raw)
+        NonNull::from_mut(&mut self.raw)
     }
 
     pub(crate) fn set_error(&mut self, error: XllError) {

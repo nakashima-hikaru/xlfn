@@ -122,7 +122,10 @@ impl HostRegistrar {
         let mut procedure_value =
             TemporaryString::new(procedure).map_err(RegistrationTransactionError::new)?;
         let mut event_value = XLOPER12::integer(event);
-        let arguments = [procedure_value.pointer(), NonNull::from(&mut event_value)];
+        let arguments = [
+            procedure_value.pointer(),
+            NonNull::from_mut(&mut event_value),
+        ];
         // SAFETY: both arguments are live for the callback.
         let (status, mut result) = unsafe {
             callbacks
@@ -257,7 +260,7 @@ impl HostRegistrar {
             type_text.pointer(),
             function_text.pointer(),
             arguments.pointer(),
-            NonNull::from(&mut macro_type),
+            NonNull::from_mut(&mut macro_type),
             category.pointer(),
             shortcut.pointer(),
             help_topic.pointer(),
@@ -518,7 +521,7 @@ impl HostRegistrar {
             }
             if registration.state == RegistrationCleanupState::Registered {
                 let mut id = XLOPER12::number(registration.registration.id);
-                let arguments = [NonNull::from(&mut id)];
+                let arguments = [NonNull::from_mut(&mut id)];
                 // SAFETY: id is live for the callback.
                 let (status, mut result) =
                     match unsafe { callbacks.call(XLF_UNREGISTER, &arguments) } {
@@ -794,8 +797,8 @@ impl HostRegistrar {
             let mut nil_procedure = XLOPER12::nil();
             let mut event_value = XLOPER12::integer(registration.event);
             let arguments = [
-                NonNull::from(&mut nil_procedure),
-                NonNull::from(&mut event_value),
+                NonNull::from_mut(&mut nil_procedure),
+                NonNull::from_mut(&mut event_value),
             ];
             // SAFETY: both arguments are live for the callback.
             let (status, mut result) =
@@ -1261,7 +1264,7 @@ impl TemporaryString {
             },
             xltype: XLTYPE_STR,
         };
-        NonNull::from(&mut self.oper)
+        NonNull::from_mut(&mut self.oper)
     }
 }
 

@@ -69,7 +69,7 @@ pub(crate) fn observe(
     let mut server_name = XLOPER12::missing();
     let arguments = [
         prog_id.pointer(),
-        NonNull::from(&mut server_name),
+        NonNull::from_mut(&mut server_name),
         topic.pointer(),
     ];
 
@@ -165,7 +165,7 @@ pub(crate) fn observe_subscription(
     let mut server_name = XLOPER12::missing();
     let arguments = [
         prog_id.pointer(),
-        NonNull::from(&mut server_name),
+        NonNull::from_mut(&mut server_name),
         topic.pointer(),
     ];
 
@@ -242,6 +242,6 @@ impl CountedString {
 
     fn pointer(&mut self) -> NonNull<XLOPER12> {
         let _keep_alive = &self.units;
-        NonNull::from(&mut self.oper)
+        NonNull::from_mut(&mut self.oper)
     }
 }

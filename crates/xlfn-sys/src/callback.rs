@@ -286,7 +286,7 @@ mod tests {
     fn wrapper_passes_function_and_result() {
         install_fake();
         let mut argument = XLOPER12::integer(7);
-        let arguments = [NonNull::from(&mut argument)];
+        let arguments = [NonNull::from_mut(&mut argument)];
         let original_argument = arguments[0];
         // SAFETY: one live argument is supplied and the installed test callback
         // has the exact Excel callback signature.
@@ -304,7 +304,7 @@ mod tests {
     fn wrapper_reports_that_the_host_callback_was_invoked() {
         install_fake();
         let mut argument = XLOPER12::integer(7);
-        let arguments = [NonNull::from(&mut argument)];
+        let arguments = [NonNull::from_mut(&mut argument)];
         // SAFETY: one live argument is supplied and the installed test callback
         // has the exact Excel callback signature.
         let (status, result, invoked) = unsafe { excel12_with_invocation(123, &arguments) };
@@ -320,8 +320,12 @@ mod tests {
         let mut value = XLOPER12::number(42.0);
         // SAFETY: both operands are live for the callback and the installed
         // test callback has the exact Excel callback signature.
-        let (status, result, invoked) =
-            unsafe { excel12_async_return(NonNull::from(&mut handle), NonNull::from(&mut value)) };
+        let (status, result, invoked) = unsafe {
+            excel12_async_return(
+                NonNull::from_mut(&mut handle),
+                NonNull::from_mut(&mut value),
+            )
+        };
         assert_eq!(status, XLRET_SUCCESS);
         assert!(invoked);
         assert_eq!(result.base_type(), crate::XLTYPE_BOOL);
@@ -333,7 +337,7 @@ mod tests {
     fn failed_callback_returns_a_well_formed_result() {
         install_fake();
         let mut argument = XLOPER12::integer(7);
-        let arguments = [NonNull::from(&mut argument)];
+        let arguments = [NonNull::from_mut(&mut argument)];
         // SAFETY: one live argument is supplied and the installed test callback
         // has the exact Excel callback signature.
         let (status, result, invoked) = unsafe { excel12_with_invocation(124, &arguments) };
@@ -347,7 +351,7 @@ mod tests {
         install_fake();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let mut argument = XLOPER12::integer(7);
-        let arguments = [NonNull::from(&mut argument)];
+        let arguments = [NonNull::from_mut(&mut argument)];
         // SAFETY: one live argument is supplied and the installed test callback
         // has the exact Excel callback signature.
         let (status, mut result) = unsafe { excel12(123, &arguments) };

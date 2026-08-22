@@ -7,8 +7,6 @@ use std::fs;
 #[cfg(test)]
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
@@ -1120,9 +1118,10 @@ mod tests {
     #[test]
     fn file_delivery_failures_are_counted() {
         let before = failed_diagnostic_writes();
+        let tempdir = tempfile::tempdir().unwrap();
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog {
-                path: PathBuf::from("unavailable.log"),
+                path: tempdir.path().join("unavailable.log"),
                 file: None,
                 size: 0,
                 maximum_bytes: LOG_MAX_BYTES,

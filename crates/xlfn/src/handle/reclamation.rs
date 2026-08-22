@@ -117,17 +117,10 @@ impl RetiredStore {
     }
 
     pub(super) fn reclaim(&mut self, safe_before: u64) -> Vec<ErasedObject> {
-        let mut ready = Vec::new();
-        let mut pending = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.drain(..) {
-            if entry.pins == 0 && entry.epoch < safe_before {
-                ready.push(entry.value);
-            } else {
-                pending.push(entry);
-            }
-        }
-        self.entries = pending;
-        ready
+        self.entries
+            .extract_if(.., |entry| entry.pins == 0 && entry.epoch < safe_before)
+            .map(|entry| entry.value)
+            .collect()
     }
 }
 

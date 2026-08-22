@@ -164,7 +164,7 @@ impl ExcelCallbackValue {
 
     pub(crate) fn raw_pointer(&mut self) -> XllResult<NonNull<XLOPER12>> {
         self.ensure_live()?;
-        Ok(NonNull::from(&mut self.raw))
+        Ok(NonNull::from_mut(&mut self.raw))
     }
 
     pub(crate) fn raw(&self) -> XllResult<&XLOPER12> {
