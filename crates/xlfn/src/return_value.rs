@@ -571,7 +571,7 @@ where
     F: FnOnce() -> XllResult<T>,
     T: ExcelReturn,
 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+    let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
@@ -617,7 +617,7 @@ where
 /// Excel callbacks.
 #[doc(hidden)]
 pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+    let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
@@ -650,7 +650,7 @@ where
     F: FnOnce(&A::SharedState) -> XllResult<T>,
     T: ExcelReturn,
 {
-    let (_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
+    let (_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterExternal);
     });
@@ -707,7 +707,7 @@ where
         return udf_boundary_uninstrumented(guard, producer, udf_id, operation);
     }
 
-    let concurrent_calls = crate::ingress::global_ingress().active_udfs();
+    let concurrent_calls = crate::module_runtime::ingress().active_udfs();
 
     udf_boundary_instrumented(
         runtime,
@@ -1025,9 +1025,9 @@ mod tests {
         // so one test cannot close another test's active opening epoch.
         let module_lease = crate::ingress::acquire_test_module_lease();
         let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if crate::ingress::global_ingress().phase() != crate::ingress::PHASE_CLOSED {
-            crate::ingress::global_ingress().begin_close_with(|| {});
-            let _ = crate::ingress::global_ingress().seal_and_drain();
+        if crate::module_runtime::ingress().phase() != crate::ingress::PHASE_CLOSED {
+            crate::module_runtime::ingress().begin_close_with(|| {});
+            let _ = crate::module_runtime::ingress().seal_and_drain();
         }
         ReturnValueTestGuard {
             _lock: lock,
@@ -1362,10 +1362,10 @@ mod tests {
 
         converting_rx.recv().unwrap();
         assert!(runtime.begin_close());
-        crate::ingress::global_ingress().begin_close_with(|| {});
+        crate::module_runtime::ingress().begin_close_with(|| {});
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
-            let _ = crate::ingress::global_ingress().seal_and_drain();
+            let _ = crate::module_runtime::ingress().seal_and_drain();
             closed_tx.send(()).unwrap();
         });
         assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());

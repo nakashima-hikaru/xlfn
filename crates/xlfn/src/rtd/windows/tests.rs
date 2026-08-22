@@ -421,7 +421,7 @@ impl Drop for TestUnknownReference {
 }
 
 fn close_test_ingress() {
-    let ingress = crate::ingress::global_ingress();
+    let ingress = crate::module_runtime::ingress();
     if matches!(
         ingress.phase(),
         crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
@@ -481,7 +481,7 @@ impl RtdTestLock {
         // another concurrently running lifecycle test.
         cleanup_test_active_server();
         close_test_ingress();
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
         crate::rtd::begin_module_open();
@@ -498,7 +498,7 @@ static TEST_LOCK: RtdTestLock = RtdTestLock;
 #[test]
 fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let ingress = crate::ingress::global_ingress();
+    let ingress = crate::module_runtime::ingress();
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     crate::rtd::certify_logical_quiescence();
@@ -580,7 +580,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 #[test]
 fn com_module_lifetime_emits_rtd_resource_trace_events() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let ingress = crate::ingress::global_ingress();
+    let ingress = crate::module_runtime::ingress();
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     ingress.begin_opening();

@@ -824,7 +824,7 @@ impl FormulaHandleServiceSlot {
                 FormulaHandleService::try_new_with_ingress(
                     usize::try_from(config.maximum_bindings())
                         .expect("handle capacity fits the platform usize"),
-                    Some(crate::ingress::global_ingress()),
+                    Some(crate::module_runtime::ingress()),
                 )
                 .map(Arc::new)
             },

@@ -3,9 +3,8 @@
 use crate::generation::RuntimeGeneration;
 
 /// Service slots whose liveness is coupled to one open generation.
-/// Generation-specific policy lives in [`crate::addin::RuntimeConfig`] inside
-/// [`crate::runtime::OpenGeneration`], while these slots carry the reusable
-/// service state.
+/// Generation-specific policy is consumed from [`crate::runtime::OpeningGeneration`]
+/// while these slots carry the reusable service state after arming.
 pub(crate) struct GenerationServices {
     pub(crate) formula_handles: crate::handle::FormulaHandleServiceSlot,
     pub(crate) subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot,
@@ -54,11 +53,6 @@ impl ArmedServices<'_> {
             generation: self.generation,
         }
     }
-
-    pub(crate) fn rollback(mut self) {
-        self.committed = true;
-        self.services.disarm_or_abort(self.generation);
-    }
 }
 
 impl Drop for ArmedServices<'_> {
@@ -94,7 +88,7 @@ impl GenerationServices {
             .map(|()| armed)
     }
 
-    fn disarm_or_abort(&self, generation: RuntimeGeneration) {
+    pub(crate) fn disarm_or_abort(&self, generation: RuntimeGeneration) {
         if let Err(error) = self.disarm_generation(generation) {
             tracing::error!(
                 ?generation,

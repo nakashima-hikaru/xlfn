@@ -89,11 +89,11 @@ impl CallbackGate {
         gate
     }
 
-    fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.state.lock().borrow_mut().lifecycle = CallbackGateLifecycle::Open;
     }
 
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         self.state.lock().borrow_mut().lifecycle = CallbackGateLifecycle::Closed;
     }
 
@@ -253,26 +253,6 @@ fn decrement_scope(
     }
 }
 
-pub(crate) fn reset() {
-    crate::module_runtime::global().callback_gate().reset();
-}
-
-pub(crate) fn reset_from_runtime() {
-    #[cfg(test)]
-    let Some(_test_guard) = crate::test_callback::try_lock() else {
-        return;
-    };
-    reset();
-}
-
-pub(crate) fn close_from_runtime() {
-    #[cfg(test)]
-    let Some(_test_guard) = crate::test_callback::try_lock() else {
-        return;
-    };
-    crate::module_runtime::global().callback_gate().close();
-}
-
 pub(crate) fn enter_callback<'a>(
     invocation: &'a CallbackInvocationToken,
 ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
@@ -299,10 +279,10 @@ mod tests {
     #[test]
     fn runtime_transitions_update_the_module_gate() {
         let _test_guard = crate::test_callback::lock();
-        reset_from_runtime();
+        crate::module_runtime::global().reset_callbacks();
         let token = CallbackInvocationToken::new();
         assert!(enter_callback(&token).is_ok());
-        close_from_runtime();
+        crate::module_runtime::global().close_callbacks();
         assert!(matches!(
             enter_callback(&token),
             Err(CallbackGateSuppressed { .. })

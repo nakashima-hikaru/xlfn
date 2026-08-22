@@ -453,7 +453,7 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
         return Err(DiagnosticInitError::ReentrantMutation);
     }
     let admitted = crate::ingress::with_diagnostic_linearization(|| {
-        crate::ingress::global_ingress().allows_diagnostic_mutation()
+        crate::module_runtime::ingress().allows_diagnostic_mutation()
     });
     if !admitted {
         return Err(DiagnosticInitError::RouterClosed);
@@ -467,7 +467,7 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
             }
             Ok(sink)
         },
-        |had_sink| admit_published_sink(router, crate::ingress::global_ingress(), had_sink),
+        |had_sink| admit_published_sink(router, crate::module_runtime::ingress(), had_sink),
     )
 }
 
@@ -659,7 +659,7 @@ mod tests {
 
     impl Drop for GlobalRouterTestGuard {
         fn drop(&mut self) {
-            let ingress = crate::ingress::global_ingress();
+            let ingress = crate::module_runtime::ingress();
             if ingress.phase() != crate::ingress::PHASE_CLOSED {
                 ingress.begin_close_with(|| {});
                 let _ = ingress.seal_and_drain();
@@ -670,7 +670,7 @@ mod tests {
     fn prepare_global_router() -> GlobalRouterTestGuard {
         let module_lease = crate::ingress::acquire_test_module_lease();
         let diagnostic_lock = DIAGNOSTIC_TEST_MUTEX.lock();
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         if ingress.phase() != crate::ingress::PHASE_CLOSED {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();

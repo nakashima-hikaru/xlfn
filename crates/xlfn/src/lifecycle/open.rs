@@ -38,6 +38,12 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
+    pub(super) fn attempt_mut(&mut self) -> &mut OpeningTxn<'runtime, A> {
+        self.attempt
+            .as_mut()
+            .expect("an open transaction always owns its attempt")
+    }
+
     pub(super) fn stage_registrations(
         &mut self,
         registrations: Vec<crate::registration::RegistrationId>,
@@ -46,12 +52,11 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
     }
 
     pub(super) fn commit(&mut self) -> XllResult<()> {
-        self.runtime.finish_open_with_registrations(
-            self.attempt
-                .as_mut()
-                .expect("an open transaction always owns its attempt"),
-            &mut self.registrations,
-        )
+        let attempt = self
+            .attempt
+            .as_mut()
+            .expect("an open transaction always owns its attempt");
+        attempt.commit(&mut self.registrations)
     }
 
     pub(super) fn rollback(&mut self, lifecycle: &AddinLifecycleAccess<'_, A>) {
@@ -130,7 +135,7 @@ where
             lifecycle,
             BuildInfo::new(addin_id.clone(), version, target),
             descriptors,
-            transaction.callbacks_mut(),
+            transaction,
         )?;
         transaction.stage_registrations(registrations);
         transaction.commit()

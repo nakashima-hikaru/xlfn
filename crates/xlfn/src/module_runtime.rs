@@ -80,6 +80,10 @@ impl ModuleRuntime {
         &self.callback_gate
     }
 
+    pub(crate) fn reset_callbacks(&'static self) {
+        self.callback_gate.reset();
+    }
+
     pub(crate) fn rtd(&'static self) -> &'static RtdModuleState {
         &self.rtd
     }
@@ -94,7 +98,7 @@ impl ModuleRuntime {
     /// this transition; this method owns the module-local portion.
     pub(crate) fn begin_open(&'static self) -> ModuleOpening {
         self.rtd.begin_open();
-        crate::callback_gate::reset_from_runtime();
+        self.reset_callbacks();
         self.ingress.begin_opening();
         ModuleOpening {
             module: self,
@@ -114,7 +118,7 @@ impl ModuleRuntime {
     }
 
     pub(crate) fn close_callbacks(&'static self) {
-        crate::callback_gate::close_from_runtime();
+        self.callback_gate.close();
     }
 
     pub(crate) fn seal_and_drain(&'static self) -> ExportsDrained {
@@ -130,4 +134,10 @@ static MODULE_RUNTIME: LazyLock<ModuleRuntime> = LazyLock::new(ModuleRuntime::ne
 
 pub(crate) fn global() -> &'static ModuleRuntime {
     &MODULE_RUNTIME
+}
+
+/// Read/admission capability for the module ingress owned by the singleton
+/// module runtime.
+pub(crate) fn ingress() -> &'static ExportIngress {
+    global().ingress()
 }

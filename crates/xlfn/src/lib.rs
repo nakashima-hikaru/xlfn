@@ -124,7 +124,7 @@ inventory::collect!(registration::RegistrationDescriptor);
 pub(crate) mod test_callback {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-    use std::sync::{Mutex, MutexGuard, TryLockError};
+    use std::sync::{Mutex, MutexGuard};
     use xlfn_sys::{
         XL_ASYNC_RETURN, XL_FREE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLMREF12, XLOPER12,
         XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT, XLRET_FAILED,
@@ -180,21 +180,6 @@ pub(crate) mod test_callback {
         CallbackTestGuard { guard }
     }
 
-    pub(crate) fn try_lock() -> Option<CallbackTestGuard> {
-        let reentrant = CALLBACK_TEST_LOCK_DEPTH.get() != 0;
-        let guard = if reentrant {
-            None
-        } else {
-            match CALLBACK_TEST_LOCK.try_lock() {
-                Ok(guard) => Some(guard),
-                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-                Err(TryLockError::WouldBlock) => return None,
-            }
-        };
-        CALLBACK_TEST_LOCK_DEPTH.set(CALLBACK_TEST_LOCK_DEPTH.get() + 1);
-        Some(CallbackTestGuard { guard })
-    }
-
     impl Drop for CallbackTestGuard {
         fn drop(&mut self) {
             let depth = CALLBACK_TEST_LOCK_DEPTH
@@ -219,7 +204,7 @@ pub(crate) mod test_callback {
     }
 
     pub(crate) fn reset() {
-        crate::callback_gate::reset();
+        crate::module_runtime::global().reset_callbacks();
         TOTAL_CALLS.store(0, Ordering::Relaxed);
         ASYNC_RETURN_CALLS.store(0, Ordering::Relaxed);
         FREE_CALLS.store(0, Ordering::Relaxed);

@@ -173,7 +173,7 @@ impl ComModuleLifetime {
     }
 
     pub(super) fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
-        let (ingress_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {
+        let (ingress_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
         });

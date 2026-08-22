@@ -235,10 +235,6 @@ pub(crate) struct OpeningPublicationLost;
 
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
 
-pub(crate) fn global_ingress() -> &'static ExportIngress {
-    crate::module_runtime::global().ingress()
-}
-
 pub(crate) fn with_diagnostic_linearization<F, R>(operation: F) -> R
 where
     F: FnOnce() -> R,
@@ -280,7 +276,7 @@ impl ExportIngress {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         #[cfg(test)]
-        let owns_test_epoch = std::ptr::eq(self, global_ingress());
+        let owns_test_epoch = std::ptr::eq(self, crate::module_runtime::ingress());
         #[cfg(test)]
         if owns_test_epoch {
             TEST_EPOCH_GATE.acquire();
@@ -590,7 +586,7 @@ impl ExportIngress {
             Err(_) => std::process::abort(),
         }
         #[cfg(test)]
-        if std::ptr::eq(self, global_ingress())
+        if std::ptr::eq(self, crate::module_runtime::ingress())
             && self.test_epoch_active.swap(0, Ordering::AcqRel) != 0
         {
             TEST_EPOCH_GATE.release();

@@ -18,7 +18,7 @@ struct AsyncTestGuard {
 impl Drop for AsyncTestGuard {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            let ingress = crate::ingress::global_ingress();
+            let ingress = crate::module_runtime::ingress();
             if ingress.phase() != crate::ingress::PHASE_CLOSED {
                 ingress.begin_close_with(|| {});
                 let _ = ingress.seal_and_drain();

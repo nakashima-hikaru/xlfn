@@ -110,7 +110,7 @@ fn open_addin_inner<A>(
     lifecycle: &AddinLifecycleAccess<'_, A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
-    callbacks: &mut HostCallbackSession,
+    transaction: &mut open::OpeningTransaction<'_, A>,
 ) -> XllResult<Vec<crate::registration::RegistrationId>>
 where
     A: Addin,
@@ -119,13 +119,14 @@ where
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     crate::diagnostics::reset_diagnostic_router()?;
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
-    let registrar = HostRegistrar::connect(callbacks)
+    let registrar = HostRegistrar::connect(transaction.callbacks_mut())
         .map_err(|error| retain_transaction_error(runtime, error))?;
     let generation = runtime.active_generation().ok_or(XllError::Internal {
         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let runtime_config = initialize_addin::<A>(runtime, lifecycle, &context)?;
+    let runtime_config =
+        initialize_addin::<A>(runtime, lifecycle, &context, transaction.attempt_mut())?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
     let has_async_functions = descriptors
@@ -135,7 +136,7 @@ where
         #[cfg(feature = "async")]
         {
             runtime.start_async(runtime_config.async_worker_count())?;
-            match registrar.register_async_events(callbacks) {
+            match registrar.register_async_events(transaction.callbacks_mut()) {
                 Ok(events) => runtime.set_event_registrations(events),
                 Err(error) => return Err(retain_transaction_error(runtime, error)),
             }
@@ -148,7 +149,7 @@ where
         }
     }
     registrar
-        .register_all(callbacks, descriptors)
+        .register_all(transaction.callbacks_mut(), descriptors)
         .map_err(|error| retain_transaction_error(runtime, error))
 }
 
@@ -194,6 +195,7 @@ fn initialize_addin<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     context: &OpenContext,
+    attempt: &mut crate::runtime::OpeningTxn<'_, A>,
 ) -> XllResult<RuntimeConfig>
 where
     A: Addin,
@@ -225,9 +227,9 @@ where
     let opening = crate::runtime::OpeningGeneration {
         shared_state,
         layers,
-        config: runtime_config,
+        init_config: runtime_config,
     };
-    if let Err((error, opening)) = runtime.stage_opening_generation(opening) {
+    if let Err((error, opening)) = attempt.stage(opening) {
         runtime.quarantine_opening_generation(
             active_runtime_generation(runtime),
             opening,
@@ -427,7 +429,7 @@ where
         runtime.retain_failed_event_registrations(Vec::new());
     }
 
-    crate::callback_gate::close_from_runtime();
+    crate::module_runtime::global().close_callbacks();
 
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
@@ -1425,7 +1427,7 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         crate::module_runtime::global().begin_close(|| {});
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         if matches!(
             ingress.phase(),
             crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
@@ -1651,7 +1653,13 @@ mod tests {
         let runtime = Runtime::<LayersPanic>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
         let lifecycle = lifecycle_access(&runtime);
-        initialize_addin::<LayersPanic>(&runtime, &lifecycle, &test_open_context()).unwrap();
+        initialize_addin::<LayersPanic>(
+            &runtime,
+            &lifecycle,
+            &test_open_context(),
+            &mut open_attempt,
+        )
+        .unwrap();
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
         assert!(open_attempt.fail());
@@ -1677,7 +1685,7 @@ mod tests {
         let mut first_open = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut first_open, Vec::new()).unwrap();
-        let first_generation = runtime.generation();
+        let first_generation = runtime.last_committed_generation();
 
         let lifecycle = lifecycle_access(&runtime);
         assert_eq!(remove_addin::<LayersPanic>(&runtime, &lifecycle), 1);
@@ -1687,7 +1695,7 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut second_open, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
-        assert!(runtime.generation() > first_generation);
+        assert!(runtime.last_committed_generation() > first_generation);
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
@@ -2154,7 +2162,9 @@ mod tests {
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime.generation().expect("test runtime has a generation"),
+            runtime
+                .last_committed_generation()
+                .expect("test runtime has a generation"),
             TraceSource {
                 sink: std::sync::Arc::clone(&trace_sink),
             },
@@ -2195,7 +2205,7 @@ mod tests {
                 .async_manager()
                 .spawn(
                     runtime
-                        .generation()
+                        .last_committed_generation()
                         .expect("an open runtime has a published generation")
                         .get(),
                     async move {
@@ -2638,7 +2648,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let (export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {});
+            let (export_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {});
             assert!(accepted);
             let call = runtime.enter().unwrap();
             entered_tx.send(()).unwrap();
@@ -2916,7 +2926,9 @@ mod tests {
             )
             .unwrap();
         let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime.generation().expect("test runtime has a generation"),
+            runtime
+                .last_committed_generation()
+                .expect("test runtime has a generation"),
             OrderedSource {
                 events: std::sync::Arc::clone(&events),
             },
@@ -3013,11 +3025,11 @@ mod tests {
         let lifecycle = lifecycle_access(runtime);
         assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         assert!(
-            runtime
-                .stage_opening_generation(crate::runtime::OpeningGeneration {
+            open_attempt
+                .stage(crate::runtime::OpeningGeneration {
                     shared_state: (),
                     layers: (),
-                    config: crate::addin::RuntimeConfig::new(),
+                    init_config: crate::addin::RuntimeConfig::new(),
                 })
                 .is_ok()
         );
@@ -3115,11 +3127,11 @@ mod tests {
         let lifecycle = lifecycle_access(&runtime);
         assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         assert!(
-            runtime
-                .stage_opening_generation(crate::runtime::OpeningGeneration {
+            open_attempt
+                .stage(crate::runtime::OpeningGeneration {
                     shared_state: (),
                     layers: (),
-                    config: crate::addin::RuntimeConfig::new(),
+                    init_config: crate::addin::RuntimeConfig::new(),
                 })
                 .is_ok()
         );

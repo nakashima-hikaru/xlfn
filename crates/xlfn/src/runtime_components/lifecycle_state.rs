@@ -60,9 +60,30 @@ impl LifecycleStateKind {
     }
 }
 
+/// The complete ownership bundle for a published generation.
+///
+/// A generation is not considered current unless its service lease and module
+/// epoch are owned by the same canonical value.  The read-side ArcSwap only
+/// projects `generation` from this bundle.
+pub(crate) struct OpenBundle<A: crate::Addin> {
+    generation: Arc<OpenGeneration<A>>,
+    services: GenerationServicesLease,
+    module_epoch: ModuleEpochLease,
+}
+
+/// The ownership retained while the generation root is being quiesced.
+///
+/// Shutdown must temporarily remove the generation Arc so `try_unwrap` can
+/// prove that the add-in state did not escape, but the two protocol leases
+/// remain coupled until terminal certification consumes this value.
+struct OpenRetirement {
+    services: GenerationServicesLease,
+    module_epoch: ModuleEpochLease,
+}
+
 /// Canonical owner of every mutable lifecycle decision and generation root.
 ///
-/// `known_generation` intentionally survives the transition to `Closed`: it
+/// `last_committed_generation` intentionally survives the transition to `Closed`: it
 /// identifies the last generation whose teardown was certified and is used by
 /// shutdown certificates and diagnostics. The currently active generation is
 /// represented by `current` and the `Open` state. Both generation roots live
@@ -71,12 +92,11 @@ impl LifecycleStateKind {
 pub(crate) struct LifecycleCore<A: crate::Addin> {
     state: LifecycleStateKind,
     opening: Option<OpeningGeneration<A>>,
-    current: Option<Arc<OpenGeneration<A>>>,
-    services_lease: Option<GenerationServicesLease>,
-    module_epoch: Option<ModuleEpochLease>,
+    current: Option<OpenBundle<A>>,
+    retiring: Option<OpenRetirement>,
     host_intent: HostLifecycleIntent,
     next_lifecycle_attempt: u64,
-    known_generation: Option<RuntimeGeneration>,
+    last_committed_generation: Option<RuntimeGeneration>,
     removal_epoch: u64,
     removal_attempt_active: bool,
 }
@@ -87,11 +107,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
             state: LifecycleStateKind::Closed,
             opening: None,
             current: None,
-            services_lease: None,
-            module_epoch: None,
+            retiring: None,
             host_intent: HostLifecycleIntent::None,
             next_lifecycle_attempt: 1,
-            known_generation: None,
+            last_committed_generation: None,
             removal_epoch: 0,
             removal_attempt_active: false,
         }
@@ -107,8 +126,33 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.host_intent
     }
 
-    pub(crate) const fn known_generation(&self) -> Option<RuntimeGeneration> {
-        self.known_generation
+    pub(crate) const fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
+        self.last_committed_generation
+    }
+
+    pub(crate) const fn protocol_generation(&self) -> Option<RuntimeGeneration> {
+        match self.state {
+            LifecycleStateKind::Opening { attempt } => Some(attempt.into_runtime_generation()),
+            LifecycleStateKind::Open { generation }
+            | LifecycleStateKind::OpenRollbackPending {
+                generation: Some(generation),
+            }
+            | LifecycleStateKind::Closing {
+                generation: Some(generation),
+                open_attempt: None,
+            } => Some(generation),
+            LifecycleStateKind::Closing {
+                open_attempt: Some(attempt),
+                ..
+            } => Some(attempt.into_runtime_generation()),
+            LifecycleStateKind::Closed
+            | LifecycleStateKind::OpenRollbackPending { generation: None }
+            | LifecycleStateKind::Closing {
+                generation: None,
+                open_attempt: None,
+            }
+            | LifecycleStateKind::Quarantined => None,
+        }
     }
 
     pub(crate) const fn removal_epoch(&self) -> u64 {
@@ -125,7 +169,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
     }
 
     pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
-        self.opening.as_ref().map(|opening| opening.config)
+        self.opening.as_ref().map(|opening| opening.init_config)
     }
 
     pub(crate) const fn has_opening_generation(&self) -> bool {
@@ -137,37 +181,29 @@ impl<A: crate::Addin> LifecycleCore<A> {
     }
 
     pub(crate) fn generation_services_lease_generation(&self) -> Option<RuntimeGeneration> {
-        self.services_lease
+        self.retiring
             .as_ref()
-            .map(GenerationServicesLease::generation)
+            .map(|retirement| retirement.services.generation())
     }
 
     pub(crate) fn has_module_epoch(&self) -> bool {
-        self.module_epoch.is_some()
+        self.retiring.is_some()
     }
 
     pub(crate) fn module_epoch_is_current(&self) -> bool {
-        self.module_epoch
+        self.retiring
             .as_ref()
-            .is_none_or(ModuleEpochLease::is_current)
+            .is_none_or(|retirement| retirement.module_epoch.is_current())
     }
 
-    fn install_generation_services_lease(&mut self, lease: GenerationServicesLease) {
-        debug_assert!(self.services_lease.is_none());
-        self.services_lease = Some(lease);
+    fn install_open_bundle(&mut self, bundle: OpenBundle<A>) {
+        debug_assert!(self.current.is_none());
+        debug_assert!(self.retiring.is_none());
+        self.current = Some(bundle);
     }
 
-    fn take_generation_services_lease(&mut self) -> Option<GenerationServicesLease> {
-        self.services_lease.take()
-    }
-
-    fn install_module_epoch(&mut self, lease: ModuleEpochLease) {
-        debug_assert!(self.module_epoch.is_none());
-        self.module_epoch = Some(lease);
-    }
-
-    fn take_module_epoch(&mut self) -> Option<ModuleEpochLease> {
-        self.module_epoch.take()
+    fn take_open_retirement(&mut self) -> Option<OpenRetirement> {
+        self.retiring.take()
     }
 }
 
@@ -298,7 +334,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn commit_open(&self, core: &mut LifecycleCore<A>, generation: RuntimeGeneration) {
         debug_assert_eq!(core.canonical_state().phase(), LifecyclePhase::Opening);
         debug_assert!(core.has_current_generation());
-        core.known_generation = Some(generation);
+        debug_assert_eq!(
+            core.current.as_ref().map(|bundle| bundle.generation.id()),
+            Some(generation)
+        );
+        core.last_committed_generation = Some(generation);
         core.state = LifecycleStateKind::Open { generation };
         self.refresh_projection(core);
     }
@@ -306,11 +346,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn reject_open_attempt(&self, core: &mut LifecycleCore<A>) {
         let state = match core.canonical_state().phase() {
             LifecyclePhase::Closing => LifecycleStateKind::Closing {
-                generation: core.known_generation(),
+                generation: core.last_committed_generation(),
                 open_attempt: None,
             },
             LifecyclePhase::OpenRollbackPending => LifecycleStateKind::OpenRollbackPending {
-                generation: core.known_generation(),
+                generation: core.last_committed_generation(),
             },
             LifecyclePhase::Quarantined => LifecycleStateKind::Quarantined,
             _ => LifecycleStateKind::Closed,
@@ -322,13 +362,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn record_open_failure(&self, core: &mut LifecycleCore<A>) -> bool {
         match core.canonical_state().phase() {
             LifecyclePhase::Opening => {
-                let generation = core.known_generation();
+                let generation = core.last_committed_generation();
                 self.set_state(core, LifecycleStateKind::OpenRollbackPending { generation });
                 true
             }
             LifecyclePhase::OpenRollbackPending => true,
             LifecyclePhase::Closing => {
-                let generation = core.known_generation();
+                let generation = core.last_committed_generation();
                 self.set_state(
                     core,
                     LifecycleStateKind::Closing {
@@ -350,7 +390,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 if core.removal_attempt_active() {
                     return;
                 }
-                let generation = core.known_generation();
+                let generation = core.last_committed_generation();
                 let open_attempt = core.canonical_state().open_attempt();
                 self.set_state(
                     core,
@@ -364,7 +404,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             LifecyclePhase::Opening
             | LifecyclePhase::Open
             | LifecyclePhase::OpenRollbackPending => {
-                let generation = core.known_generation();
+                let generation = core.last_committed_generation();
                 let open_attempt = core.canonical_state().open_attempt();
                 self.set_state(
                     core,
@@ -399,6 +439,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     pub(crate) fn finish_closed(&self, core: &mut LifecycleCore<A>) {
+        debug_assert!(core.opening.is_none());
+        debug_assert!(core.current.is_none());
+        debug_assert!(core.retiring.is_none());
         self.set_state(core, LifecycleStateKind::Closed);
     }
 
@@ -406,41 +449,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.set_state(core, LifecycleStateKind::Quarantined);
     }
 
-    pub(crate) fn install_generation_services_lease(
+    pub(crate) fn stage_opening_generation_locked(
         &self,
         core: &mut LifecycleCore<A>,
-        lease: GenerationServicesLease,
-    ) {
-        core.install_generation_services_lease(lease);
-    }
-
-    pub(crate) fn take_generation_services_lease(
-        &self,
-        core: &mut LifecycleCore<A>,
-    ) -> Option<GenerationServicesLease> {
-        core.take_generation_services_lease()
-    }
-
-    pub(crate) fn install_module_epoch(
-        &self,
-        core: &mut LifecycleCore<A>,
-        lease: ModuleEpochLease,
-    ) {
-        core.install_module_epoch(lease);
-    }
-
-    pub(crate) fn take_module_epoch(
-        &self,
-        core: &mut LifecycleCore<A>,
-    ) -> Option<ModuleEpochLease> {
-        core.take_module_epoch()
-    }
-
-    pub(crate) fn stage_opening_generation(
-        &self,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
-        let mut core = self.lock();
         if core.has_opening_generation() || core.has_current_generation() {
             return Err((
                 crate::XllError::Internal {
@@ -457,6 +470,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
         core: &mut LifecycleCore<A>,
         generation: RuntimeGeneration,
+        services: GenerationServicesLease,
+        module_epoch: ModuleEpochLease,
     ) -> Result<(), PublishOpeningError<A>> {
         if core.has_current_generation() {
             return Err(PublishOpeningError {
@@ -475,16 +490,37 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         let OpeningGeneration {
             shared_state,
             layers,
-            config: _,
+            init_config: _,
         } = opening;
         let published = Arc::new(OpenGeneration {
             id: generation,
             shared_state,
             layers,
         });
-        core.current = Some(Arc::clone(&published));
+        core.install_open_bundle(OpenBundle {
+            generation: Arc::clone(&published),
+            services,
+            module_epoch,
+        });
         self.current.store(Some(published));
         Ok(())
+    }
+
+    /// Consumes the coupled shutdown ownership only after a terminal
+    /// certificate has validated it.  The service lease is intentionally
+    /// dropped together with this operation; callers receive only the module
+    /// epoch token needed by the certificate value.
+    pub(crate) fn take_certified_module_epoch(
+        &self,
+        core: &mut LifecycleCore<A>,
+    ) -> Option<ModuleEpochLease> {
+        core.take_open_retirement().map(|retirement| {
+            let OpenRetirement {
+                services: _services,
+                module_epoch,
+            } = retirement;
+            module_epoch
+        })
     }
 
     #[cfg(test)]
@@ -510,7 +546,19 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     #[cfg(test)]
     pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<A>>> {
         let mut core = self.lock();
-        let current = core.current.take();
+        let current = core.current.take().map(|bundle| {
+            let OpenBundle {
+                generation,
+                services,
+                module_epoch,
+            } = bundle;
+            debug_assert!(core.retiring.is_none());
+            core.retiring = Some(OpenRetirement {
+                services,
+                module_epoch,
+            });
+            generation
+        });
         if current.is_some() {
             self.current.store(None);
         }
@@ -522,8 +570,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     ) -> Option<crate::runtime::ShutdownGeneration<A>> {
         let mut core = self.lock();
         debug_assert!(!(core.has_opening_generation() && core.has_current_generation()));
-        if let Some(generation) = core.current.take() {
+        if let Some(bundle) = core.current.take() {
             self.current.store(None);
+            let OpenBundle {
+                generation,
+                services,
+                module_epoch,
+            } = bundle;
+            debug_assert!(core.retiring.is_none());
+            core.retiring = Some(OpenRetirement {
+                services,
+                module_epoch,
+            });
             return Some(crate::runtime::ShutdownGeneration::Open(generation));
         }
         core.opening

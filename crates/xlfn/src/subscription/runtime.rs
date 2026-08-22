@@ -64,7 +64,7 @@ impl SubscriptionRuntime {
     }
 
     pub(crate) fn with_module_ingress(generation: RuntimeGeneration, limits: RtdLimits) -> Self {
-        Self::with_limits_and_ingress(generation, limits, Some(crate::ingress::global_ingress()))
+        Self::with_limits_and_ingress(generation, limits, Some(crate::module_runtime::ingress()))
     }
 
     fn with_limits_and_ingress(

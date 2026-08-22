@@ -44,13 +44,13 @@ impl<A: crate::Addin> OpenGeneration<A> {
 pub struct OpeningGeneration<A: crate::Addin> {
     pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
-    pub(crate) config: crate::addin::RuntimeConfig,
+    pub(crate) init_config: crate::addin::RuntimeConfig,
 }
 
 impl<A: crate::Addin> OpeningGeneration<A> {
     #[must_use]
     pub(crate) fn into_parts(self) -> (A::SharedState, A::Layers, crate::addin::RuntimeConfig) {
-        (self.shared_state, self.layers, self.config)
+        (self.shared_state, self.layers, self.init_config)
     }
 }
 
@@ -192,30 +192,17 @@ impl<A: crate::Addin> Runtime<A> {
     /// Acquires the DLL's self-reference before a generated `xlAutoOpen`
     /// enters the logical opening transaction.
     pub(crate) fn ensure_module_residency(&self, anchor: *const ()) -> XllResult<bool> {
-        let mut lease = self.residency.lease.lock();
-        if lease.is_some() {
-            return Ok(false);
-        }
-        *lease = Some(crate::module_residency::ModuleResidencyLease::acquire(
-            anchor,
-        )?);
-        Ok(true)
+        self.residency.ensure(anchor)
     }
 
     /// Releases the physical residency reference after explicit removal has
     /// completed. Ordinary host shutdown hints never call this method.
     pub(crate) fn release_module_residency(&self) -> XllResult<()> {
-        let mut lease = self.residency.lease.lock();
-        let Some(residency) = lease.as_mut() else {
-            return Ok(());
-        };
-        residency.try_release()?;
-        drop(lease.take());
-        Ok(())
+        self.residency.release()
     }
 
     pub(crate) fn module_residency_held(&self) -> bool {
-        self.residency.lease.lock().is_some()
+        self.residency.is_held()
     }
 
     /// Publishes the fail-safe terminal state. A quarantined runtime rejects
@@ -275,7 +262,7 @@ impl<A: crate::Addin> Runtime<A> {
         let OpeningGeneration {
             shared_state,
             layers,
-            config: _,
+            init_config: _,
         } = opening;
         if let Some(id) = generation {
             self.quarantine.retain_generation(
@@ -298,17 +285,12 @@ impl<A: crate::Addin> Runtime<A> {
         self.quarantine.snapshot()
     }
 
-    pub(crate) fn generation(&self) -> Option<RuntimeGeneration> {
-        self.lifecycle.lock().known_generation()
+    pub(crate) fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
+        self.lifecycle.lock().last_committed_generation()
     }
 
     pub(crate) fn active_generation(&self) -> Option<RuntimeGeneration> {
-        let control = self.lifecycle.lock();
-        control
-            .canonical_state()
-            .open_attempt()
-            .map(OpenAttemptId::into_runtime_generation)
-            .or(control.known_generation())
+        self.lifecycle.lock().protocol_generation()
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -387,13 +369,17 @@ impl<A: crate::Addin> Runtime<A> {
                 "test runtime has one lifecycle state"
             );
         }
+        let mut control = self.lifecycle.lock();
         assert!(
             self.lifecycle
-                .stage_opening_generation(OpeningGeneration {
-                    shared_state: state,
-                    layers,
-                    config: crate::addin::RuntimeConfig::new(),
-                })
+                .stage_opening_generation_locked(
+                    &mut control,
+                    OpeningGeneration {
+                        shared_state: state,
+                        layers,
+                        init_config: crate::addin::RuntimeConfig::new(),
+                    }
+                )
                 .is_ok()
         );
     }
@@ -441,17 +427,26 @@ impl<A: crate::Addin> Runtime<A> {
         self.addin_lifecycle.release_empty_binding(access)
     }
 
-    pub(crate) fn stage_opening_generation(
+    fn stage_opening_generation_for_attempt(
         &self,
+        attempt_id: OpenAttemptId,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (XllError, OpeningGeneration<A>)> {
-        self.lifecycle.stage_opening_generation(opening)
+        let mut control = self.lifecycle.lock();
+        if control.canonical_state().open_attempt() != Some(attempt_id)
+            || control.canonical_state().phase() != LifecyclePhase::Opening
+        {
+            return Err((XllError::Closing, opening));
+        }
+        self.lifecycle
+            .stage_opening_generation_locked(&mut control, opening)
     }
 
     pub(crate) fn publish_opening_generation(
         &self,
         control: &mut LifecycleCore<A>,
         attempt_id: OpenAttemptId,
+        module_epoch: crate::module_runtime::ModuleEpochLease,
     ) -> XllResult<()> {
         let generation = attempt_id.into_runtime_generation();
         let config = control.opening_config().ok_or(XllError::Internal {
@@ -460,11 +455,13 @@ impl<A: crate::Addin> Runtime<A> {
         let armed_services = self
             .generation_services
             .arm_generation(generation, config)?;
-        if let Err(failure) = self
-            .lifecycle
-            .publish_opening_generation_locked(control, generation)
-        {
-            armed_services.rollback();
+        if let Err(failure) = self.lifecycle.publish_opening_generation_locked(
+            control,
+            generation,
+            armed_services.commit(),
+            module_epoch,
+        ) {
+            self.generation_services.disarm_or_abort(generation);
             if let Some(opening) = failure.opening {
                 self.quarantine_opening_generation(
                     Some(generation),
@@ -474,8 +471,6 @@ impl<A: crate::Addin> Runtime<A> {
             }
             return Err(failure.error);
         }
-        self.lifecycle
-            .install_generation_services_lease(control, armed_services.commit());
         Ok(())
     }
 
@@ -493,17 +488,13 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn arm_test_generation(&self) {
-        let lease = self
-            .generation_services
+        self.generation_services
             .arm_generation(
                 crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
                 crate::addin::RuntimeConfig::new(),
             )
             .expect("test runtime generation can be armed once")
             .commit();
-        let mut control = self.lifecycle.lock();
-        self.lifecycle
-            .install_generation_services_lease(&mut control, lease);
     }
 
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
@@ -526,10 +517,10 @@ impl<A: crate::Addin> Runtime<A> {
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
         let mut registrations = registrations;
-        self.finish_open_with_registrations(attempt, &mut registrations)
+        attempt.commit(&mut registrations)
     }
 
-    pub(crate) fn finish_open_with_registrations(
+    fn finish_open_for_attempt(
         &self,
         attempt: &mut OpeningTxn<'_, A>,
         registrations: &mut Vec<RegistrationId>,
@@ -552,22 +543,24 @@ impl<A: crate::Addin> Runtime<A> {
         self.host.append_registrations(new_items);
         let can_commit = control.canonical_state().phase() == LifecyclePhase::Opening;
         if can_commit {
-            let ingress = crate::ingress::global_ingress();
+            let ingress = crate::module_runtime::ingress();
             ingress
                 .complete_open(|| {
-                    self.publish_opening_generation(&mut control, attempt.attempt_id)?;
                     let module_epoch = attempt
                         .module_opening
                         .take()
                         .expect("opening transaction owns the module epoch");
-                    self.lifecycle
-                        .install_module_epoch(&mut control, module_epoch.commit());
+                    self.publish_opening_generation(
+                        &mut control,
+                        attempt.attempt_id,
+                        module_epoch.commit(),
+                    )?;
                     let generation = attempt.attempt_id.into_runtime_generation();
                     self.refinement.commit_open(self, attempt.attempt_id, || {
                         self.lifecycle.commit_open(&mut control, generation);
                         attempt.active = false;
                         debug_assert_eq!(control.canonical_state().phase(), LifecyclePhase::Open);
-                        debug_assert_eq!(control.known_generation(), Some(generation));
+                        debug_assert_eq!(control.last_committed_generation(), Some(generation));
                         debug_assert_eq!(control.canonical_state().open_attempt(), None);
                         Ok(())
                     })?;
@@ -638,7 +631,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub fn enter(&self) -> XllResult<CallGuard<'_, A>> {
-        crate::ingress::global_ingress().with_linearization(|| {
+        crate::module_runtime::ingress().with_linearization(|| {
             if self.phase() != LifecyclePhase::Open {
                 return Err(XllError::Closing);
             }
@@ -664,7 +657,7 @@ impl<A: crate::Addin> Runtime<A> {
     #[cfg(test)]
     pub(crate) fn begin_close(&self) -> bool {
         let mut control = self.lifecycle.lock();
-        crate::ingress::global_ingress().with_linearization(|| {
+        crate::module_runtime::ingress().with_linearization(|| {
             if matches!(
                 control.canonical_state().phase(),
                 LifecyclePhase::Opening | LifecyclePhase::Open
@@ -689,7 +682,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.return_protocol.close_admission();
         let mut request_recorded = false;
         loop {
-            let decision = crate::ingress::global_ingress().with_linearization(|| {
+            let decision = crate::module_runtime::ingress().with_linearization(|| {
                 match wait_guard.canonical_state().phase() {
                     LifecyclePhase::Closed => {
                         // A cleanup owner publishes Closed before its guard leaves
@@ -863,7 +856,7 @@ impl<A: crate::Addin> Runtime<A> {
         &self,
         event: crate::shutdown_refinement::GhostEvent,
     ) {
-        crate::ingress::global_ingress().with_linearization(|| self.record_ghost_event(event));
+        crate::module_runtime::ingress().with_linearization(|| self.record_ghost_event(event));
     }
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -916,7 +909,7 @@ impl<A: crate::Addin> Runtime<A> {
     #[cfg(any(test, feature = "shutdown-refinement"))]
     pub(crate) fn record_ghost_returned_success(&self, witness: ClosedWitness) -> XllResult<()> {
         if witness.runtime_address != std::ptr::from_ref(self).addr()
-            || witness.generation != self.generation()
+            || witness.generation != self.last_committed_generation()
             || self.phase() != LifecyclePhase::Closed
         {
             return Err(XllError::Internal {
@@ -1070,15 +1063,15 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(not(feature = "async"))]
         let async_stopped = true;
         let handles_match_generation = control
-            .known_generation()
+            .last_committed_generation()
             .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
         let services_lease_matches_generation = control
             .generation_services_lease_generation()
-            .is_none_or(|generation| Some(generation) == control.known_generation());
+            .is_none_or(|generation| Some(generation) == control.last_committed_generation());
         let module_epoch_present = control.has_module_epoch();
         let module_epoch_current = control.module_epoch_is_current();
         let module_epoch_required =
-            K::requires_module_epoch() && control.known_generation().is_some();
+            K::requires_module_epoch() && control.last_committed_generation().is_some();
 
         let certified = K::accepts_phase(control.canonical_state().phase())
             && control.canonical_state().open_attempt().is_none()
@@ -1100,8 +1093,7 @@ impl<A: crate::Addin> Runtime<A> {
         // The lease is the canonical owner of the cross-slot generation
         // arming decision. Once every service slot is stopped and all other
         // quiescence proofs hold, consuming it linearizes generation teardown.
-        let _ = self.lifecycle.take_generation_services_lease(&mut control);
-        let module_epoch = self.lifecycle.take_module_epoch(&mut control);
+        let module_epoch = self.lifecycle.take_certified_module_epoch(&mut control);
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
@@ -1111,7 +1103,7 @@ impl<A: crate::Addin> Runtime<A> {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             composition_resources,
             runtime_address: std::ptr::from_ref(self).addr(),
-            generation: control.known_generation(),
+            generation: control.last_committed_generation(),
             module_epoch,
             _kind: std::marker::PhantomData,
         })
@@ -1168,7 +1160,7 @@ impl<A: crate::Addin> Runtime<A> {
                 diagnostic_id: crate::error::DiagnosticId::CLOSE_RUNTIME,
             });
         }
-        if certificate.generation != self.generation() {
+        if certificate.generation != self.last_committed_generation() {
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::CLOSE_LEASE_GATE,
             });
@@ -1324,7 +1316,7 @@ impl<A: crate::Addin> Default for Runtime<A> {
 impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn cleanup_test_runtime(&self) {
         if !matches!(self.phase(), LifecyclePhase::Closed) {
-            let ingress = crate::ingress::global_ingress();
+            let ingress = crate::module_runtime::ingress();
             if matches!(
                 ingress.phase(),
                 crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
@@ -1398,6 +1390,22 @@ impl<A: crate::Addin> OpeningTxn<'_, A> {
 
     pub(crate) const fn attempt_id(&self) -> OpenAttemptId {
         self.attempt_id
+    }
+
+    pub(crate) fn stage(
+        &mut self,
+        opening: OpeningGeneration<A>,
+    ) -> Result<(), (XllError, OpeningGeneration<A>)> {
+        if !self.active {
+            return Err((XllError::Closing, opening));
+        }
+        self.runtime
+            .stage_opening_generation_for_attempt(self.attempt_id, opening)
+    }
+
+    pub(crate) fn commit(&mut self, registrations: &mut Vec<RegistrationId>) -> XllResult<()> {
+        let runtime = self.runtime;
+        runtime.finish_open_for_attempt(self, registrations)
     }
 
     pub(crate) fn fail(&mut self) -> bool {
@@ -1499,7 +1507,7 @@ pub(crate) mod tests {
     }
 
     fn finish_test_close<A: crate::Addin>(runtime: &Runtime<A>) {
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         if matches!(
             ingress.phase(),
             crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
@@ -1541,7 +1549,7 @@ pub(crate) mod tests {
     }
 
     fn finish_test_open_rollback<A: crate::Addin>(runtime: &Runtime<A>) {
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         if matches!(
             ingress.phase(),
             crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
@@ -1737,7 +1745,7 @@ pub(crate) mod tests {
         runtime.close_subscriptions().unwrap();
         assert!(runtime.take_current_generation().is_some());
 
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if runtime.ghost_generation_active() {
@@ -1861,7 +1869,7 @@ pub(crate) mod tests {
             .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed))
             .unwrap();
         runtime.close_subscriptions().unwrap();
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
             #[cfg(any(test, feature = "shutdown-refinement"))]
             if runtime.ghost_generation_active() {
@@ -1903,16 +1911,16 @@ pub(crate) mod tests {
         runtime.publish(7_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        let (_export_guard, accepted) = crate::ingress::global_ingress().enter_with(|| {});
+        let (_export_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {});
         assert!(accepted);
         let guard = runtime.enter().unwrap();
         assert!(runtime.begin_close());
-        crate::ingress::global_ingress().begin_close_with(|| {});
+        crate::module_runtime::ingress().begin_close_with(|| {});
         assert!(matches!(runtime.enter(), Err(XllError::Closing)));
 
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let _ = crate::ingress::global_ingress().seal_and_drain();
+            let _ = crate::module_runtime::ingress().seal_and_drain();
             sender.send(()).unwrap();
         });
 

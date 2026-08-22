@@ -167,7 +167,7 @@ pub struct SyncBoundaryWorkerPool {
 
 impl SyncBoundaryWorkerPool {
     pub fn new(threads: usize, iterations_per_thread: usize, kind: SyncBenchKind) -> Self {
-        let ingress = crate::ingress::global_ingress();
+        let ingress = crate::module_runtime::ingress();
         if ingress.phase() != crate::ingress::PHASE_CLOSED {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
@@ -203,7 +203,7 @@ impl SyncBoundaryWorkerPool {
                         SyncBenchKind::IngressUdfOnly => {
                             for _ in 0..iterations_per_thread {
                                 let (guard, accepted) =
-                                    crate::ingress::global_ingress().enter_udf_with(|| {});
+                                    crate::module_runtime::ingress().enter_udf_with(|| {});
                                 std::hint::black_box(accepted);
                                 drop(guard);
                             }
@@ -211,7 +211,7 @@ impl SyncBoundaryWorkerPool {
                         SyncBenchKind::FullAdmission => {
                             for _ in 0..iterations_per_thread {
                                 let (guard, accepted) =
-                                    crate::ingress::global_ingress().enter_udf_with(|| {});
+                                    crate::module_runtime::ingress().enter_udf_with(|| {});
                                 if accepted && let Ok(call) = r.enter() {
                                     std::hint::black_box(&call);
                                 }
@@ -282,11 +282,11 @@ impl Drop for SyncBoundaryWorkerPool {
             let _ = worker.join();
         }
         if matches!(
-            crate::ingress::global_ingress().phase(),
+            crate::module_runtime::ingress().phase(),
             crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
         ) {
-            crate::ingress::global_ingress().begin_close_with(|| {});
-            let _ = crate::ingress::global_ingress().seal_and_drain();
+            crate::module_runtime::ingress().begin_close_with(|| {});
+            let _ = crate::module_runtime::ingress().seal_and_drain();
         }
     }
 }
@@ -789,7 +789,7 @@ pub struct FormulaCallerBenchmark {
 impl FormulaCallerBenchmark {
     pub fn new(case: FormulaCallerBenchCase) -> Self {
         BENCH_CALLER_KIND.store(case.raw(), Ordering::Relaxed);
-        crate::callback_gate::reset();
+        crate::module_runtime::global().reset_callbacks();
         // SAFETY: `benchmark_formula_callback` has Excel's exact callback ABI
         // and remains live for the duration of this benchmark process.
         unsafe {

@@ -957,7 +957,9 @@ mod tests {
         let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
         let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime.generation().expect("test runtime has a generation"),
+            runtime
+                .last_committed_generation()
+                .expect("test runtime has a generation"),
             TestSource {
                 disconnected: Arc::clone(&disconnected),
             },

@@ -90,7 +90,7 @@ pub(crate) fn logical_quiescence_certified() -> bool {
     crate::module_runtime::global()
         .rtd()
         .is_logically_quiescent()
-        && crate::ingress::global_ingress().phase() == crate::ingress::PHASE_CLOSED
+        && crate::module_runtime::ingress().phase() == crate::ingress::PHASE_CLOSED
 }
 
 #[derive(Debug)]

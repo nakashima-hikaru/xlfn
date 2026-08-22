@@ -68,6 +68,154 @@ impl<R> GenerationServiceRead<R> {
     }
 }
 
+/// Owns an in-flight service initialization.
+///
+/// Dropping an uncommitted transaction records a panic fault and wakes every
+/// waiter.  An initializer can therefore never leave the slot permanently in
+/// `Initializing` when it unwinds.
+struct InitializingTxn<'slot, C, R> {
+    slot: &'slot GenerationServiceSlot<C, R>,
+    generation: RuntimeGeneration,
+    committed: bool,
+}
+
+impl<C, R> InitializingTxn<'_, C, R> {
+    fn commit(
+        mut self,
+        runtime: Arc<R>,
+        on_initialized: impl FnOnce(&Arc<R>),
+    ) -> GenerationServiceRead<R> {
+        // Keep the callback outside the state lock.  If it panics, Drop owns
+        // the transition to InitFaulted.
+        on_initialized(&runtime);
+        self.slot.published.store(Some(runtime));
+
+        let mut state = self.slot.state.lock();
+        match &*state {
+            GenerationServiceState::Initializing { generation }
+                if *generation == self.generation => {}
+            _ => unreachable!("initialization transaction lost its state owner"),
+        }
+        *state = GenerationServiceState::Ready {
+            generation: self.generation,
+        };
+        self.committed = true;
+        self.slot.changed.notify_all();
+        drop(state);
+
+        let guard = self.slot.published.load();
+        debug_assert!(guard.is_some());
+        GenerationServiceRead { guard }
+    }
+
+    fn fail(mut self, error: crate::XllError) -> crate::XllError {
+        self.record_fault(error.clone());
+        self.committed = true;
+        error
+    }
+
+    fn record_fault(&mut self, error: crate::XllError) {
+        let mut state = self.slot.state.lock();
+        if matches!(
+            &*state,
+            GenerationServiceState::Initializing { generation }
+                if *generation == self.generation
+        ) {
+            *state = GenerationServiceState::InitFaulted {
+                generation: self.generation,
+                error,
+            };
+            self.slot.changed.notify_all();
+        }
+    }
+}
+
+impl<C, R> Drop for InitializingTxn<'_, C, R> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.record_fault(crate::XllError::Panic);
+        }
+    }
+}
+
+/// Owns the published runtime while its shutdown callback executes.
+///
+/// The runtime root remains in this transaction until shutdown commits.  An
+/// unwind transfers it to `TeardownFaulted`, so the fault path retains the
+/// same resource root as an ordinary shutdown error.
+struct SealingTxn<'slot, C, R> {
+    slot: &'slot GenerationServiceSlot<C, R>,
+    generation: RuntimeGeneration,
+    runtime: Option<Arc<R>>,
+    committed: bool,
+}
+
+impl<C, R> SealingTxn<'_, C, R> {
+    fn finish<S>(
+        mut self,
+        shutdown: impl FnOnce(Arc<R>) -> crate::XllResult<S>,
+    ) -> crate::XllResult<S> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .expect("a sealing transaction owns its runtime root");
+        let result = shutdown(Arc::clone(runtime));
+        let mut state = self.slot.state.lock();
+
+        match result {
+            Ok(sealed) => {
+                *state = GenerationServiceState::Closed;
+                self.committed = true;
+                self.slot.changed.notify_all();
+                drop(state);
+                self.runtime.take();
+                Ok(sealed)
+            }
+            Err(error) => {
+                let runtime = self
+                    .runtime
+                    .take()
+                    .expect("a sealing transaction retains its runtime root");
+                *state = GenerationServiceState::TeardownFaulted {
+                    generation: self.generation,
+                    error: error.clone(),
+                    runtime: ManuallyDrop::new(runtime),
+                };
+                self.committed = true;
+                self.slot.changed.notify_all();
+                Err(error)
+            }
+        }
+    }
+
+    fn record_fault(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        let mut state = self.slot.state.lock();
+        if matches!(
+            &*state,
+            GenerationServiceState::Sealing { generation }
+                if *generation == self.generation
+        ) {
+            *state = GenerationServiceState::TeardownFaulted {
+                generation: self.generation,
+                error: crate::XllError::Panic,
+                runtime: ManuallyDrop::new(runtime),
+            };
+            self.slot.changed.notify_all();
+        }
+    }
+}
+
+impl<C, R> Drop for SealingTxn<'_, C, R> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.record_fault();
+        }
+    }
+}
+
 /// Common state-machine kernel for a generation-scoped lazy service.
 ///
 /// The service-specific modules provide initialization and shutdown closures,
@@ -182,34 +330,27 @@ impl<C, R> GenerationServiceSlot<C, R> {
                     *state = GenerationServiceState::Initializing { generation };
                     drop(state);
 
+                    let transaction = InitializingTxn {
+                        slot: self,
+                        generation,
+                        committed: false,
+                    };
+
                     let candidate = initialize
                         .take()
                         .expect("a service initializer is consumed exactly once")(
                         config
                     );
 
-                    let mut state = self.state.lock();
                     match candidate {
                         Ok(runtime) => {
-                            if let Some(on_initialized) = on_initialized.take() {
-                                on_initialized(&runtime);
-                            }
-                            self.published.store(Some(runtime));
-                            *state = GenerationServiceState::Ready { generation };
-                            self.changed.notify_all();
-                            drop(state);
-
-                            let guard = self.published.load();
-                            debug_assert!(guard.is_some());
-                            return Ok(GenerationServiceRead { guard });
+                            let on_initialized = on_initialized
+                                .take()
+                                .expect("a service initializer callback is consumed once");
+                            return Ok(transaction.commit(runtime, on_initialized));
                         }
                         Err(error) => {
-                            *state = GenerationServiceState::InitFaulted {
-                                generation,
-                                error: error.clone(),
-                            };
-                            self.changed.notify_all();
-                            return Err(error);
+                            return Err(transaction.fail(error));
                         }
                     }
                 }
@@ -277,35 +418,33 @@ impl<C, R> GenerationServiceSlot<C, R> {
         };
 
         let Some(runtime) = runtime else {
-            return Err(crate::XllError::Internal {
+            let error = crate::XllError::Internal {
                 diagnostic_id: missing_runtime_diagnostic,
-            });
+            };
+            let mut state = self.state.lock();
+            *state = GenerationServiceState::InitFaulted {
+                generation: generation.expect("a sealing state has a generation"),
+                error: error.clone(),
+            };
+            self.changed.notify_all();
+            return Err(error);
         };
-        let result = shutdown(Arc::clone(&runtime));
-        let mut state = self.state.lock();
-        match result {
-            Ok(sealed) => {
-                *state = GenerationServiceState::Closed;
-                self.changed.notify_all();
-                Ok(sealed)
-            }
-            Err(error) => {
-                *state = GenerationServiceState::TeardownFaulted {
-                    generation: generation.expect("a live service runtime has a generation"),
-                    error: error.clone(),
-                    runtime: ManuallyDrop::new(runtime),
-                };
-                self.changed.notify_all();
-                Err(error)
-            }
+
+        SealingTxn {
+            slot: self,
+            generation: generation.expect("a live service runtime has a generation"),
+            runtime: Some(runtime),
+            committed: false,
         }
+        .finish(shutdown)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GenerationServiceSlot;
+    use super::{GenerationServiceSlot, GenerationServiceState};
     use crate::generation::RuntimeGeneration;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
 
     struct NonCopyConfig(String);
@@ -328,5 +467,68 @@ mod tests {
             )
             .expect("service slot initializes from its moved config");
         std::hint::black_box(&*read);
+    }
+
+    #[test]
+    fn initialization_panic_is_retained_and_wakes_waiters() {
+        let slot = GenerationServiceSlot::<(), Service>::new();
+        let generation = RuntimeGeneration::new(2).expect("test generation is non-zero");
+        slot.arm(generation, ()).expect("service slot can be armed");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = slot.read(
+                |_| -> crate::XllResult<Arc<Service>> { panic!("injected initializer panic") },
+                |_| {},
+            );
+        }));
+        assert!(result.is_err());
+        assert!(matches!(
+            &*slot.state.lock(),
+            GenerationServiceState::InitFaulted {
+                generation: active,
+                error: crate::XllError::Panic,
+            } if *active == generation
+        ));
+        assert!(matches!(
+            slot.read(|_| Ok(Arc::new(Service)), |_| {}),
+            Err(crate::XllError::Panic)
+        ));
+    }
+
+    #[test]
+    fn shutdown_panic_retains_runtime_as_teardown_fault() {
+        let slot = GenerationServiceSlot::<(), Service>::new();
+        let generation = RuntimeGeneration::new(3).expect("test generation is non-zero");
+        slot.arm(generation, ()).expect("service slot can be armed");
+        let _read = slot
+            .read(|_| Ok(Arc::new(Service)), |_| {})
+            .expect("service slot initializes");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = slot.seal(
+                Some(generation),
+                crate::error::DiagnosticId::HANDLE_SLOT,
+                || (),
+                |_| -> crate::XllResult<()> { panic!("injected shutdown panic") },
+            );
+        }));
+        assert!(result.is_err());
+        assert!(matches!(
+            &*slot.state.lock(),
+            GenerationServiceState::TeardownFaulted {
+                generation: active,
+                error: crate::XllError::Panic,
+                ..
+            } if *active == generation
+        ));
+        assert!(matches!(
+            slot.seal(
+                Some(generation),
+                crate::error::DiagnosticId::HANDLE_SLOT,
+                || (),
+                |_| { Ok(()) }
+            ),
+            Err(crate::XllError::Panic)
+        ));
     }
 }
