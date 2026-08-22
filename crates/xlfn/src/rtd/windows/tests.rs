@@ -948,7 +948,7 @@ fn failed_git_revocation_is_retained_and_retryable() {
     let cookie = NonZeroU32::new(41).unwrap();
     COM_MODULE_LIFETIME.git_cookie_registered();
     COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
-    let error = XllError::ExcelApi {
+    let error = XllError::WindowsApi {
         function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
         code: E_FAIL,
     };

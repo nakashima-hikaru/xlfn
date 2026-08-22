@@ -625,7 +625,7 @@ pub(super) fn ensure_server(
     let status = unsafe { CoCreateGuid(&mut class_id) };
 
     if status < 0 {
-        return Err(XllError::ExcelApi {
+        return Err(XllError::WindowsApi {
             function: "CoCreateGuid",
             code: status,
         });
@@ -635,7 +635,7 @@ pub(super) fn ensure_server(
         allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
         })?;
-    let operations = ServerOperationBarrier::new().map_err(|error| XllError::ExcelApi {
+    let operations = ServerOperationBarrier::new().map_err(|error| XllError::WindowsApi {
         function: error.operation,
         code: error.code as i32,
     })?;
@@ -1296,7 +1296,7 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
         if status != S_OK {
             crate::diagnostics::report_no_unwind(
                 "IRtdServer::deferred termination",
-                &XllError::ExcelApi {
+                &XllError::WindowsApi {
                     function: "IRtdServer::ServerTerminate",
                     code: status,
                 },

@@ -97,8 +97,10 @@ pub(crate) fn observe(
     {
         let _ = (handles, key, token, callbacks);
         Err(XllError::ExcelApi {
-            function: "xlfRtd",
-            code: xlfn_sys::XLRET_FAILED,
+            function: crate::error::ExcelApiFunction::Rtd,
+            failure: crate::error::ExcelApiFailure::Status(
+                crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+            ),
         })
     }
 }
@@ -116,8 +118,10 @@ pub(crate) fn observe_subscription(
     {
         let _ = (subscriptions, key, callbacks);
         Err(XllError::ExcelApi {
-            function: "xlfRtd",
-            code: xlfn_sys::XLRET_FAILED,
+            function: crate::error::ExcelApiFunction::Rtd,
+            failure: crate::error::ExcelApiFailure::Status(
+                crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+            ),
         })
     }
 }

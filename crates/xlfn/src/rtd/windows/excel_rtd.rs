@@ -3,6 +3,7 @@ use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensur
 use crate::handle::HandleRuntime;
 use crate::host_callback::HostCallbackSession;
 use crate::subscription::SubscriptionRuntime;
+use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::{ExcelCallbackStatus, ExcelValue, FromExcel, RtdValue, XllError, XllResult};
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -77,8 +78,8 @@ pub(crate) fn observe(
         callbacks
             .call(XLF_RTD, &arguments)
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlfRtd(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: ExcelApiFunction::Rtd,
+                failure: ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
 
@@ -86,8 +87,8 @@ pub(crate) fn observe(
 
     if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlfRtd",
-            code: status.raw_code(),
+            function: ExcelApiFunction::Rtd,
+            failure: ExcelApiFailure::Status(status),
         }));
     }
 
@@ -173,8 +174,8 @@ pub(crate) fn observe_subscription(
         callbacks
             .call(XLF_RTD, &arguments)
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlfRtd(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: ExcelApiFunction::Rtd,
+                failure: ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
 
@@ -182,8 +183,8 @@ pub(crate) fn observe_subscription(
 
     if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlfRtd",
-            code: status.raw_code(),
+            function: ExcelApiFunction::Rtd,
+            failure: ExcelApiFailure::Status(status),
         }));
     }
 
@@ -200,15 +201,15 @@ fn module_path(callbacks: &HostCallbackSession) -> XllResult<String> {
         callbacks
             .call(XL_GET_NAME, &[])
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlGetName(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: ExcelApiFunction::GetName,
+                failure: ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
 
     if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlGetName",
-            code: status.raw_code(),
+            function: ExcelApiFunction::GetName,
+            failure: ExcelApiFailure::Status(status),
         }));
     }
 

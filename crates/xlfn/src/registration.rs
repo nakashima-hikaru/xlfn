@@ -1,5 +1,5 @@
 use crate::callback_value::ExcelCallbackValue;
-use crate::error::InputError;
+use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::value::FromExcel;
 use crate::{XllError, XllResult};
 use crate::{host_callback::HostCallbackSession, return_value::ExcelCallbackStatus};
@@ -50,16 +50,16 @@ impl HostRegistrar {
                 .call(xlfn_sys::XL_GET_NAME, &[])
                 .map_err(|suppressed| {
                     RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlGetName(suppressed)",
-                        code: suppressed.status.raw_code(),
+                        function: ExcelApiFunction::GetName,
+                        failure: ExcelApiFailure::Suppressed(suppressed.status),
                     })
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(RegistrationTransactionError::new(
                 result.try_release().err().unwrap_or(XllError::ExcelApi {
-                    function: "xlGetName",
-                    code: status.raw_code(),
+                    function: ExcelApiFunction::GetName,
+                    failure: ExcelApiFailure::Status(status),
                 }),
             ));
         }
@@ -129,15 +129,15 @@ impl HostRegistrar {
                 .call(XL_EVENT_REGISTER, &arguments)
                 .map_err(|suppressed| {
                     RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlEventRegister(suppressed)",
-                        code: suppressed.status.raw_code(),
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Suppressed(suppressed.status),
                     })
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlEventRegister",
-                code: status.raw_code(),
+                function: ExcelApiFunction::EventRegister,
+                failure: ExcelApiFailure::Status(status),
             });
             let mut error = RegistrationTransactionError::new(source);
             if status.is_terminal() {
@@ -186,8 +186,8 @@ impl HostRegistrar {
                 callbacks,
                 registration,
                 XllError::ExcelApi {
-                    function: "xlEventRegister(result)",
-                    code: status.raw_code(),
+                    function: ExcelApiFunction::EventRegister,
+                    failure: ExcelApiFailure::UnexpectedResult,
                 },
                 Self::unregister_events_detailed,
             ));
@@ -197,8 +197,8 @@ impl HostRegistrar {
                 callbacks,
                 registration,
                 XllError::ExcelApi {
-                    function: "xlEventRegister(result)",
-                    code: registration_id,
+                    function: ExcelApiFunction::EventRegister,
+                    failure: ExcelApiFailure::InvalidRegistrationId(registration_id),
                 },
                 Self::unregister_events_detailed,
             ));
@@ -271,15 +271,15 @@ impl HostRegistrar {
                 .call(XLF_REGISTER, &pointers)
                 .map_err(|suppressed| {
                     RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlfRegister(suppressed)",
-                        code: suppressed.status.raw_code(),
+                        function: ExcelApiFunction::Register,
+                        failure: ExcelApiFailure::Suppressed(suppressed.status),
                     })
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlfRegister",
-                code: status.raw_code(),
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::Status(status),
             });
             let mut error = RegistrationTransactionError::new(source);
             if status.is_terminal() {
@@ -287,8 +287,8 @@ impl HostRegistrar {
                     export_name: descriptor.export_name,
                     excel_name: descriptor.excel_name,
                     recovery_error: XllError::ExcelApi {
-                        function: "xlfRegister terminal result",
-                        code: status.raw_code(),
+                        function: ExcelApiFunction::Register,
+                        failure: ExcelApiFailure::Status(status),
                     },
                 });
             }
@@ -299,12 +299,9 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             != XLTYPE_NUM
         {
-            let base_type = result
-                .base_type()
-                .map_err(RegistrationTransactionError::new)?;
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlfRegister(result)",
-                code: base_type as i32,
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::UnexpectedResult,
             });
             return Err(self.reconcile_malformed_registration_result(callbacks, descriptor, source));
         }
@@ -322,8 +319,8 @@ impl HostRegistrar {
         };
         if !valid_registration_id(id) {
             let source = result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlfRegister(result)",
-                code: -1,
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::UnexpectedResult,
             });
             return Err(self.reconcile_malformed_registration_result(callbacks, descriptor, source));
         }
@@ -371,16 +368,16 @@ impl HostRegistrar {
                 .call(XLF_EVALUATE, &arguments)
                 .map_err(|suppressed| {
                     RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlfEvaluate(registration recovery, suppressed)",
-                        code: suppressed.status.raw_code(),
+                        function: ExcelApiFunction::Evaluate,
+                        failure: ExcelApiFailure::Suppressed(suppressed.status),
                     })
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(RegistrationTransactionError::new(
                 result.try_release().err().unwrap_or(XllError::ExcelApi {
-                    function: "xlfEvaluate(registration recovery)",
-                    code: status.raw_code(),
+                    function: ExcelApiFunction::Evaluate,
+                    failure: ExcelApiFailure::Status(status),
                 }),
             ));
         }
@@ -406,8 +403,8 @@ impl HostRegistrar {
                 Ok(None)
             } else {
                 Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                    function: "xlfEvaluate(registration recovery result)",
-                    code,
+                    function: ExcelApiFunction::Evaluate,
+                    failure: ExcelApiFailure::UnexpectedResult,
                 }))
             };
         }
@@ -417,15 +414,12 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             != XLTYPE_NUM
         {
-            let base_type = result
-                .base_type()
-                .map_err(RegistrationTransactionError::new)?;
             result
                 .try_release()
                 .map_err(RegistrationTransactionError::new)?;
             return Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                function: "xlfEvaluate(registration recovery result)",
-                code: base_type as i32,
+                function: ExcelApiFunction::Evaluate,
+                failure: ExcelApiFailure::UnexpectedResult,
             }));
         }
 
@@ -438,8 +432,8 @@ impl HostRegistrar {
         let id = id.map_err(RegistrationTransactionError::new)?;
         if !valid_registration_id(id) {
             return Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                function: "xlfEvaluate(registration recovery result)",
-                code: -1,
+                function: ExcelApiFunction::Evaluate,
+                failure: ExcelApiFailure::UnexpectedResult,
             }));
         }
         Ok(Some(RegistrationId { id, excel_name }))
@@ -459,16 +453,16 @@ impl HostRegistrar {
                 .call(XLF_EVALUATE, &arguments)
                 .map_err(|suppressed| {
                     RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlfEvaluate(suppressed)",
-                        code: suppressed.status.raw_code(),
+                        function: ExcelApiFunction::Evaluate,
+                        failure: ExcelApiFailure::Suppressed(suppressed.status),
                     })
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(RegistrationTransactionError::new(
                 result.try_release().err().unwrap_or(XllError::ExcelApi {
-                    function: "xlfEvaluate",
-                    code: status.raw_code(),
+                    function: ExcelApiFunction::Evaluate,
+                    failure: ExcelApiFailure::Status(status),
                 }),
             ));
         }
@@ -533,8 +527,8 @@ impl HostRegistrar {
                             outcome.failed.push((
                                 registration,
                                 XllError::ExcelApi {
-                                    function: "xlfUnregister(suppressed)",
-                                    code: suppressed.status.raw_code(),
+                                    function: ExcelApiFunction::Unregister,
+                                    failure: ExcelApiFailure::Suppressed(suppressed.status),
                                 },
                             ));
                             continue;
@@ -544,8 +538,8 @@ impl HostRegistrar {
                     outcome.failed.push((
                         registration,
                         XllError::ExcelApi {
-                            function: "xlfUnregister",
-                            code: status.raw_code(),
+                            function: ExcelApiFunction::Unregister,
+                            failure: ExcelApiFailure::Status(status),
                         },
                     ));
                     continue;
@@ -555,8 +549,7 @@ impl HostRegistrar {
                     RegistrationCleanupState::Unregistered,
                     status,
                     &result,
-                    "xlfUnregister",
-                    "xlfUnregister(result)",
+                    ExcelApiFunction::Unregister,
                 );
                 let release = result.try_release();
                 if let Err(error) = unregistered {
@@ -594,8 +587,8 @@ impl HostRegistrar {
                         outcome.metadata_debt.push(MetadataDebt::new(
                             registration.registration,
                             XllError::ExcelApi {
-                                function: "xlfSetName(suppressed)",
-                                code: suppressed.status.raw_code(),
+                                function: ExcelApiFunction::SetName,
+                                failure: ExcelApiFailure::Suppressed(suppressed.status),
                             },
                         ));
                         continue;
@@ -605,8 +598,8 @@ impl HostRegistrar {
                 outcome.metadata_debt.push(MetadataDebt::new(
                     registration.registration,
                     XllError::ExcelApi {
-                        function: "xlfSetName",
-                        code: status.raw_code(),
+                        function: ExcelApiFunction::SetName,
+                        failure: ExcelApiFailure::Status(status),
                     },
                 ));
                 continue;
@@ -616,8 +609,7 @@ impl HostRegistrar {
                 RegistrationCleanupState::NameDeleted,
                 status,
                 &result,
-                "xlfSetName",
-                "xlfSetName(result)",
+                ExcelApiFunction::SetName,
             );
             let release = result.try_release();
             if let Err(error) = name_deleted {
@@ -649,8 +641,8 @@ impl HostRegistrar {
             if !callbacks.permits_callbacks() {
                 if let Some(status) = callbacks.terminal_status() {
                     terminal = Some(XllError::ExcelApi {
-                        function: "xlfEvaluate(metadata debt suppressed)",
-                        code: status.raw_code(),
+                        function: ExcelApiFunction::Evaluate,
+                        failure: ExcelApiFailure::Suppressed(status),
                     });
                 }
                 remaining.insert(key.clone(), debt_bucket.clone());
@@ -739,8 +731,8 @@ impl HostRegistrar {
                             .iter()
                             .map(|debt| {
                                 debt.retry_failed(XllError::ExcelApi {
-                                    function: "xlfSetName(metadata debt suppressed)",
-                                    code: suppressed.status.raw_code(),
+                                    function: ExcelApiFunction::SetName,
+                                    failure: ExcelApiFailure::Suppressed(suppressed.status),
                                 })
                             })
                             .collect(),
@@ -750,8 +742,8 @@ impl HostRegistrar {
             };
             if status.is_terminal() {
                 let error = XllError::ExcelApi {
-                    function: "xlfSetName(metadata debt)",
-                    code: status.raw_code(),
+                    function: ExcelApiFunction::SetName,
+                    failure: ExcelApiFailure::Status(status),
                 };
                 if let Err(release_error) = result.try_release() {
                     cleanup_issues.push(release_error);
@@ -850,14 +842,14 @@ fn metadata_debt_binding(
         callbacks
             .call(XLF_EVALUATE, &arguments)
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlfEvaluate(metadata debt suppressed)",
-                code: suppressed.status.raw_code(),
+                function: ExcelApiFunction::Evaluate,
+                failure: ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
     if status != ExcelCallbackStatus::Success {
         return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlfEvaluate(metadata debt)",
-            code: status.raw_code(),
+            function: ExcelApiFunction::Evaluate,
+            failure: ExcelApiFailure::Status(status),
         }));
     }
 
@@ -880,15 +872,15 @@ fn metadata_debt_binding(
             return Ok(None);
         }
         return Err(XllError::ExcelApi {
-            function: "xlfEvaluate(metadata debt result)",
-            code,
+            function: ExcelApiFunction::Evaluate,
+            failure: ExcelApiFailure::UnexpectedResult,
         });
     }
     if base_type != XLTYPE_NUM {
         result.try_release()?;
         return Err(XllError::ExcelApi {
-            function: "xlfEvaluate(metadata debt result)",
-            code: base_type as i32,
+            function: ExcelApiFunction::Evaluate,
+            failure: ExcelApiFailure::UnexpectedResult,
         });
     }
 
@@ -900,8 +892,8 @@ fn metadata_debt_binding(
     release?;
     if !valid_registration_id(id) {
         return Err(XllError::ExcelApi {
-            function: "xlfEvaluate(metadata debt result)",
-            code: -1,
+            function: ExcelApiFunction::Evaluate,
+            failure: ExcelApiFailure::UnexpectedResult,
         });
     }
     Ok(Some(id))
@@ -912,19 +904,18 @@ fn advance_cleanup_state(
     next: RegistrationCleanupState,
     status: ExcelCallbackStatus,
     result: &ExcelCallbackValue,
-    callback_function: &'static str,
-    result_function: &'static str,
+    function: ExcelApiFunction,
 ) -> XllResult<()> {
     if status != ExcelCallbackStatus::Success {
         return Err(XllError::ExcelApi {
-            function: callback_function,
-            code: status.raw_code(),
+            function,
+            failure: ExcelApiFailure::Status(status),
         });
     }
-    if !read_excel_bool(result, result_function)? {
+    if !read_excel_bool(result, function)? {
         return Err(XllError::ExcelApi {
-            function: result_function,
-            code: 0,
+            function,
+            failure: ExcelApiFailure::UnexpectedResult,
         });
     }
     // Persist the side effect before xlFree is attempted. A result-release
@@ -943,12 +934,11 @@ fn metadata_debt_name_result(
         RegistrationCleanupState::NameDeleted,
         status,
         result,
-        "xlfSetName(metadata debt)",
-        "xlfSetName(metadata debt result)",
+        ExcelApiFunction::SetName,
     )
 }
 
-fn read_excel_bool(result: &ExcelCallbackValue, function: &'static str) -> XllResult<bool> {
+fn read_excel_bool(result: &ExcelCallbackValue, function: ExcelApiFunction) -> XllResult<bool> {
     let raw = result.raw()?;
     match raw.base_type() {
         XLTYPE_BOOL => {
@@ -957,12 +947,15 @@ fn read_excel_bool(result: &ExcelCallbackValue, function: &'static str) -> XllRe
         }
         XLTYPE_ERR => {
             // SAFETY: XLTYPE_ERR selects the error union member.
-            let code = unsafe { raw.value.error };
-            Err(XllError::ExcelApi { function, code })
+            let _code = unsafe { raw.value.error };
+            Err(XllError::ExcelApi {
+                function,
+                failure: ExcelApiFailure::UnexpectedResult,
+            })
         }
-        base_type => Err(XllError::ExcelApi {
+        _ => Err(XllError::ExcelApi {
             function,
-            code: base_type as i32,
+            failure: ExcelApiFailure::UnexpectedResult,
         }),
     }
 }
@@ -987,16 +980,16 @@ fn validate_event_unregister_result(result: &ExcelCallbackValue) -> XllResult<()
     let raw = result.raw()?;
     if raw.base_type() != XLTYPE_INT {
         return Err(XllError::ExcelApi {
-            function: "xlEventRegister(unregister result)",
-            code: raw.base_type() as i32,
+            function: ExcelApiFunction::EventRegister,
+            failure: ExcelApiFailure::UnexpectedResult,
         });
     }
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
     if value <= 0 {
         return Err(XllError::ExcelApi {
-            function: "xlEventRegister(unregister result)",
-            code: value,
+            function: ExcelApiFunction::EventRegister,
+            failure: ExcelApiFailure::InvalidRegistrationId(value),
         });
     }
     Ok(())
@@ -1024,8 +1017,8 @@ fn unregister_events_with(
             outcome.failed.push((
                 registration,
                 XllError::ExcelApi {
-                    function: "xlEventRegister(unregister)",
-                    code: attempt.status.raw_code(),
+                    function: ExcelApiFunction::EventRegister,
+                    failure: ExcelApiFailure::Status(attempt.status),
                 },
             ));
             continue;
@@ -1034,8 +1027,8 @@ fn unregister_events_with(
             outcome.failed.push((
                 registration,
                 XllError::ExcelApi {
-                    function: "xlEventRegister(unregister)",
-                    code: attempt.status.raw_code(),
+                    function: ExcelApiFunction::EventRegister,
+                    failure: ExcelApiFailure::Status(attempt.status),
                 },
             ));
             continue;
@@ -1571,8 +1564,7 @@ mod tests {
             RegistrationCleanupState::Unregistered,
             ExcelCallbackStatus::Success,
             &result,
-            "xlfUnregister",
-            "xlfUnregister(result)",
+            ExcelApiFunction::Unregister,
         )
         .unwrap_err();
 
@@ -1580,8 +1572,8 @@ mod tests {
         assert!(matches!(
             error,
             XllError::ExcelApi {
-                function: "xlfUnregister(result)",
-                code: 0,
+                function: ExcelApiFunction::Unregister,
+                failure: ExcelApiFailure::UnexpectedResult,
             }
         ));
     }
@@ -1597,8 +1589,7 @@ mod tests {
                     RegistrationCleanupState::NameDeleted,
                     ExcelCallbackStatus::Success,
                     &result,
-                    "xlfSetName",
-                    "xlfSetName(result)",
+                    ExcelApiFunction::SetName,
                 )
                 .is_err()
             );
@@ -1614,13 +1605,13 @@ mod tests {
                 excel_name: "RETRY.NAME",
             },
             XllError::ExcelApi {
-                function: "xlfSetName",
-                code: 1,
+                function: ExcelApiFunction::SetName,
+                failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
             },
         );
         let failed = debt.retry_failed(XllError::ExcelApi {
-            function: "xlfSetName",
-            code: 2,
+            function: ExcelApiFunction::SetName,
+            failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
         });
         assert_eq!(failed.excel_name(), "RETRY.NAME");
         assert_eq!(failed.attempts(), 2);
@@ -1645,15 +1636,16 @@ mod tests {
     fn successful_payload_advances_state_before_result_release() {
         let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::boolean(true));
         let mut state = RegistrationCleanupState::Registered;
-        advance_cleanup_state(
-            &mut state,
-            RegistrationCleanupState::Unregistered,
-            ExcelCallbackStatus::Success,
-            &result,
-            "xlfUnregister",
-            "xlfUnregister(result)",
-        )
-        .unwrap();
+        assert!(
+            advance_cleanup_state(
+                &mut state,
+                RegistrationCleanupState::Unregistered,
+                ExcelCallbackStatus::Success,
+                &result,
+                ExcelApiFunction::Unregister,
+            )
+            .is_ok()
+        );
         assert_eq!(state, RegistrationCleanupState::Unregistered);
     }
 
@@ -1669,8 +1661,8 @@ mod tests {
                 attempts.set(attempt);
                 if attempt == 2 {
                     Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "injected",
-                        code: 32,
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                     }))
                 } else {
                     Ok(EventRegistration {
@@ -1713,8 +1705,8 @@ mod tests {
                 if attempt == 2 {
                     callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
                     let mut error = RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlEventRegister",
-                        code: xlfn_sys::XLRET_ABORT,
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                     });
                     error.pending_events.push(EventRegistration {
                         procedure,
@@ -1777,8 +1769,8 @@ mod tests {
                 attempts.set(attempt);
                 if attempt == 2 {
                     Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "injected register",
-                        code: 32,
+                        function: ExcelApiFunction::Register,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                     }))
                 } else {
                     Ok(RegistrationId {
@@ -1795,8 +1787,8 @@ mod tests {
                         (
                             entry,
                             XllError::ExcelApi {
-                                function: "injected unregister",
-                                code: 64,
+                                function: ExcelApiFunction::Unregister,
+                                failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
                             },
                         )
                     }));
@@ -1838,8 +1830,8 @@ mod tests {
                 attempts.set(attempt);
                 if attempt == 2 {
                     Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "injected register",
-                        code: 32,
+                        function: ExcelApiFunction::Register,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                     }))
                 } else {
                     Ok(RegistrationId {
@@ -1856,8 +1848,8 @@ mod tests {
                         MetadataDebt::new(
                             entry.registration,
                             XllError::ExcelApi {
-                                function: "injected set_name",
-                                code: 64,
+                                function: ExcelApiFunction::SetName,
+                                failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
                             },
                         )
                     }));
@@ -1902,15 +1894,15 @@ mod tests {
                 if attempt == 2 {
                     callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
                     let mut error = RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "xlfRegister",
-                        code: xlfn_sys::XLRET_ABORT,
+                        function: ExcelApiFunction::Register,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                     });
                     error.unknown_registrations.push(UnknownRegistrationState {
                         export_name: descriptor.export_name,
                         excel_name: descriptor.excel_name,
                         recovery_error: XllError::ExcelApi {
-                            function: "xlfRegister terminal result",
-                            code: xlfn_sys::XLRET_ABORT,
+                            function: ExcelApiFunction::Register,
+                            failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                         },
                     });
                     Err(error)
@@ -1961,8 +1953,8 @@ mod tests {
             &mut callbacks,
             &descriptor,
             XllError::ExcelApi {
-                function: "xlfRegister(result)",
-                code: XLTYPE_STR as i32,
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::UnexpectedResult,
             },
             |_callbacks, excel_name| {
                 Ok(Some(RegistrationId {
@@ -2006,13 +1998,13 @@ mod tests {
             &mut callbacks,
             &descriptor,
             XllError::ExcelApi {
-                function: "xlfRegister(result)",
-                code: XLTYPE_STR as i32,
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::UnexpectedResult,
             },
             |_callbacks, _| {
                 Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                    function: "xlfEvaluate(registration recovery)",
-                    code: 32,
+                    function: ExcelApiFunction::Evaluate,
+                    failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                 }))
             },
             |_callbacks, _| panic!("an unknown registration must not be treated as recoverable"),
@@ -2046,14 +2038,14 @@ mod tests {
             &mut callbacks,
             &descriptor,
             XllError::ExcelApi {
-                function: "xlfRegister(result)",
-                code: XLTYPE_STR as i32,
+                function: ExcelApiFunction::Register,
+                failure: ExcelApiFailure::UnexpectedResult,
             },
             |callbacks, _| {
                 callbacks.suppress_for_test(ExcelCallbackStatus::Uncalced);
                 Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                    function: "xlfEvaluate(registration recovery)",
-                    code: xlfn_sys::XLRET_UNCALCED,
+                    function: ExcelApiFunction::Evaluate,
+                    failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
                 }))
             },
             |_callbacks, _| panic!("terminal recovery must not attempt unregister"),
@@ -2085,8 +2077,8 @@ mod tests {
                 outcome.failed.push((
                     registrations[0].clone(),
                     XllError::ExcelApi {
-                        function: "injected unregister",
-                        code: 64,
+                        function: ExcelApiFunction::Unregister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
                     },
                 ));
                 outcome
@@ -2108,8 +2100,8 @@ mod tests {
                 attempts.set(attempt);
                 if attempt == 2 {
                     Err(RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: "injected event register",
-                        code: 32,
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                     }))
                 } else {
                     Ok(EventRegistration {
@@ -2125,8 +2117,8 @@ mod tests {
                 outcome.failed.push((
                     registrations[0].clone(),
                     XllError::ExcelApi {
-                        function: "injected event unregister",
-                        code: 64,
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
                     },
                 ));
                 outcome
@@ -2169,8 +2161,8 @@ mod tests {
                 status: ExcelCallbackStatus::Success,
                 detached: Ok(()),
                 release: Some(Err(XllError::ExcelApi {
-                    function: "xlFree",
-                    code: 32,
+                    function: ExcelApiFunction::Free,
+                    failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(32)),
                 })),
             }
         });
@@ -2206,8 +2198,8 @@ mod tests {
         let result = unregister_events_with(&[registration], |_| EventUnregisterAttempt {
             status: ExcelCallbackStatus::Success,
             detached: Err(XllError::ExcelApi {
-                function: "xlEventRegister(unregister result)",
-                code: 0,
+                function: ExcelApiFunction::EventRegister,
+                failure: ExcelApiFailure::InvalidRegistrationId(0),
             }),
             release: Some(Ok(())),
         });
@@ -2227,8 +2219,8 @@ mod tests {
         let result = unregister_events_with(&[registration], |_| EventUnregisterAttempt {
             status: ExcelCallbackStatus::Success,
             detached: Err(XllError::ExcelApi {
-                function: "xlEventRegister(unregister result)",
-                code: xlfn_sys::XLTYPE_BOOL as i32,
+                function: ExcelApiFunction::EventRegister,
+                failure: ExcelApiFailure::UnexpectedResult,
             }),
             release: Some(Ok(())),
         });
@@ -2251,8 +2243,8 @@ mod tests {
             &mut callbacks,
             registration.clone(),
             XllError::ExcelApi {
-                function: "xlEventRegister(result)",
-                code: 0,
+                function: ExcelApiFunction::EventRegister,
+                failure: ExcelApiFailure::InvalidRegistrationId(0),
             },
             |_callbacks, registrations| {
                 rollback_calls.set(rollback_calls.get() + 1);
@@ -2260,8 +2252,10 @@ mod tests {
                 outcome.failed.push((
                     registrations[0].clone(),
                     XllError::ExcelApi {
-                        function: "xlEventRegister(unregister)",
-                        code: xlfn_sys::XLRET_FAILED,
+                        function: ExcelApiFunction::EventRegister,
+                        failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(
+                            xlfn_sys::XLRET_FAILED,
+                        )),
                     },
                 ));
                 outcome
@@ -2290,8 +2284,8 @@ mod tests {
         outcome.metadata_debt.push(MetadataDebt::new(
             registration.registration,
             XllError::ExcelApi {
-                function: "xlfSetName",
-                code: 0,
+                function: ExcelApiFunction::SetName,
+                failure: ExcelApiFailure::UnexpectedResult,
             },
         ));
         assert!(outcome.failed.is_empty());

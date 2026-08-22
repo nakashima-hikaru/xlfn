@@ -230,8 +230,8 @@ pub(crate) unsafe fn async_return(
     let callback_gate =
         crate::callback_gate::enter_callback(&invocation).map_err(|suppressed| {
             XllError::ExcelApi {
-                function: "xlAsyncReturn(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: crate::error::ExcelApiFunction::AsyncReturn,
+                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
             }
         })?;
     // SAFETY: both XLOPER12 pointers are live for this call. The specialized
@@ -248,13 +248,14 @@ pub(crate) unsafe fn async_return(
         // SAFETY: XLTYPE_BOOL selects the boolean union field.
         && unsafe { callback_result.value.boolean != 0 };
     if !accepted {
+        let failure = if !invoked || status == ExcelCallbackStatus::Success {
+            crate::error::ExcelApiFailure::UnexpectedResult
+        } else {
+            crate::error::ExcelApiFailure::Status(status)
+        };
         let error = XllError::ExcelApi {
-            function: "xlAsyncReturn",
-            code: if !invoked || status == ExcelCallbackStatus::Success {
-                -1
-            } else {
-                status.raw_code()
-            },
+            function: crate::error::ExcelApiFunction::AsyncReturn,
+            failure,
         };
         return Err(error);
     }

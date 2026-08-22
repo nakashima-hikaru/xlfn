@@ -191,6 +191,99 @@ impl fmt::LowerHex for DiagnosticId {
     }
 }
 
+/// Represents the terminal or recoverable status returned by Excel C API callbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExcelCallbackStatus {
+    Success,
+    Abort,
+    Uncalced,
+    Failed(i32),
+}
+
+impl fmt::Display for ExcelCallbackStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => write!(f, "XLRET_SUCCESS"),
+            Self::Abort => write!(f, "XLRET_ABORT"),
+            Self::Uncalced => write!(f, "XLRET_UNCALCED"),
+            Self::Failed(code) => write!(f, "{code}"),
+        }
+    }
+}
+
+impl ExcelCallbackStatus {
+    pub(crate) fn from_raw(status: i32) -> Self {
+        match status {
+            xlfn_sys::XLRET_SUCCESS => Self::Success,
+            xlfn_sys::XLRET_ABORT => Self::Abort,
+            xlfn_sys::XLRET_UNCALCED => Self::Uncalced,
+            other => Self::Failed(other),
+        }
+    }
+
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(self, Self::Abort | Self::Uncalced)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ExcelApiFunction {
+    Caller,
+    SheetName,
+    SheetId,
+    GetName,
+    Register,
+    Unregister,
+    SetName,
+    Evaluate,
+    EventRegister,
+    Rtd,
+    Free,
+    AsyncReturn,
+    Coerce,
+}
+
+impl fmt::Display for ExcelApiFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Caller => "xlfCaller",
+            Self::SheetName => "xlSheetNm",
+            Self::SheetId => "xlSheetId",
+            Self::GetName => "xlGetName",
+            Self::Register => "xlfRegister",
+            Self::Unregister => "xlfUnregister",
+            Self::SetName => "xlfSetName",
+            Self::Evaluate => "xlfEvaluate",
+            Self::EventRegister => "xlEventRegister",
+            Self::Rtd => "xlfRtd",
+            Self::Free => "xlFree",
+            Self::AsyncReturn => "xlAsyncReturn",
+            Self::Coerce => "xlCoerce",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ExcelApiFailure {
+    Status(ExcelCallbackStatus),
+    Suppressed(ExcelCallbackStatus),
+    UnexpectedResult,
+    InvalidRegistrationId(i32),
+    Indeterminate(ExcelCallbackStatus),
+}
+
+impl fmt::Display for ExcelApiFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "status {status}"),
+            Self::Suppressed(status) => write!(f, "suppressed with status {status}"),
+            Self::UnexpectedResult => write!(f, "unexpected callback result"),
+            Self::InvalidRegistrationId(id) => write!(f, "invalid registration id {id}"),
+            Self::Indeterminate(status) => write!(f, "indeterminate callback result {status}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum XllError {
@@ -218,8 +311,13 @@ pub enum XllError {
     },
     #[error("domain error: {code:?}")]
     Domain { code: DomainErrorCode },
-    #[error("Excel API {function} failed with {code}")]
-    ExcelApi { function: &'static str, code: i32 },
+    #[error("Excel API {function} failed: {failure}")]
+    ExcelApi {
+        function: ExcelApiFunction,
+        failure: ExcelApiFailure,
+    },
+    #[error("Windows API {function} failed with {code}")]
+    WindowsApi { function: &'static str, code: i32 },
     #[error("Excel name {name} is already registered")]
     RegistrationConflict { name: &'static str },
     #[error("Excel name {name} no longer refers to the expected registration")]
@@ -284,6 +382,7 @@ impl XllError {
             | Self::Shape { .. }
             | Self::ElementCountMismatch { .. }
             | Self::ExcelApi { .. }
+            | Self::WindowsApi { .. }
             | Self::RegistrationConflict { .. }
             | Self::MetadataDebtBindingChanged { .. }
             | Self::LibraryLoad { .. }

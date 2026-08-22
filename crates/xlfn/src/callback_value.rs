@@ -193,8 +193,8 @@ impl ExcelCallbackValue {
             CallbackValueReleaseState::Released => return Ok(()),
             CallbackValueReleaseState::Indeterminate { status } => {
                 return Err(XllError::ExcelApi {
-                    function: "xlFree(indeterminate callback result)",
-                    code: status.raw_code(),
+                    function: crate::error::ExcelApiFunction::Free,
+                    failure: crate::error::ExcelApiFailure::Indeterminate(status),
                 });
             }
             CallbackValueReleaseState::Live
@@ -261,8 +261,8 @@ impl ExcelCallbackValue {
                 record_callback_value_debt(CallbackCleanupDebt { status });
             }
             Err(XllError::ExcelApi {
-                function: "xlFree",
-                code: raw_status,
+                function: crate::error::ExcelApiFunction::Free,
+                failure: crate::error::ExcelApiFailure::Status(status),
             })
         }
     }

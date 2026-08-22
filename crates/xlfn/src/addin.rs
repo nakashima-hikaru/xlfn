@@ -2,7 +2,7 @@ use crate::call::CallScope;
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
-use crate::error::IntoXllError;
+use crate::error::{ExcelApiFailure, ExcelApiFunction, IntoXllError};
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
@@ -673,14 +673,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 .callbacks()
                 .call(XL_COERCE, &arguments)
                 .map_err(|suppressed| XllError::ExcelApi {
-                    function: "xlCoerce(suppressed)",
-                    code: suppressed.status.raw_code(),
+                    function: ExcelApiFunction::Coerce,
+                    failure: ExcelApiFailure::Suppressed(suppressed.status),
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlCoerce",
-                code: status.raw_code(),
+                function: ExcelApiFunction::Coerce,
+                failure: ExcelApiFailure::Status(status),
             }));
         }
         let converted = <ExcelValue as FromExcel>::from_excel(result.borrow()?, "reference");
@@ -699,14 +699,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 .callbacks()
                 .call(XL_COERCE, &arguments)
                 .map_err(|suppressed| XllError::ExcelApi {
-                    function: "xlCoerce(suppressed)",
-                    code: suppressed.status.raw_code(),
+                    function: ExcelApiFunction::Coerce,
+                    failure: ExcelApiFailure::Suppressed(suppressed.status),
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlCoerce",
-                code: status.raw_code(),
+                function: ExcelApiFunction::Coerce,
+                failure: ExcelApiFailure::Status(status),
             }));
         }
         let converted = decode_owned_matrix::<T>(result.borrow()?, "reference");
@@ -722,14 +722,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 .callbacks()
                 .call(XL_SHEET_NM, &arguments)
                 .map_err(|suppressed| XllError::ExcelApi {
-                    function: "xlSheetNm(suppressed)",
-                    code: suppressed.status.raw_code(),
+                    function: ExcelApiFunction::SheetName,
+                    failure: ExcelApiFailure::Suppressed(suppressed.status),
                 })?
         };
         if status != ExcelCallbackStatus::Success {
             return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: "xlSheetNm",
-                code: status.raw_code(),
+                function: ExcelApiFunction::SheetName,
+                failure: ExcelApiFailure::Status(status),
             }));
         }
         let converted = <String as FromExcel>::from_excel(result.borrow()?, "reference");
@@ -990,8 +990,10 @@ mod tests {
             assert!(matches!(
                 context.subscribe(&source, topic),
                 Err(crate::XllError::ExcelApi {
-                    function: "xlfRtd",
-                    code: xlfn_sys::XLRET_FAILED,
+                    function: crate::ExcelApiFunction::Rtd,
+                    failure: crate::ExcelApiFailure::Status(crate::ExcelCallbackStatus::Failed(
+                        xlfn_sys::XLRET_FAILED,
+                    )),
                 })
             ));
         });

@@ -138,7 +138,7 @@ impl CrossProcessRegistrationGuard {
             // SAFETY: GetLastError has no preconditions and is read immediately
             // after the failed CreateMutexW call.
             let code = (unsafe { GetLastError() }) as i32;
-            return Err(XllError::ExcelApi {
+            return Err(XllError::WindowsApi {
                 function: "CreateMutexW",
                 code,
             });
@@ -149,7 +149,7 @@ impl CrossProcessRegistrationGuard {
         if !matches!(wait, WAIT_OBJECT_0 | WAIT_ABANDONED) {
             // SAFETY: `handle` is owned by this function and has not been closed.
             unsafe { CloseHandle(handle) };
-            return Err(XllError::ExcelApi {
+            return Err(XllError::WindowsApi {
                 function: "WaitForSingleObject(RTD registration mutex)",
                 code: if wait == WAIT_FAILED {
                     // SAFETY: GetLastError is read immediately after WAIT_FAILED.
@@ -381,7 +381,7 @@ pub(super) fn read_registry_string(path: &str, name: &str) -> XllResult<Option<S
 }
 
 fn registry_error(function: &'static str, status: u32) -> XllError {
-    XllError::ExcelApi {
+    XllError::WindowsApi {
         function,
         code: status as i32,
     }
@@ -423,7 +423,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
     };
 
     if status != ERROR_SUCCESS {
-        return Err(XllError::ExcelApi {
+        return Err(XllError::WindowsApi {
             function: "RegCreateKeyExW",
             code: status as i32,
         });
@@ -452,7 +452,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
     if status == ERROR_SUCCESS {
         Ok(())
     } else {
-        Err(XllError::ExcelApi {
+        Err(XllError::WindowsApi {
             function: "RegSetValueExW",
             code: status as i32,
         })

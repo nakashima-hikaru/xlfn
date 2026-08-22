@@ -395,8 +395,8 @@ where
         let error = callbacks
             .terminal_status()
             .map(|status| XllError::ExcelApi {
-                function: "xlEventRegister(unregister suppressed)",
-                code: status.raw_code(),
+                function: crate::error::ExcelApiFunction::EventRegister,
+                failure: crate::error::ExcelApiFailure::Suppressed(status),
             })
             .unwrap_or(XllError::Closing);
         report_boundary_error("xlAutoOpen event rollback", &error);
@@ -895,8 +895,8 @@ where
                 .callbacks()
                 .terminal_status()
                 .map(|status| XllError::ExcelApi {
-                    function: "xlEventRegister(unregister suppressed)",
-                    code: status.raw_code(),
+                    function: crate::error::ExcelApiFunction::EventRegister,
+                    failure: crate::error::ExcelApiFailure::Suppressed(status),
                 })
                 .unwrap_or(XllError::Closing);
             for _ in &event_registrations {

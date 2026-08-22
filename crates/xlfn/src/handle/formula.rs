@@ -98,14 +98,14 @@ pub(crate) fn resolve_formula_caller(
         callbacks
             .call(XLF_CALLER, &[])
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlfCaller(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: crate::error::ExcelApiFunction::Caller,
+                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
     if status != ExcelCallbackStatus::Success {
         return Err(caller.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlfCaller",
-            code: status.raw_code(),
+            function: crate::error::ExcelApiFunction::Caller,
+            failure: crate::error::ExcelApiFailure::Status(status),
         }));
     }
     let (row, column, sheet_id) = {
@@ -183,14 +183,14 @@ pub(crate) fn resolve_formula_caller(
         callbacks
             .call(XL_SHEET_NM, &caller_arguments)
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlSheetNm(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: crate::error::ExcelApiFunction::SheetName,
+                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
     if sheet_status != ExcelCallbackStatus::Success {
         return Err(sheet.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: "xlSheetNm",
-            code: sheet_status.raw_code(),
+            function: crate::error::ExcelApiFunction::SheetName,
+            failure: crate::error::ExcelApiFailure::Status(sheet_status),
         }));
     }
     // `xlSheetId` accepts the counted external sheet name returned by
@@ -204,8 +204,8 @@ pub(crate) fn resolve_formula_caller(
         callbacks
             .call(XL_SHEET_ID, &sheet_name_argument)
             .map_err(|suppressed| XllError::ExcelApi {
-                function: "xlSheetId(suppressed)",
-                code: suppressed.status.raw_code(),
+                function: crate::error::ExcelApiFunction::SheetId,
+                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
             })?
     };
     if sheet_id_status != ExcelCallbackStatus::Success {
@@ -213,8 +213,8 @@ pub(crate) fn resolve_formula_caller(
             .try_release()
             .err()
             .unwrap_or(XllError::ExcelApi {
-                function: "xlSheetId",
-                code: sheet_id_status.raw_code(),
+                function: crate::error::ExcelApiFunction::SheetId,
+                failure: crate::error::ExcelApiFailure::Status(sheet_id_status),
             }));
     }
     let sheet_id = {

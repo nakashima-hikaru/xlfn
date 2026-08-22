@@ -104,7 +104,7 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
         return Ok(());
     }
 
-    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::ExcelApi {
+    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
         function: "CoInitializeEx",
         code,
     })?;
@@ -112,7 +112,7 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
     // owned GIT wrapper. Its COM reference is released exactly once after the
     // synchronous revocation attempt.
     unsafe {
-        let git = get_git().map_err(|status| XllError::ExcelApi {
+        let git = get_git().map_err(|status| XllError::WindowsApi {
             function: "CoCreateInstance(IGlobalInterfaceTable)",
             code: status,
         })?;
@@ -120,7 +120,7 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
         if status >= 0 {
             Ok(())
         } else {
-            Err(XllError::ExcelApi {
+            Err(XllError::WindowsApi {
                 function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
                 code: status,
             })
@@ -151,7 +151,7 @@ impl RetainedUpdateCallback {
             return Ok(());
         };
         let cookie = cookie.raw();
-        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::ExcelApi {
+        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
             function: "CoInitializeEx",
             code,
         })?;
@@ -165,7 +165,7 @@ impl RetainedUpdateCallback {
             })?;
             let proxy = git
                 .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
-                .map_err(|code| XllError::ExcelApi {
+                .map_err(|code| XllError::WindowsApi {
                     function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
                     code,
                 })?;
@@ -173,7 +173,7 @@ impl RetainedUpdateCallback {
             let notify_status = event.notify();
 
             if notify_status != S_OK {
-                return Err(XllError::ExcelApi {
+                return Err(XllError::WindowsApi {
                     function: "IRTDUpdateEvent::UpdateNotify",
                     code: notify_status,
                 });
