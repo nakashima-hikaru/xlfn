@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
-    GenerationServices, HostLedger, LifecycleCore, LifecycleState, ModuleResidency,
+    GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore, ModuleResidency,
     QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess, ThreadAffineError,
     ThreadAffineInstallError,
 };
@@ -41,57 +41,16 @@ impl<A: crate::Addin> OpenGeneration<A> {
 }
 
 /// Unique Add-in state staged during `OPENING`.
-pub enum OpeningGeneration<A: crate::Addin> {
-    SharedStateOnly {
-        shared_state: A::SharedState,
-        config: crate::addin::RuntimeConfig,
-    },
-    Ready {
-        shared_state: A::SharedState,
-        layers: A::Layers,
-        config: crate::addin::RuntimeConfig,
-    },
+pub struct OpeningGeneration<A: crate::Addin> {
+    pub(crate) shared_state: A::SharedState,
+    pub(crate) layers: A::Layers,
+    pub(crate) config: crate::addin::RuntimeConfig,
 }
 
 impl<A: crate::Addin> OpeningGeneration<A> {
     #[must_use]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        A::SharedState,
-        Option<A::Layers>,
-        crate::addin::RuntimeConfig,
-    ) {
-        match self {
-            Self::SharedStateOnly {
-                shared_state,
-                config,
-            } => (shared_state, None, config),
-            Self::Ready {
-                shared_state,
-                layers,
-                config,
-            } => (shared_state, Some(layers), config),
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn attach_layers(self, layers: A::Layers) -> Self {
-        match self {
-            Self::SharedStateOnly {
-                shared_state,
-                config,
-            }
-            | Self::Ready {
-                shared_state,
-                config,
-                ..
-            } => Self::Ready {
-                shared_state,
-                layers,
-                config,
-            },
-        }
+    pub(crate) fn into_parts(self) -> (A::SharedState, A::Layers, crate::addin::RuntimeConfig) {
+        (self.shared_state, self.layers, self.config)
     }
 }
 
@@ -128,8 +87,8 @@ impl<A: crate::Addin> GenerationLease<A> {
 }
 
 pub struct Runtime<A: crate::Addin> {
-    pub(crate) lifecycle: LifecycleState<A>,
-    pub(crate) lifecycle_state: crate::runtime_components::ThreadAffineSlot<A::LifecycleState>,
+    pub(crate) lifecycle: LifecycleCoordinator<A>,
+    pub(crate) addin_lifecycle: crate::runtime_components::ThreadAffineSlot<A::LifecycleState>,
     pub(crate) host: HostLedger,
     pub(crate) return_protocol: ReturnProtocol,
     pub(crate) generation_services: GenerationServices,
@@ -140,15 +99,15 @@ pub struct Runtime<A: crate::Addin> {
     pub(crate) refinement: RuntimeRefinementHooks,
 }
 
-pub(crate) type LifecycleThreadAccess<'runtime, A> =
+pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
 
 impl<A: crate::Addin> Runtime<A> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            lifecycle: LifecycleState::new(),
-            lifecycle_state: crate::runtime_components::ThreadAffineSlot::new(),
+            lifecycle: LifecycleCoordinator::new(),
+            addin_lifecycle: crate::runtime_components::ThreadAffineSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             generation_services: GenerationServices::new(),
@@ -313,31 +272,25 @@ impl<A: crate::Addin> Runtime<A> {
         opening: OpeningGeneration<A>,
         reason: QuarantineReason,
     ) {
-        match opening {
-            OpeningGeneration::SharedStateOnly { shared_state, .. } => {
-                self.quarantine_shared_state(generation, shared_state, reason);
-            }
-            OpeningGeneration::Ready {
-                shared_state,
-                layers,
-                config: _,
-            } => {
-                if let Some(id) = generation {
-                    self.quarantine.retain_generation(
-                        Some(id),
-                        OpenGeneration {
-                            id,
-                            shared_state,
-                            layers,
-                        },
-                        reason,
-                    );
-                } else {
-                    self.quarantine
-                        .retain_shared_state(None, shared_state, reason);
-                    self.quarantine.retain_layers(None, layers, reason);
-                }
-            }
+        let OpeningGeneration {
+            shared_state,
+            layers,
+            config: _,
+        } = opening;
+        if let Some(id) = generation {
+            self.quarantine.retain_generation(
+                Some(id),
+                OpenGeneration {
+                    id,
+                    shared_state,
+                    layers,
+                },
+                reason,
+            );
+        } else {
+            self.quarantine
+                .retain_shared_state(None, shared_state, reason);
+            self.quarantine.retain_layers(None, layers, reason);
         }
     }
 
@@ -384,9 +337,7 @@ impl<A: crate::Addin> Runtime<A> {
         let attempt_id = self.lifecycle.allocate_open_attempt(&mut control)?;
         self.return_protocol.reopen_admission()?;
 
-        crate::rtd::begin_module_open();
-        crate::callback_gate::reset_from_runtime();
-        crate::ingress::global_ingress().begin_opening();
+        let module_opening = crate::module_runtime::global().begin_open();
         #[cfg(test)]
         {
             *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
@@ -397,6 +348,7 @@ impl<A: crate::Addin> Runtime<A> {
         Ok(OpeningTxn {
             runtime: self,
             attempt_id,
+            module_opening: Some(module_opening),
             active: true,
         })
     }
@@ -426,18 +378,18 @@ impl<A: crate::Addin> Runtime<A> {
         layers: A::Layers,
     ) {
         let access = self
-            .bind_lifecycle_thread()
+            .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        if self.with_lifecycle_state(&access, |_| ()).is_err() {
+        if self.with_addin_lifecycle(&access, |_| ()).is_err() {
             assert!(
-                self.install_lifecycle_state(&access, lifecycle_state)
+                self.install_addin_lifecycle(&access, lifecycle_state)
                     .is_ok(),
                 "test runtime has one lifecycle state"
             );
         }
         assert!(
             self.lifecycle
-                .stage_opening_generation(OpeningGeneration::Ready {
+                .stage_opening_generation(OpeningGeneration {
                     shared_state: state,
                     layers,
                     config: crate::addin::RuntimeConfig::new(),
@@ -446,62 +398,54 @@ impl<A: crate::Addin> Runtime<A> {
         );
     }
 
-    pub(crate) fn stage_opening_state(
+    pub(crate) fn bind_addin_lifecycle(
         &self,
-        state: A::SharedState,
-        config: crate::addin::RuntimeConfig,
-    ) -> Result<(), (XllError, A::SharedState)> {
-        self.lifecycle.stage_opening_state(state, config)
+    ) -> Result<AddinLifecycleAccess<'_, A>, ThreadAffineError> {
+        self.addin_lifecycle.bind_current()
     }
 
-    pub(crate) fn bind_lifecycle_thread(
+    pub(crate) fn install_addin_lifecycle(
         &self,
-    ) -> Result<LifecycleThreadAccess<'_, A>, ThreadAffineError> {
-        self.lifecycle_state.bind_current()
-    }
-
-    pub(crate) fn install_lifecycle_state(
-        &self,
-        access: &LifecycleThreadAccess<'_, A>,
+        access: &AddinLifecycleAccess<'_, A>,
         state: A::LifecycleState,
     ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
-        self.lifecycle_state.install(access, state)
+        self.addin_lifecycle.install(access, state)
     }
 
-    pub(crate) fn with_lifecycle_state<R>(
+    pub(crate) fn with_addin_lifecycle<R>(
         &self,
-        access: &LifecycleThreadAccess<'_, A>,
+        access: &AddinLifecycleAccess<'_, A>,
         operation: impl FnOnce(&mut A::LifecycleState) -> R,
     ) -> Result<R, ThreadAffineError> {
-        self.lifecycle_state.with_mut(access, operation)
+        self.addin_lifecycle.with_mut(access, operation)
     }
 
-    pub(crate) fn has_lifecycle_state(
+    pub(crate) fn has_addin_lifecycle(
         &self,
-        access: &LifecycleThreadAccess<'_, A>,
+        access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<bool, ThreadAffineError> {
-        self.lifecycle_state.has_value(access)
+        self.addin_lifecycle.has_value(access)
     }
 
-    pub(crate) fn take_lifecycle_state(
+    pub(crate) fn take_addin_lifecycle(
         &self,
-        access: &LifecycleThreadAccess<'_, A>,
+        access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<A::LifecycleState, ThreadAffineError> {
-        self.lifecycle_state.take(access)
+        self.addin_lifecycle.take(access)
     }
 
-    pub(crate) fn release_empty_lifecycle_binding(
+    pub(crate) fn release_empty_addin_lifecycle(
         &self,
-        access: &LifecycleThreadAccess<'_, A>,
+        access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<(), ThreadAffineError> {
-        self.lifecycle_state.release_empty_binding(access)
+        self.addin_lifecycle.release_empty_binding(access)
     }
 
-    pub(crate) fn restore_opening_generation(
+    pub(crate) fn stage_opening_generation(
         &self,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (XllError, OpeningGeneration<A>)> {
-        self.lifecycle.restore_opening_generation(opening)
+        self.lifecycle.stage_opening_generation(opening)
     }
 
     pub(crate) fn publish_opening_generation(
@@ -562,8 +506,8 @@ impl<A: crate::Addin> Runtime<A> {
             .install_generation_services_lease(&mut control, lease);
     }
 
-    pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
-        self.lifecycle.take_opening_generation()
+    pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
+        self.lifecycle.take_opening_for_rollback()
     }
 
     #[cfg(test)]
@@ -612,6 +556,12 @@ impl<A: crate::Addin> Runtime<A> {
             ingress
                 .complete_open(|| {
                     self.publish_opening_generation(&mut control, attempt.attempt_id)?;
+                    let module_epoch = attempt
+                        .module_opening
+                        .take()
+                        .expect("opening transaction owns the module epoch");
+                    self.lifecycle
+                        .install_module_epoch(&mut control, module_epoch.commit());
                     let generation = attempt.attempt_id.into_runtime_generation();
                     self.refinement.commit_open(self, attempt.attempt_id, || {
                         self.lifecycle.commit_open(&mut control, generation);
@@ -667,6 +617,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     fn reject_open_attempt(&self, control: &mut LifecycleCore<A>, attempt: &mut OpeningTxn<'_, A>) {
         self.lifecycle.reject_open_attempt(control);
+        let _ = attempt.module_opening.take();
         attempt.active = false;
     }
 
@@ -732,7 +683,7 @@ impl<A: crate::Addin> Runtime<A> {
         // Every final-close invocation invalidates open operations that started
         // before it, including an operation that is between rollback recovery
         // and acquisition of its open-attempt token while the phase is Closed.
-        // This epoch is deliberately not part of TerminalCertificate: a waiting
+        // The removal-request epoch is deliberately not part of TerminalCertificate: a waiting
         // final-close caller may advance it while the active owner finishes.
         self.lifecycle.begin_removal_request(&mut wait_guard);
         self.return_protocol.close_admission();
@@ -1022,12 +973,17 @@ pub(crate) struct OpenRollback;
 
 pub(crate) trait TerminalCertificateKind {
     fn accepts_phase(phase: LifecyclePhase) -> bool;
+    fn requires_module_epoch() -> bool;
     fn error() -> XllError;
 }
 
 impl TerminalCertificateKind for FinalRemoval {
     fn accepts_phase(phase: LifecyclePhase) -> bool {
         phase == LifecyclePhase::Closing
+    }
+
+    fn requires_module_epoch() -> bool {
+        true
     }
 
     fn error() -> XllError {
@@ -1043,6 +999,10 @@ impl TerminalCertificateKind for OpenRollback {
             phase,
             LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
         )
+    }
+
+    fn requires_module_epoch() -> bool {
+        false
     }
 
     fn error() -> XllError {
@@ -1063,6 +1023,7 @@ pub(crate) struct TerminalCertificate<K> {
     pub(crate) composition_resources: crate::shutdown_refinement::GhostResources,
     pub(crate) runtime_address: usize,
     pub(crate) generation: Option<RuntimeGeneration>,
+    pub(crate) module_epoch: Option<crate::module_runtime::ModuleEpochLease>,
     pub(crate) _kind: std::marker::PhantomData<K>,
 }
 
@@ -1114,6 +1075,10 @@ impl<A: crate::Addin> Runtime<A> {
         let services_lease_matches_generation = control
             .generation_services_lease_generation()
             .is_none_or(|generation| Some(generation) == control.known_generation());
+        let module_epoch_present = control.has_module_epoch();
+        let module_epoch_current = control.module_epoch_is_current();
+        let module_epoch_required =
+            K::requires_module_epoch() && control.known_generation().is_some();
 
         let certified = K::accepts_phase(control.canonical_state().phase())
             && control.canonical_state().open_attempt().is_none()
@@ -1124,6 +1089,7 @@ impl<A: crate::Addin> Runtime<A> {
             && !control.has_opening_generation()
             && !control.has_current_generation()
             && services_lease_matches_generation
+            && (!module_epoch_required || (module_epoch_present && module_epoch_current))
             && self.host.is_quiescent();
         let certified = certified && handles_match_generation;
 
@@ -1135,6 +1101,7 @@ impl<A: crate::Addin> Runtime<A> {
         // arming decision. Once every service slot is stopped and all other
         // quiescence proofs hold, consuming it linearizes generation teardown.
         let _ = self.lifecycle.take_generation_services_lease(&mut control);
+        let module_epoch = self.lifecycle.take_module_epoch(&mut control);
 
         #[cfg(any(test, feature = "shutdown-refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
@@ -1145,6 +1112,7 @@ impl<A: crate::Addin> Runtime<A> {
             composition_resources,
             runtime_address: std::ptr::from_ref(self).addr(),
             generation: control.known_generation(),
+            module_epoch,
             _kind: std::marker::PhantomData,
         })
     }
@@ -1153,6 +1121,7 @@ impl<A: crate::Addin> Runtime<A> {
         &self,
         certificate: TerminalCertificate<OpenRollback>,
     ) -> XllResult<()> {
+        let _module_epoch = certificate.module_epoch;
         if certificate.runtime_address != std::ptr::from_ref(self).addr() {
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_CERT_UNKNOWN,
@@ -1170,7 +1139,7 @@ impl<A: crate::Addin> Runtime<A> {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PHASE,
             });
         }
-        crate::callback_gate::close_from_runtime();
+        crate::module_runtime::global().close_callbacks();
         self.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.record_composition_event(
@@ -1183,7 +1152,7 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         self.mark_composition_terminal_pending();
         self.lifecycle.notify_all();
-        crate::rtd::certify_logical_quiescence();
+        crate::module_runtime::global().certify_logical_quiescence();
         #[cfg(test)]
         drop(self.lifecycle.test_module_lease.lock().take());
         Ok(())
@@ -1193,6 +1162,7 @@ impl<A: crate::Addin> Runtime<A> {
         &self,
         certificate: TerminalCertificate<FinalRemoval>,
     ) -> XllResult<ClosedWitness> {
+        let _module_epoch = certificate.module_epoch;
         if certificate.runtime_address != std::ptr::from_ref(self).addr() {
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::CLOSE_RUNTIME,
@@ -1220,7 +1190,7 @@ impl<A: crate::Addin> Runtime<A> {
                 crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
             );
         }
-        crate::callback_gate::close_from_runtime();
+        crate::module_runtime::global().close_callbacks();
         self.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "shutdown-refinement"))]
         debug_assert_eq!(self.phase(), LifecyclePhase::Closed);
@@ -1241,7 +1211,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
         }
         self.lifecycle.notify_all();
-        crate::rtd::certify_logical_quiescence();
+        crate::module_runtime::global().certify_logical_quiescence();
         #[cfg(test)]
         drop(self.lifecycle.test_module_lease.lock().take());
         Ok(ClosedWitness {
@@ -1417,6 +1387,7 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
 pub(crate) struct OpeningTxn<'runtime, A: crate::Addin> {
     runtime: &'runtime Runtime<A>,
     attempt_id: OpenAttemptId,
+    module_opening: Option<crate::module_runtime::ModuleOpening>,
     active: bool,
 }
 
@@ -1434,6 +1405,7 @@ impl<A: crate::Addin> OpeningTxn<'_, A> {
             return false;
         }
         let should_rollback = self.runtime.fail_and_record(self.attempt_id);
+        let _ = self.module_opening.take();
         self.active = false;
         should_rollback
     }

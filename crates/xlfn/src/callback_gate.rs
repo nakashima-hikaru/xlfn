@@ -71,7 +71,7 @@ pub(crate) struct CallbackGate {
 }
 
 impl CallbackGate {
-    const fn new(initial: CallbackGateLifecycle) -> Self {
+    pub(crate) const fn new(initial: CallbackGateLifecycle) -> Self {
         Self {
             id: 0,
             state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
@@ -224,7 +224,10 @@ fn finish_invocation(invocation: &CallbackInvocationToken) {
     }
     #[cfg(not(test))]
     let _ = gate_id;
-    decrement_scope(&MODULE_CALLBACK_GATE.state, status);
+    decrement_scope(
+        &crate::module_runtime::global().callback_gate().state,
+        status,
+    );
 }
 
 fn decrement_scope(
@@ -250,10 +253,8 @@ fn decrement_scope(
     }
 }
 
-static MODULE_CALLBACK_GATE: CallbackGate = CallbackGate::new(CallbackGateLifecycle::Closed);
-
 pub(crate) fn reset() {
-    MODULE_CALLBACK_GATE.reset();
+    crate::module_runtime::global().callback_gate().reset();
 }
 
 pub(crate) fn reset_from_runtime() {
@@ -269,19 +270,23 @@ pub(crate) fn close_from_runtime() {
     let Some(_test_guard) = crate::test_callback::try_lock() else {
         return;
     };
-    MODULE_CALLBACK_GATE.close();
+    crate::module_runtime::global().callback_gate().close();
 }
 
 pub(crate) fn enter_callback<'a>(
     invocation: &'a CallbackInvocationToken,
 ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
-    MODULE_CALLBACK_GATE.enter_callback(invocation)
+    crate::module_runtime::global()
+        .callback_gate()
+        .enter_callback(invocation)
 }
 
 pub(crate) fn enter_cleanup<'a>(
     invocation: Option<&'a CallbackInvocationToken>,
 ) -> Result<CallbackGatePermit<'a>, CallbackGateSuppressed> {
-    MODULE_CALLBACK_GATE.enter_cleanup(invocation)
+    crate::module_runtime::global()
+        .callback_gate()
+        .enter_cleanup(invocation)
 }
 
 #[cfg(test)]

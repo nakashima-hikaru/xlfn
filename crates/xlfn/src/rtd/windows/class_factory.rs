@@ -1,4 +1,5 @@
-use super::module_state::{COM_MODULE_LIFETIME, ComObjectKind, ComObjectLease};
+use super::module_lifetime;
+use super::module_state::{ComObjectKind, ComObjectLease};
 use super::{
     ACTIVE_SERVER, IID_IUNKNOWN, RtdServer, com_boundary, guid_eq, server_add_ref,
     server_query_interface, server_release,
@@ -128,7 +129,7 @@ unsafe extern "system" fn factory_query_interface(
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     if output.is_null() {
         return E_POINTER;
     }
@@ -159,14 +160,14 @@ unsafe extern "system" fn factory_query_interface(
 }
 
 unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     // SAFETY: COM calls AddRef only on a live object pointer. The atomic update
     // preserves the shared COM reference count.
     unsafe { (*this).references.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
 pub(super) unsafe extern "system" fn factory_release(this: *mut ClassFactory) -> u32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     let Some(this) = NonNull::new(this) else {
         return 0;
     };
@@ -259,7 +260,7 @@ pub(super) unsafe extern "system" fn factory_lock_server(
         if this.is_null() {
             return E_POINTER;
         }
-        if COM_MODULE_LIFETIME.set_server_lock(lock != 0) {
+        if module_lifetime().set_server_lock(lock != 0) {
             S_OK
         } else {
             E_UNEXPECTED
@@ -269,7 +270,7 @@ pub(super) unsafe extern "system" fn factory_lock_server(
     if lock == 0 {
         // Unlocking releases an existing module hold rather than admitting new
         // work. It must remain available after ingress enters CLOSING.
-        let (_module_call, _accepted) = COM_MODULE_LIFETIME.enter_call();
+        let (_module_call, _accepted) = module_lifetime().enter_call();
         match catch_unwind(AssertUnwindSafe(operation)) {
             Ok(status) => status,
             Err(_) => {

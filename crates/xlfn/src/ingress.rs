@@ -233,11 +233,10 @@ pub struct ExportIngress {
 #[derive(Debug)]
 pub(crate) struct OpeningPublicationLost;
 
-static GLOBAL_INGRESS: ExportIngress = ExportIngress::new();
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
 
-pub fn global_ingress() -> &'static ExportIngress {
-    &GLOBAL_INGRESS
+pub(crate) fn global_ingress() -> &'static ExportIngress {
+    crate::module_runtime::global().ingress()
 }
 
 pub(crate) fn with_diagnostic_linearization<F, R>(operation: F) -> R
@@ -603,6 +602,10 @@ impl ExportIngress {
 
     pub fn phase(&self) -> u8 {
         self.phase.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     pub(crate) fn allows_diagnostic_mutation(&self) -> bool {

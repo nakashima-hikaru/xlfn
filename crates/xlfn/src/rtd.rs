@@ -47,14 +47,35 @@ impl RtdNotifier {
     }
 }
 
-static LOGICAL_QUIESCENCE_CERTIFIED: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn begin_module_open() {
-    LOGICAL_QUIESCENCE_CERTIFIED.store(false, Ordering::Release);
+pub(crate) struct RtdModuleState {
+    logical_quiescence_certified: AtomicBool,
 }
 
-pub(crate) fn begin_module_close() {
-    LOGICAL_QUIESCENCE_CERTIFIED.store(false, Ordering::Release);
+impl RtdModuleState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            logical_quiescence_certified: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn begin_open(&self) {
+        self.logical_quiescence_certified
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn begin_close(&self) {
+        self.logical_quiescence_certified
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn certify_logical_quiescence(&self) {
+        self.logical_quiescence_certified
+            .store(true, Ordering::Release);
+    }
+
+    fn is_logically_quiescent(&self) -> bool {
+        self.logical_quiescence_certified.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -65,12 +86,10 @@ pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
     let _ = ghost;
 }
 
-pub(crate) fn certify_logical_quiescence() {
-    LOGICAL_QUIESCENCE_CERTIFIED.store(true, Ordering::Release);
-}
-
 pub(crate) fn logical_quiescence_certified() -> bool {
-    LOGICAL_QUIESCENCE_CERTIFIED.load(Ordering::Acquire)
+    crate::module_runtime::global()
+        .rtd()
+        .is_logically_quiescent()
         && crate::ingress::global_ingress().phase() == crate::ingress::PHASE_CLOSED
 }
 

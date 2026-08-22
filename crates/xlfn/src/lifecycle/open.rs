@@ -5,7 +5,7 @@ use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::{LifecycleThreadAccess, OpeningTxn, Runtime};
+use crate::runtime::{AddinLifecycleAccess, OpeningTxn, Runtime};
 use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, its host registrations, and the callback
@@ -54,7 +54,7 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
         )
     }
 
-    pub(super) fn rollback(&mut self, lifecycle: &LifecycleThreadAccess<'_, A>) {
+    pub(super) fn rollback(&mut self, lifecycle: &AddinLifecycleAccess<'_, A>) {
         if !self.registrations.is_empty() {
             self.runtime.retain_registration_debt(
                 std::mem::take(&mut self.registrations)
@@ -85,7 +85,7 @@ impl<A: Addin> Drop for OpeningTransaction<'_, A> {
 
 pub fn open_addin_boundary<A>(
     runtime: &Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
     addin_id: &AddinId,
     version: &'static str,
     target: &'static str,

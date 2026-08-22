@@ -5,7 +5,7 @@ use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::{LifecycleThreadAccess, Runtime};
+use crate::runtime::{AddinLifecycleAccess, Runtime};
 use crate::runtime_components::ThreadAffineError;
 use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -107,7 +107,7 @@ fn retry_metadata_debt<A: Addin>(
 
 fn open_addin_inner<A>(
     runtime: &Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     callbacks: &mut HostCallbackSession,
@@ -154,7 +154,7 @@ where
 
 fn rollback_active_open<A>(
     runtime: &Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
     attempt: Option<&mut crate::runtime::OpeningTxn<'_, A>>,
     callbacks: &mut HostCallbackSession,
 ) where
@@ -192,7 +192,7 @@ fn rollback_active_open<A>(
 
 fn initialize_addin<A>(
     runtime: &Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
     context: &OpenContext,
 ) -> XllResult<RuntimeConfig>
 where
@@ -203,7 +203,7 @@ where
     // Lifecycle state is deliberately installed in the main-thread slot
     // before the shared generation is staged. It may be non-Send and must not
     // become part of the cross-thread generation root.
-    if let Err(error) = runtime.install_lifecycle_state(lifecycle, lifecycle_state) {
+    if let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state) {
         let (lifecycle_state, _) = error.into_parts();
         std::mem::forget(lifecycle_state);
         runtime.quarantine_shared_state(
@@ -220,31 +220,14 @@ where
             diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
         });
     }
-    // Stage unique ownership in OpeningGeneration before invoking add-in hooks.
-    // If subsequent hooks panic, the outer boundary can roll the shared state
-    // back while the lifecycle state remains retained in its main-thread slot.
-    if let Err((error, shared_state)) = runtime.stage_opening_state(shared_state, runtime_config) {
-        let generation = active_runtime_generation(runtime);
-        runtime.quarantine_shared_state(
-            generation,
-            shared_state,
-            crate::runtime_components::QuarantineReason::OpenStateInvariant,
-        );
-        runtime.quarantine_layers(
-            generation,
-            layers,
-            crate::runtime_components::QuarantineReason::OpenStateInvariant,
-        );
-        return Err(error);
-    }
-    let opening = runtime
-        .take_opening_generation()
-        .ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-        })?;
-
-    let opening = opening.attach_layers(layers);
-    if let Err((error, opening)) = runtime.restore_opening_generation(opening) {
+    // Stage the complete generation as one owned value.  The opening state
+    // cannot be observed in a partially assembled form.
+    let opening = crate::runtime::OpeningGeneration {
+        shared_state,
+        layers,
+        config: runtime_config,
+    };
+    if let Err((error, opening)) = runtime.stage_opening_generation(opening) {
         runtime.quarantine_opening_generation(
             active_runtime_generation(runtime),
             opening,
@@ -304,7 +287,7 @@ fn drain_execution<A: Addin>(
     runtime: &Runtime<A>,
     _record_ghost: bool,
 ) -> crate::ingress::ExportsDrained {
-    let exports_drained = crate::ingress::global_ingress().seal_and_drain();
+    let exports_drained = crate::module_runtime::global().seal_and_drain();
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     if _record_ghost {
@@ -334,7 +317,7 @@ impl OpenRollbackOutcome {
 
 fn rollback_open<A>(
     runtime: &Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
     generation: Option<RuntimeGeneration>,
 ) -> OpenRollbackOutcome
@@ -356,10 +339,10 @@ where
             },
         };
     };
-    crate::ingress::global_ingress().begin_close_with(|| {});
+    crate::module_runtime::global().begin_close(|| {});
 
     let mut local_quiescent = true;
-    let mut lifecycle_release_ready = match runtime.has_lifecycle_state(lifecycle) {
+    let mut lifecycle_release_ready = match runtime.has_addin_lifecycle(lifecycle) {
         Ok(present) => !present,
         Err(error) => {
             report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
@@ -452,11 +435,11 @@ where
     let mut addin_shared_state = None;
     let mut addin_quiesced = None;
     let mut generation_reclaimed = None;
-    if let Some(opening) = runtime.take_opening_generation() {
+    if let Some(opening) = runtime.take_opening_for_rollback() {
         let (mut shared_state, layers, _config) = opening.into_parts();
         match catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(lifecycle, |lifecycle_state| {
+                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     A::quiesce(&mut shared_state, lifecycle_state)
                         .map_err(IntoXllError::into_xll_error)
                 })
@@ -476,13 +459,11 @@ where
                 // A failed quiesce cannot prove that shared-state-owned
                 // execution resources have stopped. Preserve it until
                 // the caller enters the quarantine path.
-                if let Some(layers) = layers {
-                    runtime.quarantine_layers(
-                        generation,
-                        layers,
-                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                    );
-                }
+                runtime.quarantine_layers(
+                    generation,
+                    layers,
+                    crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                );
                 runtime.quarantine_shared_state(
                     generation,
                     shared_state,
@@ -529,7 +510,7 @@ where
         let mut report = crate::shutdown::CloseReport::default();
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(lifecycle, |lifecycle_state| {
+                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
                     A::cleanup(lifecycle_state, &mut reporter);
                 })
@@ -548,7 +529,7 @@ where
             );
             local_quiescent = false;
         } else {
-            let lifecycle_dropped = match runtime.take_lifecycle_state(lifecycle) {
+            let lifecycle_dropped = match runtime.take_addin_lifecycle(lifecycle) {
                 Ok(lifecycle_state) => {
                     if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
                         report.push(
@@ -672,7 +653,7 @@ where
             .certify::<crate::runtime::OpenRollback>(proof)
             .and_then(|certificate| runtime.finish_open_rollback(certificate))
         {
-            Ok(()) => match runtime.release_empty_lifecycle_binding(lifecycle) {
+            Ok(()) => match runtime.release_empty_addin_lifecycle(lifecycle) {
                 Ok(()) => finalized = true,
                 Err(error) => {
                     report_boundary_error(
@@ -696,7 +677,7 @@ where
 }
 
 #[must_use]
-pub fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &LifecycleThreadAccess<'_, A>) -> i32
+pub fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &AddinLifecycleAccess<'_, A>) -> i32
 where
     A: Addin,
 {
@@ -715,7 +696,7 @@ where
     match success {
         RemovalSuccess::AlreadyClosed => {
             if runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-                && let Err(error) = runtime.release_empty_lifecycle_binding(lifecycle)
+                && let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle)
             {
                 let error = lifecycle_access_error(error);
                 report_boundary_error("xlAutoRemove closed lifecycle binding", &error);
@@ -815,7 +796,7 @@ impl<A: Addin> Drop for RemovalTransaction<'_, A> {
 
 fn remove_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
 ) -> RemovalSuccess<'runtime, A>
 where
     A: Addin,
@@ -831,7 +812,7 @@ where
 
 fn remove_addin_inner_unchecked<'runtime, A>(
     runtime: &'runtime Runtime<A>,
-    lifecycle: &LifecycleThreadAccess<'_, A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
 ) -> Result<RemovalSuccess<'runtime, A>, RemovalControl>
 where
     A: Addin,
@@ -844,17 +825,16 @@ where
     let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
         return Ok(RemovalSuccess::AlreadyClosed);
     };
-    crate::ingress::global_ingress().begin_close_with(|| {
+    crate::module_runtime::global().begin_close(|| {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         if runtime.ghost_generation_active() {
             runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
         }
     });
-    crate::rtd::begin_module_close();
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let mut lifecycle_release_ready = match runtime.has_lifecycle_state(lifecycle) {
+    let mut lifecycle_release_ready = match runtime.has_addin_lifecycle(lifecycle) {
         Ok(present) => !present,
         Err(error) => {
             let error = lifecycle_access_error(error);
@@ -1033,7 +1013,7 @@ where
     // lifecycle. A terminal result transitions the module gate immediately;
     // once unregistering is complete, close it unconditionally so all later
     // cleanup is provably callback-free.
-    crate::callback_gate::close_from_runtime();
+    crate::module_runtime::global().close_callbacks();
 
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::CloseCallbackGate);
@@ -1054,7 +1034,7 @@ where
                     Ok(mut generation) => {
                         let quiesce = catch_unwind(AssertUnwindSafe(|| {
                             runtime
-                                .with_lifecycle_state(lifecycle, |lifecycle_state| {
+                                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                                     A::quiesce(&mut generation.shared_state, lifecycle_state)
                                         .map_err(IntoXllError::into_xll_error)
                                 })
@@ -1103,7 +1083,7 @@ where
                 let (mut shared_state, layers, _config) = opening.into_parts();
                 let quiesce = catch_unwind(AssertUnwindSafe(|| {
                     runtime
-                        .with_lifecycle_state(lifecycle, |lifecycle_state| {
+                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                             A::quiesce(&mut shared_state, lifecycle_state)
                                 .map_err(IntoXllError::into_xll_error)
                         })
@@ -1115,13 +1095,11 @@ where
                 if let Err(error) = quiesce {
                     report_boundary_error("xlAutoRemove quiesce", &error);
                     let generation_id = active_runtime_generation(runtime);
-                    if let Some(layers) = layers {
-                        runtime.quarantine_layers(
-                            generation_id,
-                            layers,
-                            crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                        );
-                    }
+                    runtime.quarantine_layers(
+                        generation_id,
+                        layers,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
                     runtime.quarantine_shared_state(
                         generation_id,
                         shared_state,
@@ -1169,7 +1147,7 @@ where
     if let Some(shared_state) = addin_shared_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(lifecycle, |lifecycle_state| {
+                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
                     A::cleanup(lifecycle_state, &mut reporter);
                 })
@@ -1195,7 +1173,7 @@ where
                 ));
             }
         } else {
-            let lifecycle_dropped = match runtime.take_lifecycle_state(lifecycle) {
+            let lifecycle_dropped = match runtime.take_addin_lifecycle(lifecycle) {
                 Ok(lifecycle_state) => {
                     if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
                         report.push(
@@ -1362,7 +1340,7 @@ where
         }
     };
 
-    if let Err(error) = runtime.release_empty_lifecycle_binding(lifecycle) {
+    if let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle) {
         let error = lifecycle_access_error(error);
         return Err(handle_unload_hazard(
             runtime,
@@ -1446,7 +1424,7 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
 
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        crate::rtd::begin_module_close();
+        crate::module_runtime::global().begin_close(|| {});
         let ingress = crate::ingress::global_ingress();
         if matches!(
             ingress.phase(),
@@ -1457,7 +1435,7 @@ fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
         if ingress.phase() == crate::ingress::PHASE_CLOSING {
             let _ = ingress.seal_and_drain();
         }
-        crate::callback_gate::close_from_runtime();
+        crate::module_runtime::global().close_callbacks();
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
             tracing::error!(
@@ -1601,9 +1579,9 @@ mod tests {
         )
     }
 
-    fn lifecycle_access<A: Addin>(runtime: &Runtime<A>) -> LifecycleThreadAccess<'_, A> {
+    fn lifecycle_access<A: Addin>(runtime: &Runtime<A>) -> AddinLifecycleAccess<'_, A> {
         runtime
-            .bind_lifecycle_thread()
+            .bind_addin_lifecycle()
             .expect("test runs on the lifecycle thread")
     }
 
@@ -1822,10 +1800,7 @@ mod tests {
         remove_addin_inner::<RetryClose>(&runtime, &lifecycle);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
-        assert!(
-            runtime.take_current_generation().is_none()
-                && runtime.take_opening_generation().is_none()
-        );
+        assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
     }
 
     struct CleanupPanic;
@@ -1865,7 +1840,7 @@ mod tests {
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         let lifecycle = lifecycle_access(&runtime);
-        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
+        assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         remove_addin_inner::<CleanupPanic>(&runtime, &lifecycle);
@@ -1875,7 +1850,7 @@ mod tests {
             crate::lifecycle::LifecyclePhase::Quarantined
         );
         assert_eq!(drops.load(Ordering::Acquire), 0);
-        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
+        assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
     }
 
     struct WrongThreadRemoval;
@@ -1932,7 +1907,7 @@ mod tests {
         );
         assert!(runtime.module_residency_held());
         assert_eq!(drops.load(Ordering::Acquire), 0);
-        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
+        assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
     }
 
     struct QuiesceFailure;
@@ -1969,7 +1944,7 @@ mod tests {
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         let lifecycle = lifecycle_access(&runtime);
-        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
+        assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let result = { remove_addin_inner::<QuiesceFailure>(&runtime, &lifecycle) };
@@ -2013,10 +1988,7 @@ mod tests {
         assert!(outcome.is_finalized());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
-        assert!(
-            runtime.take_current_generation().is_none()
-                && runtime.take_opening_generation().is_none()
-        );
+        assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
     }
 
     struct CleanClose;
@@ -2837,7 +2809,7 @@ mod tests {
         // terminal unregister. Restore the RTD test epoch for later cases;
         // ingress is already sealed and must remain sealed until the next
         // Runtime::begin_open.
-        crate::rtd::begin_module_open();
+        crate::module_runtime::global().rtd().begin_open();
         runtime.release_test_module_lease();
     }
 
@@ -3039,15 +3011,16 @@ mod tests {
             ))),
         };
         let lifecycle = lifecycle_access(runtime);
-        assert!(runtime.install_lifecycle_state(&lifecycle, state).is_ok());
+        assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         assert!(
             runtime
-                .stage_opening_state((), crate::addin::RuntimeConfig::new())
+                .stage_opening_generation(crate::runtime::OpeningGeneration {
+                    shared_state: (),
+                    layers: (),
+                    config: crate::addin::RuntimeConfig::new(),
+                })
                 .is_ok()
         );
-        let opening = runtime.take_opening_generation().unwrap();
-        let opening = opening.attach_layers(());
-        assert!(runtime.restore_opening_generation(opening).is_ok());
 
         let (finish_start_tx, finish_start_rx) = std::sync::mpsc::channel();
         let (finish_result_tx, finish_result_rx) = std::sync::mpsc::channel();
@@ -3081,7 +3054,7 @@ mod tests {
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert!(runtime.take_current_generation().is_none());
-        assert!(runtime.take_opening_generation().is_none());
+        assert!(!runtime.has_opening_generation());
     }
 
     struct PanicLayersState {
@@ -3140,16 +3113,16 @@ mod tests {
             dropped: std::sync::Arc::clone(&dropped),
         };
         let lifecycle = lifecycle_access(&runtime);
-        assert!(runtime.install_lifecycle_state(&lifecycle, state).is_ok());
+        assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         assert!(
             runtime
-                .stage_opening_state((), crate::addin::RuntimeConfig::new())
+                .stage_opening_generation(crate::runtime::OpeningGeneration {
+                    shared_state: (),
+                    layers: (),
+                    config: crate::addin::RuntimeConfig::new(),
+                })
                 .is_ok()
         );
-        let opening = runtime.take_opening_generation().unwrap();
-
-        let opening = opening.attach_layers(());
-        assert!(runtime.restore_opening_generation(opening).is_ok());
         assert!(runtime.has_opening_generation());
 
         assert!(open_attempt.fail());
@@ -3167,6 +3140,6 @@ mod tests {
         assert_eq!(quiesced.load(Ordering::SeqCst), 1);
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        assert!(runtime.take_opening_generation().is_none());
+        assert!(!runtime.has_opening_generation());
     }
 }

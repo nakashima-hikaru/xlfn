@@ -62,7 +62,7 @@ use class_factory::{
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
 pub(super) use excel_rtd::{observe, observe_subscription};
-use module_state::COM_MODULE_LIFETIME;
+pub(crate) use module_state::ComModuleLifetime;
 #[cfg(test)]
 use module_state::{ComObjectKind, ComObjectLease};
 #[cfg(test)]
@@ -95,13 +95,17 @@ use update_event::retry_git_revocation_debt;
 #[cfg(test)]
 use update_event::{RetainedUpdateCallback, install_callback, retry_git_revocation_debt_with};
 
+pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
+    crate::module_runtime::global().com_module_lifetime()
+}
+
 #[cfg(any(test, feature = "shutdown-refinement"))]
 pub(super) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
-    COM_MODULE_LIFETIME.set_ghost(ghost);
+    module_lifetime().set_ghost(ghost);
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
-    if crate::rtd::logical_quiescence_certified() && COM_MODULE_LIFETIME.can_unload_now() {
+    if crate::rtd::logical_quiescence_certified() && module_lifetime().can_unload_now() {
         S_OK
     } else {
         1 // S_FALSE
@@ -109,7 +113,7 @@ pub(super) fn dll_can_unload_now() -> i32 {
 }
 
 pub(super) fn wait_for_module_quiescence() -> Result<(), crate::rtd::RtdQuiescenceError> {
-    COM_MODULE_LIFETIME
+    module_lifetime()
         .wait_for_quiescence(retry_git_revocation_debt)
         .map_err(|error| crate::rtd::RtdQuiescenceError {
             outstanding_git_cookies: error.state.outstanding_git_cookies,

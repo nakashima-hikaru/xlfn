@@ -4,7 +4,8 @@ use super::automation::{
 };
 use super::com_abi::IID_IUNKNOWN;
 use super::global_interface_table::get_git;
-use super::module_state::{COM_MODULE_LIFETIME, ComObjectKind, ComObjectLease};
+use super::module_lifetime;
+use super::module_state::{ComObjectKind, ComObjectLease};
 use super::registration::guid_compact;
 use super::server_gate::{
     ServerCloseError, ServerOperationBarrier, ServerPhase, ServerTerminationRequest,
@@ -688,7 +689,7 @@ pub(super) unsafe extern "system" fn server_query_interface(
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     if output.is_null() {
         return E_POINTER;
     }
@@ -722,13 +723,13 @@ pub(super) unsafe extern "system" fn server_query_interface(
 }
 
 pub(super) unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer.
     unsafe { (*this).references.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
 pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     let Some(this) = NonNull::new(this) else {
         return 0;
     };
@@ -752,7 +753,7 @@ pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32
 }
 
 unsafe extern "system" fn server_get_type_info_count(this: *mut RtdServer, count: *mut u32) -> i32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     if this.is_null() || count.is_null() {
         return E_POINTER;
     }
@@ -769,7 +770,7 @@ unsafe extern "system" fn server_get_type_info(
     _locale: u32,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = COM_MODULE_LIFETIME.enter_call();
+    let _module_call = module_lifetime().enter_call();
     if output.is_null() {
         return E_POINTER;
     }

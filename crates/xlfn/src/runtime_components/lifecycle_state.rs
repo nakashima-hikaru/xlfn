@@ -8,13 +8,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use super::services::GenerationServicesLease;
 use crate::generation::{OpenAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
+use crate::module_runtime::ModuleEpochLease;
 use crate::runtime::{OpenGeneration, OpeningGeneration};
 
 /// Canonical lifecycle state owned by the lifecycle core mutex.
 ///
-/// The phase atomic in [`LifecycleState`] is deliberately only a read-side
+/// The phase atomic in [`LifecycleCoordinator`] is deliberately only a read-side
 /// projection. Every writer first updates this state and then publishes the
-/// phase through [`LifecycleState::refresh_projection`]. Correlated lifecycle
+/// phase through [`LifecycleCoordinator::refresh_projection`]. Correlated lifecycle
 /// values remain behind this mutex and are read as one canonical snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleStateKind {
@@ -65,13 +66,14 @@ impl LifecycleStateKind {
 /// identifies the last generation whose teardown was certified and is used by
 /// shutdown certificates and diagnostics. The currently active generation is
 /// represented by `current` and the `Open` state. Both generation roots live
-/// in this same mutex-protected value; the ArcSwap in [`LifecycleState`] is
+/// in this same mutex-protected value; the ArcSwap in [`LifecycleCoordinator`] is
 /// only a read-side projection of `current`.
 pub(crate) struct LifecycleCore<A: crate::Addin> {
     state: LifecycleStateKind,
     opening: Option<OpeningGeneration<A>>,
     current: Option<Arc<OpenGeneration<A>>>,
     services_lease: Option<GenerationServicesLease>,
+    module_epoch: Option<ModuleEpochLease>,
     host_intent: HostLifecycleIntent,
     next_lifecycle_attempt: u64,
     known_generation: Option<RuntimeGeneration>,
@@ -86,6 +88,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
             opening: None,
             current: None,
             services_lease: None,
+            module_epoch: None,
             host_intent: HostLifecycleIntent::None,
             next_lifecycle_attempt: 1,
             known_generation: None,
@@ -122,10 +125,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
     }
 
     pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
-        self.opening.as_ref().map(|opening| match opening {
-            OpeningGeneration::SharedStateOnly { config, .. }
-            | OpeningGeneration::Ready { config, .. } => *config,
-        })
+        self.opening.as_ref().map(|opening| opening.config)
     }
 
     pub(crate) const fn has_opening_generation(&self) -> bool {
@@ -142,6 +142,16 @@ impl<A: crate::Addin> LifecycleCore<A> {
             .map(GenerationServicesLease::generation)
     }
 
+    pub(crate) fn has_module_epoch(&self) -> bool {
+        self.module_epoch.is_some()
+    }
+
+    pub(crate) fn module_epoch_is_current(&self) -> bool {
+        self.module_epoch
+            .as_ref()
+            .is_none_or(ModuleEpochLease::is_current)
+    }
+
     fn install_generation_services_lease(&mut self, lease: GenerationServicesLease) {
         debug_assert!(self.services_lease.is_none());
         self.services_lease = Some(lease);
@@ -150,6 +160,15 @@ impl<A: crate::Addin> LifecycleCore<A> {
     fn take_generation_services_lease(&mut self) -> Option<GenerationServicesLease> {
         self.services_lease.take()
     }
+
+    fn install_module_epoch(&mut self, lease: ModuleEpochLease) {
+        debug_assert!(self.module_epoch.is_none());
+        self.module_epoch = Some(lease);
+    }
+
+    fn take_module_epoch(&mut self) -> Option<ModuleEpochLease> {
+        self.module_epoch.take()
+    }
 }
 
 /// Lifecycle synchronization state.
@@ -157,7 +176,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
 /// `core` is the canonical ownership boundary. `phase` and `current` are
 /// read-side projections used by hot-path admission and generation access;
 /// lifecycle writers must mutate the corresponding fields in `core` first.
-pub(crate) struct LifecycleState<A: crate::Addin> {
+pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
     current: ArcSwapOption<OpenGeneration<A>>,
     core: Mutex<LifecycleCore<A>>,
@@ -171,7 +190,7 @@ pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) opening: Option<OpeningGeneration<A>>,
 }
 
-impl<A: crate::Addin> LifecycleState<A> {
+impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) const fn new() -> Self {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
@@ -402,46 +421,22 @@ impl<A: crate::Addin> LifecycleState<A> {
         core.take_generation_services_lease()
     }
 
-    pub(crate) fn stage_opening_state(
+    pub(crate) fn install_module_epoch(
         &self,
-        state: A::SharedState,
-        config: crate::addin::RuntimeConfig,
-    ) -> Result<(), (crate::XllError, A::SharedState)> {
-        let mut core = self.lock();
-        if core.has_opening_generation() || core.has_current_generation() {
-            return Err((
-                crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                },
-                state,
-            ));
-        }
-        core.opening = Some(OpeningGeneration::SharedStateOnly {
-            shared_state: state,
-            config,
-        });
-        Ok(())
+        core: &mut LifecycleCore<A>,
+        lease: ModuleEpochLease,
+    ) {
+        core.install_module_epoch(lease);
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn take_module_epoch(
+        &self,
+        core: &mut LifecycleCore<A>,
+    ) -> Option<ModuleEpochLease> {
+        core.take_module_epoch()
+    }
+
     pub(crate) fn stage_opening_generation(
-        &self,
-        opening: OpeningGeneration<A>,
-    ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
-        let mut core = self.lock();
-        if core.has_opening_generation() || core.has_current_generation() {
-            return Err((
-                crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                },
-                opening,
-            ));
-        }
-        core.opening = Some(opening);
-        Ok(())
-    }
-
-    pub(crate) fn restore_opening_generation(
         &self,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
@@ -477,21 +472,11 @@ impl<A: crate::Addin> LifecycleState<A> {
             },
             opening: None,
         })?;
-        let (shared_state, layers, _config) = match opening {
-            OpeningGeneration::Ready {
-                shared_state,
-                layers,
-                config,
-            } => (shared_state, layers, config),
-            opening @ OpeningGeneration::SharedStateOnly { .. } => {
-                return Err(PublishOpeningError {
-                    error: crate::XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                    },
-                    opening: Some(opening),
-                });
-            }
-        };
+        let OpeningGeneration {
+            shared_state,
+            layers,
+            config: _,
+        } = opening;
         let published = Arc::new(OpenGeneration {
             id: generation,
             shared_state,
@@ -518,7 +503,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         self.current.load()
     }
 
-    pub(crate) fn take_opening_generation(&self) -> Option<OpeningGeneration<A>> {
+    pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
         self.lock().opening.take()
     }
 

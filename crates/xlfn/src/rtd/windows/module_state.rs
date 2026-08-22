@@ -59,7 +59,7 @@ impl GitRevocationDebtClaim {
             .cookie
             .take()
             .expect("GIT revocation debt is resolved once");
-        COM_MODULE_LIFETIME.git_revocation_debt_resolved();
+        super::module_lifetime().git_revocation_debt_resolved();
     }
 }
 
@@ -69,11 +69,11 @@ impl Drop for GitRevocationDebtClaim {
             return;
         };
 
-        COM_MODULE_LIFETIME.requeue_git_revocation_debt(cookie);
+        super::module_lifetime().requeue_git_revocation_debt(cookie);
     }
 }
 
-pub(super) struct ComModuleLifetime {
+pub(crate) struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
     #[cfg(any(test, feature = "shutdown-refinement"))]
@@ -81,7 +81,7 @@ pub(super) struct ComModuleLifetime {
 }
 
 impl ComModuleLifetime {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             inner: Mutex::new(ComModuleLifetimeInner {
                 state: ComModuleState {
@@ -293,8 +293,6 @@ impl ComModuleLifetime {
     }
 }
 
-pub(super) static COM_MODULE_LIFETIME: ComModuleLifetime = ComModuleLifetime::new();
-
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportCallGuard<'static>,
@@ -328,13 +326,13 @@ pub(super) struct ComObjectLease {
 
 impl ComObjectLease {
     pub(super) fn new(kind: ComObjectKind) -> Self {
-        COM_MODULE_LIFETIME.object_created(kind);
+        super::module_lifetime().object_created(kind);
         Self { kind }
     }
 }
 
 impl Drop for ComObjectLease {
     fn drop(&mut self) {
-        COM_MODULE_LIFETIME.object_destroyed(self.kind);
+        super::module_lifetime().object_destroyed(self.kind);
     }
 }

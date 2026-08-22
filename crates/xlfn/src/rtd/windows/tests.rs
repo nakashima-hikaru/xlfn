@@ -444,7 +444,7 @@ fn clear_test_shutdown_ghost() {
     // Runtime/lifecycle tests install a process-global shutdown ghost.
     // An RTD unit test owns a synthetic module epoch and must not append
     // resource events to a previous runtime generation.
-    *COM_MODULE_LIFETIME.ghost.lock() = None;
+    *module_lifetime().ghost.lock() = None;
 }
 
 impl Drop for RtdTestGuard {
@@ -502,17 +502,17 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     crate::rtd::certify_logical_quiescence();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
     assert_eq!(dll_can_unload_now(), S_OK);
 
     {
-        let _call = COM_MODULE_LIFETIME.enter_call();
-        let entered = COM_MODULE_LIFETIME.snapshot();
+        let _call = module_lifetime().enter_call();
+        let entered = module_lifetime().snapshot();
         assert_eq!(entered.in_flight_calls, baseline.in_flight_calls + 1);
         assert_eq!(dll_can_unload_now(), S_FALSE);
     }
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    assert_eq!(module_lifetime().snapshot(), baseline);
 
     ingress.begin_opening();
     ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
@@ -525,7 +525,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
         _module_lease: ComObjectLease::new(ComObjectKind::Factory),
     })));
     assert_eq!(
-        COM_MODULE_LIFETIME.snapshot().live_factories,
+        module_lifetime().snapshot().live_factories,
         baseline.live_factories + 1
     );
     assert_eq!(dll_can_unload_now(), S_FALSE);
@@ -536,7 +536,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     assert_eq!(unsafe { factory_lock_server(pointer, 1) }, S_OK);
     let server_lock = TestServerLock(pointer);
     assert_eq!(
-        COM_MODULE_LIFETIME.snapshot().server_locks,
+        module_lifetime().snapshot().server_locks,
         baseline.server_locks + 1
     );
 
@@ -554,7 +554,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     );
     drop(server_lock);
     assert_eq!(
-        COM_MODULE_LIFETIME.snapshot().server_locks,
+        module_lifetime().snapshot().server_locks,
         baseline.server_locks
     );
     assert_eq!(
@@ -566,7 +566,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     );
     drop(factory);
 
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    assert_eq!(module_lifetime().snapshot(), baseline);
     let _ = ingress.seal_and_drain();
     crate::rtd::certify_logical_quiescence();
     assert_eq!(dll_can_unload_now(), S_OK);
@@ -591,14 +591,14 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     ghost
         .begin_generation(1, crate::shutdown_refinement::GhostResources::opened(0, 0))
         .unwrap();
-    COM_MODULE_LIFETIME.set_ghost(Arc::clone(&ghost));
+    module_lifetime().set_ghost(Arc::clone(&ghost));
 
-    let (call, accepted) = COM_MODULE_LIFETIME.enter_call();
+    let (call, accepted) = module_lifetime().enter_call();
     assert!(accepted);
     let factory = ComObjectLease::new(ComObjectKind::Factory);
     let server = ComObjectLease::new(ComObjectKind::Server);
-    assert!(COM_MODULE_LIFETIME.set_server_lock(true));
-    assert!(COM_MODULE_LIFETIME.set_server_lock(false));
+    assert!(module_lifetime().set_server_lock(true));
+    assert!(module_lifetime().set_server_lock(false));
     drop(server);
     drop(factory);
     drop(call);
@@ -607,7 +607,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     if let Some(path) = std::env::var_os("XLFN_WINDOWS_RTD_TRACE") {
         std::fs::write(path, &trace).expect("write Windows RTD shutdown trace");
     }
-    *COM_MODULE_LIFETIME.ghost.lock() = None;
+    *module_lifetime().ghost.lock() = None;
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     crate::rtd::certify_logical_quiescence();
@@ -632,28 +632,28 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
 #[test]
 fn registered_git_cookie_blocks_module_unload() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
 
-    COM_MODULE_LIFETIME.git_cookie_registered();
-    let registered = COM_MODULE_LIFETIME.snapshot();
+    module_lifetime().git_cookie_registered();
+    let registered = module_lifetime().snapshot();
     assert_eq!(registered.outstanding_git_cookies, 1);
     assert_eq!(registered.revocation_debt, 0);
-    assert!(!COM_MODULE_LIFETIME.can_unload_now());
+    assert!(!module_lifetime().can_unload_now());
 
-    COM_MODULE_LIFETIME.git_cookie_revoked();
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    module_lifetime().git_cookie_revoked();
+    assert_eq!(module_lifetime().snapshot(), baseline);
 }
 
 #[test]
 fn git_revocation_retry_in_flight_keeps_unload_blocked() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
     let cookie = NonZeroU32::new(41).unwrap();
 
-    COM_MODULE_LIFETIME.git_cookie_registered();
-    COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
 
     let (claimed_tx, claimed_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(0);
@@ -666,67 +666,64 @@ fn git_revocation_retry_in_flight_keeps_unload_blocked() {
     });
 
     assert_eq!(claimed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 41);
-    let retrying = COM_MODULE_LIFETIME.snapshot();
+    let retrying = module_lifetime().snapshot();
     assert_eq!(retrying.revocation_debt, 1);
-    assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
-    assert!(!COM_MODULE_LIFETIME.can_unload_now());
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
+    assert!(!module_lifetime().can_unload_now());
 
     release_tx.send(()).unwrap();
     retry.join().unwrap();
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    assert_eq!(module_lifetime().snapshot(), baseline);
 }
 
 #[test]
 fn panicking_git_revocation_retry_requeues_claim() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
     let cookie = NonZeroU32::new(41).unwrap();
 
-    COM_MODULE_LIFETIME.git_cookie_registered();
-    COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         retry_git_revocation_debt_with(|_| panic!("injected GIT revoke panic"));
     }));
     assert!(result.is_err());
-    assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
-    assert_eq!(
-        COM_MODULE_LIFETIME.queued_git_revocation_debt(),
-        vec![cookie]
-    );
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
+    assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
 
     retry_git_revocation_debt_with(|cookie| {
         assert_eq!(cookie, 41);
         Ok(())
     });
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    assert_eq!(module_lifetime().snapshot(), baseline);
 }
 
 #[test]
 fn module_quiescence_refuses_debt_claim_in_flight() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
     let cookie = NonZeroU32::new(41).unwrap();
 
-    COM_MODULE_LIFETIME.git_cookie_registered();
-    COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
-    let claims = COM_MODULE_LIFETIME.claim_git_revocation_debt_batch();
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
     assert_eq!(claims.len(), 1);
-    assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 
     let error = crate::rtd::wait_for_module_quiescence().unwrap_err();
     assert_eq!(error.outstanding_git_cookies, 0);
     assert_eq!(error.revocation_debt, 1);
-    assert!(!COM_MODULE_LIFETIME.can_unload_now());
+    assert!(!module_lifetime().can_unload_now());
 
     drop(claims);
     retry_git_revocation_debt_with(|cookie| {
         assert_eq!(cookie, 41);
         Ok(())
     });
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
+    assert_eq!(module_lifetime().snapshot(), baseline);
 }
 
 #[test]
@@ -941,23 +938,20 @@ fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
 #[test]
 fn failed_git_revocation_is_retained_and_retryable() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let baseline = COM_MODULE_LIFETIME.snapshot();
+    let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
-    assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 
     let cookie = NonZeroU32::new(41).unwrap();
-    COM_MODULE_LIFETIME.git_cookie_registered();
-    COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
     let error = XllError::WindowsApi {
         function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
         code: E_FAIL,
     };
-    assert_eq!(COM_MODULE_LIFETIME.snapshot().outstanding_git_cookies, 0);
-    assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
-    assert_eq!(
-        COM_MODULE_LIFETIME.queued_git_revocation_debt(),
-        vec![cookie]
-    );
+    assert_eq!(module_lifetime().snapshot().outstanding_git_cookies, 0);
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
+    assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
 
     let mut attempts = 0;
     retry_git_revocation_debt_with(|cookie| {
@@ -966,9 +960,9 @@ fn failed_git_revocation_is_retained_and_retryable() {
         Err(error.clone())
     });
     assert_eq!(attempts, 1);
-    assert_eq!(COM_MODULE_LIFETIME.snapshot().revocation_debt, 1);
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
     assert_eq!(
-        COM_MODULE_LIFETIME.queued_git_revocation_debt(),
+        module_lifetime().queued_git_revocation_debt(),
         vec![NonZeroU32::new(41).unwrap()]
     );
 
@@ -978,8 +972,8 @@ fn failed_git_revocation_is_retained_and_retryable() {
         Ok(())
     });
     assert_eq!(attempts, 2);
-    assert_eq!(COM_MODULE_LIFETIME.snapshot(), baseline);
-    assert!(COM_MODULE_LIFETIME.queued_git_revocation_debt().is_empty());
+    assert_eq!(module_lifetime().snapshot(), baseline);
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 }
 
 #[test]

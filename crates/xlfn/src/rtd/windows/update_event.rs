@@ -1,6 +1,6 @@
 use super::IID_IRTD_UPDATE_EVENT;
 use super::global_interface_table::get_git;
-use super::module_state::COM_MODULE_LIFETIME;
+use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
 use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use crate::{XllError, XllResult};
@@ -64,7 +64,7 @@ pub(super) struct GitCookieLease {
 
 impl GitCookieLease {
     pub(super) fn from_registered(cookie: std::num::NonZeroU32) -> Self {
-        COM_MODULE_LIFETIME.git_cookie_registered();
+        module_lifetime().git_cookie_registered();
         Self {
             cookie: Some(cookie),
         }
@@ -84,9 +84,9 @@ impl Drop for GitCookieLease {
         };
 
         match revoke_git_cookie(cookie.get()) {
-            Ok(()) => COM_MODULE_LIFETIME.git_cookie_revoked(),
+            Ok(()) => module_lifetime().git_cookie_revoked(),
             Err(error) => {
-                COM_MODULE_LIFETIME.git_cookie_revocation_deferred(cookie);
+                module_lifetime().git_cookie_revocation_deferred(cookie);
                 crate::diagnostics::report_no_unwind("RTD GIT callback revocation", &error);
             }
         }
@@ -133,7 +133,7 @@ pub(super) fn retry_git_revocation_debt() {
 }
 
 pub(super) fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllResult<()>) {
-    let claims = COM_MODULE_LIFETIME.claim_git_revocation_debt_batch();
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
     for claim in claims {
         match revoke(claim.raw()) {
             Ok(()) => claim.resolve(),

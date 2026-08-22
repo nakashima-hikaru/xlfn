@@ -3,12 +3,12 @@ use crate::win32::{CO_E_SERVER_STOPPING, E_UNEXPECTED, GUID};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use super::module_state::COM_MODULE_LIFETIME;
+use super::module_lifetime;
 
 pub(crate) const IID_IUNKNOWN: GUID = GUID::from_u128(0x0000_0000_0000_0000_c000_0000_0000_0046);
 
 pub(crate) fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {
-    let (_module_call, accepted) = COM_MODULE_LIFETIME.enter_call();
+    let (_module_call, accepted) = module_lifetime().enter_call();
     if !accepted {
         return CO_E_SERVER_STOPPING;
     }

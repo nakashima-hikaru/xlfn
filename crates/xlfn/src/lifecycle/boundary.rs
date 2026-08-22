@@ -24,7 +24,7 @@ where
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
         return 0;
     }
-    let mut lifecycle = match runtime.bind_lifecycle_thread() {
+    let mut lifecycle = match runtime.bind_addin_lifecycle() {
         Ok(access) => access,
         Err(error) => {
             let error = super::lifecycle_access_error(error);
@@ -41,7 +41,7 @@ where
         if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
             return 0;
         }
-        lifecycle = match runtime.bind_lifecycle_thread() {
+        lifecycle = match runtime.bind_addin_lifecycle() {
             Ok(access) => access,
             Err(error) => {
                 let error = super::lifecycle_access_error(error);
@@ -99,7 +99,7 @@ where
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
         return 1;
     }
-    let lifecycle = match runtime.bind_lifecycle_thread() {
+    let lifecycle = match runtime.bind_addin_lifecycle() {
         Ok(access) => access,
         Err(error) => {
             let error = super::lifecycle_access_error(error);

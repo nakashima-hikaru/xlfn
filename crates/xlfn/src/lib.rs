@@ -75,6 +75,7 @@ mod lifecycle;
     reason = "Win32 module residency management requires raw FFI calls"
 )]
 mod module_residency;
+mod module_runtime;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
