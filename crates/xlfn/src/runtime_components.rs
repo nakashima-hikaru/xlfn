@@ -7,20 +7,22 @@
 mod formal;
 mod host_ledger;
 mod lifecycle_state;
-mod main_thread_state;
 mod quarantine;
 mod residency;
 mod return_protocol;
 mod service_slot;
 mod services;
+mod thread_affine;
 
 #[cfg(any(test, feature = "shutdown-refinement"))]
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
 pub(crate) use lifecycle_state::{LifecycleControl, LifecycleState, LifecycleStateKind};
-pub(crate) use main_thread_state::MainThreadStateSlot;
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
 pub(crate) use service_slot::{GenerationServiceRead, GenerationServiceSlot};
 pub(crate) use services::RuntimeServices;
+pub(crate) use thread_affine::{
+    ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
+};

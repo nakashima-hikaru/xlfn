@@ -11,7 +11,8 @@ use std::sync::atomic::Ordering;
 
 use crate::runtime_components::{
     HostLedger, LifecycleState, LifecycleStateKind, ModuleResidency, QuarantineReason,
-    QuarantineVault, ReturnProtocol, RuntimeServices,
+    QuarantineVault, ReturnProtocol, RuntimeServices, ThreadAffineAccess, ThreadAffineError,
+    ThreadAffineInstallError,
 };
 use crate::runtime_refinement::RuntimeRefinementHooks;
 
@@ -128,7 +129,7 @@ impl<A: crate::Addin> GenerationLease<A> {
 
 pub struct Runtime<A: crate::Addin> {
     pub(crate) lifecycle: LifecycleState<A>,
-    pub(crate) lifecycle_state: crate::runtime_components::MainThreadStateSlot<A>,
+    pub(crate) lifecycle_state: crate::runtime_components::ThreadAffineSlot<A::LifecycleState>,
     pub(crate) host: HostLedger,
     pub(crate) return_protocol: ReturnProtocol,
     pub(crate) services: RuntimeServices,
@@ -137,12 +138,15 @@ pub struct Runtime<A: crate::Addin> {
     pub(crate) refinement: RuntimeRefinementHooks,
 }
 
+pub(crate) type LifecycleThreadAccess<'runtime, A> =
+    ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
+
 impl<A: crate::Addin> Runtime<A> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
             lifecycle: LifecycleState::new(),
-            lifecycle_state: crate::runtime_components::MainThreadStateSlot::new(),
+            lifecycle_state: crate::runtime_components::ThreadAffineSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             services: RuntimeServices::new(),
@@ -417,9 +421,13 @@ impl<A: crate::Addin> Runtime<A> {
         lifecycle_state: A::LifecycleState,
         layers: A::Layers,
     ) {
-        if self.with_lifecycle_state(|_| ()).is_none() {
+        let access = self
+            .bind_lifecycle_thread()
+            .expect("test runtime binds its lifecycle thread");
+        if self.with_lifecycle_state(&access, |_| ()).is_err() {
             assert!(
-                self.install_lifecycle_state(lifecycle_state).is_ok(),
+                self.install_lifecycle_state(&access, lifecycle_state)
+                    .is_ok(),
                 "test runtime has one lifecycle state"
             );
         }
@@ -438,26 +446,47 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.stage_opening_state(state, config)
     }
 
-    pub(crate) fn install_lifecycle_state(
+    pub(crate) fn bind_lifecycle_thread(
         &self,
-        state: A::LifecycleState,
-    ) -> Result<(), A::LifecycleState> {
-        self.lifecycle_state.install(state)
+    ) -> Result<LifecycleThreadAccess<'_, A>, ThreadAffineError> {
+        self.lifecycle_state.bind_current()
     }
 
-    pub(crate) fn retain_lifecycle_state(&self, state: A::LifecycleState) {
-        self.lifecycle_state.retain(state);
+    pub(crate) fn install_lifecycle_state(
+        &self,
+        access: &LifecycleThreadAccess<'_, A>,
+        state: A::LifecycleState,
+    ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
+        self.lifecycle_state.install(access, state)
     }
 
     pub(crate) fn with_lifecycle_state<R>(
         &self,
+        access: &LifecycleThreadAccess<'_, A>,
         operation: impl FnOnce(&mut A::LifecycleState) -> R,
-    ) -> Option<R> {
-        self.lifecycle_state.with_mut(operation)
+    ) -> Result<R, ThreadAffineError> {
+        self.lifecycle_state.with_mut(access, operation)
     }
 
-    pub(crate) fn take_lifecycle_state(&self) -> Option<A::LifecycleState> {
-        self.lifecycle_state.take()
+    pub(crate) fn has_lifecycle_state(
+        &self,
+        access: &LifecycleThreadAccess<'_, A>,
+    ) -> Result<bool, ThreadAffineError> {
+        self.lifecycle_state.has_value(access)
+    }
+
+    pub(crate) fn take_lifecycle_state(
+        &self,
+        access: &LifecycleThreadAccess<'_, A>,
+    ) -> Result<A::LifecycleState, ThreadAffineError> {
+        self.lifecycle_state.take(access)
+    }
+
+    pub(crate) fn release_empty_lifecycle_binding(
+        &self,
+        access: &LifecycleThreadAccess<'_, A>,
+    ) -> Result<(), ThreadAffineError> {
+        self.lifecycle_state.release_empty_binding(access)
     }
 
     pub(crate) fn restore_opening_generation(

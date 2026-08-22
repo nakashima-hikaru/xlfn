@@ -24,17 +24,35 @@ where
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
         return 0;
     }
+    let mut lifecycle = match runtime.bind_lifecycle_thread() {
+        Ok(access) => access,
+        Err(error) => {
+            let error = super::lifecycle_access_error(error);
+            report_boundary_error("xlAutoOpen lifecycle thread", &error);
+            quarantine_runtime(runtime);
+            return 0;
+        }
+    };
     let controlled_reload = runtime.phase() == crate::lifecycle::LifecyclePhase::Open;
     let removal_completed_before_open = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
         && runtime.host_intent() == super::HostLifecycleIntent::ExplicitRemovalComplete;
     if controlled_reload {
-        let result = remove_addin::<A>(runtime);
+        let result = remove_addin::<A>(runtime, &lifecycle);
         if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
             return 0;
         }
+        lifecycle = match runtime.bind_lifecycle_thread() {
+            Ok(access) => access,
+            Err(error) => {
+                let error = super::lifecycle_access_error(error);
+                report_boundary_error("xlAutoOpen lifecycle rebind", &error);
+                quarantine_runtime(runtime);
+                return 0;
+            }
+        };
         runtime.clear_host_intent();
     }
-    let result = open_addin(runtime, addin_id, version, target, descriptors);
+    let result = open_addin(runtime, &lifecycle, addin_id, version, target, descriptors);
     if controlled_reload
         && result == 0
         && runtime.phase() != crate::lifecycle::LifecyclePhase::Quarantined
@@ -81,8 +99,17 @@ where
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
         return 1;
     }
+    let lifecycle = match runtime.bind_lifecycle_thread() {
+        Ok(access) => access,
+        Err(error) => {
+            let error = super::lifecycle_access_error(error);
+            report_boundary_error("xlAutoRemove lifecycle thread", &error);
+            quarantine_runtime(runtime);
+            return 1;
+        }
+    };
     runtime.request_explicit_removal();
-    let result = remove_addin::<A>(runtime);
+    let result = remove_addin::<A>(runtime, &lifecycle);
     if result == 1 && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed {
         runtime.complete_explicit_removal();
     }

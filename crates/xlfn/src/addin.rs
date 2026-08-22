@@ -433,9 +433,11 @@ impl<S, L, U> Opened<S, L, U> {
 ///
 /// The framework invokes [`Self::open`] and [`Self::cleanup`] from Excel's main
 /// lifecycle thread, and all lifecycle hooks for one open generation run on
-/// that same thread. `SharedState` is the state borrowed by UDF calls and is
-/// therefore required to be `Send + Sync`. `LifecycleState` is owned by the
-/// framework's main-thread lifecycle slot and may be thread-affine or
+/// that same thread. xlfn binds lifecycle-state access to that thread for the
+/// generation and quarantines the runtime if a lifecycle boundary is entered
+/// from another thread. `SharedState` is the state borrowed by UDF calls and
+/// is therefore required to be `Send + Sync`. `LifecycleState` is owned by the
+/// framework's thread-affine lifecycle slot and may be thread-affine or
 /// otherwise non-`Send`.
 ///
 /// [`Self::quiesce`] must synchronously stop every execution source before

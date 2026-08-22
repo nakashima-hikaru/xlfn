@@ -5,8 +5,7 @@ use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::OpenAttemptGuard;
-use crate::runtime::Runtime;
+use crate::runtime::{LifecycleThreadAccess, OpenAttemptGuard, Runtime};
 use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, its host registrations, and the callback
@@ -55,7 +54,7 @@ impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
         )
     }
 
-    pub(super) fn rollback(&mut self) {
+    pub(super) fn rollback(&mut self, lifecycle: &LifecycleThreadAccess<'_, A>) {
         if !self.registrations.is_empty() {
             self.runtime.retain_registration_debt(
                 std::mem::take(&mut self.registrations)
@@ -64,7 +63,12 @@ impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
                     .collect(),
             );
         }
-        rollback_active_open(self.runtime, self.attempt.as_mut(), &mut self.callbacks);
+        rollback_active_open(
+            self.runtime,
+            lifecycle,
+            self.attempt.as_mut(),
+            &mut self.callbacks,
+        );
     }
 }
 
@@ -85,6 +89,7 @@ impl<A: Addin> Drop for OpenTxn<'_, A> {
 
 pub fn open_addin_boundary<A>(
     runtime: &Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
     addin_id: &AddinId,
     version: &'static str,
     target: &'static str,
@@ -101,6 +106,7 @@ where
             let mut callbacks = HostCallbackSession::new();
             let outcome = super::rollback_open::<A>(
                 runtime,
+                lifecycle,
                 &mut callbacks,
                 super::active_runtime_generation(runtime),
             );
@@ -125,6 +131,7 @@ where
         super::retry_metadata_debt(runtime, transaction.callbacks_mut())?;
         let registrations = open_addin_inner::<A>(
             runtime,
+            lifecycle,
             BuildInfo::new(addin_id.clone(), version, target),
             descriptors,
             transaction.callbacks_mut(),
@@ -142,7 +149,7 @@ where
             super::write_startup_log(addin_id, &format!("xlAutoOpen failed: {error}"));
             report_boundary_error("xlAutoOpen", &error);
             if let Some(transaction) = transaction.as_mut() {
-                transaction.rollback();
+                transaction.rollback(lifecycle);
             }
             0
         }
@@ -151,7 +158,7 @@ where
             super::write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
             if let Some(transaction) = transaction.as_mut() {
-                transaction.rollback();
+                transaction.rollback(lifecycle);
             }
             0
         }

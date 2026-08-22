@@ -123,6 +123,8 @@ impl DiagnosticId {
     pub(crate) const FAILURE: Self = Self::from_ascii8(*b"\0\0\0\0FAIL");
     pub(crate) const LEAN_TRACE: Self = Self::from_ascii8(*b"LEANTRCE");
     pub(crate) const OPEN_STATE: Self = Self::from_ascii8(*b"OPENSTAT");
+    pub(crate) const LIFECYCLE_THREAD: Self = Self::from_ascii8(*b"LIFETHRD");
+    pub(crate) const LIFECYCLE_SLOT: Self = Self::from_ascii8(*b"LIFESLOT");
     pub(crate) const OPEN_ROLLBACK_FAILURE: Self = Self::from_ascii8(*b"OPRBFAIL");
     pub(crate) const OPEN_ROLLBACK_PENDING: Self = Self::from_ascii8(*b"OPRBPEND");
     pub(crate) const QUIESCENCE_FAILURE: Self = Self::from_ascii8(*b"QUIESCEF");

@@ -5,7 +5,8 @@ use crate::generation::RuntimeGeneration;
 use crate::host_callback::{HostCallbackSession, HostCallbackState};
 use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::Runtime;
+use crate::runtime::{LifecycleThreadAccess, Runtime};
+use crate::runtime_components::ThreadAffineError;
 use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -44,6 +45,16 @@ lifecycle_token!(GenerationReclaimed);
 
 #[cfg(not(feature = "async"))]
 lifecycle_token!(AsyncStopped);
+
+fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
+    let diagnostic_id = match error {
+        ThreadAffineError::WrongThread | ThreadAffineError::StaleAccess => {
+            crate::error::DiagnosticId::LIFECYCLE_THREAD
+        }
+        _ => crate::error::DiagnosticId::LIFECYCLE_SLOT,
+    };
+    XllError::Internal { diagnostic_id }
+}
 
 fn write_startup_log(addin_id: &AddinId, message: &str) {
     #[cfg(target_os = "windows")]
@@ -96,6 +107,7 @@ fn retry_metadata_debt<A: Addin>(
 
 fn open_addin_inner<A>(
     runtime: &Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     callbacks: &mut HostCallbackSession,
@@ -113,7 +125,7 @@ where
         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let runtime_config = initialize_addin::<A>(runtime, &context)?;
+    let runtime_config = initialize_addin::<A>(runtime, lifecycle, &context)?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
     let has_async_functions = descriptors
@@ -142,6 +154,7 @@ where
 
 fn rollback_active_open<A>(
     runtime: &Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
     attempt: Option<&mut crate::runtime::OpenAttemptGuard<'_, A>>,
     callbacks: &mut HostCallbackSession,
 ) where
@@ -159,7 +172,7 @@ fn rollback_active_open<A>(
     );
     if attempt.fail() {
         match catch_unwind(AssertUnwindSafe(|| {
-            rollback_open::<A>(runtime, callbacks, generation)
+            rollback_open::<A>(runtime, lifecycle, callbacks, generation)
         })) {
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
@@ -177,7 +190,11 @@ fn rollback_active_open<A>(
     }
 }
 
-fn initialize_addin<A>(runtime: &Runtime<A>, context: &OpenContext) -> XllResult<RuntimeConfig>
+fn initialize_addin<A>(
+    runtime: &Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
+    context: &OpenContext,
+) -> XllResult<RuntimeConfig>
 where
     A: Addin,
 {
@@ -186,8 +203,9 @@ where
     // Lifecycle state is deliberately installed in the main-thread slot
     // before the shared generation is staged. It may be non-Send and must not
     // become part of the cross-thread generation root.
-    if let Err(lifecycle_state) = runtime.install_lifecycle_state(lifecycle_state) {
-        runtime.retain_lifecycle_state(lifecycle_state);
+    if let Err(error) = runtime.install_lifecycle_state(lifecycle, lifecycle_state) {
+        let (lifecycle_state, _) = error.into_parts();
+        std::mem::forget(lifecycle_state);
         runtime.quarantine_shared_state(
             active_runtime_generation(runtime),
             shared_state,
@@ -313,6 +331,7 @@ impl OpenRollbackOutcome {
 
 fn rollback_open<A>(
     runtime: &Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
     generation: Option<RuntimeGeneration>,
 ) -> OpenRollbackOutcome
@@ -335,6 +354,16 @@ where
     crate::ingress::global_ingress().begin_close_with(|| {});
 
     let mut local_quiescent = true;
+    let mut lifecycle_release_ready = match runtime.has_lifecycle_state(lifecycle) {
+        Ok(present) => !present,
+        Err(error) => {
+            report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
+            false
+        }
+    };
+    // An opening transaction normally owns the lifecycle payload. It is only
+    // safe to release the thread binding after that payload has been
+    // explicitly taken and dropped below.
     let exports_drained = drain_execution(runtime, false);
 
     #[cfg(feature = "async")]
@@ -422,13 +451,11 @@ where
         let (mut shared_state, layers, _config) = opening.into_parts();
         match catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(|lifecycle_state| {
+                .with_lifecycle_state(lifecycle, |lifecycle_state| {
                     A::quiesce(&mut shared_state, lifecycle_state)
                         .map_err(IntoXllError::into_xll_error)
                 })
-                .ok_or(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                })?
+                .map_err(lifecycle_access_error)?
         }))
         .map_err(|_| XllError::Panic)
         .and_then(|result| result)
@@ -497,13 +524,11 @@ where
         let mut report = crate::shutdown::CloseReport::default();
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(|lifecycle_state| {
+                .with_lifecycle_state(lifecycle, |lifecycle_state| {
                     let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
                     A::cleanup(lifecycle_state, &mut reporter);
                 })
-                .ok_or(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                })
+                .map_err(lifecycle_access_error)
         }));
         if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
             report.push(
@@ -516,30 +541,42 @@ where
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
+            local_quiescent = false;
         } else {
-            if let Some(lifecycle_state) = runtime.take_lifecycle_state() {
-                if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
-                    report.push(
-                        "Addin::LifecycleState::drop",
-                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                        XllError::Panic,
-                    );
+            let lifecycle_dropped = match runtime.take_lifecycle_state(lifecycle) {
+                Ok(lifecycle_state) => {
+                    if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
+                        report.push(
+                            "Addin::LifecycleState::drop",
+                            crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                            XllError::Panic,
+                        );
+                        false
+                    } else {
+                        true
+                    }
                 }
-            } else {
-                report.push(
-                    "Addin::LifecycleState",
-                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                    },
-                );
-            }
-            if catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_err() {
+                Err(error) => {
+                    report.push(
+                        "Addin::LifecycleState",
+                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                        lifecycle_access_error(error),
+                    );
+                    false
+                }
+            };
+            let shared_state_dropped =
+                catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
+            if !shared_state_dropped {
                 report.push(
                     "Addin::SharedState::drop",
                     crate::shutdown::CleanupIssueKind::DisposalPanicked,
                     XllError::Panic,
                 );
+            }
+            lifecycle_release_ready = lifecycle_dropped && shared_state_dropped;
+            if !lifecycle_release_ready {
+                local_quiescent = false;
             }
         }
         for issue in report.issues() {
@@ -597,7 +634,11 @@ where
         runtime.registrations().is_empty() && runtime.event_registrations().is_empty();
     let registration_state_known = !runtime.registration_state_unknown();
     let mut finalized = false;
-    if local_quiescent && host_callbacks_detached && registration_state_known {
+    if local_quiescent
+        && lifecycle_release_ready
+        && host_callbacks_detached
+        && registration_state_known
+    {
         let prerequisites = crate::runtime::OpenRollbackQuiescencePrerequisites {
             exports: exports_drained,
             rtd: rtd_quiescent
@@ -627,7 +668,16 @@ where
             .certify_open_rollback(prerequisites)
             .and_then(|certificate| runtime.finish_open_rollback(certificate))
         {
-            Ok(()) => finalized = true,
+            Ok(()) => match runtime.release_empty_lifecycle_binding(lifecycle) {
+                Ok(()) => finalized = true,
+                Err(error) => {
+                    report_boundary_error(
+                        "xlAutoOpen lifecycle binding release",
+                        &lifecycle_access_error(error),
+                    );
+                    local_quiescent = false;
+                }
+            },
             Err(error) => {
                 report_boundary_error("xlAutoOpen rollback certification", &error);
                 local_quiescent = false;
@@ -644,11 +694,13 @@ where
 }
 
 #[must_use]
-pub fn remove_addin<A>(runtime: &Runtime<A>) -> i32
+pub fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &LifecycleThreadAccess<'_, A>) -> i32
 where
     A: Addin,
 {
-    let close_result = catch_unwind(AssertUnwindSafe(|| remove_addin_inner::<A>(runtime)));
+    let close_result = catch_unwind(AssertUnwindSafe(|| {
+        remove_addin_inner::<A>(runtime, lifecycle)
+    }));
     let success = match close_result {
         Ok(success) => success,
         Err(_) => {
@@ -660,6 +712,13 @@ where
     };
     match success {
         RemovalSuccess::AlreadyClosed => {
+            if runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+                && let Err(error) = runtime.release_empty_lifecycle_binding(lifecycle)
+            {
+                let error = lifecycle_access_error(error);
+                report_boundary_error("xlAutoRemove closed lifecycle binding", &error);
+                quarantine_runtime(runtime);
+            }
             #[cfg(any(test, feature = "shutdown-refinement"))]
             runtime.record_composition_already_closed_return();
             1
@@ -752,12 +811,15 @@ impl<A: Addin> Drop for RemovalTransaction<'_, A> {
     }
 }
 
-fn remove_addin_inner<'runtime, A>(runtime: &'runtime Runtime<A>) -> RemovalSuccess<'runtime, A>
+fn remove_addin_inner<'runtime, A>(
+    runtime: &'runtime Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
+) -> RemovalSuccess<'runtime, A>
 where
     A: Addin,
 {
     match catch_unwind(AssertUnwindSafe(|| {
-        remove_addin_inner_unchecked::<A>(runtime)
+        remove_addin_inner_unchecked::<A>(runtime, lifecycle)
     })) {
         Ok(Ok(success)) => success,
         Ok(Err(control)) => commit_removal_control(runtime, control),
@@ -767,6 +829,7 @@ where
 
 fn remove_addin_inner_unchecked<'runtime, A>(
     runtime: &'runtime Runtime<A>,
+    lifecycle: &LifecycleThreadAccess<'_, A>,
 ) -> Result<RemovalSuccess<'runtime, A>, RemovalControl>
 where
     A: Addin,
@@ -789,6 +852,19 @@ where
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
+    let mut lifecycle_release_ready = match runtime.has_lifecycle_state(lifecycle) {
+        Ok(present) => !present,
+        Err(error) => {
+            let error = lifecycle_access_error(error);
+            report_boundary_error("xlAutoRemove lifecycle slot", &error);
+            unload_failure = Some((
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                "xlAutoRemove lifecycle slot",
+                error,
+            ));
+            false
+        }
+    };
 
     let exports_drained = drain_execution(runtime, true);
 
@@ -976,13 +1052,11 @@ where
                     Ok(mut generation) => {
                         let quiesce = catch_unwind(AssertUnwindSafe(|| {
                             runtime
-                                .with_lifecycle_state(|lifecycle_state| {
+                                .with_lifecycle_state(lifecycle, |lifecycle_state| {
                                     A::quiesce(&mut generation.shared_state, lifecycle_state)
                                         .map_err(IntoXllError::into_xll_error)
                                 })
-                                .ok_or(XllError::Internal {
-                                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                                })
+                                .map_err(lifecycle_access_error)
                         }))
                         .map_err(|_| XllError::Panic)
                         .and_then(|result| result)
@@ -1027,13 +1101,11 @@ where
                 let (mut shared_state, layers, _config) = opening.into_parts();
                 let quiesce = catch_unwind(AssertUnwindSafe(|| {
                     runtime
-                        .with_lifecycle_state(|lifecycle_state| {
+                        .with_lifecycle_state(lifecycle, |lifecycle_state| {
                             A::quiesce(&mut shared_state, lifecycle_state)
                                 .map_err(IntoXllError::into_xll_error)
                         })
-                        .ok_or(XllError::Internal {
-                            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                        })
+                        .map_err(lifecycle_access_error)
                 }))
                 .map_err(|_| XllError::Panic)
                 .and_then(|result| result)
@@ -1095,13 +1167,11 @@ where
     if let Some(shared_state) = addin_shared_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
             runtime
-                .with_lifecycle_state(|lifecycle_state| {
+                .with_lifecycle_state(lifecycle, |lifecycle_state| {
                     let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
                     A::cleanup(lifecycle_state, &mut reporter);
                 })
-                .ok_or(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                })
+                .map_err(lifecycle_access_error)
         }));
         if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
             report.push(
@@ -1114,30 +1184,55 @@ where
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
-        } else {
-            if let Some(lifecycle_state) = runtime.take_lifecycle_state() {
-                if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
-                    report.push(
-                        "Addin::LifecycleState::drop",
-                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                        XllError::Panic,
-                    );
-                }
-            } else {
-                report.push(
-                    "Addin::LifecycleState",
-                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
-                    },
-                );
+            let error = XllError::Panic;
+            if unload_failure.is_none() {
+                unload_failure = Some((
+                    crate::shutdown::UnloadHazard::AddinCleanupFailed,
+                    "xlAutoRemove cleanup",
+                    error,
+                ));
             }
-            if catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_err() {
+        } else {
+            let lifecycle_dropped = match runtime.take_lifecycle_state(lifecycle) {
+                Ok(lifecycle_state) => {
+                    if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
+                        report.push(
+                            "Addin::LifecycleState::drop",
+                            crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                            XllError::Panic,
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Err(error) => {
+                    report.push(
+                        "Addin::LifecycleState",
+                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                        lifecycle_access_error(error),
+                    );
+                    false
+                }
+            };
+            let shared_state_dropped =
+                catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
+            if !shared_state_dropped {
                 report.push(
                     "Addin::SharedState::drop",
                     crate::shutdown::CleanupIssueKind::DisposalPanicked,
                     XllError::Panic,
                 );
+            }
+            lifecycle_release_ready = lifecycle_dropped && shared_state_dropped;
+            if !lifecycle_release_ready && unload_failure.is_none() {
+                unload_failure = Some((
+                    crate::shutdown::UnloadHazard::AddinCleanupFailed,
+                    "xlAutoRemove lifecycle cleanup",
+                    XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+                    },
+                ));
             }
         }
     }
@@ -1145,6 +1240,21 @@ where
         #[cfg(any(test, feature = "shutdown-refinement"))]
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
         report_cleanup_issue(issue);
+    }
+
+    if let Some((hazard, boundary, error)) = unload_failure.take() {
+        return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
+    }
+    if !lifecycle_release_ready {
+        let error = XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+        };
+        return Err(handle_unload_hazard(
+            runtime,
+            crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            "xlAutoRemove lifecycle binding",
+            &error,
+        ));
     }
 
     let handles_quiescent = match runtime.finish_handle_quiescence(handles_sealed) {
@@ -1249,6 +1359,16 @@ where
             ));
         }
     };
+
+    if let Err(error) = runtime.release_empty_lifecycle_binding(lifecycle) {
+        let error = lifecycle_access_error(error);
+        return Err(handle_unload_hazard(
+            runtime,
+            crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            "xlAutoRemove lifecycle binding release",
+            &error,
+        ));
+    }
 
     Ok(RemovalSuccess::Closed {
         witness: closed_witness,
@@ -1479,6 +1599,12 @@ mod tests {
         )
     }
 
+    fn lifecycle_access<A: Addin>(runtime: &Runtime<A>) -> LifecycleThreadAccess<'_, A> {
+        runtime
+            .bind_lifecycle_thread()
+            .expect("test runs on the lifecycle thread")
+    }
+
     static LAYERS_PANIC_CLOSES: AtomicUsize = AtomicUsize::new(0);
     static LAYERS_PANIC_QUIESCES: AtomicUsize = AtomicUsize::new(0);
 
@@ -1508,7 +1634,7 @@ mod tests {
         }
 
         fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
-            assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
+            assert!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire) >= 1);
             LAYERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -1528,8 +1654,9 @@ mod tests {
         let runtime = Runtime::<LayersPanic>::new();
         let mut owner = runtime.begin_open().unwrap();
         let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
 
-        rollback_active_open::<LayersPanic>(&runtime, None, &mut callbacks);
+        rollback_active_open::<LayersPanic>(&runtime, &lifecycle, None, &mut callbacks);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         runtime.publish((), ());
@@ -1543,7 +1670,8 @@ mod tests {
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
         let mut open_attempt = runtime.begin_open().unwrap();
-        initialize_addin::<LayersPanic>(&runtime, &test_open_context()).unwrap();
+        let lifecycle = lifecycle_access(&runtime);
+        initialize_addin::<LayersPanic>(&runtime, &lifecycle, &test_open_context()).unwrap();
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
         assert!(open_attempt.fail());
@@ -1551,6 +1679,7 @@ mod tests {
         assert!(
             rollback_open::<LayersPanic>(
                 &runtime,
+                &lifecycle,
                 &mut callbacks,
                 active_runtime_generation(&runtime),
             )
@@ -1570,7 +1699,8 @@ mod tests {
         runtime.finish_open(&mut first_open, Vec::new()).unwrap();
         let first_generation = runtime.generation();
 
-        assert_eq!(remove_addin::<LayersPanic>(&runtime), 1);
+        let lifecycle = lifecycle_access(&runtime);
+        assert_eq!(remove_addin::<LayersPanic>(&runtime, &lifecycle), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         runtime.clear_host_intent();
         let mut second_open = runtime.begin_open().unwrap();
@@ -1581,6 +1711,7 @@ mod tests {
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 2);
     }
 
     struct ReloadFailure;
@@ -1685,7 +1816,8 @@ mod tests {
         );
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        remove_addin_inner::<RetryClose>(&runtime);
+        let lifecycle = lifecycle_access(&runtime);
+        remove_addin_inner::<RetryClose>(&runtime, &lifecycle);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(
@@ -1725,18 +1857,80 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_panic_leaks_state_and_still_finalizes_safe_unload() {
+    fn cleanup_panic_retains_state_and_quarantines_runtime() {
         let runtime = Runtime::<CleanupPanic>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
-        assert!(runtime.with_lifecycle_state(|_| ()).is_some());
+        let lifecycle = lifecycle_access(&runtime);
+        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        remove_addin_inner::<CleanupPanic>(&runtime);
+        remove_addin_inner::<CleanupPanic>(&runtime, &lifecycle);
 
-        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
         assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
+    }
+
+    struct WrongThreadRemoval;
+
+    impl Addin for WrongThreadRemoval {
+        type SharedState = ();
+        type LifecycleState = DropObserved;
+        type Error = XllError;
+        type Layers = ();
+
+        fn open(
+            _: &OpenContext,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!("the wrong-thread test publishes state directly")
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {}
+    }
+
+    #[test]
+    fn wrong_thread_removal_quarantines_before_touching_lifecycle_state() {
+        let runtime = std::sync::Arc::new(Runtime::<WrongThreadRemoval>::new());
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut opening = runtime.begin_open().unwrap();
+        runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        assert!(
+            runtime
+                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                .is_ok()
+        );
+        let lifecycle = lifecycle_access(&runtime);
+
+        let removal_runtime = std::sync::Arc::clone(&runtime);
+        std::thread::spawn(move || {
+            assert_eq!(host_auto_remove::<WrongThreadRemoval>(&removal_runtime), 1);
+        })
+        .join()
+        .expect("wrong-thread removal worker panicked");
+
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert!(runtime.module_residency_held());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
     }
 
     struct QuiesceFailure;
@@ -1772,10 +1966,11 @@ mod tests {
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
-        assert!(runtime.with_lifecycle_state(|_| ()).is_some());
+        let lifecycle = lifecycle_access(&runtime);
+        assert!(runtime.with_lifecycle_state(&lifecycle, |_| ()).is_ok());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let result = { remove_addin_inner::<QuiesceFailure>(&runtime) };
+        let result = { remove_addin_inner::<QuiesceFailure>(&runtime, &lifecycle) };
 
         assert!(matches!(result, RemovalSuccess::Quarantined));
         assert_eq!(
@@ -1805,8 +2000,10 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
         let outcome = rollback_open::<RetryClose>(
             &runtime,
+            &lifecycle,
             &mut callbacks,
             active_runtime_generation(&runtime),
         );
@@ -2361,8 +2558,10 @@ mod tests {
         let mut opening = rollback.begin_open().unwrap();
         assert!(opening.fail());
         let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&rollback);
         let outcome = rollback_open::<CleanClose>(
             &rollback,
+            &lifecycle,
             &mut callbacks,
             active_runtime_generation(&rollback),
         );
@@ -2381,7 +2580,8 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let success = remove_addin_inner::<CleanClose>(&runtime);
+        let lifecycle = lifecycle_access(&runtime);
+        let success = remove_addin_inner::<CleanClose>(&runtime, &lifecycle);
         assert!(runtime.begin_open().is_err());
         let RemovalSuccess::Closed {
             witness,
@@ -2438,9 +2638,11 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
         assert!(
             rollback_open::<AlwaysFailClose>(
                 &runtime,
+                &lifecycle,
                 &mut callbacks,
                 active_runtime_generation(&runtime),
             )
@@ -2615,7 +2817,8 @@ mod tests {
             .expect("async close-order task did not start");
 
         crate::test_callback::set_terminal(XLF_UNREGISTER, XLRET_ABORT);
-        let close = remove_addin_inner::<CleanClose>(runtime);
+        let lifecycle = lifecycle_access(runtime);
+        let close = remove_addin_inner::<CleanClose>(runtime, &lifecycle);
 
         assert!(matches!(close, RemovalSuccess::Quarantined));
         assert_eq!(
@@ -2833,7 +3036,8 @@ mod tests {
                 quiesce_release_rx,
             ))),
         };
-        assert!(runtime.install_lifecycle_state(state).is_ok());
+        let lifecycle = lifecycle_access(runtime);
+        assert!(runtime.install_lifecycle_state(&lifecycle, state).is_ok());
         assert!(
             runtime
                 .stage_opening_state((), crate::addin::RuntimeConfig::new())
@@ -2933,7 +3137,8 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
-        assert!(runtime.install_lifecycle_state(state).is_ok());
+        let lifecycle = lifecycle_access(&runtime);
+        assert!(runtime.install_lifecycle_state(&lifecycle, state).is_ok());
         assert!(
             runtime
                 .stage_opening_state((), crate::addin::RuntimeConfig::new())
@@ -2947,8 +3152,10 @@ mod tests {
 
         assert!(open_attempt.fail());
         let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
         let outcome = rollback_open::<PanicLayersAddin>(
             &runtime,
+            &lifecycle,
             &mut callbacks,
             active_runtime_generation(&runtime),
         );

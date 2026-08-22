@@ -52,7 +52,7 @@ fn load_configuration(_: &std::path::Path) -> XllResult<Configuration> {
 }
 ```
 
-`State` must be `Send + Sync + 'static`. Anything stored in it must independently satisfy the concurrency contract of every worksheet function that can access it. If an application resource is thread-affine, expose only a safe thread-compatible client through `State` and retain creation, destruction, and join ownership in application lifecycle code. See [Add-in lifecycle and state](lifecycle.md) and [Execution modes and contexts](execution-modes.md).
+`State` must be `Send + Sync + 'static`. Anything stored in it must independently satisfy the concurrency contract of every worksheet function that can access it. If an application resource is thread-affine, keep its owner in `LifecycleState` and expose only a safe thread-compatible client through `State`; xlfn binds lifecycle-state access to the lifecycle thread for the open generation. See [Add-in lifecycle and state](lifecycle.md) and [Execution modes and contexts](execution-modes.md).
 
 ## UDF modules
 

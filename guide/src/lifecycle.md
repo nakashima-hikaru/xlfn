@@ -22,8 +22,9 @@ pub trait Addin: Send + Sync + 'static {
 
 `Opened` returns shared state, lifecycle-local state, execution layers, and the
 runtime policy as one open transaction. `SharedState` is borrowed by UDF calls
-and must be `Send + Sync`; `LifecycleState` is retained by xlfn on the Excel
-main lifecycle thread and may own thread-affine resources. `RuntimeConfig` can
+and must be `Send + Sync`; `LifecycleState` is retained by xlfn in thread-local
+storage and bound to the Excel lifecycle thread for the open generation, so it
+may own thread-affine resources. `RuntimeConfig` can
 select RTD limits and, with the `async` feature, the async worker count.
 
 The stable default uses `type Layers = ();`. Custom UDF layers and other
@@ -156,10 +157,13 @@ fn cleanup(lifecycle: &mut LifecycleState, reporter: &mut CleanupReporter<'_>) {
 }
 ```
 
-A cleanup panic is contained after quiescence. The framework leaks the
-lifecycle state rather than invoking more unknown destructor code, records the
-issue, and completes unload. `cleanup` must not start work or register
-callbacks.
+A cleanup panic is contained after quiescence. The framework retains or leaks
+the lifecycle state rather than invoking more unknown destructor code, records
+the issue, and quarantines the runtime with its module residency lease held.
+`cleanup` must not start work or register callbacks. Only a completed cleanup,
+an explicit lifecycle-state take and drop, and an empty thread-affine binding
+permit the runtime to publish `Closed` and release its lifecycle-thread
+binding.
 
 Consequences:
 
@@ -172,7 +176,9 @@ Consequences:
 ## Application-owned lifecycle resources
 
 `Addin::open`, `Addin::quiesce`, and `Addin::cleanup` for a generation run on
-the same lifecycle thread. An application may use this property for
+the same lifecycle thread. xlfn records that affinity as an internal
+capability; a wrong-thread open or removal boundary is rejected and
+quarantined before lifecycle state is accessed. An application may use this property for
 lifecycle-owned registries or other resources that are not exposed to
 worksheet calls. `SharedState` remains `Send + Sync + 'static`; expose only
 safe, thread-compatible clients through it. `LifecycleState` is the place for

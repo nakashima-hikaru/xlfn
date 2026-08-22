@@ -90,6 +90,7 @@ pub(crate) enum UnloadHazard {
     HandleRuntimeNotQuiescent,
     AddinGenerationEscaped,
     AddinQuiesceFailed,
+    AddinCleanupFailed,
     DiagnosticWorkerStillRunning,
     RegistrationStateUnknown,
     CloseInvariantViolation,
@@ -119,6 +120,9 @@ impl UnloadHazard {
                 crate::shutdown_refinement::GhostFailure::GenerationEscaped
             }
             Self::AddinQuiesceFailed => {
+                crate::shutdown_refinement::GhostFailure::AddinShutdownFailed
+            }
+            Self::AddinCleanupFailed => {
                 crate::shutdown_refinement::GhostFailure::AddinShutdownFailed
             }
             Self::DiagnosticWorkerStillRunning => {
