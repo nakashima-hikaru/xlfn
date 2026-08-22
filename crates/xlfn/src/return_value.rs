@@ -864,7 +864,7 @@ pub unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundary
 fn is_detached_error_pointer(pointer: *mut XLOPER12) -> bool {
     CLOSING_ERROR
         .get()
-        .is_some_and(|static_ptr| pointer as usize == *static_ptr)
+        .is_some_and(|static_ptr| pointer.addr() == *static_ptr)
 }
 
 unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFreeGuard> {
@@ -1105,7 +1105,7 @@ mod tests {
             workers.push(std::thread::spawn(move || {
                 let pointer = ffi_boundary(runtime, || Ok(value));
                 assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
-                pointer_tx.send(pointer as usize).unwrap();
+                pointer_tx.send(pointer.addr()).unwrap();
                 barrier.wait();
 
                 // SAFETY: this worker owns the live pointer it produced.

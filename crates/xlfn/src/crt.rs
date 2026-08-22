@@ -36,7 +36,7 @@ pub(crate) fn effective_crt_policy() -> EmbeddedCrtPolicy {
     // lifecycle path, preventing PE link-time dead stripping of the section.
     // SAFETY: the address refers to an immutable, correctly aligned static and
     // is read without mutation for the lifetime of the process.
-    unsafe { std::ptr::addr_of!(CRT_POLICY_MARKER.policy).read_volatile() }
+    unsafe { (&raw const CRT_POLICY_MARKER.policy).read_volatile() }
 }
 
 #[cfg(test)]

@@ -2768,7 +2768,7 @@ fn concurrent_first_use_initializes_exactly_once() {
             std::thread::spawn(move || {
                 barrier.wait();
                 let read = slot.read().unwrap();
-                &*read as *const HandleRuntime as usize
+                (&*read as *const HandleRuntime).addr()
             })
         })
         .collect();

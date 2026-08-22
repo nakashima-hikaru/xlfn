@@ -83,10 +83,7 @@ impl CallbackGate {
             id,
             state: ReentrantMutex::new(RefCell::new(CallbackGateState::new(initial))),
         }));
-        GATES
-            .lock()
-            .get_or_insert_with(HashMap::new)
-            .insert(id, gate);
+        GATES.lock().get_or_insert_default().insert(id, gate);
         gate
     }
 

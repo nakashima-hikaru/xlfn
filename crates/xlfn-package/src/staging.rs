@@ -657,8 +657,8 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
             if unsafe { GetAce(checked_dacl, index, &mut ace) == 0 } || ace.is_null() {
                 return Err("private staging directory DACL ACE could not be read".into());
             }
-            let acl_start = checked_dacl.cast::<u8>() as usize;
-            let ace_start = ace.cast::<u8>() as usize;
+            let acl_start = checked_dacl.cast::<u8>().addr();
+            let ace_start = ace.cast::<u8>().addr();
             let ace_offset = ace_start.checked_sub(acl_start).ok_or_else(|| {
                 "private staging directory DACL ACE is outside the ACL".to_owned()
             })?;

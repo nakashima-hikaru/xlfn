@@ -141,7 +141,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 let read = slot.read().unwrap();
-                Arc::as_ptr(read.as_arc()) as usize
+                Arc::as_ptr(read.as_arc()).addr()
             }));
         }
 
