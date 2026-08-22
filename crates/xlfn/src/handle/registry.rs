@@ -414,7 +414,7 @@ impl HandleRegistry {
 
     pub(crate) fn lookup_handle<'call, T>(
         &self,
-        scope: &'call crate::value::CallScope<'call>,
+        scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where

@@ -57,6 +57,66 @@ impl<T> Matrix<T> {
     }
 }
 
+/// A call-scoped view over a rectangular collection whose elements are owned
+/// by the active [`crate::call::CallScope`].
+///
+/// `MatrixRef` contains no allocation and cannot outlive the Excel call that
+/// created it. Use [`Self::to_owned`] when the values must cross that
+/// boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MatrixRef<'call, T> {
+    rows: usize,
+    columns: usize,
+    data: &'call [T],
+}
+
+impl<'call, T> MatrixRef<'call, T> {
+    pub(crate) fn from_slice(rows: usize, columns: usize, data: &'call [T]) -> XllResult<Self> {
+        validate_matrix_dimensions(rows, columns, data.len())?;
+        Ok(Self {
+            rows,
+            columns,
+            data,
+        })
+    }
+
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[must_use]
+    pub const fn columns(&self) -> usize {
+        self.columns
+    }
+
+    #[must_use]
+    pub const fn as_slice(&self) -> &'call [T] {
+        self.data
+    }
+
+    pub fn row(&self, row: usize) -> Option<&'call [T]> {
+        let start = row.checked_mul(self.columns)?;
+        let end = start.checked_add(self.columns)?;
+        self.data.get(start..end)
+    }
+
+    pub fn column(&self, column: usize) -> Option<impl Iterator<Item = &'call T>> {
+        (column < self.columns).then(|| self.data.iter().skip(column).step_by(self.columns))
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'call, T> {
+        self.data.iter()
+    }
+
+    pub fn to_owned(&self) -> XllResult<Matrix<T>>
+    where
+        T: Clone,
+    {
+        Matrix::new(self.rows, self.columns, self.data.to_vec())
+    }
+}
+
 impl<T> Index<(usize, usize)> for Matrix<T> {
     type Output = T;
 

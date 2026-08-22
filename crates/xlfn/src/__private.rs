@@ -8,6 +8,8 @@
 use std::future::Future;
 
 use crate::addin::Addin;
+use crate::call::with_excel_call_scope_and_state;
+pub use crate::call::{CallScope, with_excel_call_scope};
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationToken;
 use crate::error::{InputError, XllError, XllResult};
@@ -21,11 +23,9 @@ use crate::return_value::ffi_boundary_void;
 use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
 use crate::runtime::Runtime;
 use crate::value::ExcelCellOutput;
-use crate::value::input::with_excel_call_scope_and_state;
 pub use crate::value::input::{
-    ArgumentContext, CallScope, ExcelParameter, argument_from_raw,
-    argument_from_raw_with_arguments, argument_from_raw_with_context, cell_presence_from_raw,
-    with_excel_call_scope,
+    ArgumentContext, ExcelParameter, argument_from_raw, argument_from_raw_with_arguments,
+    argument_from_raw_with_context, cell_presence_from_raw,
 };
 
 #[doc(hidden)]

@@ -2712,11 +2712,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
 
     crate::value::with_excel_call_scope(|scope| {
         let resolver = HandleRuntimeResolver::new(slot);
-        let mut call_ctx =
-            crate::value::CallContext::from_access(Some(crate::value::input::HandleCallAccess {
-                runtime: resolver,
-                scope,
-            }));
+        let mut call_ctx = crate::value::CallContext::from_access(scope, Some(resolver));
 
         // First handle resolution initializes resolver OnceCell
         let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();

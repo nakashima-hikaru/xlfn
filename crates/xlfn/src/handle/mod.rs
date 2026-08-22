@@ -6,10 +6,10 @@
     )
 )]
 
-mod arena;
 mod binding;
 mod connection;
 mod formula;
+mod object_access;
 mod object_store;
 mod prepare;
 mod reclamation;
@@ -49,7 +49,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-pub(crate) use arena::{BorrowedObject, PinnedObject};
 #[cfg(test)]
 pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
@@ -64,6 +63,7 @@ pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
+pub(crate) use object_access::{BorrowedObject, PinnedObject};
 #[cfg(test)]
 pub(crate) use object_store::ObjectKey;
 pub(crate) use object_store::{ErasedObject, ObjectLocator};

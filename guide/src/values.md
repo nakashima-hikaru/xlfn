@@ -11,7 +11,9 @@ xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to coe
 | `i32` | integer, or an integral number in range | fractional values are rejected |
 | `i64` | integer, or an exactly representable integral number | numeric input is limited to the exact Excel-double integer range, `-2^53..=2^53` |
 | `String` | string | decoded as valid UTF-16 |
+| `&str` | string | decoded into call-local scratch; synchronous functions only |
 | `ExcelErrorValue` | Excel error | preserves the worksheet error |
+| `ExcelCellRef<'call>` | number, Boolean, string, error, or blank | borrowed cell view for the active call |
 | `ExcelSerialDate` | finite number | initially marked with `ExcelDateSystem::Workbook` |
 | `ExcelValue` | supported scalar, error, blank, missing, or array | use for intentionally dynamic input |
 
@@ -39,6 +41,17 @@ fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
     values
         .cells()
         .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+}
+```
+
+For typed, call-local grids use `MatrixRef<'_, T>`. Its elements are copied into
+the call scratch arena and therefore require `T: Copy`; string elements can be
+`&str` without a per-element `String` allocation:
+
+```rust
+#[excel_function(name = "ARRAY.TEXT.COUNT", thread_safe)]
+fn text_count(values: MatrixRef<'_, &str>) -> f64 {
+    values.iter().map(|value| value.len() as f64).sum()
 }
 ```
 

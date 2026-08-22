@@ -11,7 +11,7 @@
 //! storage directly. Changes to the reclamation algorithm belong here with
 //! its complete safety proof and concurrency tests.
 
-use super::arena::{BorrowedObject, PinnedObject};
+use super::object_access::{BorrowedObject, PinnedObject};
 #[cfg(test)]
 use super::object_store::ObjectIdentity;
 use super::object_store::{

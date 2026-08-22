@@ -17,6 +17,12 @@ impl<'call> ExcelParameter<'call> for ModuleName {
         _: &CallContext,
         _identity: Option<&mut crate::input_identity::InputIdentityEncoder>,
     ) -> XllResult<Self> {
+        Self::from_value(value, argument)
+    }
+}
+
+impl ModuleName {
+    fn from_value(value: XlValueRef<'_>, argument: &'static str) -> XllResult<Self> {
         let units = value.utf16(argument)?.to_vec();
         #[cfg(target_os = "windows")]
         let path = {
@@ -34,5 +40,5 @@ impl<'call> ExcelParameter<'call> for ModuleName {
 }
 
 pub(super) fn decode_module_name<'call>(value: XlValueRef<'call>) -> XllResult<ModuleName> {
-    ModuleName::decode(value, "module", &CallContext::without_runtime(), None)
+    ModuleName::from_value(value, "module")
 }

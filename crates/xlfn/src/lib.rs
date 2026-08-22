@@ -44,6 +44,7 @@ pub mod benchmark_support;
     )
 )]
 mod cache;
+mod call;
 mod callback_gate;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(
@@ -496,7 +497,8 @@ pub mod prelude {
     pub use crate::handle::{Handle, HandleAlias, PinnedHandle};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
-        Column, ExcelErrorValue, ExcelSerialDate, Matrix, OptionalExcelValue, Row,
+        Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
+        OptionalExcelValue, Row,
     };
     pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
 }

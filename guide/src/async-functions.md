@@ -39,6 +39,13 @@ If a context parameter is present on an `async fn`, its role must be `asynchrono
 
 Async functions are registered as thread-safe by the generated boundary. They cannot accept raw Excel references or return newly constructed handle objects.
 
+The asynchronous meaning comes from the Rust function being written as
+`async fn`; there is no `#[excel_function(async)]` attribute. Borrowed input
+types such as `&str`, `MatrixRef<'_, T>`, `ExcelCellRef<'_>`, `XlStrRef<'_>`,
+and `XlArrayRef<'_>` are rejected at compile time because their call scope
+ends before the future may run. Use owned `String`, `Matrix<T>`, or another
+`Send + 'static` representation instead.
+
 ## State and converted inputs
 
 `AsyncContext<ServiceAddin>` owns a lease on the open `ServiceAddin` generation. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.

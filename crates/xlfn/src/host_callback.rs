@@ -239,9 +239,9 @@ mod tests {
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        let escaped = crate::value::with_excel_call_scope(|scope| {
-            let state = ();
-            let context = crate::addin::MacroSheetContext::<()>::new(&state, scope);
+        let state = ();
+        let escaped = crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
+            let context = crate::addin::MacroSheetContext::<()>::new(state, scope);
             std::mem::forget(context);
             scope.callbacks().shared_handle()
         });

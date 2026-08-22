@@ -1093,9 +1093,10 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn string(value: &str) -> Self {
-        let mut u16_chars: Vec<u16> = Vec::with_capacity(value.len() + 1);
-        u16_chars.push(value.len() as u16);
-        u16_chars.extend(value.encode_utf16());
+        let encoded = value.encode_utf16().collect::<Vec<_>>();
+        let mut u16_chars: Vec<u16> = Vec::with_capacity(encoded.len() + 1);
+        u16_chars.push(encoded.len() as u16);
+        u16_chars.extend(encoded);
         let raw = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 string: u16_chars.as_ptr() as *mut u16,
@@ -1107,6 +1108,74 @@ impl RawArgumentIngressBenchmark {
             _handle_runtime: None,
             raw,
             _storage: Some(Box::new(u16_chars)),
+        }
+    }
+
+    pub fn string_matrix(values: &[&str]) -> Self {
+        let mut strings = values
+            .iter()
+            .map(|value| {
+                std::iter::once(value.encode_utf16().count() as u16)
+                    .chain(value.encode_utf16())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut cells = strings
+            .iter_mut()
+            .map(|string| xlfn_sys::XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: string.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: 1,
+                    columns: cells.len() as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            _handle_runtime: None,
+            raw,
+            _storage: Some(Box::new((cells, strings))),
+        }
+    }
+
+    pub fn mixed_cells() -> Self {
+        let mut text = vec![3_u16, '猫' as u16, 'A' as u16, 'B' as u16];
+        let mut cells = vec![
+            xlfn_sys::XLOPER12::number(1.0),
+            xlfn_sys::XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            },
+            xlfn_sys::XLOPER12::nil(),
+        ]
+        .into_boxed_slice();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: 1,
+                    columns: cells.len() as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            _handle_runtime: None,
+            raw,
+            _storage: Some(Box::new((cells, text))),
         }
     }
 
@@ -1214,6 +1283,57 @@ impl RawArgumentIngressBenchmark {
             arguments
                 .finish()
                 .expect("formula revision return must produce fingerprint")
+        })
+    }
+
+    pub fn run_borrowed_str(&mut self) {
+        crate::value::with_excel_call_scope(|scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<&str>(
+                    &mut arguments,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark borrowed string ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_borrowed_matrix_str(&mut self) {
+        crate::value::with_excel_call_scope(|scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::MatrixRef<'_, &str>,
+                    >(&mut arguments, "arg", &mut self.raw)
+                }
+                .expect("benchmark borrowed string matrix ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_borrowed_mixed_cells(&mut self) {
+        crate::value::with_excel_call_scope(|scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::for_return::<f64, _>(self.runtime, scope);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::MatrixRef<'_, crate::value::ExcelCellRef<'_>>,
+                >(&mut arguments, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed mixed-cell ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
         })
     }
 

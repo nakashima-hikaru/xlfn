@@ -33,7 +33,12 @@ The call lifetime is explicit. Owned conversions work for every `'call`; borrowe
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 
-Every type used as an Excel-visible parameter implements one `FromExcel` contract. Runtime context and formula-fingerprint construction stay inside the framework boundary. Do not retain `XlValueRef` or any pointer derived from it in an owned result.
+Owned types used as ordinary Excel-visible parameters implement one `FromExcel`
+contract. The framework also provides explicit call-scoped views such as
+`&str`, `MatrixRef<'_, T>`, and `ExcelCellRef<'_>`; those are synchronous-only
+and are not custom `FromExcel` implementations. Runtime context and
+formula-fingerprint construction stay inside the framework boundary. Do not
+retain `XlValueRef` or any pointer derived from it in an owned result.
 
 ## Custom cell and output conversions
 

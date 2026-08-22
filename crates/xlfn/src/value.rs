@@ -26,10 +26,10 @@ pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 pub mod raw;
 
+pub(crate) use crate::call::with_excel_call_scope;
 pub use input::FromExcel;
 pub(crate) use input::{
-    ArgumentContext, CallContext, CallScope, ExcelParameter, argument_from_raw_with_arguments,
-    with_excel_call_scope,
+    ArgumentContext, CallContext, ExcelParameter, argument_from_raw_with_arguments,
 };
 #[cfg(test)]
 pub(crate) use input::{argument_from_raw, argument_from_raw_with_context};
@@ -40,7 +40,7 @@ pub use output::{
 
 pub use date::{ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
-pub use matrix::{BoundedVarArgs, Column, Matrix, Row};
+pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub(crate) use raw::{GridView, encode_raw_value};
 pub use raw::{XlArrayRef, XlStrRef, XlValueRef};
 
@@ -64,6 +64,20 @@ pub enum ExcelCellValue {
     Number(f64),
     Boolean(bool),
     String(String),
+    Error(ExcelError),
+    Blank,
+}
+
+/// A zero-allocation view of one worksheet cell for a synchronous call.
+///
+/// The string variant borrows UTF-8 text from the active call scope. This
+/// type is therefore suitable for synchronous and main-thread UDFs, but it
+/// cannot be moved into an asynchronous future.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExcelCellRef<'call> {
+    Number(f64),
+    Boolean(bool),
+    String(&'call str),
     Error(ExcelError),
     Blank,
 }
@@ -199,6 +213,23 @@ impl<'call> FromExcel<'call> for String {
     }
 }
 
+impl<'call> ExcelParameter<'call> for &'call str {
+    fn decode(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        mut identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        let text = context
+            .scratch()
+            .decode_utf16(value.utf16(argument)?, argument)?;
+        if let Some(identity) = identity.as_mut() {
+            identity.string(text);
+        }
+        Ok(text)
+    }
+}
+
 impl<'call> FromExcel<'call> for ExcelErrorValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() != XLTYPE_ERR {
@@ -299,6 +330,79 @@ where
     Ok(data)
 }
 
+fn convert_grid_elements_borrowed<'call, T>(
+    grid: &GridView<'call>,
+    argument: &'static str,
+    context: &CallContext<'call>,
+    mut identity: Option<&mut InputIdentityEncoder>,
+) -> XllResult<&'call [T]>
+where
+    T: ExcelParameter<'call> + Copy,
+{
+    let (rows, columns) = grid.shape();
+    let element_count = rows.checked_mul(columns).ok_or_else(|| {
+        XllError::input(argument, InputError::Malformed("array dimension overflow"))
+    })?;
+    let output_bytes = element_count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| {
+            XllError::input(argument, InputError::Malformed("output byte-size overflow"))
+        })?;
+    let mut referenced_bytes = element_count
+        .checked_mul(std::mem::size_of::<XLOPER12>())
+        .and_then(|bytes| bytes.checked_add(output_bytes))
+        .ok_or_else(|| {
+            XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+        })?;
+    if referenced_bytes > MAX_ARRAY_BYTES {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit: MAX_ARRAY_BYTES,
+                actual: referenced_bytes,
+            },
+        ));
+    }
+
+    context.scratch().collect_copy(element_count, |index| {
+        let element = grid.element(index)?;
+        if element.base_type() == XLTYPE_MULTI {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("nested arrays are not supported"),
+            ));
+        }
+        if element.base_type() == XLTYPE_STR {
+            let string_bytes = element
+                .utf16(argument)?
+                .len()
+                .checked_mul(std::mem::size_of::<u16>() + 3)
+                .ok_or_else(|| {
+                    XllError::input(
+                        argument,
+                        InputError::Malformed("array string byte-size overflow"),
+                    )
+                })?;
+            referenced_bytes = referenced_bytes.checked_add(string_bytes).ok_or_else(|| {
+                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+            })?;
+            if referenced_bytes > MAX_ARRAY_BYTES {
+                return Err(XllError::input(
+                    argument,
+                    InputError::TooLarge {
+                        limit: MAX_ARRAY_BYTES,
+                        actual: referenced_bytes,
+                    },
+                ));
+            }
+        }
+        match identity.as_mut() {
+            Some(identity) => T::decode(element, argument, context, Some(&mut **identity)),
+            None => T::decode(element, argument, context, None),
+        }
+    })
+}
+
 impl<'call, T> ExcelParameter<'call> for OptionalExcelValue<T>
 where
     T: ExcelParameter<'call>,
@@ -381,6 +485,27 @@ where
         }
         let data = convert_grid_elements(&grid, argument, context, identity)?;
         Matrix::new(rows, columns, data)
+    }
+}
+
+impl<'call, T> ExcelParameter<'call> for MatrixRef<'call, T>
+where
+    T: ExcelParameter<'call> + Copy,
+{
+    fn decode(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        mut identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        if let Some(identity) = identity.as_mut() {
+            identity.u64(rows as u64);
+            identity.u64(columns as u64);
+        }
+        let data = convert_grid_elements_borrowed(&grid, argument, context, identity)?;
+        MatrixRef::from_slice(rows, columns, data)
     }
 }
 
@@ -524,17 +649,126 @@ impl<'call> FromExcel<'call> for ExcelCellValue {
     }
 }
 
+impl<'call> ExcelParameter<'call> for ExcelCellRef<'call> {
+    fn decode(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: Option<&mut InputIdentityEncoder>,
+    ) -> XllResult<Self> {
+        match value.base_type() {
+            XLTYPE_NUM | XLTYPE_INT => {
+                <f64 as ExcelParameter>::decode(value, argument, context, identity)
+                    .map(Self::Number)
+            }
+            XLTYPE_BOOL => <bool as ExcelParameter>::decode(value, argument, context, identity)
+                .map(Self::Boolean),
+            XLTYPE_STR => {
+                <&'call str as ExcelParameter>::decode(value, argument, context, identity)
+                    .map(Self::String)
+            }
+            XLTYPE_ERR => {
+                <ExcelErrorValue as ExcelParameter>::decode(value, argument, context, identity)
+                    .map(|value| Self::Error(value.0))
+            }
+            XLTYPE_NIL => {
+                if let Some(identity) = identity {
+                    encode_raw_value(value, false, identity);
+                }
+                Ok(Self::Blank)
+            }
+            _ => Err(value.wrong_type(argument, "worksheet cell")),
+        }
+    }
+}
+
+pub(crate) fn decode_owned_matrix<'call, T>(
+    value: XlValueRef<'call>,
+    argument: &'static str,
+) -> XllResult<Matrix<T>>
+where
+    T: FromExcel<'call>,
+{
+    let grid = GridView::from_value(value, argument)?;
+    let (rows, columns) = grid.shape();
+    convert_owned_grid_elements(&grid, argument).and_then(|data| Matrix::new(rows, columns, data))
+}
+
+fn convert_owned_grid_elements<'call, T>(
+    grid: &GridView<'call>,
+    argument: &'static str,
+) -> XllResult<Vec<T>>
+where
+    T: FromExcel<'call>,
+{
+    let (rows, columns) = grid.shape();
+    let element_count = rows.checked_mul(columns).ok_or_else(|| {
+        XllError::input(argument, InputError::Malformed("array dimension overflow"))
+    })?;
+    let output_bytes = element_count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| {
+            XllError::input(argument, InputError::Malformed("output byte-size overflow"))
+        })?;
+    let mut referenced_bytes = element_count
+        .checked_mul(std::mem::size_of::<XLOPER12>())
+        .and_then(|bytes| bytes.checked_add(output_bytes))
+        .ok_or_else(|| {
+            XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+        })?;
+    if referenced_bytes > MAX_ARRAY_BYTES {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit: MAX_ARRAY_BYTES,
+                actual: referenced_bytes,
+            },
+        ));
+    }
+
+    let mut data = Vec::with_capacity(element_count);
+    for index in 0..element_count {
+        let element = grid.element(index)?;
+        if element.base_type() == XLTYPE_MULTI {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("nested arrays are not supported"),
+            ));
+        }
+        if element.base_type() == XLTYPE_STR {
+            let string_bytes = element
+                .utf16(argument)?
+                .len()
+                .checked_mul(std::mem::size_of::<u16>() + 3)
+                .ok_or_else(|| {
+                    XllError::input(
+                        argument,
+                        InputError::Malformed("array string byte-size overflow"),
+                    )
+                })?;
+            referenced_bytes = referenced_bytes.checked_add(string_bytes).ok_or_else(|| {
+                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+            })?;
+            if referenced_bytes > MAX_ARRAY_BYTES {
+                return Err(XllError::input(
+                    argument,
+                    InputError::TooLarge {
+                        limit: MAX_ARRAY_BYTES,
+                        actual: referenced_bytes,
+                    },
+                ));
+            }
+        }
+        data.push(T::from_excel(element, argument)?);
+    }
+    Ok(data)
+}
+
 impl<'call> FromExcel<'call> for ExcelValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
             XLTYPE_MISSING => Ok(Self::Missing),
-            XLTYPE_MULTI => <Matrix<ExcelCellValue> as ExcelParameter>::decode(
-                value,
-                argument,
-                &CallContext::without_runtime(),
-                None,
-            )
-            .map(Self::Array),
+            XLTYPE_MULTI => decode_owned_matrix::<ExcelCellValue>(value, argument).map(Self::Array),
             _ => ExcelCellValue::from_excel(value, argument).map(Self::Scalar),
         }
     }
@@ -550,8 +784,8 @@ where
         context: &CallContext<'call>,
         identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
-        let token = String::from_excel(value, argument)?;
-        let handle = context.resolve_handle(&token)?;
+        let token = <&'call str as ExcelParameter>::decode(value, argument, context, None)?;
+        let handle = context.resolve_handle(token)?;
         if let Some(identity) = identity {
             identity.u64(handle.object.id.0.0);
         }
@@ -569,8 +803,8 @@ where
         context: &CallContext<'call>,
         identity: Option<&mut InputIdentityEncoder>,
     ) -> XllResult<Self> {
-        let token = String::from_excel(value, argument)?;
-        let handle = context.resolve_handle::<T>(&token)?.pin()?;
+        let token = <&'call str as ExcelParameter>::decode(value, argument, context, None)?;
+        let handle = context.resolve_handle::<T>(token)?.pin()?;
         if let Some(identity) = identity {
             identity.u64(handle.object_id());
         }
@@ -736,7 +970,7 @@ mod tests {
     where
         T: for<'call> ExcelParameter<'call>,
     {
-        with_excel_call_scope(|_scope| {
+        with_excel_call_scope(|scope| {
             let mut builder = crate::input_identity::InputFingerprintBuilder::new();
             // SAFETY: raw is live for this conversion.
             let value = unsafe {
@@ -746,7 +980,7 @@ mod tests {
                     converted = Some(T::decode(
                         value_ref,
                         "arg",
-                        &CallContext::without_runtime(),
+                        &CallContext::plain(scope),
                         Some(encoder),
                     )?);
                     Ok(())
@@ -896,6 +1130,102 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn borrowed_string_is_decoded_into_the_call_scratch() {
+        let text: Vec<u16> = std::iter::once(5_u16)
+            .chain("日本語💡".encode_utf16())
+            .collect();
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_ptr().cast_mut(),
+            },
+            xltype: XLTYPE_STR,
+        };
+
+        with_excel_call_scope(|scope| {
+            // SAFETY: raw and its UTF-16 payload remain live for this scope.
+            let value: &str = unsafe { argument_from_raw(scope, "text", &mut raw) }.unwrap();
+            assert_eq!(value, "日本語💡");
+        });
+    }
+
+    #[test]
+    fn borrowed_matrix_and_cell_views_preserve_shape_and_strings() {
+        let mut first = vec![3_u16, '猫' as u16, 'A' as u16, 'B' as u16];
+        let mut second = vec![3_u16, '犬' as u16, 'C' as u16, 'D' as u16];
+        let mut cells = [
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: first.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            },
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: second.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        ];
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: 1,
+                    columns: 2,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+
+        with_excel_call_scope(|scope| {
+            // SAFETY: raw, cells, and both UTF-16 payloads remain live for this scope.
+            let values: MatrixRef<'_, &str> =
+                unsafe { argument_from_raw(scope, "values", &mut raw) }.unwrap();
+            assert_eq!((values.rows(), values.columns()), (1, 2));
+            assert_eq!(values.as_slice(), &["猫AB", "犬CD"]);
+
+            let mut number = XLOPER12::number(4.0);
+            // SAFETY: number remains live for the duration of this scope.
+            let cell: ExcelCellRef<'_> =
+                unsafe { argument_from_raw(scope, "cell", &mut number) }.unwrap();
+            assert_eq!(cell, ExcelCellRef::Number(4.0));
+
+            let mut mixed_text = vec![3_u16, '猫' as u16, 'A' as u16, 'B' as u16];
+            let mut mixed_cells = [
+                XLOPER12::number(2.0),
+                XLOPER12 {
+                    value: XLOPER12Value {
+                        string: mixed_text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                },
+                XLOPER12::nil(),
+            ];
+            let mut mixed_raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: mixed_cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: 3,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            // SAFETY: the mixed array and its string payload remain live for this scope.
+            let mixed: MatrixRef<'_, ExcelCellRef<'_>> =
+                unsafe { argument_from_raw(scope, "mixed", &mut mixed_raw) }.unwrap();
+            assert_eq!(
+                mixed.as_slice(),
+                &[
+                    ExcelCellRef::Number(2.0),
+                    ExcelCellRef::String("猫AB"),
+                    ExcelCellRef::Blank,
+                ]
+            );
+        });
     }
 
     #[test]
@@ -1566,7 +1896,7 @@ mod tests {
 
         let (handle_data_a, id_a, object_id_a) = crate::value::with_excel_call_scope(|scope| {
             let mut arguments = ArgumentContext {
-                call: CallContext::new(runtime, scope),
+                call: CallContext::with_runtime(runtime, scope),
                 inputs: Some(crate::input_identity::InputFingerprintBuilder::new()),
             };
             // SAFETY: raw_a is live for this conversion.
@@ -1583,7 +1913,7 @@ mod tests {
 
         let (handle_data_b, id_b, object_id_b) = crate::value::with_excel_call_scope(|scope| {
             let mut arguments = ArgumentContext {
-                call: CallContext::new(runtime, scope),
+                call: CallContext::with_runtime(runtime, scope),
                 inputs: Some(crate::input_identity::InputFingerprintBuilder::new()),
             };
             // SAFETY: raw_b is live for this conversion.

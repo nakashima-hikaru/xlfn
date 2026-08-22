@@ -58,7 +58,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         runtime: &'call Runtime<A>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
-        scope: &'scope crate::value::CallScope<'scope>,
+        scope: &'scope crate::call::CallScope<'scope>,
     ) -> Self {
         Self {
             formula: inputs.map(|inputs| FormulaReturnAccess {

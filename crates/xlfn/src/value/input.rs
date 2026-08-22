@@ -1,9 +1,8 @@
 //! Worksheet-input conversion and call-boundary state.
 
-use crate::host_callback::HostCallbackSession;
+use crate::call::CallScope;
 use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
 use crate::{XllError, XllResult};
-use std::marker::PhantomData;
 use xlfn_sys::{XLOPER12, XLTYPE_MISSING, XLTYPE_NIL};
 
 use super::{ExcelReturn, XlValueRef, encode_raw_value};
@@ -48,43 +47,60 @@ pub(crate) struct HandleCallAccess<'call> {
 /// Runtime services available while converting one Excel-visible argument.
 #[doc(hidden)]
 pub struct CallContext<'call> {
-    handles: Option<HandleCallAccess<'call>>,
+    scope: &'call CallScope<'call>,
+    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
 }
 
 impl<'call> CallContext<'call> {
-    pub(crate) fn new<A: crate::Addin>(
+    pub(crate) fn plain(scope: &'call CallScope<'call>) -> Self {
+        Self {
+            scope,
+            handle_runtime: None,
+        }
+    }
+
+    pub(crate) fn with_runtime<A: crate::Addin>(
         runtime: &'call crate::runtime::Runtime<A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
-            handles: Some(HandleCallAccess {
-                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
-                scope,
-            }),
+            scope,
+            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
+                runtime.handle_runtime_slot(),
+            )),
         }
     }
 
-    pub(crate) const fn without_runtime() -> Self {
-        Self { handles: None }
+    pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch {
+        self.scope.scratch()
     }
 
     #[cfg(test)]
-    pub(crate) const fn from_access(handles: Option<HandleCallAccess<'call>>) -> Self {
-        Self { handles }
+    pub(crate) fn from_access(
+        scope: &'call CallScope<'call>,
+        handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+    ) -> Self {
+        Self {
+            scope,
+            handle_runtime,
+        }
     }
 
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
-        self.handles.take()
+        self.handle_runtime.take().map(|runtime| HandleCallAccess {
+            runtime,
+            scope: self.scope,
+        })
     }
 
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        let access = self.handles.as_ref().ok_or(XllError::Internal {
+        let runtime = self.handle_runtime.as_ref().ok_or(XllError::Internal {
             diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
         })?;
-        access.runtime.get()?.lookup(access.scope, token)
+        runtime.get()?.lookup(self.scope, token)
     }
 }
 
@@ -104,7 +120,7 @@ impl<'call> ArgumentContext<'call> {
         R: ExcelReturn,
     {
         Self {
-            call: CallContext::new(runtime, scope),
+            call: CallContext::with_runtime(runtime, scope),
             inputs: R::USES_FORMULA_REVISION.then(InputFingerprintBuilder::new),
         }
     }
@@ -118,51 +134,6 @@ impl<'call> ArgumentContext<'call> {
     }
 }
 
-/// A generative lifetime token for one generated Excel call boundary.
-#[doc(hidden)]
-pub struct CallScope<'call> {
-    callbacks: HostCallbackSession,
-    handle_guard: crate::handle::HandleCallGuard,
-    lifetime: PhantomData<&'call mut &'call ()>,
-}
-
-impl<'call> CallScope<'call> {
-    pub(crate) fn new() -> Self {
-        Self {
-            callbacks: HostCallbackSession::new(),
-            handle_guard: crate::handle::HandleCallGuard::new(),
-            lifetime: PhantomData,
-        }
-    }
-
-    pub(crate) fn callbacks(&self) -> &HostCallbackSession {
-        &self.callbacks
-    }
-
-    pub(crate) fn handle_guard(&'call self) -> &'call crate::handle::HandleCallGuard {
-        &self.handle_guard
-    }
-}
-
-/// Runs an operation under a fresh lifetime that cannot escape in its result.
-#[doc(hidden)]
-pub fn with_excel_call_scope<R>(
-    operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
-) -> R {
-    let scope = CallScope::new();
-    operation(&scope)
-}
-
-/// Runs an operation under a fresh call scope while borrowing existing state.
-#[doc(hidden)]
-pub(crate) fn with_excel_call_scope_and_state<S, R>(
-    state: &S,
-    operation: impl for<'scope> FnOnce(&'scope S, &'scope CallScope<'scope>) -> R,
-) -> R {
-    let scope = CallScope::new();
-    operation(state, &scope)
-}
-
 /// Converts one raw Excel argument at the generated ABI boundary.
 ///
 /// # Safety
@@ -171,7 +142,7 @@ pub(crate) fn with_excel_call_scope_and_state<S, R>(
 /// conversion.
 #[doc(hidden)]
 pub unsafe fn argument_from_raw<'call, T>(
-    _scope: &'call CallScope<'call>,
+    scope: &'call CallScope<'call>,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
@@ -183,12 +154,12 @@ where
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::decode(borrowed, argument, &CallContext::without_runtime(), None)
+    T::decode(borrowed, argument, &CallContext::plain(scope), None)
 }
 
 #[doc(hidden)]
 pub unsafe fn argument_from_raw_with_context<'call, A, T>(
-    _scope: &'call CallScope<'call>,
+    scope: &'call CallScope<'call>,
     runtime: &'call crate::runtime::Runtime<A>,
     argument: &'static str,
     raw: *mut XLOPER12,
@@ -202,7 +173,12 @@ where
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::decode(borrowed, argument, &CallContext::new(runtime, _scope), None)
+    T::decode(
+        borrowed,
+        argument,
+        &CallContext::with_runtime(runtime, scope),
+        None,
+    )
 }
 
 /// Converts one raw Excel argument and records its framework identity.

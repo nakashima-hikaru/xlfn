@@ -1,0 +1,64 @@
+error[E0277]: the trait bound `for<'call> &str: xlfn::__private::ExcelParameter<'call>` is not satisfied
+  --> tests/ui/fail_async/borrowed_inputs.rs:19:31
+   |
+19 | async fn borrowed_text(value: &str) -> f64 {
+   |                               ^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `&str`
+   |
+help: the trait `ExcelParameter<'call>` is not implemented for `&str`
+      but trait `ExcelParameter<'_>` is implemented for it
+  --> src/value.rs
+   |
+   | impl<'call> ExcelParameter<'call> for &'call str {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> src/value/input.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: the trait bound `for<'call> xlfn::value::MatrixRef<'_, f64>: xlfn::__private::ExcelParameter<'call>` is not satisfied
+  --> tests/ui/fail_async/borrowed_inputs.rs:24:33
+   |
+24 | async fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
+   |                                 ^^^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
+   |
+help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
+      but trait `ExcelParameter<'_>` is implemented for it
+  --> src/value.rs
+   |
+   | / impl<'call, T> ExcelParameter<'call> for MatrixRef<'call, T>
+   | | where
+   | |     T: ExcelParameter<'call> + Copy,
+   | |____________________________________^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> src/value/input.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
+
+error[E0277]: the trait bound `for<'call> xlfn::value::ExcelCellRef<'_>: xlfn::__private::ExcelParameter<'call>` is not satisfied
+  --> tests/ui/fail_async/borrowed_inputs.rs:29:31
+   |
+29 | async fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
+   |                               ^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::value::ExcelCellRef<'_>`
+   |
+help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::value::ExcelCellRef<'_>`
+      but trait `ExcelParameter<'_>` is implemented for it
+  --> src/value.rs
+   |
+   | impl<'call> ExcelParameter<'call> for ExcelCellRef<'call> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `xlfn::__private::assert_async_parameter`
+  --> src/value/input.rs
+   |
+   | pub fn assert_async_parameter<T>()
+   |        ---------------------- required by a bound in this function
+   | where
+   |     T: for<'call> ExcelParameter<'call> + Send + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`

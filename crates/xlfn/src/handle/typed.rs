@@ -13,7 +13,7 @@ use std::ops::Deref;
 /// handle token identifies that object for the token's entire lifetime.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
 
-type HandleAliasMarker<'call, T> = (&'call crate::value::CallScope<'call>, fn() -> T);
+type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -> T);
 
 /// A call-scoped read capability for an object owned by a formula handle.
 ///
@@ -24,7 +24,7 @@ pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) object: LiveObjectRef,
     pub(crate) value: BorrowedObject<'call, T>,
     pub(crate) pin: PinContext<'call>,
-    pub(crate) _call: PhantomData<&'call crate::value::CallScope<'call>>,
+    pub(crate) _call: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {

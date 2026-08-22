@@ -25,8 +25,20 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("string_short/with_identity", |b| {
         b.iter(|| str_short.run_with_identity::<String>());
     });
+    group.bench_function("string_short/borrowed", |b| {
+        b.iter(|| str_short.run_borrowed_str());
+    });
 
-    // 3. Long string
+    // 3. Unicode string
+    let mut str_unicode = RawArgumentIngressBenchmark::string("日本語💡");
+    group.bench_function("string_unicode/owned", |b| {
+        b.iter(|| str_unicode.run_plain::<String>());
+    });
+    group.bench_function("string_unicode/borrowed", |b| {
+        b.iter(|| str_unicode.run_borrowed_str());
+    });
+
+    // 4. Long string
     let long_text = "a".repeat(1000);
     let mut str_long = RawArgumentIngressBenchmark::string(&long_text);
     group.bench_function("string_1k/plain", |b| {
@@ -36,7 +48,20 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| str_long.run_with_identity::<String>());
     });
 
-    // 4. Matrix<f64> 100k
+    // 5. String matrices
+    for (size, label) in [(100, "100"), (1_000, "1k"), (10_000, "10k")] {
+        let values = vec!["日本語💡"; size];
+        let mut owned = RawArgumentIngressBenchmark::string_matrix(&values);
+        group.bench_function(format!("matrix_string_{label}/owned"), |b| {
+            b.iter(|| owned.run_plain::<Matrix<String>>());
+        });
+        let mut borrowed = RawArgumentIngressBenchmark::string_matrix(&values);
+        group.bench_function(format!("matrix_string_{label}/borrowed"), |b| {
+            b.iter(|| borrowed.run_borrowed_matrix_str());
+        });
+    }
+
+    // 6. Matrix<f64> 100k
     let mut mat_100k = RawArgumentIngressBenchmark::number_matrix(10, 10_000);
     group.bench_function("matrix_f64_100k/plain", |b| {
         b.iter(|| mat_100k.run_plain::<Matrix<f64>>());
@@ -45,7 +70,7 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
     });
 
-    // 5. Vec<f64> 100k
+    // 7. Vec<f64> 100k
     let mut vec_100k = RawArgumentIngressBenchmark::number_vec(100_000);
     group.bench_function("vec_f64_100k/plain", |b| {
         b.iter(|| vec_100k.run_plain::<Vec<f64>>());
@@ -54,7 +79,7 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| vec_100k.run_with_identity::<Vec<f64>>());
     });
 
-    // 6. ExcelCellValue
+    // 8. ExcelCellValue
     let mut cell_num = RawArgumentIngressBenchmark::number(42.0);
     group.bench_function("cell_value_number/plain", |b| {
         b.iter(|| cell_num.run_plain::<ExcelCellValue>());
@@ -63,7 +88,7 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| cell_num.run_with_identity::<ExcelCellValue>());
     });
 
-    // 7. ExcelValue
+    // 9. ExcelValue
     let mut val_scalar = RawArgumentIngressBenchmark::number(42.0);
     group.bench_function("excel_value_scalar/plain", |b| {
         b.iter(|| val_scalar.run_plain::<ExcelValue>());
@@ -80,7 +105,17 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| val_arr.run_with_identity::<ExcelValue>());
     });
 
-    // 8. Handle
+    // 10. Mixed cells
+    let mut mixed_owned = RawArgumentIngressBenchmark::mixed_cells();
+    group.bench_function("matrix_cells/matrix_owned", |b| {
+        b.iter(|| mixed_owned.run_plain::<Matrix<ExcelCellValue>>());
+    });
+    let mut mixed_borrowed = RawArgumentIngressBenchmark::mixed_cells();
+    group.bench_function("matrix_cells/matrix_borrowed", |b| {
+        b.iter(|| mixed_borrowed.run_borrowed_mixed_cells());
+    });
+
+    // 11. Handle
     let mut handle_bench = RawArgumentIngressBenchmark::handle();
     group.bench_function("handle/plain", |b| {
         b.iter(|| handle_bench.run_handle_plain::<BenchHandleObject>());
