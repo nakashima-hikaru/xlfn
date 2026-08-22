@@ -15,7 +15,8 @@ use crate::win32::{
     VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
     VariantClear,
 };
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
 
 pub(super) const IID_NULL: super::GUID = super::GUID::from_u128(0);

@@ -22,7 +22,8 @@ use crate::win32::{
     E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, VARIANT, VARIANT_BOOL, VARIANT_FALSE,
     VARIANT_TRUE, VariantClear,
 };
-use crate::{InputError, XllError, XllResult};
+use crate::error::InputError;
+use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::ffi::c_void;
 use std::num::NonZeroU32;

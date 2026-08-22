@@ -1,5 +1,5 @@
 #[cfg(test)]
-use crate::RtdValue;
+use crate::subscription::RtdValue;
 #[cfg(test)]
 use crate::XllError;
 #[cfg(test)]

@@ -109,9 +109,14 @@ pub use addin::{
 #[cfg(feature = "async")]
 pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
 pub use error::{
-    ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, XllError, XllResult,
+    ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, InputError, XllError,
+    XllResult,
 };
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
+pub use subscription::{
+    IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
+    RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
+};
 
 mod ingress;
 
