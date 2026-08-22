@@ -278,32 +278,123 @@ impl InputFingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExcelCellValue, ExcelParameter, ExcelValue, Matrix, OptionalExcelValue};
+    use crate::{ExcelCellValue, ExcelValue, Matrix, OptionalExcelValue};
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);
 
-    impl<'call> ExcelParameter<'call> for Pair {
-        fn from_excel(
-            _value: crate::XlValueRef<'call>,
-            _argument: &'static str,
-            _context: &crate::CallContext<'call>,
-        ) -> XllResult<Self> {
-            Err(XllError::input(
-                "test",
-                InputError::Malformed("test-only parameter"),
-            ))
-        }
+    trait TestIdentity {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder);
+    }
 
+    impl TestIdentity for Pair {
         fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
             encoder.u32(self.0);
             encoder.u32(self.1);
         }
     }
 
+    impl TestIdentity for f64 {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            encoder.f64(*self);
+        }
+    }
+
+    impl TestIdentity for String {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            encoder.string(self);
+        }
+    }
+
+    impl TestIdentity for Option<f64> {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            match self {
+                None => encoder.bool(false),
+                Some(value) => {
+                    encoder.bool(true);
+                    value.encode_identity(encoder);
+                }
+            }
+        }
+    }
+
+    impl TestIdentity for OptionalExcelValue<f64> {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            match self {
+                Self::Missing => encoder.tag(0),
+                Self::Blank => encoder.tag(1),
+                Self::Value(value) => {
+                    encoder.tag(2);
+                    value.encode_identity(encoder);
+                }
+            }
+        }
+    }
+
+    impl TestIdentity for Vec<f64> {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            encoder.u64(self.len() as u64);
+            for value in self {
+                value.encode_identity(encoder);
+            }
+        }
+    }
+
+    impl TestIdentity for ExcelCellValue {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            match self {
+                Self::Number(value) => {
+                    encoder.tag(1);
+                    value.encode_identity(encoder);
+                }
+                Self::Boolean(value) => {
+                    encoder.tag(2);
+                    encoder.bool(*value);
+                }
+                Self::String(value) => {
+                    encoder.tag(3);
+                    encoder.string(value);
+                }
+                Self::Error(value) => {
+                    encoder.tag(4);
+                    encoder.i64(i64::from(value.code()));
+                }
+                Self::Blank => encoder.tag(5),
+            }
+        }
+    }
+
+    impl<T: TestIdentity> TestIdentity for Matrix<T> {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            encoder.u64(self.rows() as u64);
+            encoder.u64(self.columns() as u64);
+            for value in self.as_slice() {
+                value.encode_identity(encoder);
+            }
+        }
+    }
+
+    impl TestIdentity for ExcelValue {
+        fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
+            match self {
+                Self::Scalar(ExcelCellValue::Number(value)) => {
+                    encoder.tag(1);
+                    encoder.tag(1);
+                    value.encode_identity(encoder);
+                }
+                Self::Missing => encoder.tag(2),
+                Self::Array(value) => {
+                    encoder.tag(3);
+                    value.encode_identity(encoder);
+                }
+                _ => encoder.tag(1),
+            }
+        }
+    }
+
     fn fingerprint<T>(values: &[T]) -> InputFingerprint
     where
-        T: for<'call> ExcelParameter<'call>,
+        T: TestIdentity,
     {
         let mut builder = InputFingerprintBuilder::new();
         for value in values {

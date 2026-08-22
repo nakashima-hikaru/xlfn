@@ -7,7 +7,6 @@ fn generation(raw: u64) -> crate::generation::RuntimeGeneration {
 fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
     crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
 }
-use crate::ExcelParameter;
 use crate::input_identity::InputFingerprint;
 use crate::input_identity::InputFingerprintBuilder;
 
@@ -47,7 +46,7 @@ fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> Inpu
     let mut builder = InputFingerprintBuilder::new();
     builder
         .with_argument("handle", |encoder| {
-            value.encode_identity(encoder);
+            encoder.u64(value.object.id.0.0);
             Ok(())
         })
         .unwrap();

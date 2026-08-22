@@ -15,9 +15,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::generation::{
     AtomicOptionalOpenAttemptId, AtomicOptionalRuntimeGeneration, OpenAttemptId, RuntimeGeneration,
 };
+use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_residency::ModuleResidencyLease;
 use crate::registration::{EventRegistration, ExcelNameKey, MetadataDebt, PendingRegistration};
-use crate::runtime::{HostLifecycleIntent, LifecyclePhase, OpenGeneration, OpeningGeneration};
+use crate::runtime::{OpenGeneration, OpeningGeneration};
 
 /// Shared lifecycle vocabulary for generation-scoped lazy services. The
 /// service modules keep their own initialization and teardown policy, while

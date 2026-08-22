@@ -7,6 +7,15 @@ use crate::{
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+mod boundary;
+mod open;
+mod state;
+
+pub use boundary::{host_auto_close, host_auto_open, host_auto_remove};
+pub(super) use open::open_addin_boundary as open_addin;
+pub(crate) use state::HostLifecycleIntent;
+pub use state::LifecyclePhase;
+
 macro_rules! lifecycle_token {
     ($name:ident) => {
         #[derive(Debug)]
@@ -33,220 +42,6 @@ lifecycle_token!(GenerationReclaimed);
 
 #[cfg(not(feature = "async"))]
 lifecycle_token!(AsyncStopped);
-
-/// Handles the generated `xlAutoOpen` boundary. An open runtime is a
-/// controlled reload request: the old logical generation is terminally torn
-/// down, then a new generation is opened while the physical residency lease
-/// remains held.
-#[must_use]
-pub fn host_auto_open<A>(
-    runtime: &Runtime<A>,
-    addin_id: &AddinId,
-    version: &'static str,
-    target: &'static str,
-    descriptors: &[RegistrationDescriptor],
-) -> i32
-where
-    A: Addin,
-{
-    if runtime.phase() == crate::LifecyclePhase::Quarantined {
-        return 0;
-    }
-    let controlled_reload = runtime.phase() == crate::LifecyclePhase::Open;
-    let removal_completed_before_open = runtime.phase() == crate::LifecyclePhase::Closed
-        && runtime.host_intent() == crate::runtime::HostLifecycleIntent::ExplicitRemovalComplete;
-    if controlled_reload {
-        let result = remove_addin::<A>(runtime);
-        if result == 0 || runtime.phase() != crate::LifecyclePhase::Closed {
-            return 0;
-        }
-        runtime.clear_host_intent();
-    }
-    let result = open_addin(runtime, addin_id, version, target, descriptors);
-    if controlled_reload && result == 0 && runtime.phase() != crate::LifecyclePhase::Quarantined {
-        // A reload has already destroyed the previous generation. A failed
-        // replacement must therefore not leave a closed runtime with the old
-        // residency lease and no generation owner.
-        quarantine_runtime(runtime);
-    } else if result == 0
-        && removal_completed_before_open
-        && runtime.phase() == crate::LifecyclePhase::Closed
-    {
-        // The old generation was already removed successfully, but Excel
-        // attempted a new open before delivering its close hint. Preserve
-        // the release marker so that the later hint can release the lease.
-        runtime.complete_explicit_removal();
-    }
-    result
-}
-
-/// Handles Excel's ambiguous close/deactivation hint. It is deliberately a
-/// no-op for an open runtime; only explicit removal is allowed to run terminal
-/// teardown.
-#[must_use]
-pub fn host_auto_close<A>(runtime: &Runtime<A>) -> i32
-where
-    A: Addin,
-{
-    if runtime.phase() == crate::LifecyclePhase::Closed
-        && runtime.host_intent() == crate::runtime::HostLifecycleIntent::ExplicitRemovalComplete
-    {
-        if let Err(error) = runtime.release_module_residency() {
-            report_boundary_error("xlAutoClose module residency release", &error);
-            quarantine_runtime(runtime);
-        } else {
-            runtime.clear_host_intent();
-        }
-    }
-    1
-}
-
-/// Handles the explicit terminal-removal boundary.
-#[must_use]
-pub fn host_auto_remove<A>(runtime: &Runtime<A>) -> i32
-where
-    A: Addin,
-{
-    if runtime.phase() == crate::LifecyclePhase::Quarantined {
-        return 1;
-    }
-    runtime.request_explicit_removal();
-    let result = remove_addin::<A>(runtime);
-    if result == 1 && runtime.phase() == crate::LifecyclePhase::Closed {
-        runtime.complete_explicit_removal();
-    }
-    1
-}
-
-#[must_use]
-pub fn open_addin<A>(
-    runtime: &Runtime<A>,
-    addin_id: &AddinId,
-    version: &'static str,
-    target: &'static str,
-    descriptors: &[RegistrationDescriptor],
-) -> i32
-where
-    A: Addin,
-{
-    std::hint::black_box(crate::crt::effective_crt_policy());
-    let removal_epoch = runtime.removal_epoch();
-    let mut transaction = None;
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        if runtime.phase() == crate::LifecyclePhase::OpenRollbackPending {
-            let mut callbacks = HostCallbackSession::new();
-            let outcome =
-                rollback_open::<A>(runtime, &mut callbacks, active_runtime_generation(runtime));
-            if !outcome.unload_safe() {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::DiagnosticId::OPEN_ROLLBACK_PENDING,
-                };
-                report_boundary_error("xlAutoOpen pending rollback", &error);
-                quarantine_runtime(runtime);
-                return Err(error);
-            }
-        }
-
-        // A final removal that overlapped recovery of a previous failed open
-        // owns the terminal outcome. Do not resurrect the runtime after that
-        // close has already completed.
-        if runtime.removal_epoch() != removal_epoch {
-            return Err(XllError::Closing);
-        }
-
-        transaction = Some(OpenTransaction::begin(runtime, removal_epoch)?);
-        let transaction = transaction
-            .as_mut()
-            .expect("the open transaction was installed");
-        retry_metadata_debt(runtime, transaction.callbacks_mut())?;
-        let registrations = open_addin_inner::<A>(
-            runtime,
-            BuildInfo::new(addin_id.clone(), version, target),
-            descriptors,
-            transaction.callbacks_mut(),
-        )?;
-        transaction.finish(registrations)
-    }));
-
-    match result {
-        Ok(Ok(())) => {
-            write_startup_log(addin_id, "xlAutoOpen succeeded");
-            1
-        }
-        Ok(Err(error)) => {
-            write_startup_log(addin_id, &format!("xlAutoOpen failed: {error}"));
-            report_boundary_error("xlAutoOpen", &error);
-            if let Some(transaction) = transaction.as_mut() {
-                transaction.rollback();
-            }
-            0
-        }
-        Err(_) => {
-            let error = XllError::Panic;
-            write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
-            report_boundary_error("xlAutoOpen", &error);
-            if let Some(transaction) = transaction.as_mut() {
-                transaction.rollback();
-            }
-            0
-        }
-    }
-}
-
-/// Owns one logical open attempt, including the callback session that can
-/// undo host mutations made by that attempt. The caller must explicitly call
-/// [`Self::finish`] or [`Self::rollback`]; dropping an active transaction only
-/// quarantines the runtime and never performs implicit callback cleanup.
-struct OpenTransaction<'runtime, A: Addin> {
-    runtime: &'runtime Runtime<A>,
-    callbacks: HostCallbackSession,
-    attempt: Option<crate::runtime::OpenAttemptGuard<'runtime, A>>,
-}
-
-impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
-    fn begin(
-        runtime: &'runtime Runtime<A>,
-        removal_epoch: crate::generation::RemovalEpoch,
-    ) -> XllResult<Self> {
-        Ok(Self {
-            runtime,
-            callbacks: HostCallbackSession::new(),
-            attempt: Some(runtime.begin_open_if_epoch(removal_epoch)?),
-        })
-    }
-
-    fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        &mut self.callbacks
-    }
-
-    fn finish(&mut self, registrations: Vec<crate::RegistrationId>) -> XllResult<()> {
-        self.runtime.finish_open(
-            self.attempt
-                .as_mut()
-                .expect("an open transaction always owns its attempt"),
-            registrations,
-        )
-    }
-
-    fn rollback(&mut self) {
-        rollback_active_open(self.runtime, self.attempt.as_mut(), &mut self.callbacks);
-    }
-}
-
-impl<A: Addin> Drop for OpenTransaction<'_, A> {
-    fn drop(&mut self) {
-        if self
-            .attempt
-            .as_ref()
-            .is_some_and(crate::runtime::OpenAttemptGuard::is_active)
-        {
-            // A dropped transaction must not call Excel. It is an unrecovered
-            // protocol failure, so retain the fail-safe terminal state for a
-            // later explicit removal/reload decision.
-            self.runtime.quarantine();
-        }
-    }
-}
 
 fn write_startup_log(addin_id: &AddinId, message: &str) {
     #[cfg(target_os = "windows")]
@@ -2579,7 +2374,7 @@ mod tests {
         assert_eq!(runtime.phase(), crate::LifecyclePhase::Closed);
         assert_eq!(
             runtime.host_intent(),
-            crate::runtime::HostLifecycleIntent::ExplicitRemovalComplete
+            HostLifecycleIntent::ExplicitRemovalComplete
         );
         let _ = host_auto_close::<CleanClose>(&runtime);
         assert!(!runtime.module_residency_held());

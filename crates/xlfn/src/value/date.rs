@@ -11,15 +11,7 @@ pub enum ExcelDateSystem {
     Mac1904,
 }
 
-impl ExcelDateSystem {
-    pub(super) const fn identity_tag(self) -> u8 {
-        match self {
-            Self::Workbook => 0,
-            Self::Windows1900 => 1,
-            Self::Mac1904 => 2,
-        }
-    }
-}
+impl ExcelDateSystem {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExcelSerialDate {

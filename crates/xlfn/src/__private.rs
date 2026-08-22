@@ -1,4 +1,4 @@
-//! Opaque macro support layer for `xlfn-macros`.
+//! Private macro ABI façade for `xlfn-macros`.
 //!
 //! Items in this module are implementation details consumed exclusively by
 //! code expanded by `#[excel_addin]`, `#[excel_function]`, and `derive` macros.
@@ -66,9 +66,9 @@ pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
     }
 }
 #[doc(hidden)]
-pub use crate::__xlfn_macro_support_async_exports as __xlfn_async_exports;
+pub use crate::__xlfn_private_async_exports as __xlfn_async_exports;
 #[doc(hidden)]
-pub use crate::__xlfn_macro_support_async_only as __xlfn_async_only;
+pub use crate::__xlfn_private_async_only as __xlfn_async_only;
 #[doc(hidden)]
 pub use crate::utf16::utf16_eq_ignore_ascii_case;
 #[doc(hidden)]
@@ -408,15 +408,6 @@ impl<'call> CallFrame<'call> {
     ) -> XllResult<CellPresence> {
         // SAFETY: raw is supplied by Excel for this call.
         unsafe { cell_presence_from_raw(name, raw) }
-    }
-
-    #[doc(hidden)]
-    pub fn record_value<T: ExcelParameter<'call>>(
-        &mut self,
-        name: &'static str,
-        value: &T,
-    ) -> XllResult<()> {
-        self.arguments.record_value(name, value)
     }
 }
 

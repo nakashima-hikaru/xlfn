@@ -67,7 +67,7 @@ note: required because it appears within the type `xlfn::host_callback::HostCall
   | pub(crate) struct HostCallbackSession {
   |                   ^^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::value::CallScope<'call>`
- --> src/value.rs
+ --> src/value/input.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^
@@ -107,7 +107,7 @@ note: required because it appears within the type `handle::reclamation::HandleCa
   | pub(crate) struct HandleCallGuard {
   |                   ^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::value::CallScope<'call>`
- --> src/value.rs
+ --> src/value/input.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^

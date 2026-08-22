@@ -647,7 +647,7 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
-        T: for<'value> FromExcel<'value>,
+        T: for<'value> crate::ExcelParameter<'value>,
     {
         let arguments = [reference.raw_pointer()];
         // SAFETY: the reference and argument array remain live for the callback.
@@ -665,7 +665,12 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
                 code: status.raw_code(),
             }));
         }
-        let converted = <Matrix<T> as FromExcel>::from_excel(result.borrow()?, "reference");
+        let converted = <Matrix<T> as crate::ExcelParameter>::decode(
+            result.borrow()?,
+            "reference",
+            &crate::CallContext::without_runtime(),
+            None,
+        );
         result.try_release()?;
         converted
     }

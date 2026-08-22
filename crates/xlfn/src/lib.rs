@@ -27,6 +27,8 @@
 )]
 pub(crate) mod win32;
 
+#[doc(hidden)]
+pub mod __private;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod addin;
 #[cfg(feature = "async")]
@@ -66,8 +68,6 @@ mod host_callback;
 mod input_identity;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod lifecycle;
-#[doc(hidden)]
-pub mod macro_support;
 #[allow(
     unsafe_code,
     reason = "Win32 module residency management requires raw FFI calls"
@@ -90,6 +90,7 @@ mod return_value;
 pub mod rtd;
 mod runtime;
 mod runtime_components;
+mod runtime_refinement;
 mod shutdown;
 #[cfg(any(test, feature = "shutdown-refinement"))]
 mod shutdown_refinement;
@@ -140,6 +141,8 @@ pub(crate) use ingress::{ExportCallGuard, ExportIngress, ExportsDrained, global_
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use input_identity::InputIdentityEncoder;
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
+pub(crate) use lifecycle::LifecyclePhase;
+#[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use reference::{
@@ -158,7 +161,7 @@ pub(crate) use return_value::{
     free_return, free_return_boundary, udf_boundary_named,
 };
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
-pub(crate) use runtime::{CallGuard, LifecyclePhase, Runtime};
+pub(crate) use runtime::{CallGuard, Runtime};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
 pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
 #[allow(unused_imports, reason = "crate-internal canonical-path alias")]
@@ -488,7 +491,7 @@ pub(crate) mod test_callback {
 #[cfg(feature = "async")]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_macro_support_async_only {
+macro_rules! __xlfn_private_async_only {
     ($($body:tt)*) => {
         $($body)*
     };
@@ -497,7 +500,7 @@ macro_rules! __xlfn_macro_support_async_only {
 #[cfg(not(feature = "async"))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_macro_support_async_only {
+macro_rules! __xlfn_private_async_only {
     ($($body:tt)*) => {
         compile_error!("asynchronous Excel functions require the xlfn `async` feature");
     };
@@ -506,7 +509,7 @@ macro_rules! __xlfn_macro_support_async_only {
 #[cfg(feature = "async")]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_macro_support_async_exports {
+macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
@@ -518,13 +521,13 @@ macro_rules! __xlfn_macro_support_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::macro_support::cancel_async_calculation($runtime);
+            $crate::__private::cancel_async_calculation($runtime);
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::macro_support::end_async_calculation($runtime);
+            $crate::__private::end_async_calculation($runtime);
         }
     };
 }
@@ -532,7 +535,7 @@ macro_rules! __xlfn_macro_support_async_exports {
 #[cfg(not(feature = "async"))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_macro_support_async_exports {
+macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {};
 }
 

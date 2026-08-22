@@ -1,5 +1,5 @@
 use crate::{
-    ExcelCallbackValue, ExcelParameter, InputError, XlValueRef, XllError, XllResult,
+    ExcelCallbackValue, FromExcel, InputError, XllError, XllResult,
     host_callback::HostCallbackSession, return_value::ExcelCallbackStatus,
 };
 use smallvec::SmallVec;
@@ -39,40 +39,6 @@ pub(crate) struct HostRegistrar {
     module_units: Vec<u16>,
 }
 
-struct ModuleName {
-    path: PathBuf,
-    units: Vec<u16>,
-}
-
-impl<'call> ExcelParameter<'call> for ModuleName {
-    fn from_excel(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        _: &crate::CallContext,
-    ) -> XllResult<Self> {
-        let units = value.utf16(argument)?.to_vec();
-        #[cfg(target_os = "windows")]
-        let path = {
-            use std::ffi::OsString;
-            use std::os::windows::ffi::OsStringExt;
-            PathBuf::from(OsString::from_wide(&units))
-        };
-        #[cfg(not(target_os = "windows"))]
-        let path = PathBuf::from(
-            String::from_utf16(&units)
-                .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))?,
-        );
-        Ok(Self { path, units })
-    }
-
-    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
-        encoder.u64(self.units.len() as u64);
-        for unit in &self.units {
-            encoder.u32(u32::from(*unit));
-        }
-    }
-}
-
 impl HostRegistrar {
     pub(crate) fn connect(
         callbacks: &mut HostCallbackSession,
@@ -98,11 +64,8 @@ impl HostRegistrar {
         }
 
         // SAFETY: Excel returned a live result XLOPER12 for this stack frame.
-        let module_name = ModuleName::from_excel(
-            result.borrow().map_err(RegistrationTransactionError::new)?,
-            "module",
-            &crate::CallContext::without_runtime(),
-        );
+        let module_name =
+            host::decode_module_name(result.borrow().map_err(RegistrationTransactionError::new)?);
         let release = result.try_release();
         let module_name = module_name.map_err(RegistrationTransactionError::new)?;
         release.map_err(RegistrationTransactionError::new)?;
@@ -344,13 +307,10 @@ impl HostRegistrar {
             });
             return Err(self.reconcile_malformed_registration_result(callbacks, descriptor, source));
         }
-        let id = match result.borrow().and_then(|value| {
-            f64::from_excel(
-                value,
-                "registration",
-                &crate::CallContext::without_runtime(),
-            )
-        }) {
+        let id = match result
+            .borrow()
+            .and_then(|value| f64::from_excel(value, "registration"))
+        {
             Ok(id) => id,
             Err(error) => {
                 let source = result.try_release().err().unwrap_or(error);
@@ -468,13 +428,9 @@ impl HostRegistrar {
             }));
         }
 
-        let id = result.borrow().and_then(|value| {
-            f64::from_excel(
-                value,
-                "registration recovery",
-                &crate::CallContext::without_runtime(),
-            )
-        });
+        let id = result
+            .borrow()
+            .and_then(|value| f64::from_excel(value, "registration recovery"));
         result
             .try_release()
             .map_err(RegistrationTransactionError::new)?;
@@ -535,13 +491,9 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             == XLTYPE_NUM
         {
-            let id = result.borrow().and_then(|value| {
-                f64::from_excel(
-                    value,
-                    "is_registered_name",
-                    &crate::CallContext::without_runtime(),
-                )
-            });
+            let id = result
+                .borrow()
+                .and_then(|value| f64::from_excel(value, "is_registered_name"));
             match id {
                 Ok(id) => valid_registration_id(id),
                 Err(_) => false,
@@ -939,13 +891,9 @@ fn metadata_debt_binding(
         });
     }
 
-    let id = result.borrow().and_then(|value| {
-        f64::from_excel(
-            value,
-            "metadata debt binding",
-            &crate::CallContext::without_runtime(),
-        )
-    });
+    let id = result
+        .borrow()
+        .and_then(|value| f64::from_excel(value, "metadata debt binding"));
     let release = result.try_release();
     let id = id?;
     release?;

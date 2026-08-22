@@ -20,8 +20,8 @@ help: the trait `IntoExcel` is not implemented for `Handle`
             i64
             std::string::String
   = note: required for `Handle` to implement `xlfn::value::ExcelReturn`
-note: required by a bound in `xlfn::macro_support::sync_udf`
- --> src/macro_support.rs
+note: required by a bound in `xlfn::__private::sync_udf`
+ --> src/__private.rs
   |
   | pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
   |                              ^^^^^^^^^^^ required by this bound in `sync_udf`

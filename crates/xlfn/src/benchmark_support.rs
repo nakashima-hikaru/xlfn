@@ -9,13 +9,13 @@
 
 #[cfg(feature = "async")]
 use crate::CancellationGuarantee;
-use crate::ExcelParameter;
 #[cfg(feature = "async")]
 use crate::XllError;
 #[cfg(feature = "async")]
 use crate::async_udf::AsyncManager;
 #[cfg(feature = "async")]
 use crate::cancellation::CancellationSource;
+use crate::{ExcelParameter, Matrix};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -518,10 +518,34 @@ impl Drop for HandleRevisionChurnBenchmark {
 
 const HANDLE_FORMULA_UDF_ID: &str = "BENCH.HANDLE";
 
-fn fingerprint_argument<T>(value: &T) -> [u8; 32]
-where
-    T: for<'call> ExcelParameter<'call>,
-{
+#[doc(hidden)]
+pub trait BenchmarkInputIdentity {
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder);
+}
+
+impl BenchmarkInputIdentity for f64 {
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+        encoder.f64(*self);
+    }
+}
+
+impl BenchmarkInputIdentity for String {
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+        encoder.string(self);
+    }
+}
+
+impl<T: BenchmarkInputIdentity> BenchmarkInputIdentity for Matrix<T> {
+    fn encode_identity(&self, encoder: &mut crate::InputIdentityEncoder) {
+        encoder.u64(self.rows() as u64);
+        encoder.u64(self.columns() as u64);
+        for value in self.as_slice() {
+            value.encode_identity(encoder);
+        }
+    }
+}
+
+fn fingerprint_argument<T: BenchmarkInputIdentity>(value: &T) -> [u8; 32] {
     let mut builder = crate::input_identity::InputFingerprintBuilder::new();
     builder
         .with_argument("benchmark", |encoder| {
@@ -543,7 +567,7 @@ impl<T> SemanticIdentityBenchmark<T> {
 
     pub fn run(&self) -> [u8; 32]
     where
-        T: for<'call> ExcelParameter<'call>,
+        T: BenchmarkInputIdentity,
     {
         fingerprint_argument(&self.value)
     }
@@ -558,7 +582,7 @@ pub struct FormulaRevisionBenchmark<T> {
 
 impl<T> FormulaRevisionBenchmark<T>
 where
-    T: for<'call> ExcelParameter<'call>,
+    T: BenchmarkInputIdentity,
 {
     pub fn new(argument: T) -> Self {
         let caller = FormulaCaller {
@@ -618,7 +642,7 @@ where
 
 fn formula_revision_key<T>(arguments: &T, caller: FormulaCaller) -> HandleTopicKey
 where
-    T: for<'call> ExcelParameter<'call>,
+    T: BenchmarkInputIdentity,
 {
     let inputs = fingerprint_argument(arguments);
     HandleTopicKey::Formula(FormulaRevisionKey::new(
@@ -1286,7 +1310,7 @@ impl MultiHandleCallBenchmark {
 
     pub fn run(&mut self) {
         crate::with_excel_call_scope(|scope| {
-            let mut frame = crate::macro_support::CallFrame::new::<f64, _>(self.runtime, scope);
+            let mut frame = crate::__private::CallFrame::new::<f64, _>(self.runtime, scope);
             for raw in &mut self.raw_tokens {
                 // SAFETY: raw points to valid benchmark storage.
                 let handle: crate::Handle<'_, BenchHandleObject> = unsafe {

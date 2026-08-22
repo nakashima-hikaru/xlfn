@@ -1,8 +1,8 @@
 use xlfn::prelude::*;
 
 struct NotAReturn;
-static __XLFN_RUNTIME: xlfn::macro_support::MacroRuntime<()> =
-    xlfn::macro_support::MacroRuntime::new();
+static __XLFN_RUNTIME: xlfn::__private::MacroRuntime<()> =
+    xlfn::__private::MacroRuntime::new();
 
 #[excel_function(name = "FAIL.RETURN")]
 fn bad() -> NotAReturn {

@@ -348,19 +348,6 @@ impl<'call> FromExcel<'call> for XlArrayRef<'call> {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         Self::from_value(value, argument)
     }
-
-    fn encode_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.u64(self.rows as u64);
-        encoder.u64(self.columns as u64);
-        for cell in self.cells.iter() {
-            // SAFETY: XlArrayRef owns a validated borrow of every cell in its
-            // contiguous Excel array for the duration of this call.
-            match unsafe { XlValueRef::from_raw(cell as *const _ as *mut _) } {
-                Ok(value) => encode_raw_value(value, true, encoder),
-                Err(error) => encoder.fail(error),
-            }
-        }
-    }
 }
 
 #[repr(u8)]
