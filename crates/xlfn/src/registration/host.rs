@@ -1,8 +1,9 @@
 //! Host-module discovery and Excel callback boundary helpers.
 
-use crate::error::InputError;
+use crate::XllResult;
+#[cfg(not(target_os = "windows"))]
+use crate::error::{InputError, XllError};
 use crate::value::{CallContext, ExcelParameter, XlValueRef};
-use crate::{XllError, XllResult};
 use std::path::PathBuf;
 
 pub(super) struct ModuleName {

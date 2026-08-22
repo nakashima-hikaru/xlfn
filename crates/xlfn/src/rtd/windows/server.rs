@@ -15,6 +15,7 @@ use super::update_event::{
     active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
 use super::{HandleRuntime, com_boundary, guid_eq};
+use crate::error::InputError;
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::win32::{
@@ -22,7 +23,6 @@ use crate::win32::{
     E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, VARIANT, VARIANT_BOOL, VARIANT_FALSE,
     VARIANT_TRUE, VariantClear,
 };
-use crate::error::InputError;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::ffi::c_void;

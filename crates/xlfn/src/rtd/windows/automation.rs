@@ -4,6 +4,7 @@ use super::{
     IID_IRTD_UPDATE_EVENT, RtdServer, com_boundary, connect_data, disconnect_data, guid_eq,
     heartbeat, refresh_data, server_start, server_terminate,
 };
+use crate::error::InputError;
 use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
@@ -15,7 +16,6 @@ use crate::win32::{
     VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
     VariantClear,
 };
-use crate::error::InputError;
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
 
