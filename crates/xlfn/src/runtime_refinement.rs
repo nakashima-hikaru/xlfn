@@ -80,7 +80,7 @@ impl RuntimeRefinementHooks {
             );
             #[cfg(feature = "async")]
             {
-                resources.async_executor_running = !runtime.services.async_manager.is_stopped();
+                resources.async_executor_running = !runtime.executors.async_manager.is_stopped();
             }
             crate::diagnostics::connect_ghost(Arc::clone(&ghost), |snapshot| {
                 resources.diagnostics_running = snapshot.running;
@@ -97,10 +97,19 @@ impl RuntimeRefinementHooks {
                 .return_protocol
                 .returns
                 .set_ghost(Arc::clone(&ghost));
-            runtime.services.handles.set_ghost(Arc::clone(&ghost));
-            runtime.services.subscriptions.set_ghost(Arc::clone(&ghost));
+            runtime
+                .generation_services
+                .handles
+                .set_ghost(Arc::clone(&ghost));
+            runtime
+                .generation_services
+                .subscriptions
+                .set_ghost(Arc::clone(&ghost));
             #[cfg(feature = "async")]
-            runtime.services.async_manager.set_ghost(Arc::clone(&ghost));
+            runtime
+                .executors
+                .async_manager
+                .set_ghost(Arc::clone(&ghost));
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::CommitOpen {
                     attempt: attempt.get(),
@@ -120,7 +129,7 @@ impl RuntimeRefinementHooks {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
             debug_assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
-            debug_assert_eq!(runtime.lifecycle.observed_open_attempt(), None);
+            debug_assert_eq!(runtime.open_attempt(), None);
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
                     attempt: attempt.get(),
@@ -136,7 +145,7 @@ impl RuntimeRefinementHooks {
     pub(crate) fn fail_open<A: Addin>(&self, runtime: &Runtime<A>, attempt: OpenAttemptId) {
         #[cfg(any(test, feature = "shutdown-refinement"))]
         {
-            debug_assert_eq!(runtime.lifecycle.observed_open_attempt(), None);
+            debug_assert_eq!(runtime.open_attempt(), None);
             debug_assert!(matches!(
                 runtime.phase(),
                 crate::lifecycle::LifecyclePhase::OpenRollbackPending

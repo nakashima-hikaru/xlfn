@@ -1,10 +1,6 @@
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Identity of one published or staged runtime service generation.
-///
-/// Zero is reserved for the absence of a generation in the lifecycle atomics;
-/// service slots never receive that sentinel.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RuntimeGeneration(NonZeroU64);
 
@@ -22,7 +18,7 @@ impl RuntimeGeneration {
 }
 
 /// Identity of an in-flight open transaction. It is distinct from the
-/// published generation even though the lifecycle stores both in atomics.
+/// published generation even though both participate in lifecycle state.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OpenAttemptId(NonZeroU64);
 
@@ -44,50 +40,6 @@ impl OpenAttemptId {
     /// through an untyped integer at the promotion boundary.
     pub(crate) const fn into_runtime_generation(self) -> RuntimeGeneration {
         RuntimeGeneration(self.0)
-    }
-}
-
-/// Atomic optional storage for the published runtime generation.
-///
-/// The zero representation is private to this boundary.  Lifecycle code
-/// therefore carries `Option<RuntimeGeneration>` instead of reintroducing a
-/// raw integer sentinel at every load and store site.
-pub(crate) struct AtomicOptionalRuntimeGeneration(AtomicU64);
-
-impl AtomicOptionalRuntimeGeneration {
-    pub(crate) const fn empty() -> Self {
-        Self(AtomicU64::new(0))
-    }
-
-    pub(crate) fn load(&self, ordering: Ordering) -> Option<RuntimeGeneration> {
-        RuntimeGeneration::new(self.0.load(ordering))
-    }
-
-    pub(crate) fn store(&self, generation: Option<RuntimeGeneration>, ordering: Ordering) {
-        self.0
-            .store(generation.map_or(0, RuntimeGeneration::get), ordering);
-    }
-}
-
-/// Atomic optional storage for an in-flight open transaction identity.
-///
-/// `OpenAttemptId` is deliberately not interchangeable with
-/// `RuntimeGeneration`; promotion happens explicitly through
-/// [`OpenAttemptId::into_runtime_generation`].
-pub(crate) struct AtomicOptionalOpenAttemptId(AtomicU64);
-
-impl AtomicOptionalOpenAttemptId {
-    pub(crate) const fn empty() -> Self {
-        Self(AtomicU64::new(0))
-    }
-
-    pub(crate) fn load(&self, ordering: Ordering) -> Option<OpenAttemptId> {
-        OpenAttemptId::new(self.0.load(ordering))
-    }
-
-    pub(crate) fn store(&self, attempt: Option<OpenAttemptId>, ordering: Ordering) {
-        self.0
-            .store(attempt.map_or(0, OpenAttemptId::get), ordering);
     }
 }
 

@@ -2,14 +2,19 @@
 
 use crate::generation::RuntimeGeneration;
 
-/// Framework service slots owned by the runtime and reopened for each
-/// generation. Generation-specific policy lives in [`crate::addin::RuntimeConfig`]
-/// inside [`crate::runtime::OpenGeneration`], while these slots carry the
-/// reusable service state.
-pub(crate) struct RuntimeServices {
+/// Service slots whose liveness is coupled to one open generation.
+/// Generation-specific policy lives in [`crate::addin::RuntimeConfig`] inside
+/// [`crate::runtime::OpenGeneration`], while these slots carry the reusable
+/// service state.
+pub(crate) struct GenerationServices {
     pub(crate) handles: crate::handle::HandleRuntimeSlot,
     pub(crate) subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot,
-    #[cfg(feature = "async")]
+}
+
+/// Runtime-owned executors whose lifecycle is independent from generation
+/// service arming.
+#[cfg(feature = "async")]
+pub(crate) struct RuntimeExecutors {
     pub(crate) async_manager: crate::async_udf::AsyncManager,
 }
 
@@ -21,7 +26,7 @@ pub(crate) struct RuntimeServices {
 /// silently discarded at an open boundary.
 #[must_use = "an armed service reservation must be committed or rolled back"]
 pub(crate) struct ArmedServices<'a> {
-    services: &'a RuntimeServices,
+    services: &'a GenerationServices,
     generation: RuntimeGeneration,
     committed: bool,
 }
@@ -45,13 +50,11 @@ impl Drop for ArmedServices<'_> {
     }
 }
 
-impl RuntimeServices {
+impl GenerationServices {
     pub(crate) const fn new() -> Self {
         Self {
             handles: crate::handle::HandleRuntimeSlot::new(),
             subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot::new(),
-            #[cfg(feature = "async")]
-            async_manager: crate::async_udf::AsyncManager::new(),
         }
     }
 
@@ -86,5 +89,14 @@ impl RuntimeServices {
         let handle_result = self.handles.disarm(generation);
         let subscription_result = self.subscriptions.disarm(generation);
         handle_result.and(subscription_result)
+    }
+}
+
+#[cfg(feature = "async")]
+impl RuntimeExecutors {
+    pub(crate) const fn new() -> Self {
+        Self {
+            async_manager: crate::async_udf::AsyncManager::new(),
+        }
     }
 }

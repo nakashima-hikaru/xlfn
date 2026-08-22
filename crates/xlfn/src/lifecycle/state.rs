@@ -32,14 +32,3 @@ pub(crate) enum HostLifecycleIntent {
     ExplicitRemovalRequested = 1,
     ExplicitRemovalComplete = 2,
 }
-
-impl HostLifecycleIntent {
-    pub(crate) fn from_raw(value: u8) -> Self {
-        match value {
-            0 => Self::None,
-            1 => Self::ExplicitRemovalRequested,
-            2 => Self::ExplicitRemovalComplete,
-            _ => std::process::abort(),
-        }
-    }
-}

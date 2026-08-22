@@ -1,21 +1,20 @@
-//! Canonical lifecycle state and its read-side atomic projection.
+//! Canonical lifecycle state and its read-side phase projection.
 
 use arc_swap::ArcSwapOption;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::generation::{
-    AtomicOptionalOpenAttemptId, AtomicOptionalRuntimeGeneration, OpenAttemptId, RuntimeGeneration,
-};
+use crate::generation::{OpenAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::runtime::{OpenGeneration, OpeningGeneration};
 
 /// Canonical lifecycle state owned by the lifecycle control mutex.
 ///
-/// The atomic fields in [`LifecycleState`] are deliberately only read-side
-/// projections. Every writer first updates this state and then publishes a
-/// coherent projection through [`LifecycleState::refresh_projection`].
+/// The phase atomic in [`LifecycleState`] is deliberately only a read-side
+/// projection. Every writer first updates this state and then publishes the
+/// phase through [`LifecycleState::refresh_projection`]. Correlated lifecycle
+/// values remain behind this mutex and are read as one canonical snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleStateKind {
     Closed,
@@ -95,18 +94,13 @@ impl LifecycleControl {
 
 /// Lifecycle synchronization state: ownership remains in the opening slot
 /// and ArcSwap root, while all lifecycle writes are serialized by one control
-/// mutex. The atomics are projections for lock-free read-side admission.
+/// mutex. Only phase is projected for lock-free read-side admission.
 pub(crate) struct LifecycleState<A: crate::Addin> {
     phase: AtomicU8,
-    host_intent: AtomicU8,
-    generation: AtomicOptionalRuntimeGeneration,
-    open_attempt_id: AtomicOptionalOpenAttemptId,
-    removal_epoch: AtomicU64,
     pub(crate) opening: Mutex<Option<OpeningGeneration<A>>>,
     pub(crate) current: ArcSwapOption<OpenGeneration<A>>,
     control: Mutex<LifecycleControl>,
     changed: Condvar,
-    removal_attempt_active: AtomicBool,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -120,15 +114,10 @@ impl<A: crate::Addin> LifecycleState<A> {
     pub(crate) const fn new() -> Self {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
-            host_intent: AtomicU8::new(HostLifecycleIntent::None as u8),
-            generation: AtomicOptionalRuntimeGeneration::empty(),
-            open_attempt_id: AtomicOptionalOpenAttemptId::empty(),
-            removal_epoch: AtomicU64::new(0),
             opening: Mutex::new(None),
             current: ArcSwapOption::const_empty(),
             control: Mutex::new(LifecycleControl::new()),
             changed: Condvar::new(),
-            removal_attempt_active: AtomicBool::new(false),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
@@ -146,29 +135,12 @@ impl<A: crate::Addin> LifecycleState<A> {
         self.changed.notify_all();
     }
 
-    /// Returns the read-side atomic projection.
+    /// Returns the read-side phase projection.
     ///
     /// Lifecycle writers must inspect [`LifecycleControl::state`] instead;
-    /// this method is intentionally named to make that distinction visible
-    /// at every call site.
+    /// this method is intentionally named to make that distinction visible.
     pub(crate) fn observed_phase(&self) -> LifecyclePhase {
         LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn observed_host_intent(&self) -> HostLifecycleIntent {
-        HostLifecycleIntent::from_raw(self.host_intent.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn observed_generation(&self) -> Option<RuntimeGeneration> {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn observed_open_attempt(&self) -> Option<OpenAttemptId> {
-        self.open_attempt_id.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn observed_removal_epoch(&self) -> u64 {
-        self.removal_epoch.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_host_intent(&self, intent: HostLifecycleIntent) {
@@ -228,16 +200,6 @@ impl<A: crate::Addin> LifecycleState<A> {
     }
 
     fn refresh_projection(&self, control: &LifecycleControl) {
-        self.host_intent
-            .store(control.host_intent as u8, Ordering::Release);
-        self.generation
-            .store(control.known_generation, Ordering::Release);
-        self.open_attempt_id
-            .store(control.state.open_attempt(), Ordering::Release);
-        self.removal_epoch
-            .store(control.removal_epoch, Ordering::Release);
-        self.removal_attempt_active
-            .store(control.removal_attempt_active, Ordering::Release);
         self.phase
             .store(control.state.phase() as u8, Ordering::Release);
     }

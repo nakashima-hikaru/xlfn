@@ -22,7 +22,9 @@ pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
 pub(crate) use service_slot::{GenerationServiceRead, GenerationServiceSlot};
-pub(crate) use services::RuntimeServices;
+pub(crate) use services::GenerationServices;
+#[cfg(feature = "async")]
+pub(crate) use services::RuntimeExecutors;
 pub(crate) use thread_affine::{
     ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
 };

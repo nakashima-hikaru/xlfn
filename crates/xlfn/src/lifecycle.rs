@@ -343,8 +343,7 @@ where
     let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
         return OpenRollbackOutcome {
             local_quiescent: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed,
-            host_callbacks_detached: runtime.registrations().is_empty()
-                && runtime.event_registrations().is_empty(),
+            host_callbacks_detached: runtime.host_callbacks_detached(),
             host_callback_state: callbacks.state(),
             registration_state_known: !runtime.registration_state_unknown(),
             finalized: runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
@@ -630,8 +629,7 @@ where
             }
         }
     }
-    let host_callbacks_detached =
-        runtime.registrations().is_empty() && runtime.event_registrations().is_empty();
+    let host_callbacks_detached = runtime.host_callbacks_detached();
     let registration_state_known = !runtime.registration_state_unknown();
     let mut finalized = false;
     if local_quiescent
@@ -639,7 +637,7 @@ where
         && host_callbacks_detached
         && registration_state_known
     {
-        let prerequisites = crate::runtime::OpenRollbackQuiescencePrerequisites {
+        let proof = crate::runtime::QuiescenceProof {
             exports: exports_drained,
             rtd: rtd_quiescent
                 .expect("RTD certificate is present when rollback is local-quiescent"),
@@ -665,7 +663,7 @@ where
             ),
         };
         match runtime
-            .certify_open_rollback(prerequisites)
+            .certify::<crate::runtime::OpenRollback>(proof)
             .and_then(|certificate| runtime.finish_open_rollback(certificate))
         {
             Ok(()) => match runtime.release_empty_lifecycle_binding(lifecycle) {
@@ -1327,7 +1325,7 @@ where
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RtdDrained);
 
     let certificate =
-        match runtime.certify_logical_quiescence(crate::runtime::RemovalQuiescencePrerequisites {
+        match runtime.certify::<crate::runtime::FinalRemoval>(crate::runtime::QuiescenceProof {
             exports: exports_drained,
             rtd: rtd_quiescent,
             host_callbacks,

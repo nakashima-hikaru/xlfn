@@ -10,18 +10,18 @@ use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, its host registrations, and the callback
 /// session that can undo host mutations made by that attempt. The lifecycle
-/// slot holds the staged generation under this attempt until [`Self::finish`]
-/// publishes it. The caller must explicitly call [`Self::finish`] or
+/// slot holds the staged generation under this attempt until [`Self::commit`]
+/// publishes it. The caller must explicitly call [`Self::commit`] or
 /// [`Self::rollback`]; dropping an active transaction only quarantines the
 /// runtime and never performs implicit callback cleanup.
-pub(super) struct OpenTxn<'runtime, A: Addin> {
+pub(super) struct OpeningTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
     attempt: Option<OpenAttemptGuard<'runtime, A>>,
     registrations: Vec<crate::registration::RegistrationId>,
 }
 
-impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
+impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
     pub(super) fn begin(
         runtime: &'runtime Runtime<A>,
         removal_epoch: crate::generation::RemovalEpoch,
@@ -45,7 +45,7 @@ impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
         self.registrations = registrations;
     }
 
-    pub(super) fn finish(&mut self) -> XllResult<()> {
+    pub(super) fn commit(&mut self) -> XllResult<()> {
         self.runtime.finish_open_with_registrations(
             self.attempt
                 .as_mut()
@@ -72,7 +72,7 @@ impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
     }
 }
 
-impl<A: Addin> Drop for OpenTxn<'_, A> {
+impl<A: Addin> Drop for OpeningTransaction<'_, A> {
     fn drop(&mut self) {
         if self
             .attempt
@@ -124,7 +124,7 @@ where
             return Err(XllError::Closing);
         }
 
-        transaction = Some(OpenTxn::begin(runtime, removal_epoch)?);
+        transaction = Some(OpeningTransaction::begin(runtime, removal_epoch)?);
         let transaction = transaction
             .as_mut()
             .expect("the open transaction was installed");
@@ -137,7 +137,7 @@ where
             transaction.callbacks_mut(),
         )?;
         transaction.stage_registrations(registrations);
-        transaction.finish()
+        transaction.commit()
     }));
 
     match result {

@@ -2,25 +2,47 @@
 
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::registration::{EventRegistration, ExcelNameKey, MetadataDebt, PendingRegistration};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrationState {
+    Known,
+    Unknown,
+}
+
+struct HostLedgerState {
+    registrations: Vec<PendingRegistration>,
+    metadata_debt: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    event_registrations: Vec<EventRegistration>,
+    registration_state: RegistrationState,
+}
+
+impl HostLedgerState {
+    const fn new() -> Self {
+        Self {
+            registrations: Vec::new(),
+            metadata_debt: BTreeMap::new(),
+            event_registrations: Vec::new(),
+            registration_state: RegistrationState::Known,
+        }
+    }
+}
+
 /// The Excel host registration protocol and its recovery ledger.
+///
+/// Registration mutations, event registrations, metadata debt, and the
+/// registration-state certainty flag form one cold-path transaction domain.
+/// Keeping them under one mutex makes the snapshot used by shutdown
+/// certification coherent without maintaining several synchronization orders.
 pub(crate) struct HostLedger {
-    pub(crate) registrations: Mutex<Vec<PendingRegistration>>,
-    pub(crate) metadata_debt: Mutex<BTreeMap<ExcelNameKey, Vec<MetadataDebt>>>,
-    pub(crate) event_registrations: Mutex<Vec<EventRegistration>>,
-    pub(crate) registration_state_unknown: AtomicBool,
+    state: Mutex<HostLedgerState>,
 }
 
 impl HostLedger {
     pub(crate) const fn new() -> Self {
         Self {
-            registrations: Mutex::new(Vec::new()),
-            metadata_debt: Mutex::new(BTreeMap::new()),
-            event_registrations: Mutex::new(Vec::new()),
-            registration_state_unknown: AtomicBool::new(false),
+            state: Mutex::new(HostLedgerState::new()),
         }
     }
 
@@ -28,75 +50,84 @@ impl HostLedger {
         &self,
         registrations: impl IntoIterator<Item = PendingRegistration>,
     ) {
-        self.registrations.lock().extend(registrations);
+        self.state.lock().registrations.extend(registrations);
     }
 
     pub(crate) fn append_event_registrations(
         &self,
         registrations: impl IntoIterator<Item = EventRegistration>,
     ) {
-        self.event_registrations.lock().extend(registrations);
+        self.state.lock().event_registrations.extend(registrations);
     }
 
     pub(crate) fn registrations_snapshot(&self) -> Vec<PendingRegistration> {
-        self.registrations.lock().clone()
+        self.state.lock().registrations.clone()
     }
 
     pub(crate) fn event_registrations_snapshot(&self) -> Vec<EventRegistration> {
-        self.event_registrations.lock().clone()
+        self.state.lock().event_registrations.clone()
     }
 
-    pub(crate) fn registrations_empty(&self) -> bool {
-        self.registrations.lock().is_empty()
+    pub(crate) fn callbacks_detached(&self) -> bool {
+        let state = self.state.lock();
+        state.registrations.is_empty() && state.event_registrations.is_empty()
     }
 
-    pub(crate) fn event_registrations_empty(&self) -> bool {
-        self.event_registrations.lock().is_empty()
+    pub(crate) fn is_quiescent(&self) -> bool {
+        let state = self.state.lock();
+        state.registrations.is_empty()
+            && state.event_registrations.is_empty()
+            && state.registration_state == RegistrationState::Known
     }
 
     pub(crate) fn replace_registrations(&self, registrations: Vec<PendingRegistration>) {
-        *self.registrations.lock() = registrations;
+        self.state.lock().registrations = registrations;
     }
 
     pub(crate) fn replace_event_registrations(&self, registrations: Vec<EventRegistration>) {
-        *self.event_registrations.lock() = registrations;
+        self.state.lock().event_registrations = registrations;
     }
 
     pub(crate) fn mark_registration_state_unknown(&self) {
-        self.registration_state_unknown
-            .store(true, Ordering::Release);
+        self.state.lock().registration_state = RegistrationState::Unknown;
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {
-        self.registration_state_unknown.load(Ordering::Acquire)
+        self.state.lock().registration_state == RegistrationState::Unknown
     }
 
     pub(crate) fn retain_metadata_debt(&self, debts: Vec<MetadataDebt>) {
-        let mut retained = self.metadata_debt.lock();
+        let mut state = self.state.lock();
         for debt in debts {
-            retained.entry(debt.key()).or_default().push(debt);
+            state
+                .metadata_debt
+                .entry(debt.key())
+                .or_default()
+                .push(debt);
         }
     }
 
     pub(crate) fn metadata_debt_snapshot(&self) -> BTreeMap<ExcelNameKey, Vec<MetadataDebt>> {
-        self.metadata_debt.lock().clone()
+        self.state.lock().metadata_debt.clone()
     }
 
     pub(crate) fn clear_metadata_debt_for_registrations(
         &self,
         registrations: &[crate::registration::RegistrationId],
     ) {
-        let mut debts = self.metadata_debt.lock();
+        let mut state = self.state.lock();
         for registration in registrations {
-            debts.remove(&ExcelNameKey::new(registration.excel_name));
+            state
+                .metadata_debt
+                .remove(&ExcelNameKey::new(registration.excel_name));
         }
     }
 
     pub(crate) fn replace_metadata_debt(&self, debts: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>) {
-        *self.metadata_debt.lock() = debts;
+        self.state.lock().metadata_debt = debts;
     }
 
     pub(crate) fn has_metadata_debt(&self) -> bool {
-        !self.metadata_debt.lock().is_empty()
+        !self.state.lock().metadata_debt.is_empty()
     }
 }
