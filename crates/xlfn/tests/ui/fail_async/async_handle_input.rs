@@ -22,7 +22,7 @@ struct Dataset {
 
 #[excel_function(name = "TEST.HANDLE.ASYNC")]
 async fn async_handle_input(
-    #[excel_context(asynchronous)] context: AsyncContext<State>,
+    #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
     dataset: Handle<'_, Dataset>,
 ) -> XllResult<f64> {
     let _ = context.state();

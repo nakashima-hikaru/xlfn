@@ -16,7 +16,11 @@ impl Addin for OwnedMatrixAsyncAddin {
 }
 
 #[excel_function(name = "TEST.OWNED.MATRIX.ASYNC")]
-async fn owned_matrix(value: Matrix<f64>) -> f64 {
+async fn owned_matrix(
+    #[excel_context(asynchronous)] context: AsyncContext<'_, OwnedMatrixAsyncAddin>,
+    value: Matrix<f64>,
+) -> f64 {
+    let _ = context.state();
     value.iter().copied().sum()
 }
 

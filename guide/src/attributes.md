@@ -90,7 +90,7 @@ fn lookup(
 | `main_thread` | `MainThreadContext<'_, DeskTools>` | main-thread Excel callbacks, handles, RTD |
 | `thread_safe` | `ThreadSafeContext<'_, DeskTools>` | shared state during MTR; no unsafe Excel callbacks |
 | `macro_sheet` | `MacroSheetContext<'_, DeskTools>` | Excel references and macro-sheet registration |
-| `asynchronous` | `AsyncContext<DeskTools>` | cancellation and shared state for an async UDF |
+| `asynchronous` | `AsyncContext<'_, DeskTools>` | cancellation and shared state for an async UDF |
 
 An `async fn` may omit a context. When it has one, the role must be `asynchronous`. A synchronous function cannot use the asynchronous role.
 

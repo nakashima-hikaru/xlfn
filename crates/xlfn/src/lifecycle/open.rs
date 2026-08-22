@@ -9,17 +9,20 @@ use crate::runtime::OpenAttemptGuard;
 use crate::runtime::Runtime;
 use crate::{XllError, XllResult};
 
-/// Owns one logical open attempt, including the callback session that can
-/// undo host mutations made by that attempt. The caller must explicitly call
-/// [`Self::finish`] or [`Self::rollback`]; dropping an active transaction only
-/// quarantines the runtime and never performs implicit callback cleanup.
-pub(super) struct OpenTransaction<'runtime, A: Addin> {
+/// Owns one logical open attempt, its host registrations, and the callback
+/// session that can undo host mutations made by that attempt. The lifecycle
+/// slot holds the staged generation under this attempt until [`Self::finish`]
+/// publishes it. The caller must explicitly call [`Self::finish`] or
+/// [`Self::rollback`]; dropping an active transaction only quarantines the
+/// runtime and never performs implicit callback cleanup.
+pub(super) struct OpenTxn<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
     attempt: Option<OpenAttemptGuard<'runtime, A>>,
+    registrations: Vec<crate::registration::RegistrationId>,
 }
 
-impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
+impl<'runtime, A: Addin> OpenTxn<'runtime, A> {
     pub(super) fn begin(
         runtime: &'runtime Runtime<A>,
         removal_epoch: crate::generation::RemovalEpoch,
@@ -28,6 +31,7 @@ impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
             runtime,
             callbacks: HostCallbackSession::new(),
             attempt: Some(runtime.begin_open_if_epoch(removal_epoch)?),
+            registrations: Vec::new(),
         })
     }
 
@@ -35,24 +39,36 @@ impl<'runtime, A: Addin> OpenTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    pub(super) fn finish(
+    pub(super) fn stage_registrations(
         &mut self,
         registrations: Vec<crate::registration::RegistrationId>,
-    ) -> XllResult<()> {
-        self.runtime.finish_open(
+    ) {
+        self.registrations = registrations;
+    }
+
+    pub(super) fn finish(&mut self) -> XllResult<()> {
+        self.runtime.finish_open_with_registrations(
             self.attempt
                 .as_mut()
                 .expect("an open transaction always owns its attempt"),
-            registrations,
+            &mut self.registrations,
         )
     }
 
     pub(super) fn rollback(&mut self) {
+        if !self.registrations.is_empty() {
+            self.runtime.retain_registration_debt(
+                std::mem::take(&mut self.registrations)
+                    .into_iter()
+                    .map(crate::registration::PendingRegistration::from)
+                    .collect(),
+            );
+        }
         rollback_active_open(self.runtime, self.attempt.as_mut(), &mut self.callbacks);
     }
 }
 
-impl<A: Addin> Drop for OpenTransaction<'_, A> {
+impl<A: Addin> Drop for OpenTxn<'_, A> {
     fn drop(&mut self) {
         if self
             .attempt
@@ -102,7 +118,7 @@ where
             return Err(XllError::Closing);
         }
 
-        transaction = Some(OpenTransaction::begin(runtime, removal_epoch)?);
+        transaction = Some(OpenTxn::begin(runtime, removal_epoch)?);
         let transaction = transaction
             .as_mut()
             .expect("the open transaction was installed");
@@ -113,7 +129,8 @@ where
             descriptors,
             transaction.callbacks_mut(),
         )?;
-        transaction.finish(registrations)
+        transaction.stage_registrations(registrations);
+        transaction.finish()
     }));
 
     match result {

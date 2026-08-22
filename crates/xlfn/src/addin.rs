@@ -475,14 +475,6 @@ impl Addin for () {
     }
 }
 
-/// Static metadata and lifecycle configuration supplied by `#[excel_addin]`.
-#[doc(hidden)]
-pub trait AddinMetadata {
-    const ID: &'static str;
-    const DISPLAY_NAME: &'static str;
-    const DEFAULT_CATEGORY: &'static str;
-}
-
 impl<A: Addin> AsRef<A::State> for ThreadSafeContext<'_, A> {
     fn as_ref(&self) -> &A::State {
         self.state
@@ -501,38 +493,38 @@ impl<A: Addin> Clone for ThreadSafeContext<'_, A> {
 
 impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 
-/// Owned Add-in state available to an asynchronous worksheet function.
+/// Call-scoped Add-in state available to an asynchronous worksheet function.
 ///
-/// The context holds an explicit open-generation lifetime lease. Moving it
-/// into a detached thread or task that can outlive the returned future violates
-/// the XLL shutdown contract. The runtime detects an escaped lease during
-/// explicit removal, enters `Quarantined`, and keeps the DLL resident rather
-/// than returning with executable XLL code still reachable.
+/// The framework-owned async Future retains the open-generation lease and the
+/// cancellation token. This context borrows both for the duration of that
+/// Future, so a context cannot be moved into a detached task or thread that
+/// outlives the invocation. Long-lived state must be owned explicitly by the
+/// add-in rather than by escaping this capability.
 #[cfg(feature = "async")]
-pub struct AsyncContext<A: Addin> {
-    lease: crate::runtime::GenerationLease<A>,
-    cancellation: CancellationToken,
+pub struct AsyncContext<'call, A: Addin> {
+    state: &'call A::State,
+    cancellation: &'call CancellationToken,
 }
 
 #[cfg(feature = "async")]
-impl<A: Addin> AsyncContext<A> {
+impl<'call, A: Addin> AsyncContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new(lease: crate::runtime::GenerationLease<A>, cancellation: CancellationToken) -> Self {
+    pub const fn new(state: &'call A::State, cancellation: &'call CancellationToken) -> Self {
         Self {
-            lease,
+            state,
             cancellation,
         }
     }
 
     #[must_use]
-    pub fn state(&self) -> &A::State {
-        self.lease.state()
+    pub const fn state(&self) -> &'call A::State {
+        self.state
     }
 
     #[must_use]
-    pub const fn cancellation(&self) -> &CancellationToken {
-        &self.cancellation
+    pub const fn cancellation(&self) -> &'call CancellationToken {
+        self.cancellation
     }
 
     pub fn check_cancelled(&self) -> XllResult<()> {
@@ -550,9 +542,9 @@ impl<A: Addin> AsyncContext<A> {
 }
 
 #[cfg(feature = "async")]
-impl<A: Addin> AsRef<A::State> for AsyncContext<A> {
+impl<A: Addin> AsRef<A::State> for AsyncContext<'_, A> {
     fn as_ref(&self) -> &A::State {
-        self.lease.state()
+        self.state
     }
 }
 
@@ -988,14 +980,13 @@ mod tests {
         let (source, token) = crate::cancellation::CancellationSource::new(
             crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
-        let lease = crate::runtime::GenerationLease::<AsyncTestAddin> {
-            generation: Arc::new(crate::runtime::OpenGeneration {
-                id: crate::generation::RuntimeGeneration::new(1).unwrap(),
-                state: 23_u32,
-                layers: (),
-            }),
-        };
-        let context = AsyncContext::new(lease, token);
+        let generation = Arc::new(crate::runtime::OpenGeneration::<AsyncTestAddin> {
+            id: crate::generation::RuntimeGeneration::new(1).unwrap(),
+            state: 23_u32,
+            layers: (),
+        });
+        let context: AsyncContext<'_, AsyncTestAddin> =
+            AsyncContext::new(&generation.state, &token);
 
         assert_eq!(context.state(), &23);
         assert!(!context.cancellation().is_cancelled());

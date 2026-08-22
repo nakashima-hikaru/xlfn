@@ -241,7 +241,7 @@ fn expand_excel_function(
             ))
         }
         ContextKind::Async => {
-            quote!(#krate::__private::async_context(__lease, __cancellation))
+            quote!(#krate::__private::async_context(&__lease, &__cancellation))
         }
     });
     let macro_sheet = mode.is_macro_sheet();
@@ -381,9 +381,9 @@ fn expand_excel_function(
                         #excel_name,
                         __async_handle,
                         |__lease, __cancellation, __frame| {
-                            #context_setup
                             #(#conversions)*
                             ::core::result::Result::Ok(async move {
+                                #context_setup
                                 #return_assertion
                                 #async_result_expression
                             })
@@ -867,7 +867,7 @@ mod tests {
             quote!(name = "TEST.ASYNC"),
             function(quote!(
                 async fn value(
-                    #[excel_context(asynchronous)] context: AsyncContext<State>,
+                    #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
                     input: f64,
                 ) -> XllResult<f64> {
                     Ok(input)

@@ -6,6 +6,6 @@ error[E0308]: mismatched types
 7 | fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, ()>) -> f64 {
   |                                               -------------------------- expected due to this
   |
-  = note: expected reference `&xlfn::addin::MainThreadContext<'_, ()>`
-                found struct `xlfn::addin::MainThreadContext<'_, ()>`
+  = note: expected reference `&xlfn::MainThreadContext<'_, ()>`
+                found struct `xlfn::MainThreadContext<'_, ()>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

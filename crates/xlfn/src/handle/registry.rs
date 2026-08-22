@@ -15,6 +15,7 @@ use super::transaction::{RegistryRemovalTxn, RegistryWriteTxn};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::{XllError, XllResult};
+#[cfg(any(test, feature = "shutdown-refinement"))]
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};

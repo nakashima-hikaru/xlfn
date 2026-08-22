@@ -132,11 +132,11 @@ pub use crate::runtime::GenerationLease;
 /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
 #[cfg(feature = "async")]
 #[doc(hidden)]
-pub fn async_context<A: Addin>(
-    lease: crate::runtime::GenerationLease<A>,
-    cancellation: &CancellationToken,
-) -> crate::addin::AsyncContext<A> {
-    crate::addin::AsyncContext::new(lease, cancellation.clone())
+pub fn async_context<'call, A: Addin>(
+    lease: &'call crate::runtime::GenerationLease<A>,
+    cancellation: &'call CancellationToken,
+) -> crate::addin::AsyncContext<'call, A> {
+    crate::addin::AsyncContext::new(lease.state(), cancellation)
 }
 
 /// Opaque wrapper around the add-in [`Runtime`] for generated code.
@@ -501,7 +501,7 @@ pub unsafe fn async_udf<A, R, F, Fut>(
     R: ExcelReturn + Send + 'static,
     F: for<'call> FnOnce(
         crate::runtime::GenerationLease<A>,
-        &CancellationToken,
+        CancellationToken,
         &mut CallFrame<'call>,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<R>> + Send + 'static,
@@ -516,7 +516,7 @@ pub unsafe fn async_udf<A, R, F, Fut>(
             |lease, cancellation| {
                 with_excel_call_scope(|scope| {
                     let mut frame = CallFrame::new::<R, A>(runtime.runtime(), scope);
-                    let future = execute(lease, &cancellation, &mut frame)?;
+                    let future = execute(lease, cancellation, &mut frame)?;
                     let _ = frame.arguments.finish();
                     Ok(future)
                 })

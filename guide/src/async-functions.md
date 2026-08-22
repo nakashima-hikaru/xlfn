@@ -16,7 +16,7 @@ The project uses Excel 2010 or later as the operational baseline for this capabi
 ```rust
 #[excel_function(name = "SERVICE.FETCH")]
 async fn fetch(
-    #[excel_context(asynchronous)] context: AsyncContext<ServiceAddin>,
+    #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
     symbol: String,
 ) -> XllResult<f64> {
     context.check_cancelled()?;
@@ -48,7 +48,7 @@ ends before the future may run. Use owned `String`, `Matrix<T>`, or another
 
 ## State and converted inputs
 
-`AsyncContext<ServiceAddin>` owns a lease on the open `ServiceAddin` generation. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
+The framework-owned future retains the open `ServiceAddin` generation lease and cancellation token. `AsyncContext<'_, ServiceAddin>` borrows those capabilities for the invocation, so it cannot be moved into a detached task that outlives the future. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
 
 ### Async handle inputs
 
@@ -119,7 +119,7 @@ A Rust `async fn` is not automatically non-blocking. This is poor:
 ```rust,ignore
 #[excel_function(name = "DATA.FETCH")]
 async fn fetch_data(
-    #[excel_context(asynchronous)] context: AsyncContext<ServiceAddin>,
+    #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
     query: String,
 ) -> XllResult<f64> {
     // Blocks an executor worker for the whole external call.

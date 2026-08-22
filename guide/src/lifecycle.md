@@ -39,7 +39,7 @@ Do not perform unbounded I/O or long-running initialization in `open`. Excel is 
 
 ## Shared state
 
-Synchronous contexts borrow `&State`. `AsyncContext` owns a lease on the current open generation (`GenerationLease`), keeping `State` and generation-scoped resources alive until the asynchronous invocation releases it. State therefore needs explicit synchronization for mutable shared data:
+Synchronous contexts borrow `&State`. The framework-owned asynchronous future keeps the current open generation (`GenerationLease`) alive, while `AsyncContext<'_, A>` borrows the generation state and per-call cancellation token for the invocation. State therefore needs explicit synchronization for mutable shared data:
 
 ```rust
 use std::sync::RwLock;

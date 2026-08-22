@@ -30,7 +30,7 @@ pub(crate) mod win32;
 #[doc(hidden)]
 pub mod __private;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-pub mod addin;
+mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
 #[cfg(feature = "bench-internals")]
@@ -101,10 +101,15 @@ mod utf16;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
-pub use addin::{Addin, HandleBindingLimit, HandleConfig, OpenContext, Opened, RuntimeConfig};
+pub use addin::{
+    Addin, BuildInfo, DiagnosticsSetup, HandleBindingLimit, HandleConfig, MacroSheetContext,
+    MainThreadContext, OpenContext, Opened, RtdConfig, RtdOpenContext, RuntimeConfig,
+    ThreadSafeContext,
+};
 #[cfg(feature = "async")]
-pub use addin::{AsyncRuntimeConfig, AsyncWorkerCount};
+pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
 pub use error::{ExcelError, XllError, XllResult};
+pub use shutdown::{CleanupIssueKind, CleanupReporter};
 
 mod ingress;
 
@@ -495,6 +500,7 @@ pub mod prelude {
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
     pub use crate::handle::{Handle, HandleAlias, PinnedHandle};
+    pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,

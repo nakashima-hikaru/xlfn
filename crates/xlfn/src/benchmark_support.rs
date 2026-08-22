@@ -944,6 +944,88 @@ impl Drop for HandleLookupBenchmark {
     }
 }
 
+/// Control benchmark for the ownership cost of an `Arc<T>` payload.
+///
+/// This is intentionally not an alternative handle implementation: it omits
+/// token lookup, publication, and epoch admission. It provides a lower-bound
+/// ownership control beside [`HandleLookupBenchmark`] so the cost of the
+/// current call-scoped EBR path can be evaluated against a direct strong-count
+/// increment/decrement under the same worker topology.
+pub struct ArcHandleLookupBenchmark {
+    payload: Arc<BenchHandleObject>,
+    worker_count: usize,
+    iterations_per_worker: usize,
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ArcHandleLookupBenchmark {
+    pub fn new(worker_count: usize, iterations_per_worker: usize) -> Self {
+        assert!(worker_count != 0);
+        assert!(iterations_per_worker != 0);
+
+        let payload = Arc::new(BenchHandleObject { _payload: 0 });
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let mut start_tx = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let done_tx = done_tx.clone();
+            let worker_payload = Arc::clone(&payload);
+            start_tx.push(worker_tx);
+            workers.push(std::thread::spawn(move || {
+                while worker_rx.recv().is_ok() {
+                    for _ in 0..iterations_per_worker {
+                        let value = Arc::clone(&worker_payload);
+                        std::hint::black_box(value);
+                    }
+                    done_tx
+                        .send(())
+                        .expect("Arc ownership benchmark driver received completion signal");
+                }
+            }));
+        }
+
+        Self {
+            payload,
+            worker_count,
+            iterations_per_worker,
+            start_tx,
+            done_rx,
+            workers,
+        }
+    }
+
+    pub fn run(&self) {
+        for start in &self.start_tx {
+            start
+                .send(())
+                .expect("Arc ownership benchmark worker received start signal");
+        }
+        for _ in 0..self.worker_count {
+            self.done_rx
+                .recv()
+                .expect("Arc ownership benchmark worker finished batch");
+        }
+        std::hint::black_box(&self.payload);
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.worker_count * self.iterations_per_worker
+    }
+}
+
+impl Drop for ArcHandleLookupBenchmark {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// A persistent worker pool that looks up a different warm topic per worker.
 ///
 /// The topics, worker threads, and synchronization channels are all prepared

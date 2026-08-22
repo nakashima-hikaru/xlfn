@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{HandleLookupBenchCase, HandleLookupBenchmark};
+use xlfn::benchmark_support::{
+    ArcHandleLookupBenchmark, HandleLookupBenchCase, HandleLookupBenchmark,
+};
 
 const ITERATIONS_PER_WORKER: usize = 1_000;
 const THREAD_COUNTS: [usize; 4] = [1, 4, 16, 32];
@@ -21,6 +23,16 @@ fn handle_lookup_benchmarks(c: &mut Criterion) {
                 b.iter(|| benchmark.run())
             });
         }
+    }
+
+    for workers in THREAD_COUNTS {
+        let benchmark = ArcHandleLookupBenchmark::new(workers, ITERATIONS_PER_WORKER);
+        group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("arc_control", workers),
+            &workers,
+            |b, _| b.iter(|| benchmark.run()),
+        );
     }
 
     group.finish();

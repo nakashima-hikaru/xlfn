@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:25:45
    |
-25 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
-   |                                             ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+25 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `xlfn::Addin` is not implemented for `State`
   --> tests/ui/fail_async/async_handle_input.rs:3:1
@@ -19,20 +19,20 @@ help: the following other types implement trait `xlfn::Addin`
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::addin::AsyncContext`
+note: required by a bound in `xlfn::AsyncContext`
   --> src/addin.rs
    |
-   | pub struct AsyncContext<A: Addin> {
-   |                            ^^^^^ required by this bound in `AsyncContext`
+   | pub struct AsyncContext<'call, A: Addin> {
+   |                                   ^^^^^ required by this bound in `AsyncContext`
 
-error[E0599]: the method `state` exists for struct `xlfn::addin::AsyncContext<State>`, but its trait bounds were not satisfied
+error[E0599]: the method `state` exists for struct `xlfn::AsyncContext<'_, State>`, but its trait bounds were not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:28:21
    |
  3 | struct State;
    | ------------ doesn't satisfy `State: xlfn::Addin`
 ...
 28 |     let _ = context.state();
-   |                     ^^^^^ method cannot be called on `xlfn::addin::AsyncContext<State>` due to unsatisfied trait bounds
+   |                     ^^^^^ private field, not a method
    |
    = note: the following trait bounds were not satisfied:
            `State: xlfn::Addin`
@@ -41,19 +41,6 @@ note: the trait `xlfn::Addin` must be implemented
    |
    | pub trait Addin: Send + Sync + 'static {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error[E0308]: mismatched types
-  --> tests/ui/fail_async/async_handle_input.rs:23:1
-   |
-23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AsyncContext<State>`, found `AsyncContext<AsyncTestAddin>`
-24 | async fn async_handle_input(
-25 |     #[excel_context(asynchronous)] context: AsyncContext<State>,
-   |                                             ------------------- expected due to this
-   |
-   = note: expected struct `xlfn::addin::AsyncContext<State>`
-              found struct `xlfn::addin::AsyncContext<AsyncTestAddin>`
-   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::ExcelParameter<'call>` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:26:14
@@ -275,6 +262,19 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call> + Send + 'static,
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
+error[E0308]: mismatched types
+  --> tests/ui/fail_async/async_handle_input.rs:23:1
+   |
+23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AsyncContext<'_, State>`, found `AsyncContext<'_, AsyncTestAddin>`
+24 | async fn async_handle_input(
+25 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
+   |                                             ----------------------- expected due to this
+   |
+   = note: expected struct `xlfn::AsyncContext<'_, State>`
+              found struct `xlfn::AsyncContext<'_, AsyncTestAddin>`
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:23:1
    |
@@ -296,9 +296,9 @@ help: the following other types implement trait `xlfn::Addin`
    |
    | impl Addin for () {
    | ^^^^^^^^^^^^^^^^^ `()`
-note: required by a bound in `xlfn::addin::AsyncContext`
+note: required by a bound in `xlfn::AsyncContext`
   --> src/addin.rs
    |
-   | pub struct AsyncContext<A: Addin> {
-   |                            ^^^^^ required by this bound in `AsyncContext`
+   | pub struct AsyncContext<'call, A: Addin> {
+   |                                   ^^^^^ required by this bound in `AsyncContext`
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

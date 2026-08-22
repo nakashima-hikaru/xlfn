@@ -61,7 +61,7 @@ The `macro_sheet` function flag selects the same registration capability without
 ```rust
 #[excel_function(name = "APP.SLOW")]
 async fn slow(
-    #[excel_context(asynchronous)] context: AsyncContext<DeskTools>,
+    #[excel_context(asynchronous)] context: AsyncContext<'_, DeskTools>,
     input: String,
 ) -> XllResult<String> {
     context.check_cancelled()?;
@@ -69,7 +69,7 @@ async fn slow(
 }
 ```
 
-`AsyncContext` owns a lease on the current open generation and a per-call cancellation token. It is available only with the `async` feature and only to `async fn`. An async function may omit the context if it does not need state or cancellation.
+The framework-owned future retains the current open-generation lease and per-call cancellation token. `AsyncContext<'_, DeskTools>` borrows those capabilities for the invocation, so it is available only with the `async` feature and only to `async fn`; it cannot escape into a detached task. An async function may omit the context if it does not need state or cancellation.
 
 ## Compatibility table
 

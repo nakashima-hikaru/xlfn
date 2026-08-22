@@ -5,6 +5,7 @@ use super::worker::release_active;
 use crate::cancellation::CancellationSource;
 use crate::error::XllError;
 use futures_util::future::AbortHandle;
+#[cfg(any(test, feature = "shutdown-refinement"))]
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

@@ -469,6 +469,15 @@ impl<A: crate::Addin> Runtime<A> {
         attempt: &mut OpenAttemptGuard<'_, A>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
+        let mut registrations = registrations;
+        self.finish_open_with_registrations(attempt, &mut registrations)
+    }
+
+    pub(crate) fn finish_open_with_registrations(
+        &self,
+        attempt: &mut OpenAttemptGuard<'_, A>,
+        registrations: &mut Vec<RegistrationId>,
+    ) -> XllResult<()> {
         let mut control = self.lifecycle.lock();
         self.lifecycle.notify_all();
         if control.canonical_state().open_attempt() != Some(attempt.attempt_id) {
@@ -480,8 +489,8 @@ impl<A: crate::Addin> Runtime<A> {
         // registration even when a concurrent close has already won the phase
         // transition. The close owner needs those IDs to unregister the host
         // mutations before publishing Closed.
-        self.clear_metadata_debt_for_registrations(&registrations);
-        let new_items: Vec<_> = registrations
+        self.clear_metadata_debt_for_registrations(registrations);
+        let new_items: Vec<_> = std::mem::take(registrations)
             .into_iter()
             .map(crate::registration::PendingRegistration::from)
             .collect();
@@ -1529,7 +1538,7 @@ impl<A: crate::Addin> OpenAttemptGuard<'_, A> {
 impl<A: crate::Addin> Drop for OpenAttemptGuard<'_, A> {
     fn drop(&mut self) {
         if self.active {
-            // Lifecycle rollback is owned by OpenTransaction and must be
+            // Lifecycle rollback is owned by OpenTxn and must be
             // explicit. A leaked attempt can only enter the fail-safe state;
             // Drop never invokes host callbacks or resource cleanup.
             self.runtime.quarantine();

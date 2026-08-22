@@ -130,7 +130,7 @@ impl<C, R> GenerationServiceSlot<C, R> {
     }
 }
 
-impl<C: Copy, R> GenerationServiceSlot<C, R> {
+impl<C, R> GenerationServiceSlot<C, R> {
     /// Acquires a read guard, lazily initializing the service if this is the
     /// first reader of the armed generation.
     pub(crate) fn read(
@@ -173,9 +173,12 @@ impl<C: Copy, R> GenerationServiceSlot<C, R> {
                     let _ = generation;
                     self.changed.wait(&mut state);
                 }
-                GenerationServiceState::Cold { generation, config } => {
-                    let generation = *generation;
-                    let config = *config;
+                GenerationServiceState::Cold { .. } => {
+                    let GenerationServiceState::Cold { generation, config } =
+                        std::mem::replace(&mut *state, GenerationServiceState::Closed)
+                    else {
+                        unreachable!("the service state remains Cold while holding its lock");
+                    };
                     *state = GenerationServiceState::Initializing { generation };
                     drop(state);
 
@@ -296,5 +299,34 @@ impl<C: Copy, R> GenerationServiceSlot<C, R> {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GenerationServiceSlot;
+    use crate::generation::RuntimeGeneration;
+    use std::sync::Arc;
+
+    struct NonCopyConfig(String);
+    struct Service;
+
+    #[test]
+    fn initialization_moves_a_non_copy_config_once() {
+        let slot = GenerationServiceSlot::<NonCopyConfig, Service>::new();
+        let generation = RuntimeGeneration::new(1).expect("test generation is non-zero");
+        slot.arm(generation, NonCopyConfig("moved once".to_owned()))
+            .expect("service slot can be armed");
+
+        let read = slot
+            .read(
+                |config| {
+                    assert_eq!(config.0, "moved once");
+                    Ok(Arc::new(Service))
+                },
+                |_| {},
+            )
+            .expect("service slot initializes from its moved config");
+        std::hint::black_box(&*read);
     }
 }
