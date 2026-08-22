@@ -13,14 +13,17 @@
 
 use super::arena::{BorrowedObject, PinnedObject};
 #[cfg(test)]
-use super::registry::ObjectIdentity;
-use super::registry::{DetachedObject, ErasedObject, LiveObjectRef, ObjectLocator, ObjectStore};
+use super::object_store::ObjectIdentity;
+use super::object_store::{
+    DetachedObject, ErasedObject, LiveObjectRef, ObjectLocator, ObjectStore,
+};
 use super::typed::ExcelHandleObject;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::any::TypeId;
 use std::cell::OnceCell;
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -294,9 +297,7 @@ impl EpochDomain {
 
             let participant = Arc::new(EpochParticipant::new());
             self.participants.lock().push(Arc::downgrade(&participant));
-            participants.retain(|entry| {
-                entry.domain_address != address || entry.domain.upgrade().is_some()
-            });
+            participants.retain(|entry| entry.domain.upgrade().is_some());
             participants.push(EpochParticipantCacheEntry {
                 domain_address: address,
                 domain: Arc::downgrade(self),
@@ -357,7 +358,7 @@ impl Drop for EpochGuard {
 /// A copied raw pointer published with an immutable binding record.
 ///
 /// This value is not a borrow and does not protect the allocation. Resolve it
-/// through [`ObjectReadGuard`] before dereferencing it.
+/// through [`EpochReadGuard`] before dereferencing it.
 #[derive(Clone, Copy)]
 pub(crate) struct PublishedObjectPtr {
     pub(super) ptr: NonNull<()>,
@@ -367,7 +368,7 @@ pub(crate) struct PublishedObjectPtr {
 
 // SAFETY: this value is only copied from an `ErasedObject` whose payload is
 // `Send + Sync + 'static`. It contains no ownership and is dereferenced only
-// after the caller has obtained the corresponding `ObjectReadGuard`.
+// after the caller has obtained the corresponding `EpochReadGuard`.
 unsafe impl Send for PublishedObjectPtr {}
 
 // SAFETY: same invariant as `Send`; the pointer is exposed only as a shared
@@ -383,21 +384,10 @@ impl PublishedObjectPtr {
     #[inline]
     pub(crate) fn resolve<'call, T: Send + Sync + 'static>(
         self,
-        guard: ObjectReadGuard<'call>,
+        guard: EpochReadGuard<'call>,
     ) -> Option<BorrowedObject<'call, T>> {
         self.typed_ptr::<T>()
             .map(|ptr| BorrowedObject::new(ptr, guard))
-    }
-}
-
-impl ErasedObject {
-    #[inline]
-    pub(crate) fn published_ptr(&self) -> PublishedObjectPtr {
-        PublishedObjectPtr {
-            ptr: self.ptr,
-            type_id: self.type_id,
-            type_name: self.type_name,
-        }
     }
 }
 
@@ -406,32 +396,58 @@ struct CallRegistration {
     epoch: EpochGuard,
 }
 
-/// The call-local capability that proves an object publication is epoch
-/// protected. It borrows the registration stored by [`HandleCallGuard`], so
-/// handles never need to reverse-map a raw store pointer back through the
-/// surrounding scope.
+/// The read-side capability that proves an object publication is epoch
+/// protected. It has no method that can mutate the object registry.
 #[derive(Clone, Copy)]
-pub(crate) struct ObjectReadGuard<'call> {
-    registration: &'call CallRegistration,
+pub(crate) struct EpochReadGuard<'call> {
+    _registration: PhantomData<&'call CallRegistration>,
 }
 
-impl<'call> ObjectReadGuard<'call> {
-    fn new(registration: &'call CallRegistration) -> Self {
-        Self { registration }
+impl<'call> EpochReadGuard<'call> {
+    fn new(_registration: &'call CallRegistration) -> Self {
+        Self {
+            _registration: PhantomData,
+        }
     }
+}
 
+/// The write-side capability used to promote a borrowed handle to an owned
+/// registry pin. It is kept separate from [`EpochReadGuard`] so the read
+/// witness cannot accidentally acquire a resurrection or pin operation.
+#[derive(Clone, Copy)]
+pub(crate) struct PinContext<'call> {
+    store: &'call Arc<ObjectStore>,
+}
+
+impl PinContext<'_> {
     pub(crate) fn pin<T: ExcelHandleObject>(
         self,
         object: LiveObjectRef,
     ) -> XllResult<PinnedObject<T>> {
-        let (pin, ptr) = self
-            .registration
-            .store
-            .pin_or_resurrect::<T>(ObjectLocator {
-                id: object.id,
-                key_hint: object.key,
-            })?;
+        let (pin, ptr) = self.store.pin_or_resurrect::<T>(ObjectLocator {
+            id: object.id,
+            key_hint: object.key,
+        })?;
         Ok(PinnedObject::from_parts(pin, ptr))
+    }
+}
+
+/// The two call-scoped capabilities produced when a handle call joins an
+/// object store. Keeping them as one value ensures both capabilities use the
+/// same registration without giving the read witness pin authority.
+#[derive(Clone, Copy)]
+pub(crate) struct CallHandleCapabilities<'call> {
+    read: EpochReadGuard<'call>,
+    pin: PinContext<'call>,
+}
+
+impl<'call> CallHandleCapabilities<'call> {
+    pub(crate) fn read_guard(self) -> EpochReadGuard<'call> {
+        self.read
+    }
+
+    pub(crate) fn pin_context(self) -> PinContext<'call> {
+        self.pin
     }
 }
 
@@ -450,10 +466,10 @@ impl HandleCallGuard {
     pub(crate) fn register<'call>(
         &'call self,
         store: &Arc<ObjectStore>,
-    ) -> XllResult<ObjectReadGuard<'call>> {
+    ) -> XllResult<CallHandleCapabilities<'call>> {
         if let Some(registration) = self.registration.get() {
             if Arc::ptr_eq(&registration.store, store) {
-                return Ok(ObjectReadGuard::new(registration));
+                return Ok(Self::capabilities(registration));
             }
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
@@ -469,11 +485,20 @@ impl HandleCallGuard {
                 diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
             });
         }
-        Ok(ObjectReadGuard::new(
+        Ok(Self::capabilities(
             self.registration
                 .get()
                 .expect("call object registration was just installed"),
         ))
+    }
+
+    fn capabilities<'call>(registration: &'call CallRegistration) -> CallHandleCapabilities<'call> {
+        CallHandleCapabilities {
+            read: EpochReadGuard::new(registration),
+            pin: PinContext {
+                store: &registration.store,
+            },
+        }
     }
 }
 
@@ -595,6 +620,16 @@ mod tests {
             drop(guard);
             assert_eq!(replacement.oldest_active(), None);
         }
+
+        let final_domain = Arc::new(EpochDomain::new());
+        let guard = final_domain.enter();
+        drop(guard);
+        EPOCH_PARTICIPANTS.with(|participants| {
+            let participants = participants.borrow();
+            assert_eq!(participants.len(), 1);
+            assert!(participants[0].domain.upgrade().is_some());
+        });
+        drop(final_domain);
     }
 
     #[test]

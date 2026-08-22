@@ -65,7 +65,7 @@ help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::handle::Ha
       but trait `ExcelParameter<'_>` is implemented for it
   --> src/value.rs
    |
-   | / impl<'call, T> ExcelParameter<'call> for crate::Handle<'call, T>
+   | / impl<'call, T> ExcelParameter<'call> for crate::handle::Handle<'call, T>
    | | where
    | |     T: crate::handle::ExcelHandleObject,
    | |________________________________________^

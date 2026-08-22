@@ -105,7 +105,7 @@ pub use addin::{Addin, HandleBindingLimit, HandleConfig, OpenContext, Opened, Ru
 pub use addin::{AsyncRuntimeConfig, AsyncWorkerCount};
 pub use error::{ExcelError, XllError, XllResult};
 
-pub mod ingress;
+mod ingress;
 
 inventory::collect!(registration::RegistrationDescriptor);
 

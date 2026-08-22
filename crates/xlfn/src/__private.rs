@@ -56,8 +56,17 @@ pub use crate::input_identity::InputIdentityEncoder;
 pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
 #[doc(hidden)]
 pub use crate::return_value::ReturnContext;
+/// Forwards the generated COM export to the internal RTD implementation.
 #[doc(hidden)]
-pub use crate::rtd::dll_get_class_object;
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+pub unsafe fn dll_get_class_object(
+    class_id: *const core::ffi::c_void,
+    interface_id: *const core::ffi::c_void,
+    output: *mut *mut core::ffi::c_void,
+) -> i32 {
+    // SAFETY: the generated export forwards Excel/COM's live pointer contract.
+    unsafe { crate::rtd::dll_get_class_object(class_id, interface_id, output) }
+}
 
 #[doc(hidden)]
 pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {

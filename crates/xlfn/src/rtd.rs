@@ -152,7 +152,7 @@ pub(crate) fn shutdown_subscriptions(
 ///
 /// # Safety
 /// The three pointers must follow the COM `DllGetClassObject` contract.
-pub unsafe fn dll_get_class_object(
+pub(crate) unsafe fn dll_get_class_object(
     class_id: *const core::ffi::c_void,
     interface_id: *const core::ffi::c_void,
     output: *mut *mut core::ffi::c_void,
@@ -166,7 +166,7 @@ pub unsafe fn dll_get_class_object(
 ///
 /// # Safety
 /// A non-null `output` must point to writable pointer storage.
-pub unsafe fn dll_get_class_object(
+pub(crate) unsafe fn dll_get_class_object(
     _class_id: *const core::ffi::c_void,
     _interface_id: *const core::ffi::c_void,
     output: *mut *mut core::ffi::c_void,
@@ -179,7 +179,7 @@ pub unsafe fn dll_get_class_object(
 }
 
 #[must_use]
-pub fn dll_can_unload_now() -> i32 {
+pub(crate) fn dll_can_unload_now() -> i32 {
     #[cfg(target_os = "windows")]
     {
         windows::dll_can_unload_now()

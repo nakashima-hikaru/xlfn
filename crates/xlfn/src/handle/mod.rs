@@ -7,8 +7,10 @@
 )]
 
 mod arena;
+mod binding;
 mod connection;
 mod formula;
+mod object_store;
 mod prepare;
 mod reclamation;
 #[cfg(any(test, feature = "handle-refinement-trace"))]
@@ -19,6 +21,7 @@ mod registry;
 mod runtime;
 mod token;
 mod topic;
+mod transaction;
 mod typed;
 
 #[cfg(test)]
@@ -47,6 +50,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 pub(crate) use arena::{BorrowedObject, PinnedObject};
+#[cfg(test)]
+pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaBinding, HandleTopicOwner, Topic};
@@ -59,6 +64,9 @@ pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
+#[cfg(test)]
+pub(crate) use object_store::ObjectKey;
+pub(crate) use object_store::{ErasedObject, ObjectLocator};
 pub(crate) use prepare::HandlePrepareState;
 #[cfg(target_os = "windows")]
 pub(crate) use prepare::RtdOperationGuard;
@@ -66,15 +74,12 @@ pub(crate) use reclamation::HandleCallGuard;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]
-pub(crate) use registry::{BindingState, HandleRegistryPhase, ObjectKey};
-pub(crate) use registry::{
-    ErasedObject, HandleRegistry, HandleRegistrySealed, LiveObjectRef, ObjectLocator,
-    PendingHandleValue,
-};
+pub(crate) use registry::HandleRegistryPhase;
+pub(crate) use registry::{HandleRegistry, HandleRegistrySealed, PendingHandleValue};
 pub(crate) use runtime::{
     HandleRuntime, HandleRuntimeResolver, HandleRuntimeSealed, HandleRuntimeSlot, HandlesQuiescent,
 };
-pub(crate) use token::{HandleId, HandleToken, ObjectId, TokenCodec};
+pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };

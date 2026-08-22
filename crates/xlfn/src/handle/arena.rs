@@ -6,25 +6,20 @@
 //! one wrapper is borrowed for an Excel call and the other owns a registry
 //! pin for a long-lived handle.
 
-use super::reclamation::ObjectReadGuard;
-use super::registry::ObjectPin;
+use super::object_store::ObjectPin;
+use super::reclamation::EpochReadGuard;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
 /// A typed object protected by a call-local epoch witness.
 pub(crate) struct BorrowedObject<'call, T> {
     ptr: NonNull<T>,
-    guard: ObjectReadGuard<'call>,
+    guard: EpochReadGuard<'call>,
 }
 
 impl<'call, T> BorrowedObject<'call, T> {
-    pub(crate) fn new(ptr: NonNull<T>, guard: ObjectReadGuard<'call>) -> Self {
+    pub(crate) fn new(ptr: NonNull<T>, guard: EpochReadGuard<'call>) -> Self {
         Self { ptr, guard }
-    }
-
-    #[inline]
-    pub(crate) fn guard(&self) -> ObjectReadGuard<'call> {
-        self.guard
     }
 
     #[cfg(test)]
@@ -39,6 +34,7 @@ impl<T> Deref for BorrowedObject<'_, T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
+        let _epoch = self.guard;
         // SAFETY: construction requires a typed publication pointer and the
         // call-local epoch witness that prevents reclamation for this borrow.
         unsafe { self.ptr.as_ref() }

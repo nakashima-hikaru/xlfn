@@ -1,4 +1,6 @@
-use super::{BorrowedObject, LiveObjectRef, ObjectLocator, PinnedObject};
+use super::object_store::{LiveObjectRef, ObjectLocator};
+use super::reclamation::PinContext;
+use super::{BorrowedObject, PinnedObject};
 use crate::XllResult;
 use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
@@ -21,14 +23,20 @@ type HandleAliasMarker<'call, T> = (&'call crate::value::CallScope<'call>, fn() 
 pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) object: LiveObjectRef,
     pub(crate) value: BorrowedObject<'call, T>,
+    pub(crate) pin: PinContext<'call>,
     pub(crate) _call: PhantomData<&'call crate::value::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(object: LiveObjectRef, value: BorrowedObject<'call, T>) -> Self {
+    pub(crate) fn new(
+        object: LiveObjectRef,
+        value: BorrowedObject<'call, T>,
+        pin: PinContext<'call>,
+    ) -> Self {
         Self {
             object,
             value,
+            pin,
             _call: PhantomData,
         }
     }
@@ -39,7 +47,7 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
     /// resulting value may outlive the Excel call and keeps the registry
     /// payload alive until it is dropped.
     fn promote(self) -> XllResult<PinnedObject<T>> {
-        self.value.guard().pin(self.object)
+        self.pin.pin(self.object)
     }
 
     /// Promotes this capability to a long-lived synchronous handle.
