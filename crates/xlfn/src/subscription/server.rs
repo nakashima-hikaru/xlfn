@@ -932,7 +932,7 @@ impl<'a> ServerTermination<'a> {
         };
 
         #[cfg(test)]
-        if PANIC_AFTER_TERMINATION_GUARD.with(|cell| cell.replace(false)) {
+        if PANIC_AFTER_TERMINATION_GUARD.replace(false) {
             panic!("injected termination owner panic");
         }
 

@@ -38,22 +38,18 @@ pub(crate) struct HandleInitializationGuard;
 
 impl HandleInitializationGuard {
     pub(crate) fn enter() -> XllResult<Self> {
-        ACTIVE_HANDLE_INITIALIZATION_DEPTH.with(|depth| {
-            if depth.get() != 0 {
-                return Err(XllError::ReentrantCall);
-            }
-            depth.set(1);
-            Ok(Self)
-        })
+        if ACTIVE_HANDLE_INITIALIZATION_DEPTH.get() != 0 {
+            return Err(XllError::ReentrantCall);
+        }
+        ACTIVE_HANDLE_INITIALIZATION_DEPTH.set(1);
+        Ok(Self)
     }
 }
 
 impl Drop for HandleInitializationGuard {
     fn drop(&mut self) {
-        ACTIVE_HANDLE_INITIALIZATION_DEPTH.with(|depth| {
-            debug_assert_eq!(depth.get(), 1);
-            depth.set(0);
-        });
+        debug_assert_eq!(ACTIVE_HANDLE_INITIALIZATION_DEPTH.get(), 1);
+        ACTIVE_HANDLE_INITIALIZATION_DEPTH.set(0);
     }
 }
 

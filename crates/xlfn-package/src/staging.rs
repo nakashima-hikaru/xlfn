@@ -458,12 +458,8 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
     // SAFETY: both pointers refer to live, NUL-terminated buffers for the
     // duration of the call. The descriptor is freed below regardless of the
     // result, after CreateDirectoryW has consumed it synchronously.
-    let created = unsafe {
-        CreateDirectoryW(
-            path_wide.as_ptr(),
-            &security_attributes as *const SECURITY_ATTRIBUTES,
-        )
-    };
+    let created =
+        unsafe { CreateDirectoryW(path_wide.as_ptr(), std::ptr::from_ref(&security_attributes)) };
     let error = if created == 0 {
         Some(io::Error::last_os_error())
     } else {

@@ -20,16 +20,13 @@ thread_local! {
 }
 
 fn current_ingress_stripe() -> usize {
-    INGRESS_STRIPE.with(|stripe| {
-        let current = stripe.get();
-        if current != usize::MAX {
-            return current;
-        }
-        let assigned =
-            NEXT_INGRESS_STRIPE.fetch_add(1, Ordering::Relaxed) & (INGRESS_STRIPE_COUNT - 1);
-        stripe.set(assigned);
-        assigned
-    })
+    let current = INGRESS_STRIPE.get();
+    if current != usize::MAX {
+        return current;
+    }
+    let assigned = NEXT_INGRESS_STRIPE.fetch_add(1, Ordering::Relaxed) & (INGRESS_STRIPE_COUNT - 1);
+    INGRESS_STRIPE.set(assigned);
+    assigned
 }
 
 static NEXT_INGRESS_STRIPE: AtomicUsize = AtomicUsize::new(0);

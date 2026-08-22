@@ -968,7 +968,7 @@ fn server_terminate_owner_unwind_notifies_waiter() {
 
     let handle = std::thread::spawn(move || server.terminate());
 
-    PANIC_AFTER_TERMINATION_GUARD.with(|cell| cell.set(true));
+    PANIC_AFTER_TERMINATION_GUARD.set(true);
 
     let cancel_res = owner.request_cancel();
     let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish(cancel_res)));

@@ -20,16 +20,13 @@ thread_local! {
 static NEXT_RETURN_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
 fn current_return_stripe() -> usize {
-    RETURN_STRIPE.with(|stripe| {
-        let current = stripe.get();
-        if current != usize::MAX {
-            return current;
-        }
-        let assigned =
-            NEXT_RETURN_STRIPE.fetch_add(1, Ordering::Relaxed) & (RETURN_STRIPE_COUNT - 1);
-        stripe.set(assigned);
-        assigned
-    })
+    let current = RETURN_STRIPE.get();
+    if current != usize::MAX {
+        return current;
+    }
+    let assigned = NEXT_RETURN_STRIPE.fetch_add(1, Ordering::Relaxed) & (RETURN_STRIPE_COUNT - 1);
+    RETURN_STRIPE.set(assigned);
+    assigned
 }
 
 #[derive(Debug)]

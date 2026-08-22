@@ -729,7 +729,7 @@ unsafe extern "system" fn benchmark_formula_callback(
         return XLRET_FAILED;
     }
 
-    let references = (&BENCH_CALLER_REFERENCES as *const xlfn_sys::XLMREF12).cast_mut();
+    let references = std::ptr::from_ref(&BENCH_CALLER_REFERENCES).cast_mut();
     let value = match function {
         XLF_CALLER if BENCH_CALLER_KIND.load(Ordering::Relaxed) == BENCH_CALLER_REF => {
             xlfn_sys::XLOPER12 {

@@ -15,16 +15,14 @@ thread_local! {
 static NEXT_HANDLE_PREPARE_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
 fn current_handle_prepare_stripe() -> usize {
-    HANDLE_PREPARE_STRIPE.with(|stripe| {
-        let current = stripe.get();
-        if current != usize::MAX {
-            return current;
-        }
-        let assigned =
-            NEXT_HANDLE_PREPARE_STRIPE.fetch_add(1, Ordering::Relaxed) & HANDLE_PREPARE_STRIPE_MASK;
-        stripe.set(assigned);
-        assigned
-    })
+    let current = HANDLE_PREPARE_STRIPE.get();
+    if current != usize::MAX {
+        return current;
+    }
+    let assigned =
+        NEXT_HANDLE_PREPARE_STRIPE.fetch_add(1, Ordering::Relaxed) & HANDLE_PREPARE_STRIPE_MASK;
+    HANDLE_PREPARE_STRIPE.set(assigned);
+    assigned
 }
 
 pub(crate) struct HandlePrepareState {

@@ -63,24 +63,20 @@ struct ActiveCacheGuard;
 
 impl ActiveCacheGuard {
     fn enter() -> XllResult<Self> {
-        ACTIVE_CACHE_INITIALIZATION_DEPTH.with(|depth| {
-            if depth.get() != 0 {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CACHE_REENTRANT,
-                });
-            }
-            depth.set(1);
-            Ok(Self)
-        })
+        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::CACHE_REENTRANT,
+            });
+        }
+        ACTIVE_CACHE_INITIALIZATION_DEPTH.set(1);
+        Ok(Self)
     }
 }
 
 impl Drop for ActiveCacheGuard {
     fn drop(&mut self) {
-        ACTIVE_CACHE_INITIALIZATION_DEPTH.with(|depth| {
-            debug_assert_eq!(depth.get(), 1);
-            depth.set(0);
-        });
+        debug_assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 1);
+        ACTIVE_CACHE_INITIALIZATION_DEPTH.set(0);
     }
 }
 

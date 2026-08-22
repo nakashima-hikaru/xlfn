@@ -164,7 +164,7 @@ pub(crate) mod test_callback {
     }
 
     pub(crate) fn lock() -> CallbackTestGuard {
-        let reentrant = CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.get() != 0);
+        let reentrant = CALLBACK_TEST_LOCK_DEPTH.get() != 0;
         let guard = if reentrant {
             None
         } else {
@@ -174,12 +174,12 @@ pub(crate) mod test_callback {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             )
         };
-        CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        CALLBACK_TEST_LOCK_DEPTH.set(CALLBACK_TEST_LOCK_DEPTH.get() + 1);
         CallbackTestGuard { guard }
     }
 
     pub(crate) fn try_lock() -> Option<CallbackTestGuard> {
-        let reentrant = CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.get() != 0);
+        let reentrant = CALLBACK_TEST_LOCK_DEPTH.get() != 0;
         let guard = if reentrant {
             None
         } else {
@@ -189,22 +189,20 @@ pub(crate) mod test_callback {
                 Err(TryLockError::WouldBlock) => return None,
             }
         };
-        CALLBACK_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        CALLBACK_TEST_LOCK_DEPTH.set(CALLBACK_TEST_LOCK_DEPTH.get() + 1);
         Some(CallbackTestGuard { guard })
     }
 
     impl Drop for CallbackTestGuard {
         fn drop(&mut self) {
-            let depth = CALLBACK_TEST_LOCK_DEPTH.with(|depth| {
-                depth
-                    .get()
-                    .checked_sub(1)
-                    .expect("callback test lock depth remains balanced")
-            });
+            let depth = CALLBACK_TEST_LOCK_DEPTH
+                .get()
+                .checked_sub(1)
+                .expect("callback test lock depth remains balanced");
             if depth == 0 {
                 drop(self.guard.take());
             }
-            CALLBACK_TEST_LOCK_DEPTH.with(|current| current.set(depth));
+            CALLBACK_TEST_LOCK_DEPTH.set(depth);
         }
     }
 
@@ -306,7 +304,7 @@ pub(crate) mod test_callback {
             (kind, XLF_CALLER) if kind != 0 => {
                 // SAFETY: the test callback owns the static reference table for
                 // the duration of the process.
-                let references = (&FORMULA_CALLER_REFERENCES as *const XLMREF12).cast_mut();
+                let references = std::ptr::from_ref(&FORMULA_CALLER_REFERENCES).cast_mut();
                 if kind == FormulaCallerKind::Ref as i32 {
                     // SAFETY: the callback contract supplies writable result storage.
                     unsafe {
@@ -357,7 +355,7 @@ pub(crate) mod test_callback {
             (kind, XL_SHEET_ID) if kind != 0 => {
                 // SAFETY: the test callback owns the static reference table for
                 // the duration of the process.
-                let references = (&FORMULA_CALLER_REFERENCES as *const XLMREF12).cast_mut();
+                let references = std::ptr::from_ref(&FORMULA_CALLER_REFERENCES).cast_mut();
                 // SAFETY: the callback contract supplies writable result storage.
                 unsafe {
                     *result = XLOPER12 {
