@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/xlfn.svg)](https://crates.io/crates/xlfn)
 [![docs.rs](https://docs.rs/xlfn/badge.svg)](https://docs.rs/xlfn)
 [![CI](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml/badge.svg)](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml)
-[![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust-toolchain.toml)
+[![Rust 1.98.0](https://img.shields.io/badge/Rust-1.98.0-000000?logo=rust)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 [User Guide](https://nakashima-hikaru.github.io/xlfn/) ·
@@ -109,7 +109,7 @@ xlfn focuses on native worksheet functions and calculation infrastructure. Ribbo
 ### Requirements
 
 - Windows 10 or Windows 11
-- Rust `1.97.1`
+- Rust `1.98.0`
 - Visual Studio Build Tools with **Desktop development with C++**
 - `i686-pc-windows-msvc` for 32-bit Excel
 - `x86_64-pc-windows-msvc` for 64-bit Excel

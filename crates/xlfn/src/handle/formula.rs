@@ -1,7 +1,7 @@
 use crate::input_identity::InputFingerprint;
 use crate::return_value::ExcelCallbackStatus;
 use crate::{XllError, XllResult};
-use std::fmt::Write as _;
+use core::fmt::NumBuffer;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {
@@ -45,12 +45,16 @@ impl FormulaRevisionKey {
             NUMERIC_KEY_CAPACITY + self.udf_id.len() + self.inputs.as_bytes().len() * 2,
         );
 
-        write!(
-            &mut result,
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}",
-            self.caller.sheet_id, self.caller.row, self.caller.column, self.udf_id,
-        )
-        .expect("writing to String cannot fail");
+        let mut sheet_buffer = NumBuffer::<usize>::new();
+        let mut coordinate_buffer = NumBuffer::<i32>::new();
+        result.push_str(self.caller.sheet_id.format_into(&mut sheet_buffer));
+        result.push('\x1f');
+        result.push_str(self.caller.row.format_into(&mut coordinate_buffer));
+        result.push('\x1f');
+        result.push_str(self.caller.column.format_into(&mut coordinate_buffer));
+        result.push('\x1f');
+        result.push_str(self.udf_id);
+        result.push('\x1f');
 
         for byte in self.inputs.as_bytes() {
             result.push(HEX[(byte >> 4) as usize] as char);

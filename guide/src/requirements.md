@@ -5,7 +5,7 @@
 Release XLLs target the Microsoft Visual C++ ABI and are expected to be built and linked on Windows with:
 
 - Windows 10 or Windows 11;
-- Rust 1.97.1 or a compatible toolchain for this source snapshot;
+- Rust 1.98.0 or a compatible toolchain for this source snapshot;
 - the `i686-pc-windows-msvc` and/or `x86_64-pc-windows-msvc` Rust targets;
 - Visual Studio Build Tools with **Desktop development with C++**;
 - Cargo and `cargo-xlfn`.
@@ -14,7 +14,7 @@ The repository pins the toolchain and both targets in `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
 targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"]

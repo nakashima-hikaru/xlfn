@@ -101,7 +101,8 @@ fn decode_digest_hex(hex: &str) -> [u8; 32] {
 
     assert_eq!(hex.len(), 64, "golden digest must contain 32 bytes");
     let mut digest = [0_u8; 32];
-    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+    let (chunks, _) = hex.as_bytes().as_chunks::<2>();
+    for (index, pair) in chunks.iter().enumerate() {
         digest[index] = nibble(pair[0]) << 4 | nibble(pair[1]);
     }
     digest

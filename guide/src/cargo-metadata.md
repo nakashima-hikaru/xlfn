@@ -94,7 +94,7 @@ Windows system imports are accepted by the versioned built-in `windows-system-v1
 name = "data-xlfn"
 version = "1.4.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.98.0"
 
 [lib]
 crate-type = ["cdylib"]

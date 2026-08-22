@@ -17,7 +17,8 @@ pub(crate) fn decode_tag(encoded: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut tag = [0_u8; 16];
-    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+    let (chunks, _) = encoded.as_bytes().as_chunks::<2>();
+    for (index, pair) in chunks.iter().enumerate() {
         tag[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(tag)

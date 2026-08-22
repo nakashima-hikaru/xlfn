@@ -10,7 +10,7 @@ For the source version documented by this guide:
 |---|---|
 | workspace version | `0.2.0` |
 | Rust edition | 2024 |
-| minimum/pinned Rust toolchain | `1.97.1` |
+| minimum/pinned Rust toolchain | `1.98.0` |
 | license | MIT OR Apache-2.0 |
 | Excel C API generation | Excel 12 / `XLOPER12` |
 
