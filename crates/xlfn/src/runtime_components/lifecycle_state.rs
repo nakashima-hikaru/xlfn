@@ -244,9 +244,9 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     pub(crate) fn stage_opening_state(
         &self,
-        state: A::State,
+        state: A::SharedState,
         config: crate::addin::RuntimeConfig,
-    ) -> Result<(), (crate::XllError, A::State)> {
+    ) -> Result<(), (crate::XllError, A::SharedState)> {
         let mut slot = self.opening.lock();
         if slot.is_some() || self.current.load().is_some() {
             return Err((
@@ -256,7 +256,10 @@ impl<A: crate::Addin> LifecycleState<A> {
                 state,
             ));
         }
-        *slot = Some(OpeningGeneration::StateOnly { state, config });
+        *slot = Some(OpeningGeneration::SharedStateOnly {
+            shared_state: state,
+            config,
+        });
         Ok(())
     }
 
@@ -287,13 +290,13 @@ impl<A: crate::Addin> LifecycleState<A> {
             },
             opening: None,
         })?;
-        let (state, layers, _config) = match opening {
+        let (shared_state, layers, _config) = match opening {
             OpeningGeneration::Ready {
-                state,
+                shared_state,
                 layers,
                 config,
-            } => (state, layers, config),
-            opening @ OpeningGeneration::StateOnly { .. } => {
+            } => (shared_state, layers, config),
+            opening @ OpeningGeneration::SharedStateOnly { .. } => {
                 return Err(PublishOpeningError {
                     error: crate::XllError::Internal {
                         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
@@ -304,7 +307,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         };
         self.current.store(Some(Arc::new(OpenGeneration {
             id: generation,
-            state,
+            shared_state,
             layers,
         })));
         Ok(())
@@ -312,7 +315,7 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
         self.opening.lock().as_ref().map(|opening| match opening {
-            OpeningGeneration::StateOnly { config, .. }
+            OpeningGeneration::SharedStateOnly { config, .. }
             | OpeningGeneration::Ready { config, .. } => *config,
         })
     }

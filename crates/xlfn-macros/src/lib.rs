@@ -30,8 +30,9 @@ use options::{
 /// Attributes a function as an Excel UDF.
 ///
 /// Excel-visible arguments and return values are selected by their conversion
-/// trait implementations. Injected contexts must be the first parameter and
-/// carry an explicit `#[excel_context(...)]` role.
+/// trait implementations. An `async fn` selects asynchronous mode directly;
+/// there is no `#[excel_function(async)]` mode flag. Injected contexts must be
+/// the first parameter and carry an explicit `#[excel_context(...)]` role.
 #[proc_macro_attribute]
 pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -862,7 +863,46 @@ mod tests {
     }
 
     #[test]
-    fn async_function_uses_native_async_boundary_and_owned_context() {
+    fn execution_mode_flags_cannot_repeat_context_roles() {
+        let error = expand_excel_function(
+            quote!(name = "TEST.DUPLICATE.THREAD", thread_safe),
+            function(quote!(
+                fn value(
+                    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
+                ) -> i32 {
+                    let _ = context;
+                    1
+                }
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must not repeat the `thread_safe`")
+        );
+
+        let error = expand_excel_function(
+            quote!(name = "TEST.DUPLICATE.MACRO", macro_sheet),
+            function(quote!(
+                fn value(
+                    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, State>,
+                ) -> i32 {
+                    let _ = context;
+                    1
+                }
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must not repeat the `macro_sheet`")
+        );
+    }
+
+    #[test]
+    fn async_function_uses_native_async_boundary_and_borrowed_context() {
         let expanded = expand_excel_function(
             quote!(name = "TEST.ASYNC"),
             function(quote!(
@@ -883,6 +923,22 @@ mod tests {
         assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("__xlfn_async_only !"));
         assert!(!expanded.contains("AsyncFeature"));
+        assert!(expanded.contains("assert_async_return"));
+    }
+
+    #[test]
+    fn async_function_selects_async_mode_without_a_mode_attribute() {
+        let expanded = expand_excel_function(
+            quote!(name = "TEST.ASYNC.NO_CONTEXT"),
+            function(quote!(
+                async fn value(input: f64) -> XllResult<f64> {
+                    Ok(input)
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("async_udf"));
         assert!(expanded.contains("assert_async_return"));
     }
 

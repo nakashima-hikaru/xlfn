@@ -32,15 +32,16 @@ pub struct Configuration {
 pub struct DeskTools;
 
 impl Addin for DeskTools {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         let configuration = load_configuration(context.module_directory())?;
         Ok(Opened::new(State {
             configuration: Arc::new(configuration),
-        }, ()))
+        }, (), ()))
     }
 }
 

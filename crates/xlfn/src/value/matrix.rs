@@ -57,12 +57,16 @@ impl<T> Matrix<T> {
     }
 }
 
-/// A call-scoped view over a rectangular collection whose elements are owned
-/// by the active [`crate::call::CallScope`].
+/// A call-scoped view over a typed rectangular collection materialized in the
+/// active [`crate::call::CallScope`] scratch arena.
 ///
-/// `MatrixRef` contains no allocation and cannot outlive the Excel call that
-/// created it. Use [`Self::to_owned`] when the values must cross that
-/// boundary.
+/// `MatrixRef` does not own a separate heap allocation and cannot outlive the
+/// Excel call that created it. Excel stores an input array as `XLOPER12`
+/// cells, so decoding into a typed `&[T]` necessarily copies the elements;
+/// this type avoids per-element ownership and deallocation rather than being
+/// a literal zero-copy view. Use [`crate::value::XlArrayRef`] for lazy access
+/// to the raw cells, or [`Self::to_owned`] when the values must cross the
+/// call boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MatrixRef<'call, T> {
     rows: usize,

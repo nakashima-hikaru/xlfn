@@ -87,16 +87,16 @@ When an application must retain a handle beyond the current Excel call, promote
 it explicitly:
 
 ```rust
-fn retain(dataset: Handle<'_, Dataset>) -> XllResult<PinnedHandle<Dataset>> {
+fn retain(dataset: Handle<'_, Dataset>) -> XllResult<HandleLease<Dataset>> {
     dataset.pin()
 }
 ```
 
-`PinnedHandle<T>` is the long-lived registry lease and may be moved into a
+`HandleLease<T>` is the long-lived registry lease and may be moved into a
 `Send + 'static` future when `T` is safe for that future:
 
 ```rust
-fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<PinnedHandle<Dataset>> {
+fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<HandleLease<Dataset>> {
     dataset.pin()
 }
 ```
@@ -105,7 +105,7 @@ These types own a registry pin, not an `Arc<T>`. The registry remains the sole
 owner of the payload, and the payload is released when its formula bindings and
 all explicit pins are gone. A pin may therefore survive formula disconnect or
 terminal runtime close, but it must be dropped when the application no longer
-needs it. `PinnedHandle` is not an Excel return value. It is the owned handle
+needs it. `HandleLease` is not an Excel return value. It is the owned handle
 type used when a value must cross Excel calls or enter an asynchronous UDF.
 
 ## Re-evaluation semantics
@@ -209,7 +209,7 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 `HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
 `Handle<'_, T>` is an input capability only and is not a valid return type.
 
-`PinnedHandle<T>` is intentionally not call-borrowed: it is an owned input that
+`HandleLease<T>` is intentionally not call-borrowed: it is an owned input that
 pins the registry payload before an async future is scheduled. It can also be
 used synchronously; it does not make a borrowed `Handle<'_, T>` safe to capture
 without an explicit call to `Handle::pin()`.

@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:25:45
+  --> tests/ui/fail_async/async_handle_input.rs:26:45
    |
-25 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
+26 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
    |                                             ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `xlfn::Addin` is not implemented for `State`
@@ -26,12 +26,12 @@ note: required by a bound in `xlfn::AsyncContext`
    |                                   ^^^^^ required by this bound in `AsyncContext`
 
 error[E0599]: the method `state` exists for struct `xlfn::AsyncContext<'_, State>`, but its trait bounds were not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:28:21
+  --> tests/ui/fail_async/async_handle_input.rs:29:21
    |
  3 | struct State;
    | ------------ doesn't satisfy `State: xlfn::Addin`
 ...
-28 |     let _ = context.state();
+29 |     let _ = context.state();
    |                     ^^^^^ private field, not a method
    |
    = note: the following trait bounds were not satisfied:
@@ -43,9 +43,9 @@ note: the trait `xlfn::Addin` must be implemented
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::ExcelParameter<'call>` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
    |
 help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
@@ -66,9 +66,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
    = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
@@ -92,9 +92,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Rc<xlfn::host_callback::HostCallbackShared>`
@@ -129,9 +129,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `OnceCell<handle::reclamation::CallRegistration>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `OnceCell<handle::reclamation::CallRegistration>`
@@ -167,9 +167,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<NonNull<bumpalo::ChunkFooter>>`
@@ -215,9 +215,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<Option<usize>>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:26:14
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
-26 |     dataset: Handle<'_, Dataset>,
+27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<Option<usize>>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<Option<usize>>`
@@ -263,12 +263,12 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |                                           ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0308]: mismatched types
-  --> tests/ui/fail_async/async_handle_input.rs:23:1
+  --> tests/ui/fail_async/async_handle_input.rs:24:1
    |
-23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
+24 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AsyncContext<'_, State>`, found `AsyncContext<'_, AsyncTestAddin>`
-24 | async fn async_handle_input(
-25 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
+25 | async fn async_handle_input(
+26 |     #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
    |                                             ----------------------- expected due to this
    |
    = note: expected struct `xlfn::AsyncContext<'_, State>`
@@ -276,9 +276,9 @@ error[E0308]: mismatched types
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `State: xlfn::Addin` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:23:1
+  --> tests/ui/fail_async/async_handle_input.rs:24:1
    |
-23 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
+24 | #[excel_function(name = "TEST.HANDLE.ASYNC")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `xlfn::Addin` is not implemented for `State`

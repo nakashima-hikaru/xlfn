@@ -37,11 +37,12 @@ A basic production setup installs the built-in bounded file sink during `Addin::
 
 ```rust
 impl Addin for DeskTools {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         let path = context
             .diagnostics()
             .install_file_sink()
@@ -50,7 +51,7 @@ impl Addin for DeskTools {
                 message: error.to_string(),
             })?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
-        Ok(Opened::new(State::new(), ()))
+        Ok(Opened::new(State::new(), (), ()))
     }
 }
 ```
@@ -91,11 +92,12 @@ Install the custom sink during `Addin::open`:
 
 ```rust
 impl Addin for DeskTools {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
+    fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         context
             .diagnostics()
             .set_sink(Telemetry)
@@ -103,7 +105,7 @@ impl Addin for DeskTools {
                 code: -1,
                 message: error.to_string(),
             })?;
-        Ok(Opened::new(State::new(), ()))
+        Ok(Opened::new(State::new(), (), ()))
     }
 }
 ```

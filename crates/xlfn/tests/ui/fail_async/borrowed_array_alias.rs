@@ -7,12 +7,13 @@ type BorrowedArray<'call> = XlArrayRef<'call>;
 struct BorrowedAsyncAliasAddin;
 
 impl Addin for BorrowedAsyncAliasAddin {
-    type State = ();
+    type SharedState = ();
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), ()))
+    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new((), (), ()))
     }
 }
 

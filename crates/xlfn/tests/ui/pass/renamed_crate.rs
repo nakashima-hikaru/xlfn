@@ -18,12 +18,13 @@ pub struct CustomHandle {
 pub struct RenamedAddin;
 
 impl Addin for RenamedAddin {
-    type State = ();
+    type SharedState = ();
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), ()))
+    fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new((), (), ()))
     }
 }
 

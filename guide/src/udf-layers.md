@@ -52,12 +52,13 @@ Register layers from the add-in using static tuple composition:
 
 ```rust
 impl Addin for DeskTools {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = (MetricsLayer,);
 
-    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
-        Ok(Opened::new(State::new(), (MetricsLayer,)))
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+        Ok(Opened::new(State::new(), (), (MetricsLayer,)))
     }
 }
 ```
@@ -66,12 +67,13 @@ Add-ins without layers specify `type Layers = ();`:
 
 ```rust
 impl Addin for SimpleAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
-        Ok(Opened::new(State::new(), ()))
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+        Ok(Opened::new(State::new(), (), ()))
 }
 ```
 

@@ -70,11 +70,12 @@ pub struct State;
 pub struct HelloXll;
 
 impl Addin for HelloXll {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+    fn open(context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         context
             .diagnostics()
             .install_file_sink()
@@ -82,7 +83,7 @@ impl Addin for HelloXll {
                 code: -1,
                 message: error.to_string(),
             })?;
-        Ok(Opened::new(State, ()))
+        Ok(Opened::new(State, (), ()))
     }
 }
 ```

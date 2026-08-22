@@ -4,21 +4,27 @@ The `Addin` trait defines one open generation of the XLL:
 
 ```rust
 pub trait Addin: Send + Sync + 'static {
-    type State: Send + Sync + 'static;
+    type SharedState: Send + Sync + 'static;
+    type LifecycleState: 'static;
     type Error: IntoXllError;
     type Layers: UdfLayers;
 
     fn open(
         context: &OpenContext,
-    ) -> Result<Opened<Self::State, Self::Layers>, Self::Error>;
-    fn quiesce(state: &mut Self::State) -> Result<(), Self::Error>;
-    fn cleanup(state: &mut Self::State, reporter: &mut CleanupReporter<'_>);
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>;
+    fn quiesce(
+        shared: &mut Self::SharedState,
+        lifecycle: &mut Self::LifecycleState,
+    ) -> Result<(), Self::Error>;
+    fn cleanup(lifecycle: &mut Self::LifecycleState, reporter: &mut CleanupReporter<'_>);
 }
 ```
 
-`Opened` returns state, execution layers, and the runtime policy as one open
-transaction. `RuntimeConfig` can select RTD limits and, with the `async`
-feature, the async worker count.
+`Opened` returns shared state, lifecycle-local state, execution layers, and the
+runtime policy as one open transaction. `SharedState` is borrowed by UDF calls
+and must be `Send + Sync`; `LifecycleState` is retained by xlfn on the Excel
+main lifecycle thread and may own thread-affine resources. `RuntimeConfig` can
+select RTD limits and, with the `async` feature, the async worker count.
 
 The stable default uses `type Layers = ();`. Custom UDF layers and other
 lower-level execution APIs require the explicit `unstable` feature and are
@@ -39,12 +45,16 @@ Do not perform unbounded I/O or long-running initialization in `open`. Excel is 
 
 ## Shared state
 
-Synchronous contexts borrow `&State`. The framework-owned asynchronous future keeps the current open generation (`GenerationLease`) alive, while `AsyncContext<'_, A>` borrows the generation state and per-call cancellation token for the invocation. State therefore needs explicit synchronization for mutable shared data:
+Synchronous contexts borrow `&SharedState`. The framework-owned asynchronous
+future keeps the current open generation (`GenerationLease`) alive, while
+`AsyncContext<'_, A>` borrows the shared generation state and per-call
+cancellation token for the invocation. Shared state therefore needs explicit
+synchronization for mutable data:
 
 ```rust
 use std::sync::RwLock;
 
-pub struct State {
+pub struct SharedState {
     settings: RwLock<Settings>,
 }
 ```
@@ -63,12 +73,13 @@ With the `async` feature:
 
 ```rust
 impl Addin for ServiceAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
-        Ok(Opened::new(State::new(), ()).with_runtime_config(
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+        Ok(Opened::new(State::new(), (), ()).with_runtime_config(
             RuntimeConfig::new().with_async_worker_count(4),
         ))
     }
@@ -86,9 +97,13 @@ pool, or other runtime created by the application.
 The formula-handle registry is closed after `quiesce` returns. Formula-owned Rust objects can therefore still exist while application quiescence is being established. If a handle object refers to an application-owned resource, `quiesce` must leave its later `Drop` safe after workers, connections, or owner threads have stopped. Prefer releasing or invalidating such resources while their owners are still available, then make the later wrapper drop local or idempotent. See [Formula-owned handles](handles.md).
 
 ```rust
-fn quiesce(state: &mut State) -> Result<(), Error> {
-    state.request_application_shutdown();
-    state.join_application_workers()?;
+fn quiesce(
+    shared: &mut SharedState,
+    lifecycle: &mut LifecycleState,
+) -> Result<(), Error> {
+    shared.request_application_shutdown();
+    shared.join_application_workers()?;
+    lifecycle.release_thread_affine_resources();
     Ok(())
 }
 ```
@@ -128,17 +143,23 @@ For application-owned concurrent or thread-affine resources, a safe shutdown seq
 
 xlfn cannot prove those application-level properties; `quiesce` is the boundary at which the add-in must establish them.
 
-After quiescence, `Addin::cleanup` performs best-effort disposal. It cannot return an arbitrary business error. Report recoverable failures explicitly; they are logged without preventing safe unload:
+After quiescence, `Addin::cleanup` performs best-effort disposal of
+`LifecycleState`. It cannot return an arbitrary business error. Report
+recoverable failures explicitly; they are logged without preventing safe
+unload:
 
 ```rust
-fn cleanup(state: &mut State, reporter: &mut CleanupReporter<'_>) {
-    if let Err(error) = state.remove_cached_metadata() {
+fn cleanup(lifecycle: &mut LifecycleState, reporter: &mut CleanupReporter<'_>) {
+    if let Err(error) = lifecycle.remove_cached_metadata() {
         reporter.warn("metadata cache", CleanupIssueKind::HostMetadata, error);
     }
 }
 ```
 
-A cleanup panic is contained after quiescence. The framework leaks the state rather than invoking more unknown destructor code, records the issue, and completes unload. `cleanup` must not start work or register callbacks.
+A cleanup panic is contained after quiescence. The framework leaks the
+lifecycle state rather than invoking more unknown destructor code, records the
+issue, and completes unload. `cleanup` must not start work or register
+callbacks.
 
 Consequences:
 
@@ -150,6 +171,15 @@ Consequences:
 
 ## Application-owned lifecycle resources
 
-`Addin::open`, `Addin::quiesce`, and `Addin::cleanup` for a generation run on the same lifecycle thread. An application may use this property for lifecycle-owned registries or other resources that are not exposed to worksheet calls. `State` itself remains `Send + Sync + 'static`; expose only safe, thread-compatible clients through it.
+`Addin::open`, `Addin::quiesce`, and `Addin::cleanup` for a generation run on
+the same lifecycle thread. An application may use this property for
+lifecycle-owned registries or other resources that are not exposed to
+worksheet calls. `SharedState` remains `Send + Sync + 'static`; expose only
+safe, thread-compatible clients through it. `LifecycleState` is the place for
+thread-affine owners.
 
-For a thread-affine application resource, lifecycle code may own the resource and its worker while `State` exposes only a safe client. Do not let submitted work capture and destroy the owner responsible for joining its own worker. xlfn constrains the Excel boundary and unload ordering; the application's internal dispatch design remains ordinary Rust code.
+For a thread-affine application resource, lifecycle code may own the resource
+and its worker while `SharedState` exposes only a safe client. Do not let
+submitted work capture and destroy the owner responsible for joining its own
+worker. xlfn constrains the Excel boundary and unload ordering; the
+application's internal dispatch design remains ordinary Rust code.

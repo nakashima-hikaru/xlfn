@@ -182,15 +182,34 @@ where
     A: Addin,
 {
     let opened = A::open(context).map_err(IntoXllError::into_xll_error)?;
-    let (state, layers, runtime_config) = opened.into_parts();
+    let (shared_state, lifecycle_state, layers, runtime_config) = opened.into_parts();
+    // Lifecycle state is deliberately installed in the main-thread slot
+    // before the shared generation is staged. It may be non-Send and must not
+    // become part of the cross-thread generation root.
+    if let Err(lifecycle_state) = runtime.install_lifecycle_state(lifecycle_state) {
+        runtime.retain_lifecycle_state(lifecycle_state);
+        runtime.quarantine_shared_state(
+            active_runtime_generation(runtime),
+            shared_state,
+            crate::runtime_components::QuarantineReason::OpenStateInvariant,
+        );
+        runtime.quarantine_layers(
+            active_runtime_generation(runtime),
+            layers,
+            crate::runtime_components::QuarantineReason::OpenStateInvariant,
+        );
+        return Err(XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+        });
+    }
     // Stage unique ownership in OpeningGeneration before invoking add-in hooks.
-    // If subsequent hooks panic, the outer boundary can roll the state back
-    // through quiesce and cleanup with complete unique ownership.
-    if let Err((error, state)) = runtime.stage_opening_state(state, runtime_config) {
+    // If subsequent hooks panic, the outer boundary can roll the shared state
+    // back while the lifecycle state remains retained in its main-thread slot.
+    if let Err((error, shared_state)) = runtime.stage_opening_state(shared_state, runtime_config) {
         let generation = active_runtime_generation(runtime);
-        runtime.quarantine_state(
+        runtime.quarantine_shared_state(
             generation,
-            state,
+            shared_state,
             crate::runtime_components::QuarantineReason::OpenStateInvariant,
         );
         runtime.quarantine_layers(
@@ -396,24 +415,33 @@ where
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
     // are call-scoped borrows and cannot be stored in state.
-    let mut addin_state = None;
+    let mut addin_shared_state = None;
     let mut addin_quiesced = None;
     let mut generation_reclaimed = None;
     if let Some(opening) = runtime.take_opening_generation() {
-        let (mut state, layers, _config) = opening.into_parts();
-        match catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
-            .map_err(|_| XllError::Panic)
-            .and_then(|result| result.map_err(IntoXllError::into_xll_error))
+        let (mut shared_state, layers, _config) = opening.into_parts();
+        match catch_unwind(AssertUnwindSafe(|| {
+            runtime
+                .with_lifecycle_state(|lifecycle_state| {
+                    A::quiesce(&mut shared_state, lifecycle_state)
+                        .map_err(IntoXllError::into_xll_error)
+                })
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                })?
+        }))
+        .map_err(|_| XllError::Panic)
+        .and_then(|result| result)
         {
             Ok(()) => {
                 drop(layers);
-                addin_state = Some(state);
+                addin_shared_state = Some(shared_state);
                 addin_quiesced = Some(crate::shutdown::AddinQuiesced::new());
                 generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
             }
             Err(error) => {
                 report_boundary_error("xlAutoOpen rollback quiesce", &error);
-                // A failed quiesce cannot prove that State-owned
+                // A failed quiesce cannot prove that shared-state-owned
                 // execution resources have stopped. Preserve it until
                 // the caller enters the quarantine path.
                 if let Some(layers) = layers {
@@ -423,9 +451,9 @@ where
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                     );
                 }
-                runtime.quarantine_state(
+                runtime.quarantine_shared_state(
                     generation,
-                    state,
+                    shared_state,
                     crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                 );
                 local_quiescent = false;
@@ -465,38 +493,63 @@ where
         None
     };
 
-    if local_quiescent && let Some(mut state) = addin_state.take() {
+    if local_quiescent && let Some(shared_state) = addin_shared_state.take() {
         let mut report = crate::shutdown::CloseReport::default();
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
-            A::cleanup(&mut state, &mut reporter);
+            runtime
+                .with_lifecycle_state(|lifecycle_state| {
+                    let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
+                    A::cleanup(lifecycle_state, &mut reporter);
+                })
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                })
         }));
-        if cleanup.is_err() {
+        if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
             report.push(
                 "Addin::cleanup",
                 crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
-            runtime.quarantine_state(
+            runtime.quarantine_shared_state(
                 generation,
-                state,
+                shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
-        } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
-            report.push(
-                "Addin::State::drop",
-                crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                XllError::Panic,
-            );
+        } else {
+            if let Some(lifecycle_state) = runtime.take_lifecycle_state() {
+                if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
+                    report.push(
+                        "Addin::LifecycleState::drop",
+                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                        XllError::Panic,
+                    );
+                }
+            } else {
+                report.push(
+                    "Addin::LifecycleState",
+                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                    XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                    },
+                );
+            }
+            if catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_err() {
+                report.push(
+                    "Addin::SharedState::drop",
+                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                    XllError::Panic,
+                );
+            }
         }
         for issue in report.issues() {
             report_cleanup_issue(issue);
         }
     }
-    if let Some(state) = addin_state {
-        runtime.quarantine_state(
+    if let Some(shared_state) = addin_shared_state {
+        runtime.quarantine_shared_state(
             generation,
-            state,
+            shared_state,
             crate::runtime_components::QuarantineReason::BoundaryFailure,
         );
     }
@@ -915,17 +968,26 @@ where
     #[cfg(any(test, feature = "shutdown-refinement"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::HostDetached);
 
-    let mut addin_state = None;
+    let mut addin_shared_state = None;
     if let Some(generation) = runtime.take_generation_for_shutdown() {
         match generation {
             crate::runtime::ShutdownGeneration::Open(generation) => {
                 match std::sync::Arc::try_unwrap(generation) {
                     Ok(mut generation) => {
-                        if let Err(error) =
-                            catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut generation.state)))
-                                .map_err(|_| XllError::Panic)
-                                .and_then(|result| result.map_err(IntoXllError::into_xll_error))
-                        {
+                        let quiesce = catch_unwind(AssertUnwindSafe(|| {
+                            runtime
+                                .with_lifecycle_state(|lifecycle_state| {
+                                    A::quiesce(&mut generation.shared_state, lifecycle_state)
+                                        .map_err(IntoXllError::into_xll_error)
+                                })
+                                .ok_or(XllError::Internal {
+                                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                                })
+                        }))
+                        .map_err(|_| XllError::Panic)
+                        .and_then(|result| result)
+                        .and_then(|result| result);
+                        if let Err(error) = quiesce {
                             report_boundary_error("xlAutoRemove quiesce", &error);
                             runtime.quarantine_generation(
                                 active_runtime_generation(runtime),
@@ -940,7 +1002,7 @@ where
                             ));
                         }
                         drop(generation.layers);
-                        addin_state = Some(generation.state);
+                        addin_shared_state = Some(generation.shared_state);
                     }
                     Err(generation) => {
                         let error = XllError::Internal {
@@ -962,11 +1024,21 @@ where
                 }
             }
             crate::runtime::ShutdownGeneration::Opening(opening) => {
-                let (mut state, layers, _config) = opening.into_parts();
-                if let Err(error) = catch_unwind(AssertUnwindSafe(|| A::quiesce(&mut state)))
-                    .map_err(|_| XllError::Panic)
-                    .and_then(|result| result.map_err(IntoXllError::into_xll_error))
-                {
+                let (mut shared_state, layers, _config) = opening.into_parts();
+                let quiesce = catch_unwind(AssertUnwindSafe(|| {
+                    runtime
+                        .with_lifecycle_state(|lifecycle_state| {
+                            A::quiesce(&mut shared_state, lifecycle_state)
+                                .map_err(IntoXllError::into_xll_error)
+                        })
+                        .ok_or(XllError::Internal {
+                            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                        })
+                }))
+                .map_err(|_| XllError::Panic)
+                .and_then(|result| result)
+                .and_then(|result| result);
+                if let Err(error) = quiesce {
                     report_boundary_error("xlAutoRemove quiesce", &error);
                     let generation_id = active_runtime_generation(runtime);
                     if let Some(layers) = layers {
@@ -976,9 +1048,9 @@ where
                             crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                         );
                     }
-                    runtime.quarantine_state(
+                    runtime.quarantine_shared_state(
                         generation_id,
-                        state,
+                        shared_state,
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                     );
                     return Err(handle_unload_hazard(
@@ -989,7 +1061,7 @@ where
                     ));
                 }
                 drop(layers);
-                addin_state = Some(state);
+                addin_shared_state = Some(shared_state);
             }
         }
     } else {
@@ -1020,28 +1092,53 @@ where
         }
     };
 
-    if let Some(mut state) = addin_state.take() {
+    if let Some(shared_state) = addin_shared_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
-            A::cleanup(&mut state, &mut reporter);
+            runtime
+                .with_lifecycle_state(|lifecycle_state| {
+                    let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
+                    A::cleanup(lifecycle_state, &mut reporter);
+                })
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                })
         }));
-        if cleanup.is_err() {
+        if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
             report.push(
                 "Addin::cleanup",
                 crate::shutdown::CleanupIssueKind::DisposalPanicked,
                 XllError::Panic,
             );
-            runtime.quarantine_state(
+            runtime.quarantine_shared_state(
                 active_runtime_generation(runtime),
-                state,
+                shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
-        } else if catch_unwind(AssertUnwindSafe(|| drop(state))).is_err() {
-            report.push(
-                "Addin::State::drop",
-                crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                XllError::Panic,
-            );
+        } else {
+            if let Some(lifecycle_state) = runtime.take_lifecycle_state() {
+                if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
+                    report.push(
+                        "Addin::LifecycleState::drop",
+                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                        XllError::Panic,
+                    );
+                }
+            } else {
+                report.push(
+                    "Addin::LifecycleState",
+                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                    XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                    },
+                );
+            }
+            if catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_err() {
+                report.push(
+                    "Addin::SharedState::drop",
+                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                    XllError::Panic,
+                );
+            }
         }
     }
     for issue in report.issues() {
@@ -1388,22 +1485,29 @@ mod tests {
     struct LayersPanic;
 
     impl Addin for LayersPanic {
-        type State = ();
+        type SharedState = ();
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
-            Ok(crate::addin::Opened::new((), ()))
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            Ok(crate::addin::Opened::new((), (), ()))
         }
 
-        fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
             LAYERS_PANIC_QUIESCES.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
 
-        fn cleanup(_: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
             assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
             LAYERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
         }
@@ -1482,13 +1586,17 @@ mod tests {
     struct ReloadFailure;
 
     impl Addin for ReloadFailure {
-        type State = ();
+        type SharedState = ();
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
             })
@@ -1532,17 +1640,24 @@ mod tests {
     }
 
     impl Addin for RetryClose {
-        type State = RetryState;
+        type SharedState = ();
+        type LifecycleState = RetryState;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!("the close retry test publishes state directly")
         }
 
-        fn cleanup(state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(
+            state: &mut Self::LifecycleState,
+            reporter: &mut crate::shutdown::CleanupReporter<'_>,
+        ) {
             state
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1561,7 +1676,8 @@ mod tests {
         let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(
+        runtime.publish_with_lifecycle(
+            (),
             RetryState {
                 attempts: std::sync::Arc::clone(&attempts),
             },
@@ -1589,17 +1705,21 @@ mod tests {
     }
 
     impl Addin for CleanupPanic {
-        type State = DropObserved;
+        type SharedState = ();
+        type LifecycleState = DropObserved;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn cleanup(_: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
             panic!("injected cleanup panic");
         }
     }
@@ -1609,7 +1729,8 @@ mod tests {
         let runtime = Runtime::<CleanupPanic>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
+        runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
+        assert!(runtime.with_lifecycle_state(|_| ()).is_some());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         remove_addin_inner::<CleanupPanic>(&runtime);
@@ -1621,17 +1742,24 @@ mod tests {
     struct QuiesceFailure;
 
     impl Addin for QuiesceFailure {
-        type State = DropObserved;
+        type SharedState = ();
+        type LifecycleState = DropObserved;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn quiesce(_: &mut Self::State) -> Result<(), Self::Error> {
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
             Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::QUIESCENCE_FAILURE,
             })
@@ -1643,7 +1771,8 @@ mod tests {
         let runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = runtime.begin_open().unwrap();
-        runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
+        runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
+        assert!(runtime.with_lifecycle_state(|_| ()).is_some());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let result = { remove_addin_inner::<QuiesceFailure>(&runtime) };
@@ -1666,7 +1795,8 @@ mod tests {
         let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(
+        runtime.publish_with_lifecycle(
+            (),
             RetryState {
                 attempts: std::sync::Arc::clone(&attempts),
             },
@@ -1693,13 +1823,17 @@ mod tests {
     struct CleanClose;
 
     impl Addin for CleanClose {
-        type State = ();
+        type SharedState = ();
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
     }
@@ -1707,17 +1841,24 @@ mod tests {
     struct TraceCleanup;
 
     impl Addin for TraceCleanup {
-        type State = ();
+        type SharedState = ();
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn cleanup(_state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(
+            _state: &mut Self::LifecycleState,
+            reporter: &mut crate::shutdown::CleanupReporter<'_>,
+        ) {
             reporter.warn(
                 "Lean checker cleanup trace",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
@@ -1952,7 +2093,7 @@ mod tests {
         let failure_runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
         let mut opening = failure_runtime.begin_open().unwrap();
-        failure_runtime.publish(DropObserved(std::sync::Arc::clone(&drops)), ());
+        failure_runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         failure_runtime
             .finish_open(&mut opening, Vec::new())
             .unwrap();
@@ -2261,17 +2402,24 @@ mod tests {
     struct AlwaysFailClose;
 
     impl Addin for AlwaysFailClose {
-        type State = ();
+        type SharedState = ();
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn cleanup(_state: &mut Self::State, reporter: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(
+            _state: &mut Self::LifecycleState,
+            reporter: &mut crate::shutdown::CleanupReporter<'_>,
+        ) {
             reporter.warn(
                 "always fail cleanup",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
@@ -2306,35 +2454,35 @@ mod tests {
 
     #[test]
     fn xl_auto_close_waits_for_active_call_and_returns_one_after_clean_close() {
-        let runtime = std::sync::Arc::new(Runtime::<CleanClose>::new());
+        let fixture = crate::runtime::StaticTestRuntime::<CleanClose>::new();
+        let runtime = fixture.runtime();
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        let (_export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {});
-        assert!(accepted);
-        let call = runtime.enter().unwrap();
-        let closer_runtime = std::sync::Arc::clone(&runtime);
-        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
-        let closer = std::thread::spawn(move || {
-            closed_tx
-                .send(host_auto_remove::<CleanClose>(&closer_runtime))
-                .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let (export_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {});
+            assert!(accepted);
+            let call = runtime.enter().unwrap();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(call);
+            drop(export_guard);
         });
 
-        assert!(
-            closed_rx
-                .recv_timeout(std::time::Duration::from_millis(20))
-                .is_err()
-        );
-        drop(call);
-        drop(_export_guard);
-        assert_eq!(
-            closed_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap(),
-            1
-        );
-        closer.join().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release_tx.send(()).unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(host_auto_remove::<CleanClose>(runtime), 1);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+        releaser.join().unwrap();
+        holder.join().unwrap();
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
@@ -2541,17 +2689,21 @@ mod tests {
     impl crate::handle::ExcelHandleObject for OrderedHandle {}
 
     impl Addin for OrderedClose {
-        type State = OrderedState;
+        type SharedState = ();
+        type LifecycleState = OrderedState;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.events.lock().unwrap().push("state");
         }
     }
@@ -2561,7 +2713,8 @@ mod tests {
         let runtime = Runtime::<OrderedClose>::new();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut open_attempt = runtime.begin_open().unwrap();
-        runtime.publish(
+        runtime.publish_with_lifecycle(
+            (),
             OrderedState {
                 events: std::sync::Arc::clone(&events),
             },
@@ -2627,17 +2780,24 @@ mod tests {
     struct StagedRaceAddin;
 
     impl Addin for StagedRaceAddin {
-        type State = StagedRaceState;
+        type SharedState = ();
+        type LifecycleState = StagedRaceState;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
+        fn quiesce(
+            _: &mut Self::SharedState,
+            state: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
             state.quiesced.fetch_add(1, Ordering::SeqCst);
             if let Some(entered) = state.quiesce_entered.take() {
                 let _ = entered.send(());
@@ -2648,19 +2808,20 @@ mod tests {
             Ok(())
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.cleaned.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     #[test]
     fn close_reclaims_staged_opening_generation_when_finish_open_loses_race() {
-        let runtime = std::sync::Arc::new(Runtime::<StagedRaceAddin>::new());
+        let fixture = crate::runtime::StaticTestRuntime::<StagedRaceAddin>::new();
+        let runtime = fixture.runtime();
         let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
         let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
         let dropped = std::sync::Arc::new(AtomicUsize::new(0));
 
-        let (quiesce_entered_tx, quiesce_entered_rx) = std::sync::mpsc::channel();
+        let (quiesce_entered_tx, _quiesce_entered_rx) = std::sync::mpsc::channel();
         let (quiesce_release_tx, quiesce_release_rx) = std::sync::mpsc::channel();
         let mut open_attempt = runtime.begin_open().unwrap();
         let state = StagedRaceState {
@@ -2672,49 +2833,42 @@ mod tests {
                 quiesce_release_rx,
             ))),
         };
+        assert!(runtime.install_lifecycle_state(state).is_ok());
         assert!(
             runtime
-                .stage_opening_state(state, crate::addin::RuntimeConfig::new())
+                .stage_opening_state((), crate::addin::RuntimeConfig::new())
                 .is_ok()
         );
         let opening = runtime.take_opening_generation().unwrap();
         let opening = opening.attach_layers(());
         assert!(runtime.restore_opening_generation(opening).is_ok());
 
-        let closer_runtime = std::sync::Arc::clone(&runtime);
-        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
-        let closer = std::thread::spawn(move || {
-            closed_tx
-                .send(host_auto_remove::<StagedRaceAddin>(&closer_runtime))
-                .unwrap();
+        let (finish_start_tx, finish_start_rx) = std::sync::mpsc::channel();
+        let (finish_result_tx, finish_result_rx) = std::sync::mpsc::channel();
+        let finish_runtime = runtime;
+        let finisher = std::thread::spawn(move || {
+            finish_start_rx.recv().unwrap();
+            let result = finish_runtime.finish_open(&mut open_attempt, Vec::new());
+            finish_result_tx.send(result.is_err()).unwrap();
+            quiesce_release_tx.send(()).unwrap();
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while runtime.phase() != crate::lifecycle::LifecyclePhase::Closing
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
-        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+        let phase_runtime = runtime;
+        let phase_watcher = std::thread::spawn(move || {
+            while phase_runtime.phase() != crate::lifecycle::LifecyclePhase::Closing {
+                std::thread::yield_now();
+            }
+            finish_start_tx.send(()).unwrap();
+        });
 
-        assert!(matches!(
-            runtime.finish_open(&mut open_attempt, Vec::new()),
-            Err(XllError::Closing)
-        ));
-        assert!(!open_attempt.is_active());
-
-        quiesce_entered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("closer entered quiesce (Closing phase)");
-        quiesce_release_tx.send(()).unwrap();
-
-        assert_eq!(
-            closed_rx
+        assert_eq!(host_auto_remove::<StagedRaceAddin>(runtime), 1);
+        assert!(
+            finish_result_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap(),
-            1
+                .unwrap()
         );
-        closer.join().unwrap();
+        finisher.join().unwrap();
+        phase_watcher.join().unwrap();
 
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(quiesced.load(Ordering::SeqCst), 1);
@@ -2739,22 +2893,29 @@ mod tests {
     struct PanicLayersAddin;
 
     impl Addin for PanicLayersAddin {
-        type State = PanicLayersState;
+        type SharedState = ();
+        type LifecycleState = PanicLayersState;
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
             unreachable!()
         }
 
-        fn quiesce(state: &mut Self::State) -> Result<(), Self::Error> {
+        fn quiesce(
+            _: &mut Self::SharedState,
+            state: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
             state.quiesced.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        fn cleanup(state: &mut Self::State, _: &mut crate::shutdown::CleanupReporter<'_>) {
+        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
             state.cleaned.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -2772,9 +2933,10 @@ mod tests {
             cleaned: std::sync::Arc::clone(&cleaned),
             dropped: std::sync::Arc::clone(&dropped),
         };
+        assert!(runtime.install_lifecycle_state(state).is_ok());
         assert!(
             runtime
-                .stage_opening_state(state, crate::addin::RuntimeConfig::new())
+                .stage_opening_state((), crate::addin::RuntimeConfig::new())
                 .is_ok()
         );
         let opening = runtime.take_opening_generation().unwrap();

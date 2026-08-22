@@ -47,15 +47,21 @@ pub(crate) struct HandleCallAccess<'call> {
 /// Runtime services available while converting one Excel-visible argument.
 #[doc(hidden)]
 pub struct CallContext<'call> {
-    scope: &'call CallScope<'call>,
-    handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
+    access: CallAccess<'call>,
+}
+
+/// The call either has plain conversion access or the complete handle access
+/// bundle. Keeping the scope and resolver in one variant prevents a malformed
+/// half-configured handle context from being constructed.
+enum CallAccess<'call> {
+    Plain(&'call CallScope<'call>),
+    Handles(HandleCallAccess<'call>),
 }
 
 impl<'call> CallContext<'call> {
     pub(crate) fn plain(scope: &'call CallScope<'call>) -> Self {
         Self {
-            scope,
-            handle_runtime: None,
+            access: CallAccess::Plain(scope),
         }
     }
 
@@ -64,15 +70,22 @@ impl<'call> CallContext<'call> {
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
-            scope,
-            handle_runtime: Some(crate::handle::HandleRuntimeResolver::new(
-                runtime.handle_runtime_slot(),
-            )),
+            access: CallAccess::Handles(HandleCallAccess {
+                runtime: crate::handle::HandleRuntimeResolver::new(runtime.handle_runtime_slot()),
+                scope,
+            }),
         }
     }
 
     pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch {
-        self.scope.scratch()
+        self.scope().scratch()
+    }
+
+    fn scope(&self) -> &'call CallScope<'call> {
+        match &self.access {
+            CallAccess::Plain(scope) => scope,
+            CallAccess::Handles(access) => access.scope,
+        }
     }
 
     #[cfg(test)]
@@ -81,26 +94,31 @@ impl<'call> CallContext<'call> {
         handle_runtime: Option<crate::handle::HandleRuntimeResolver<'call>>,
     ) -> Self {
         Self {
-            scope,
-            handle_runtime,
+            access: match handle_runtime {
+                Some(runtime) => CallAccess::Handles(HandleCallAccess { runtime, scope }),
+                None => CallAccess::Plain(scope),
+            },
         }
     }
 
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
-        self.handle_runtime.take().map(|runtime| HandleCallAccess {
-            runtime,
-            scope: self.scope,
-        })
+        let scope = self.scope();
+        match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
+            CallAccess::Handles(access) => Some(access),
+            CallAccess::Plain(_) => None,
+        }
     }
 
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        let runtime = self.handle_runtime.as_ref().ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
-        })?;
-        runtime.get()?.lookup(self.scope, token)
+        let CallAccess::Handles(access) = &self.access else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
+            });
+        };
+        access.runtime.get()?.lookup(access.scope, token)
     }
 }
 
@@ -125,8 +143,10 @@ impl<'call> ArgumentContext<'call> {
         }
     }
 
-    pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
-        self.call.take_handle_access()
+    pub(crate) fn take_handle_access(&mut self) -> HandleCallAccess<'call> {
+        self.call
+            .take_handle_access()
+            .expect("formula argument context must retain handle access")
     }
 
     pub fn finish(&mut self) -> Option<[u8; 32]> {

@@ -23,9 +23,9 @@ pub(crate) enum QuarantineReason {
 /// as a type-level guarantee that dropping the runtime cannot accidentally
 /// execute code whose quiescence was not proven.
 pub(crate) enum QuarantinedResource<A: crate::Addin> {
-    State {
+    SharedState {
         generation: Option<RuntimeGeneration>,
-        state: ManuallyDrop<A::State>,
+        shared_state: ManuallyDrop<A::SharedState>,
         reason: QuarantineReason,
     },
     Layers {
@@ -35,7 +35,7 @@ pub(crate) enum QuarantinedResource<A: crate::Addin> {
     },
     Generation {
         generation: Option<RuntimeGeneration>,
-        state: ManuallyDrop<A::State>,
+        shared_state: ManuallyDrop<A::SharedState>,
         layers: ManuallyDrop<A::Layers>,
         reason: QuarantineReason,
     },
@@ -57,17 +57,19 @@ impl<A: crate::Addin> QuarantineVault<A> {
         }
     }
 
-    pub(crate) fn retain_state(
+    pub(crate) fn retain_shared_state(
         &self,
         generation: Option<RuntimeGeneration>,
-        state: A::State,
+        shared_state: A::SharedState,
         reason: QuarantineReason,
     ) {
-        self.resources.lock().push(QuarantinedResource::State {
-            generation,
-            state: ManuallyDrop::new(state),
-            reason,
-        });
+        self.resources
+            .lock()
+            .push(QuarantinedResource::SharedState {
+                generation,
+                shared_state: ManuallyDrop::new(shared_state),
+                reason,
+            });
     }
 
     pub(crate) fn retain_layers(
@@ -89,10 +91,14 @@ impl<A: crate::Addin> QuarantineVault<A> {
         root: OpenGeneration<A>,
         reason: QuarantineReason,
     ) {
-        let OpenGeneration { state, layers, .. } = root;
+        let OpenGeneration {
+            shared_state,
+            layers,
+            ..
+        } = root;
         self.resources.lock().push(QuarantinedResource::Generation {
             generation,
-            state: ManuallyDrop::new(state),
+            shared_state: ManuallyDrop::new(shared_state),
             layers: ManuallyDrop::new(layers),
             reason,
         });
@@ -118,12 +124,12 @@ impl<A: crate::Addin> QuarantineVault<A> {
             .lock()
             .iter()
             .map(|resource| match resource {
-                QuarantinedResource::State {
+                QuarantinedResource::SharedState {
                     generation,
-                    state,
+                    shared_state,
                     reason,
                 } => {
-                    let _ = state;
+                    let _ = shared_state;
                     (*generation, *reason)
                 }
                 QuarantinedResource::Layers {
@@ -136,11 +142,11 @@ impl<A: crate::Addin> QuarantineVault<A> {
                 }
                 QuarantinedResource::Generation {
                     generation,
-                    state,
+                    shared_state,
                     layers,
                     reason,
                 } => {
-                    let _ = (state, layers);
+                    let _ = (shared_state, layers);
                     (*generation, *reason)
                 }
                 QuarantinedResource::SharedGeneration {

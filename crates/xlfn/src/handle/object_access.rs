@@ -41,13 +41,13 @@ impl<T> Deref for BorrowedObject<'_, T> {
     }
 }
 
-/// A typed object protected by an owned registry pin.
-pub(crate) struct PinnedObject<T> {
+/// A typed object protected by an owned registry lease.
+pub(crate) struct ObjectLease<T> {
     ptr: NonNull<T>,
     _pin: ObjectPin,
 }
 
-impl<T> PinnedObject<T> {
+impl<T> ObjectLease<T> {
     pub(crate) fn from_parts(pin: ObjectPin, ptr: NonNull<T>) -> Self {
         Self { ptr, _pin: pin }
     }
@@ -58,7 +58,7 @@ impl<T> PinnedObject<T> {
     }
 }
 
-impl<T> Deref for PinnedObject<T> {
+impl<T> Deref for ObjectLease<T> {
     type Target = T;
 
     #[inline]
@@ -71,7 +71,7 @@ impl<T> Deref for PinnedObject<T> {
 
 // SAFETY: the pin and the payload type provide the ownership and thread-safety
 // guarantees required to move or share this pointer.
-unsafe impl<T: Send + Sync> Send for PinnedObject<T> {}
+unsafe impl<T: Send + Sync> Send for ObjectLease<T> {}
 
 // SAFETY: same invariant as `Send`.
-unsafe impl<T: Send + Sync> Sync for PinnedObject<T> {}
+unsafe impl<T: Send + Sync> Sync for ObjectLease<T> {}

@@ -22,18 +22,21 @@ pub struct State {
 pub struct FixtureAddin;
 
 impl Addin for FixtureAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+    fn open(
+        context: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         let publisher = Arc::new(RtdFixture::default());
         Ok(Opened::new(State {
             rtd: context
                 .rtd()
                 .register_shared_source(Arc::clone(&publisher))?,
             publisher,
-        }, ()))
+        }, (), ()))
     }
 }
 
@@ -165,7 +168,7 @@ pub fn rtd_fixture(
     )
 }
 
-#[excel_function(name = "FRAMEWORK.RTD.PUBLISH", thread_safe, volatile)]
+#[excel_function(name = "FRAMEWORK.RTD.PUBLISH", volatile)]
 pub fn rtd_publish(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
     topic_count: i32,
@@ -173,7 +176,7 @@ pub fn rtd_publish(
     context.state().publisher.publish_batch(topic_count)
 }
 
-#[excel_function(name = "FRAMEWORK.RTD.ACTIVE", thread_safe, volatile)]
+#[excel_function(name = "FRAMEWORK.RTD.ACTIVE", volatile)]
 pub fn rtd_active(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
 ) -> XllResult<i32> {

@@ -28,16 +28,19 @@ pub struct State {
 pub struct RtdSourceExample;
 
 impl Addin for RtdSourceExample {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+    fn open(
+        context: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State {
             metrics: context.rtd().register_source(MetricSource {
                 client: Arc::new(Client),
             })?,
-        }, ()))
+        }, (), ()))
     }
 }
 

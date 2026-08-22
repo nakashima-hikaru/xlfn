@@ -63,7 +63,7 @@ pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
-pub(crate) use object_access::{BorrowedObject, PinnedObject};
+pub(crate) use object_access::{BorrowedObject, ObjectLease};
 #[cfg(test)]
 pub(crate) use object_store::ObjectKey;
 pub(crate) use object_store::{ErasedObject, ObjectLocator};
@@ -83,7 +83,7 @@ pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
-pub use typed::{ExcelHandleObject, Handle, HandleAlias, PinnedHandle};
+pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease};
 
 #[cfg(test)]
 mod refinement_tests;

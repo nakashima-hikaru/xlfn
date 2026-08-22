@@ -7,12 +7,13 @@ struct State;
 struct BorrowedAsyncAddin;
 
 impl Addin for BorrowedAsyncAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State, ()))
+    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, (), ()))
     }
 }
 

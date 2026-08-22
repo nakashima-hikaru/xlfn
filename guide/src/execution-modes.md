@@ -80,4 +80,4 @@ The framework-owned future retains the current open-generation lease and per-cal
 | Macro-sheet | `macro_sheet` or `macro_sheet` context | no | yes | no |
 | Asynchronous | `async fn` | native async ABI | no | no |
 
-A function marked `volatile` must still return a type valid for its mode. Handle objects and `HandleAlias<'_, T>` support volatile main-thread return semantics. Borrowed `Handle<'_, T>` values are synchronous call-scoped inputs and cannot be used in async functions. An async function that needs a formula-owned object must use the owned `PinnedHandle<T>` input, which pins the registry payload before scheduling the future.
+A function marked `volatile` must still return a type valid for its mode. Handle objects and `HandleAlias<'_, T>` support volatile main-thread return semantics. Borrowed `Handle<'_, T>` values are synchronous call-scoped inputs and cannot be used in async functions. An async function that needs a formula-owned object must use the owned `HandleLease<T>` input, which leases the registry payload before scheduling the future.

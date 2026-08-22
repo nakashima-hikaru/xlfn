@@ -395,17 +395,19 @@ impl Default for AsyncRuntimeConfig {
 }
 
 /// The result of a successful [`Addin::open`] transaction.
-pub struct Opened<S, L> {
-    state: S,
-    layers: L,
+pub struct Opened<S, L, U> {
+    shared_state: S,
+    lifecycle_state: L,
+    layers: U,
     runtime: RuntimeConfig,
 }
 
-impl<S, L> Opened<S, L> {
+impl<S, L, U> Opened<S, L, U> {
     #[must_use]
-    pub const fn new(state: S, layers: L) -> Self {
+    pub const fn new(shared_state: S, lifecycle_state: L, layers: U) -> Self {
         Self {
-            state,
+            shared_state,
+            lifecycle_state,
             layers,
             runtime: RuntimeConfig::new(),
         }
@@ -417,30 +419,47 @@ impl<S, L> Opened<S, L> {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (S, L, RuntimeConfig) {
-        (self.state, self.layers, self.runtime)
+    pub(crate) fn into_parts(self) -> (S, L, U, RuntimeConfig) {
+        (
+            self.shared_state,
+            self.lifecycle_state,
+            self.layers,
+            self.runtime,
+        )
     }
 }
 
 /// Defines Add-in state and its Excel lifecycle hooks.
 ///
 /// The framework invokes [`Self::open`] and [`Self::cleanup`] from Excel's main
-/// lifecycle thread, and both hooks for one open generation run on that same
-/// thread. Implementations may therefore keep non-`Send` lifecycle owners in
-/// thread-local storage while placing only their `Send + Sync` handles in
-/// [`Self::State`]. [`Self::quiesce`] must synchronously stop every execution
-/// source before best-effort cleanup begins.
+/// lifecycle thread, and all lifecycle hooks for one open generation run on
+/// that same thread. `SharedState` is the state borrowed by UDF calls and is
+/// therefore required to be `Send + Sync`. `LifecycleState` is owned by the
+/// framework's main-thread lifecycle slot and may be thread-affine or
+/// otherwise non-`Send`.
+///
+/// [`Self::quiesce`] must synchronously stop every execution source before
+/// best-effort lifecycle cleanup begins. The shared state is dropped only
+/// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
 pub trait Addin: Send + Sync + 'static {
-    type State: Send + Sync + 'static;
+    type SharedState: Send + Sync + 'static;
+    type LifecycleState: 'static;
     type Error: IntoXllError;
     type Layers: crate::execution::UdfLayers;
 
     /// Opens one complete generation on Excel's main lifecycle thread.
     ///
-    /// State, UDF layers, and runtime policy are returned together so the
-    /// framework can stage them as one transaction. If a later registration
-    /// step fails, none of the three is published as an open generation.
-    fn open(context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error>;
+    /// Shared state, lifecycle state, UDF layers, and runtime policy are
+    /// returned together so the framework can stage them as one transaction.
+    /// If a later registration step fails, none of the execution state is
+    /// published as an open generation.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the associated state types are the public Addin open contract"
+    )]
+    fn open(
+        context: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>;
 
     /// Stops every Add-in-owned callback, worker, native module owner, and
     /// other source that could execute XLL code after unload.
@@ -451,10 +470,13 @@ pub trait Addin: Send + Sync + 'static {
     /// further opens or UDF calls. The hook is terminal for that generation
     /// and is never retried.
     ///
-    /// Handle values are call-scoped and cannot be stored in `State`. Vendor
-    /// operations must be canceled cooperatively; unload waits rather than
-    /// abandoning in-process code.
-    fn quiesce(_state: &mut Self::State) -> Result<(), Self::Error> {
+    /// Handle values are call-scoped and cannot be stored in either state.
+    /// Vendor operations must be canceled cooperatively; unload waits rather
+    /// than abandoning in-process code.
+    fn quiesce(
+        _shared: &mut Self::SharedState,
+        _lifecycle: &mut Self::LifecycleState,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -462,27 +484,32 @@ pub trait Addin: Send + Sync + 'static {
     ///
     /// This hook must not start work or register callbacks. Disposal failures
     /// should be recorded with `reporter`; they do not make unload unsafe.
-    fn cleanup(_state: &mut Self::State, _reporter: &mut CleanupReporter<'_>) {}
+    /// `SharedState` is already quiesced and is dropped by the framework
+    /// separately after this hook returns.
+    fn cleanup(_lifecycle: &mut Self::LifecycleState, _reporter: &mut CleanupReporter<'_>) {}
 }
 
 impl Addin for () {
-    type State = ();
+    type SharedState = ();
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), ()))
+    fn open(
+        _context: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new((), (), ()))
     }
 }
 
-impl<A: Addin> AsRef<A::State> for ThreadSafeContext<'_, A> {
-    fn as_ref(&self) -> &A::State {
+impl<A: Addin> AsRef<A::SharedState> for ThreadSafeContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
         self.state
     }
 }
 
 pub struct ThreadSafeContext<'call, A: Addin> {
-    state: &'call A::State,
+    state: &'call A::SharedState,
 }
 
 impl<A: Addin> Clone for ThreadSafeContext<'_, A> {
@@ -502,7 +529,7 @@ impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 /// add-in rather than by escaping this capability.
 #[cfg(feature = "async")]
 pub struct AsyncContext<'call, A: Addin> {
-    state: &'call A::State,
+    state: &'call A::SharedState,
     cancellation: &'call CancellationToken,
 }
 
@@ -510,7 +537,7 @@ pub struct AsyncContext<'call, A: Addin> {
 impl<'call, A: Addin> AsyncContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call A::State, cancellation: &'call CancellationToken) -> Self {
+    pub const fn new(state: &'call A::SharedState, cancellation: &'call CancellationToken) -> Self {
         Self {
             state,
             cancellation,
@@ -518,7 +545,7 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'call A::State {
+    pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
 
@@ -542,14 +569,14 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
 }
 
 #[cfg(feature = "async")]
-impl<A: Addin> AsRef<A::State> for AsyncContext<'_, A> {
-    fn as_ref(&self) -> &A::State {
+impl<A: Addin> AsRef<A::SharedState> for AsyncContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
         self.state
     }
 }
 
-impl<A: Addin> AsRef<A::State> for MainThreadContext<'_, A> {
-    fn as_ref(&self) -> &A::State {
+impl<A: Addin> AsRef<A::SharedState> for MainThreadContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
         self.state
     }
 }
@@ -557,12 +584,12 @@ impl<A: Addin> AsRef<A::State> for MainThreadContext<'_, A> {
 impl<'call, A: Addin> ThreadSafeContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call A::State) -> Self {
+    pub const fn new(state: &'call A::SharedState) -> Self {
         Self { state }
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'call A::State {
+    pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
 }
@@ -573,7 +600,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// duration of this lifetime. Keeping the existing state borrow here avoids a
 /// second generation lease and makes the ownership relationship explicit.
 pub struct MainThreadContext<'call, A: Addin> {
-    state: &'call A::State,
+    state: &'call A::SharedState,
     runtime: &'call Runtime<A>,
     callbacks: &'call HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
@@ -596,7 +623,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// [`AsyncContext`], it cannot outlive the callback scope and therefore does
 /// not need an owned generation lease.
 pub struct MacroSheetContext<'call, A: Addin> {
-    state: &'call A::State,
+    state: &'call A::SharedState,
     scope: &'call CallScope<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -611,8 +638,8 @@ impl<A: Addin> Clone for MacroSheetContext<'_, A> {
     }
 }
 
-impl<A: Addin> AsRef<A::State> for MacroSheetContext<'_, A> {
-    fn as_ref(&self) -> &A::State {
+impl<A: Addin> AsRef<A::SharedState> for MacroSheetContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
         self.state
     }
 }
@@ -621,7 +648,7 @@ impl<A: Addin> MacroSheetContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
     pub fn new<'ctx>(
-        state: &'ctx A::State,
+        state: &'ctx A::SharedState,
         scope: &'ctx CallScope<'ctx>,
     ) -> MacroSheetContext<'ctx, A> {
         MacroSheetContext {
@@ -634,7 +661,7 @@ impl<A: Addin> MacroSheetContext<'_, A> {
 
 impl<'call, A: Addin> MacroSheetContext<'call, A> {
     #[must_use]
-    pub fn state(&self) -> &A::State {
+    pub fn state(&self) -> &A::SharedState {
         self.state
     }
 
@@ -715,7 +742,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
     pub fn new<'ctx, 'scope>(
-        state: &'ctx A::State,
+        state: &'ctx A::SharedState,
         runtime: &'ctx Runtime<A>,
         scope: &'ctx CallScope<'scope>,
     ) -> MainThreadContext<'ctx, A> {
@@ -730,7 +757,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
 
 impl<'call, A: Addin> MainThreadContext<'call, A> {
     #[must_use]
-    pub fn state(&self) -> &A::State {
+    pub fn state(&self) -> &A::SharedState {
         self.state
     }
 
@@ -766,6 +793,7 @@ mod tests {
         DiagnosticsSetup, MacroSheetContext, MainThreadContext, Opened, ThreadSafeContext,
     };
     use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use std::rc::Rc;
     #[cfg(any(feature = "async", not(target_os = "windows")))]
     use std::sync::Arc;
 
@@ -777,14 +805,36 @@ mod tests {
     assert_not_impl_any!(MainThreadContext<'static, ()>: Send, Sync);
     assert_not_impl_any!(MacroSheetContext<'static, ()>: Send, Sync);
 
-    struct TestU32Addin;
+    struct NonSendLifecycleAddin;
 
-    impl crate::Addin for TestU32Addin {
-        type State = u32;
+    impl crate::Addin for NonSendLifecycleAddin {
+        type SharedState = ();
+        type LifecycleState = Rc<()>;
         type Error = crate::XllError;
         type Layers = ();
 
-        fn open(_: &crate::OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
+        fn open(
+            _: &crate::OpenContext,
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
+            Ok(Opened::new((), Rc::new(()), ()))
+        }
+    }
+
+    assert_impl_all!(crate::runtime::Runtime<NonSendLifecycleAddin>: Send, Sync);
+
+    struct TestU32Addin;
+
+    impl crate::Addin for TestU32Addin {
+        type SharedState = u32;
+        type LifecycleState = ();
+        type Error = crate::XllError;
+        type Layers = ();
+
+        fn open(
+            _: &crate::OpenContext,
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
             unreachable!()
         }
     }
@@ -963,14 +1013,16 @@ mod tests {
 
     #[cfg(feature = "async")]
     impl crate::Addin for AsyncTestAddin {
-        type State = u32;
+        type SharedState = u32;
+        type LifecycleState = ();
         type Error = crate::XllError;
         type Layers = ();
 
         fn open(
             _context: &crate::OpenContext,
-        ) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-            Ok(Opened::new(23, ()))
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
+            Ok(Opened::new(23, (), ()))
         }
     }
 
@@ -982,11 +1034,11 @@ mod tests {
         );
         let generation = Arc::new(crate::runtime::OpenGeneration::<AsyncTestAddin> {
             id: crate::generation::RuntimeGeneration::new(1).unwrap(),
-            state: 23_u32,
+            shared_state: 23_u32,
             layers: (),
         });
         let context: AsyncContext<'_, AsyncTestAddin> =
-            AsyncContext::new(&generation.state, &token);
+            AsyncContext::new(&generation.shared_state, &token);
 
         assert_eq!(context.state(), &23);
         assert!(!context.cancellation().is_cancelled());

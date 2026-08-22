@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `for<'call> &str: xlfn::__private::ExcelParameter<'call>` is not satisfied
-  --> tests/ui/fail_async/borrowed_inputs.rs:19:31
+  --> tests/ui/fail_async/borrowed_inputs.rs:20:31
    |
-19 | async fn borrowed_text(value: &str) -> f64 {
+20 | async fn borrowed_text(value: &str) -> f64 {
    |                               ^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `&str`
    |
 help: the trait `ExcelParameter<'call>` is not implemented for `&str`
@@ -20,9 +20,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: the trait bound `for<'call> xlfn::value::MatrixRef<'_, f64>: xlfn::__private::ExcelParameter<'call>` is not satisfied
-  --> tests/ui/fail_async/borrowed_inputs.rs:24:33
+  --> tests/ui/fail_async/borrowed_inputs.rs:25:33
    |
-24 | async fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
+25 | async fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
    |                                 ^^^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
    |
 help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
@@ -43,9 +43,9 @@ note: required by a bound in `xlfn::__private::assert_async_parameter`
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: the trait bound `for<'call> xlfn::value::ExcelCellRef<'_>: xlfn::__private::ExcelParameter<'call>` is not satisfied
-  --> tests/ui/fail_async/borrowed_inputs.rs:29:31
+  --> tests/ui/fail_async/borrowed_inputs.rs:30:31
    |
-29 | async fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
+30 | async fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
    |                               ^^^^^^^^^^^^^^^^ the trait `for<'call> xlfn::__private::ExcelParameter<'call>` is not implemented for `xlfn::value::ExcelCellRef<'_>`
    |
 help: the trait `ExcelParameter<'call>` is not implemented for `xlfn::value::ExcelCellRef<'_>`

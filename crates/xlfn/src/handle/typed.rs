@@ -1,6 +1,6 @@
 use super::object_store::{LiveObjectRef, ObjectLocator};
 use super::reclamation::PinContext;
-use super::{BorrowedObject, PinnedObject};
+use super::{BorrowedObject, ObjectLease};
 use crate::XllResult;
 use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
@@ -46,13 +46,13 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
     /// Promotion is explicit because it changes the lifetime kind: the
     /// resulting value may outlive the Excel call and keeps the registry
     /// payload alive until it is dropped.
-    fn promote(self) -> XllResult<PinnedObject<T>> {
+    fn promote(self) -> XllResult<ObjectLease<T>> {
         self.pin.pin(self.object)
     }
 
     /// Promotes this capability to a long-lived synchronous handle.
-    pub fn pin(self) -> XllResult<PinnedHandle<T>> {
-        self.promote().map(|lease| PinnedHandle { lease })
+    pub fn pin(self) -> XllResult<HandleLease<T>> {
+        self.promote().map(|lease| HandleLease { lease })
     }
 
     /// Converts this borrowed capability into an explicit republish
@@ -76,20 +76,20 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
-/// A long-lived handle. Use this when a handle must cross Excel calls or be
-/// moved into an asynchronous future.
-pub struct PinnedHandle<T: ExcelHandleObject> {
-    lease: PinnedObject<T>,
+/// A long-lived handle lease. Use this when a handle must cross Excel calls or
+/// be moved into an asynchronous future.
+pub struct HandleLease<T: ExcelHandleObject> {
+    lease: ObjectLease<T>,
 }
 
-impl<T: ExcelHandleObject> PinnedHandle<T> {
+impl<T: ExcelHandleObject> HandleLease<T> {
     /// Returns the stable runtime-local object identity.
     pub fn object_id(&self) -> u64 {
         self.lease.object_id()
     }
 }
 
-impl<T: ExcelHandleObject> Deref for PinnedHandle<T> {
+impl<T: ExcelHandleObject> Deref for HandleLease<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {

@@ -102,7 +102,7 @@ pub fn assert_excel_parameter<'call, T: ExcelParameter<'call>>(_: &CallFrame<'ca
 /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
 #[doc(hidden)]
 pub fn thread_safe_context<'state, A: Addin>(
-    state: &'state A::State,
+    state: &'state A::SharedState,
 ) -> crate::addin::ThreadSafeContext<'state, A> {
     crate::addin::ThreadSafeContext::new(state)
 }
@@ -111,7 +111,7 @@ pub fn thread_safe_context<'state, A: Addin>(
 #[doc(hidden)]
 pub fn main_thread_context<'call, A: Addin>(
     frame: &CallFrame<'call>,
-    state: &'call A::State,
+    state: &'call A::SharedState,
     runtime: &'call MacroRuntime<A>,
 ) -> crate::addin::MainThreadContext<'call, A> {
     crate::addin::MainThreadContext::new(state, runtime.runtime(), frame.scope)
@@ -121,7 +121,7 @@ pub fn main_thread_context<'call, A: Addin>(
 #[doc(hidden)]
 pub fn macro_sheet_context<'call, A: Addin>(
     frame: &CallFrame<'call>,
-    state: &'call A::State,
+    state: &'call A::SharedState,
 ) -> crate::addin::MacroSheetContext<'call, A> {
     crate::addin::MacroSheetContext::new(state, frame.scope)
 }
@@ -476,7 +476,7 @@ pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
     execute: F,
 ) -> *mut xlfn_sys::XLOPER12
 where
-    F: for<'call> FnOnce(&'call A::State, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
+    F: for<'call> FnOnce(&'call A::SharedState, &mut CallFrame<'call>) -> XllResult<ExcelOutput>,
 {
     udf_boundary_named(runtime.runtime(), udf_id, excel_name, |state| {
         with_excel_call_scope_and_state(state, |state, scope| {

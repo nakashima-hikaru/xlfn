@@ -7,8 +7,8 @@ use syn::{FnArg, Ident, ItemFn, Meta, Pat, Token, Type};
 
 /// The single normalized execution mode consumed by code generation.
 ///
-/// Attribute syntax may express the same mode in more than one way (for
-/// example `macro_sheet` or `MacroSheetContext`).  Code generation must never
+/// Attribute syntax may express a context capability, while function syntax
+/// may select a mode (for example `async fn`). Code generation must never
 /// repeat that precedence logic, so the validated model exposes this enum as
 /// its only execution-mode vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,10 +102,22 @@ impl FunctionModel {
                 "a main-thread context function cannot be marked `thread_safe`",
             ));
         }
+        if matches!(self.context, Some(ContextKind::ThreadSafe)) && self.thread_safe {
+            return Err(syn::Error::new_spanned(
+                &function.sig.inputs,
+                "a thread-safe context function must not repeat the `thread_safe` mode flag",
+            ));
+        }
         if matches!(self.context, Some(ContextKind::MacroSheet)) && self.thread_safe {
             return Err(syn::Error::new_spanned(
                 &function.sig.inputs,
                 "a macro-sheet context function cannot be marked `thread_safe`",
+            ));
+        }
+        if matches!(self.context, Some(ContextKind::MacroSheet)) && self.macro_sheet {
+            return Err(syn::Error::new_spanned(
+                &function.sig.inputs,
+                "a macro-sheet context function must not repeat the `macro_sheet` mode flag",
             ));
         }
         if self.macro_sheet && self.thread_safe {

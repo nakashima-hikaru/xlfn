@@ -7,6 +7,7 @@
 mod formal;
 mod host_ledger;
 mod lifecycle_state;
+mod main_thread_state;
 mod quarantine;
 mod residency;
 mod return_protocol;
@@ -17,6 +18,7 @@ mod services;
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
 pub(crate) use lifecycle_state::{LifecycleControl, LifecycleState, LifecycleStateKind};
+pub(crate) use main_thread_state::MainThreadStateSlot;
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;

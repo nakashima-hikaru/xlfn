@@ -16,12 +16,12 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `ExcelCellRef<'call>` | number, Boolean, string, error, or blank | zero-allocation cell view; synchronous UDFs only |
 | `ExcelSerialDate` | finite number | starts with `ExcelDateSystem::Workbook` |
 | `Handle<'_, T>` | string handle token | authenticates, checks generation, and checks object type; valid only for the active call |
-| `PinnedHandle<T>` | string handle token | authenticates and pins the typed object before an async future is scheduled; owned and call-independent |
+| `HandleLease<T>` | string handle token | authenticates and leases the typed object before an async future is scheduled; owned and call-independent |
 | `Option<T>` | value, blank, or missing | blank and missing become `None` |
 | `OptionalExcelValue<T>` | value, blank, or missing | preserves all three states |
 | `XlArrayRef<'call>` | rectangular multi-value | zero-allocation borrowed cells; synchronous UDFs only |
 | `Matrix<T>` | scalar or rectangular multi-value | scalar becomes `1 x 1`; validates shape and limits |
-| `MatrixRef<'call, T>` | scalar or rectangular multi-value | call-scoped `Copy` element view; synchronous UDFs only |
+| `MatrixRef<'call, T>` | scalar or rectangular multi-value | call-scoped, call-scratch-materialized `Copy` element view; synchronous UDFs only |
 | `Row<T>` | scalar or `1 x N` | rejects a true 2-D shape |
 | `Column<T>` | scalar or `N x 1` | rejects a true 2-D shape |
 | `Vec<T>` | scalar, row, or column | input only; rejects a true 2-D shape |
@@ -94,7 +94,7 @@ See [Optional arguments and enums](optional-arguments.md).
 
 ## Arrays and allocation limits
 
-`XlArrayRef` is the allocation-free mixed-value input path. It exposes shape, indexed access, and lazy cell iteration through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Use `&str`, `ExcelCellRef`, or `MatrixRef<T>` when a synchronous function only needs call-local views. Use `String`, `ExcelCellValue`, `Matrix<T>`, or `Vec<T>` when the input must be owned, especially for async work.
+`XlArrayRef` is the allocation-free mixed-value input path. It exposes shape, indexed access, and lazy cell iteration through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Use `XlArrayRef` when lazy raw-cell access is enough. Use `&str`, `ExcelCellRef`, or `MatrixRef<T>` when a synchronous function needs typed call-local values; `MatrixRef` materializes its `Copy` elements in call scratch. Use `String`, `ExcelCellValue`, `Matrix<T>`, or `Vec<T>` when the input must be owned, especially for async work.
 
 Borrowed strings and grids use one `CallScope` scratch root. String decoding allocates UTF-8 bytes there, and borrowed matrix elements are stored there only when `T: Copy`; no destructor-bearing collection is placed in call scratch. The scope is dropped after the generated synchronous call returns.
 

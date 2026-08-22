@@ -499,7 +499,7 @@ pub mod prelude {
     };
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
-    pub use crate::handle::{Handle, HandleAlias, PinnedHandle};
+    pub use crate::handle::{Handle, HandleAlias, HandleLease};
     pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{

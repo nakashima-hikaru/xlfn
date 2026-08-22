@@ -11,7 +11,7 @@
 //! storage directly. Changes to the reclamation algorithm belong here with
 //! its complete safety proof and concurrency tests.
 
-use super::object_access::{BorrowedObject, PinnedObject};
+use super::object_access::{BorrowedObject, ObjectLease};
 #[cfg(test)]
 use super::object_store::ObjectIdentity;
 use super::object_store::{
@@ -423,12 +423,12 @@ impl PinContext<'_> {
     pub(crate) fn pin<T: ExcelHandleObject>(
         self,
         object: LiveObjectRef,
-    ) -> XllResult<PinnedObject<T>> {
+    ) -> XllResult<ObjectLease<T>> {
         let (pin, ptr) = self.store.pin_or_resurrect::<T>(ObjectLocator {
             id: object.id,
             key_hint: object.key,
         })?;
-        Ok(PinnedObject::from_parts(pin, ptr))
+        Ok(ObjectLease::from_parts(pin, ptr))
     }
 }
 

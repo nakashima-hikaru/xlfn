@@ -29,7 +29,7 @@ fn opening_publication_lost() -> ! {
 /// The published root of an open Add-in generation.
 pub struct OpenGeneration<A: crate::Addin> {
     pub(crate) id: RuntimeGeneration,
-    pub(crate) state: A::State,
+    pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
 }
 
@@ -41,12 +41,12 @@ impl<A: crate::Addin> OpenGeneration<A> {
 
 /// Unique Add-in state staged during `OPENING`.
 pub enum OpeningGeneration<A: crate::Addin> {
-    StateOnly {
-        state: A::State,
+    SharedStateOnly {
+        shared_state: A::SharedState,
         config: crate::addin::RuntimeConfig,
     },
     Ready {
-        state: A::State,
+        shared_state: A::SharedState,
         layers: A::Layers,
         config: crate::addin::RuntimeConfig,
     },
@@ -54,22 +54,39 @@ pub enum OpeningGeneration<A: crate::Addin> {
 
 impl<A: crate::Addin> OpeningGeneration<A> {
     #[must_use]
-    pub(crate) fn into_parts(self) -> (A::State, Option<A::Layers>, crate::addin::RuntimeConfig) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        A::SharedState,
+        Option<A::Layers>,
+        crate::addin::RuntimeConfig,
+    ) {
         match self {
-            Self::StateOnly { state, config } => (state, None, config),
+            Self::SharedStateOnly {
+                shared_state,
+                config,
+            } => (shared_state, None, config),
             Self::Ready {
-                state,
+                shared_state,
                 layers,
                 config,
-            } => (state, Some(layers), config),
+            } => (shared_state, Some(layers), config),
         }
     }
 
     #[must_use]
     pub(crate) fn attach_layers(self, layers: A::Layers) -> Self {
         match self {
-            Self::StateOnly { state, config } | Self::Ready { state, config, .. } => Self::Ready {
-                state,
+            Self::SharedStateOnly {
+                shared_state,
+                config,
+            }
+            | Self::Ready {
+                shared_state,
+                config,
+                ..
+            } => Self::Ready {
+                shared_state,
                 layers,
                 config,
             },
@@ -99,8 +116,8 @@ impl<A: crate::Addin> Clone for GenerationLease<A> {
 
 impl<A: crate::Addin> GenerationLease<A> {
     #[must_use]
-    pub fn state(&self) -> &A::State {
-        &self.generation.state
+    pub fn state(&self) -> &A::SharedState {
+        &self.generation.shared_state
     }
 
     #[must_use]
@@ -111,6 +128,7 @@ impl<A: crate::Addin> GenerationLease<A> {
 
 pub struct Runtime<A: crate::Addin> {
     pub(crate) lifecycle: LifecycleState<A>,
+    pub(crate) lifecycle_state: crate::runtime_components::MainThreadStateSlot<A>,
     pub(crate) host: HostLedger,
     pub(crate) return_protocol: ReturnProtocol,
     pub(crate) services: RuntimeServices,
@@ -124,6 +142,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub const fn new() -> Self {
         Self {
             lifecycle: LifecycleState::new(),
+            lifecycle_state: crate::runtime_components::MainThreadStateSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             services: RuntimeServices::new(),
@@ -243,13 +262,14 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.notify_all();
     }
 
-    pub(crate) fn quarantine_state(
+    pub(crate) fn quarantine_shared_state(
         &self,
         generation: Option<RuntimeGeneration>,
-        state: A::State,
+        shared_state: A::SharedState,
         reason: QuarantineReason,
     ) {
-        self.quarantine.retain_state(generation, state, reason);
+        self.quarantine
+            .retain_shared_state(generation, shared_state, reason);
     }
 
     pub(crate) fn quarantine_layers(
@@ -287,22 +307,27 @@ impl<A: crate::Addin> Runtime<A> {
         reason: QuarantineReason,
     ) {
         match opening {
-            OpeningGeneration::StateOnly { state, .. } => {
-                self.quarantine_state(generation, state, reason);
+            OpeningGeneration::SharedStateOnly { shared_state, .. } => {
+                self.quarantine_shared_state(generation, shared_state, reason);
             }
             OpeningGeneration::Ready {
-                state,
+                shared_state,
                 layers,
                 config: _,
             } => {
                 if let Some(id) = generation {
                     self.quarantine.retain_generation(
                         Some(id),
-                        OpenGeneration { id, state, layers },
+                        OpenGeneration {
+                            id,
+                            shared_state,
+                            layers,
+                        },
                         reason,
                     );
                 } else {
-                    self.quarantine.retain_state(None, state, reason);
+                    self.quarantine
+                        .retain_shared_state(None, shared_state, reason);
                     self.quarantine.retain_layers(None, layers, reason);
                 }
             }
@@ -378,9 +403,28 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn publish(&self, state: A::State, layers: A::Layers) {
+    pub(crate) fn publish(&self, state: A::SharedState, layers: A::Layers)
+    where
+        A::LifecycleState: Default,
+    {
+        self.publish_with_lifecycle(state, Default::default(), layers);
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn publish_with_lifecycle(
+        &self,
+        state: A::SharedState,
+        lifecycle_state: A::LifecycleState,
+        layers: A::Layers,
+    ) {
+        if self.with_lifecycle_state(|_| ()).is_none() {
+            assert!(
+                self.install_lifecycle_state(lifecycle_state).is_ok(),
+                "test runtime has one lifecycle state"
+            );
+        }
         *self.lifecycle.opening.lock() = Some(OpeningGeneration::Ready {
-            state,
+            shared_state: state,
             layers,
             config: crate::addin::RuntimeConfig::new(),
         });
@@ -388,10 +432,32 @@ impl<A: crate::Addin> Runtime<A> {
 
     pub(crate) fn stage_opening_state(
         &self,
-        state: A::State,
+        state: A::SharedState,
         config: crate::addin::RuntimeConfig,
-    ) -> Result<(), (XllError, A::State)> {
+    ) -> Result<(), (XllError, A::SharedState)> {
         self.lifecycle.stage_opening_state(state, config)
+    }
+
+    pub(crate) fn install_lifecycle_state(
+        &self,
+        state: A::LifecycleState,
+    ) -> Result<(), A::LifecycleState> {
+        self.lifecycle_state.install(state)
+    }
+
+    pub(crate) fn retain_lifecycle_state(&self, state: A::LifecycleState) {
+        self.lifecycle_state.retain(state);
+    }
+
+    pub(crate) fn with_lifecycle_state<R>(
+        &self,
+        operation: impl FnOnce(&mut A::LifecycleState) -> R,
+    ) -> Option<R> {
+        self.lifecycle_state.with_mut(operation)
+    }
+
+    pub(crate) fn take_lifecycle_state(&self) -> Option<A::LifecycleState> {
+        self.lifecycle_state.take()
     }
 
     pub(crate) fn restore_opening_generation(
@@ -464,6 +530,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.take_generation_for_shutdown()
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn finish_open(
         &self,
         attempt: &mut OpenAttemptGuard<'_, A>,
@@ -1557,8 +1624,8 @@ pub struct CallGuard<'runtime, A: crate::Addin> {
 
 impl<A: crate::Addin> CallGuard<'_, A> {
     #[must_use]
-    pub fn state(&self) -> &A::State {
-        &self.generation().state
+    pub fn state(&self) -> &A::SharedState {
+        &self.generation().shared_state
     }
 
     #[must_use]
@@ -1607,14 +1674,18 @@ pub(crate) mod tests {
     struct TestU32Addin;
 
     impl crate::Addin for TestU32Addin {
-        type State = u32;
+        type SharedState = u32;
+        type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
 
         fn open(
             _context: &crate::addin::OpenContext,
-        ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
-            Ok(crate::addin::Opened::new(0, ()))
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            Ok(crate::addin::Opened::new(0, (), ()))
         }
     }
 
@@ -1711,7 +1782,7 @@ pub(crate) mod tests {
             .seal_handles()
             .and_then(|sealed| runtime.finish_handle_quiescence(sealed))
             .unwrap();
-        assert_eq!(runtime.take_current_generation().unwrap().state, 1);
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
         finish_test_close(&runtime);
         drop(removal_attempt);
 
@@ -1811,7 +1882,7 @@ pub(crate) mod tests {
                 .take_generation_for_shutdown()
                 .expect("shutdown extracts generation")
             {
-                ShutdownGeneration::Open(generation) => generation.state,
+                ShutdownGeneration::Open(generation) => generation.shared_state,
                 ShutdownGeneration::Opening(opening) => opening.into_parts().0,
             };
             assert_eq!(state, 17);

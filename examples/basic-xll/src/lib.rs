@@ -9,12 +9,15 @@ pub struct ExampleState;
 pub struct ExampleAddin;
 
 impl Addin for ExampleAddin {
-    type State = ExampleState;
+    type SharedState = ExampleState;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new(ExampleState, ()))
+    fn open(
+        _context: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(ExampleState, (), ()))
     }
 }
 
@@ -26,7 +29,7 @@ pub fn add(
     Ok(x + y)
 }
 
-#[excel_function(name = "EXAMPLE.GREET", thread_safe)]
+#[excel_function(name = "EXAMPLE.GREET")]
 pub fn greet(
     #[excel_context(thread_safe)] _context: ThreadSafeContext<'_, ExampleAddin>,
     name: String,

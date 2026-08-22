@@ -1,5 +1,5 @@
 error[E0433]: cannot find `export` in `xlfn`
-  --> tests/ui/fail/removed_export_macro.rs:17:7
+  --> tests/ui/fail/removed_export_macro.rs:18:7
    |
-17 | xlfn::export!(OldExportAddin);
+18 | xlfn::export!(OldExportAddin);
    |       ^^^^^^ could not find `export` in `xlfn`

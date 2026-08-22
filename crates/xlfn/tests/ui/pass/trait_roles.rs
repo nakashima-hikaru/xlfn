@@ -6,12 +6,13 @@ pub struct State;
 pub struct TestAddin;
 
 impl Addin for TestAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State, ()))
+    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, (), ()))
     }
 }
 
@@ -79,7 +80,7 @@ fn alias_context(#[excel_context(main_thread)] context: MainContext<'_>) -> f64 
     1.0
 }
 
-#[excel_function(name = "TEST.CONTEXT.REEXPORT", thread_safe)]
+#[excel_function(name = "TEST.CONTEXT.REEXPORT")]
 fn reexported_context(
     #[excel_context(thread_safe)] context: reexported::WorkerContext<'_, TestAddin>,
 ) -> f64 {

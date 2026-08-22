@@ -813,7 +813,7 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 }
 
 #[test]
-fn explicit_pinned_handle_argument_conversion_pins_the_payload() {
+fn explicit_handle_lease_argument_conversion_leases_the_payload() {
     let runtime: &'static crate::runtime::Runtime<()> =
         Box::leak(Box::new(crate::runtime::Runtime::new()));
     runtime.arm_test_generation();
@@ -823,7 +823,7 @@ fn explicit_pinned_handle_argument_conversion_pins_the_payload() {
         .unwrap();
     let (_encoded, mut raw) = token_value(&token);
 
-    let resolved: PinnedHandle<DataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let resolved: HandleLease<DataRecord> = crate::value::with_excel_call_scope(|scope| {
         // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
         unsafe { crate::value::argument_from_raw_with_context(scope, runtime, "dataset", &mut raw) }
             .unwrap()
@@ -1489,15 +1489,15 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
 }
 
 #[test]
-fn pinned_handle_keeps_payload_alive_after_binding_retirement() {
+fn handle_lease_keeps_payload_alive_after_binding_retirement() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = HandleRuntime::new(8);
-    let key = test_topic_key("pinned-handle-retirement");
+    let key = test_topic_key("handle-lease-retirement");
     let (token, _) = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
 
-    let pinned: PinnedHandle<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
@@ -1515,15 +1515,15 @@ fn pinned_handle_keeps_payload_alive_after_binding_retirement() {
 }
 
 #[test]
-fn pinned_handle_survives_terminal_runtime_close() {
+fn handle_lease_survives_terminal_runtime_close() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = HandleRuntime::new(8);
-    let key = test_topic_key("pinned-handle-close");
+    let key = test_topic_key("handle-lease-close");
     let (token, _) = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
 
-    let pinned: PinnedHandle<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
@@ -1548,12 +1548,12 @@ fn pinned_handle_survives_terminal_runtime_close() {
 fn pin_promotion_resurrects_a_retired_payload_without_a_binding() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = HandleRuntime::new(8);
-    let key = test_topic_key("pinned-handle-resurrection");
+    let key = test_topic_key("handle-lease-resurrection");
     let (token, _) = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
 
-    let pinned: PinnedHandle<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
         runtime
             .registry
@@ -2730,7 +2730,11 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
         assert!(std::ptr::eq(&**res_ref.get_arc().unwrap(), &*handle_rt));
 
-        let mut return_ctx = ReturnContext::for_frame(moved_access, "test_udf", Some([0; 32]));
+        let mut return_ctx = ReturnContext::for_frame(
+            moved_access.expect("test context has handle access"),
+            "test_udf",
+            Some([0; 32]),
+        );
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))
             .unwrap_err();

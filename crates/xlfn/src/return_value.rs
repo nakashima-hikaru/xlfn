@@ -80,19 +80,16 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
 
 impl<'call> ReturnContext<'call, 'call> {
     pub(crate) fn for_frame(
-        handles: Option<HandleCallAccess<'call>>,
+        handles: HandleCallAccess<'call>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
     ) -> Self {
-        let formula = match (handles, inputs) {
-            (Some(access), Some(inputs)) => Some(FormulaReturnAccess {
-                runtime: access.runtime,
-                udf_id,
-                inputs: InputFingerprint::from_bytes(inputs),
-                callbacks: access.scope.callbacks(),
-            }),
-            _ => None,
-        };
+        let formula = inputs.map(|inputs| FormulaReturnAccess {
+            runtime: handles.runtime,
+            udf_id,
+            inputs: InputFingerprint::from_bytes(inputs),
+            callbacks: handles.scope.callbacks(),
+        });
         Self {
             formula,
             lifetime: PhantomData,
@@ -631,7 +628,7 @@ pub fn udf_boundary_named<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::State) -> XllResult<T>,
+    F: FnOnce(&A::SharedState) -> XllResult<T>,
     T: ExcelReturn,
 {
     let (_guard, accepted) = crate::ingress::global_ingress().enter_udf_with(|| {
@@ -682,7 +679,7 @@ fn udf_boundary_named_inner<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::State) -> XllResult<T>,
+    F: FnOnce(&A::SharedState) -> XllResult<T>,
     T: ExcelReturn,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
@@ -716,7 +713,7 @@ fn udf_boundary_uninstrumented<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::State) -> XllResult<T>,
+    F: FnOnce(&A::SharedState) -> XllResult<T>,
     T: ExcelReturn,
 {
     let prepared = catch_unwind(AssertUnwindSafe(|| {
@@ -751,7 +748,7 @@ fn udf_boundary_instrumented<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::State) -> XllResult<T>,
+    F: FnOnce(&A::SharedState) -> XllResult<T>,
     T: ExcelReturn,
 {
     use crate::execution::{UdfLayerGuard, UdfLayers};
@@ -1434,13 +1431,17 @@ mod tests {
 
         struct LayerTestAddin;
         impl Addin for LayerTestAddin {
-            type State = ();
+            type SharedState = ();
+            type LifecycleState = ();
             type Error = XllError;
             type Layers = (Recorder,);
 
             fn open(
                 _: &OpenContext,
-            ) -> Result<crate::addin::Opened<Self::State, Self::Layers>, Self::Error> {
+            ) -> Result<
+                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                Self::Error,
+            > {
                 unreachable!()
             }
         }

@@ -40,12 +40,13 @@ pub struct State;
 pub struct ExampleAddin;
 
 impl Addin for ExampleAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_context: &OpenContext) -> Result<Opened<Self::State, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State, ()))
+    fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State, (), ()))
     }
 }
 

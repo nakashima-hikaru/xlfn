@@ -168,8 +168,8 @@ object. Accepting `Handle<'_, Dataset>` resolves and type-checks the token.
 `HandleAlias<'_, Dataset>` is the explicit main-thread return capability for
 republishing an existing object. Borrowed `Handle` values are not return values,
 and cannot be used by thread-safe, macro-sheet, or async functions. Async
-functions that need an existing object use `PinnedHandle<Dataset>`, which is an
-owned input created by pinning the authenticated registry object.
+functions that need an existing object use `HandleLease<Dataset>`, which is an
+owned input created by leasing the authenticated registry object.
 
 See [Formula-owned handles](handles.md).
 

@@ -52,17 +52,17 @@ The framework-owned future retains the open `ServiceAddin` generation lease and 
 
 ### Async handle inputs
 
-An async UDF that needs a formula-owned object must accept `PinnedHandle<T>`, not
+An async UDF that needs a formula-owned object must accept `HandleLease<T>`, not
 `Handle<'_, T>`:
 
 ```rust
 #[excel_function(name = "DATASET.ASYNC_EVALUATE")]
-async fn async_evaluate(dataset: PinnedHandle<Dataset>, time: f64) -> XllResult<f64> {
+async fn async_evaluate(dataset: HandleLease<Dataset>, time: f64) -> XllResult<f64> {
     dataset.evaluate(time)
 }
 ```
 
-`PinnedHandle<T>` is converted and pinned before the future is scheduled, so it
+`HandleLease<T>` is converted and leased before the future is scheduled, so it
 is an owned, call-independent value. Its registry pin remains active while the
 future owns the value and is released on normal completion, cancellation, or
 shutdown.
@@ -74,12 +74,13 @@ The add-in controls executor size:
 
 ```rust
 impl Addin for ServiceAddin {
-    type State = State;
+    type SharedState = State;
+    type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<Opened<Self::State, Self::Layers>> {
-        Ok(Opened::new(State::new(), ()).with_runtime_config(
+    fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+        Ok(Opened::new(State::new(), (), ()).with_runtime_config(
             RuntimeConfig::new().with_async_worker_count(4),
         ))
     }

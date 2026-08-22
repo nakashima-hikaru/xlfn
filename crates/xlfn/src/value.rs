@@ -26,11 +26,12 @@ pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 pub mod raw;
 
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use crate::call::with_excel_call_scope;
 pub use input::FromExcel;
-pub(crate) use input::{
-    ArgumentContext, CallContext, ExcelParameter, argument_from_raw_with_arguments,
-};
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
+pub(crate) use input::{CallContext, ExcelParameter};
 #[cfg(test)]
 pub(crate) use input::{argument_from_raw, argument_from_raw_with_context};
 pub use output::{
@@ -793,7 +794,7 @@ where
     }
 }
 
-impl<'call, T> ExcelParameter<'call> for crate::handle::PinnedHandle<T>
+impl<'call, T> ExcelParameter<'call> for crate::handle::HandleLease<T>
 where
     T: crate::handle::ExcelHandleObject,
 {

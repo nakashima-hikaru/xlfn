@@ -18,8 +18,10 @@ const STATE_DONE: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CancellationGuarantee {
+    #[cfg(feature = "async")]
     BestEffort,
     CalculationScoped,
+    #[cfg(feature = "async")]
     SubscriptionScoped,
 }
 
