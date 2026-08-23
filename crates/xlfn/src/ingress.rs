@@ -233,6 +233,45 @@ pub struct ExportIngress {
 #[derive(Debug)]
 pub(crate) struct OpeningPublicationLost;
 
+/// The result of reserving one external export entry.
+///
+/// Both variants own the counted ingress reservation.  Only `AdmittedExport`
+/// can be passed to `Runtime::enter`; `RejectedExport` exists solely to keep a
+/// closing/opening reservation alive until the caller has returned.
+#[derive(Debug)]
+pub(crate) enum ExportEntry<'a> {
+    Admitted(AdmittedExport<'a>),
+    Rejected(RejectedExport<'a>),
+}
+
+#[derive(Debug)]
+pub(crate) struct AdmittedExport<'a> {
+    guard: ExportCallGuard<'a>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RejectedExport<'a> {
+    _guard: ExportCallGuard<'a>,
+}
+
+impl<'a> ExportEntry<'a> {
+    pub(crate) fn into_admitted(self) -> Result<AdmittedExport<'a>, RejectedExport<'a>> {
+        match self {
+            Self::Admitted(entry) => Ok(entry),
+            Self::Rejected(entry) => Err(entry),
+        }
+    }
+}
+
+impl AdmittedExport<'_> {
+    pub(crate) fn with_linearization<F, R>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        self.guard.ingress.with_linearization(operation)
+    }
+}
+
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
 
 pub(crate) fn with_diagnostic_linearization<F, R>(operation: F) -> R
@@ -353,7 +392,7 @@ impl ExportIngress {
 
     /// Attempts to enter an export entry and runs `on_accepted` at the same
     /// refinement linearization point as the accepting state transition.
-    pub fn enter_with<F>(&self, on_accepted: F) -> (ExportCallGuard<'_>, bool)
+    pub fn enter_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
     {
@@ -370,17 +409,17 @@ impl ExportIngress {
             .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         let stripe_index = current_ingress_stripe();
         let stripe = &self.stripes[stripe_index];
         if !stripe.try_enter() {
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
             self.release_reservation(stripe_index, false);
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
         if accepted {
@@ -389,20 +428,22 @@ impl ExportIngress {
                 .expect("ingress acceptance hook called once");
             hook();
         }
-        (
-            ExportCallGuard {
-                ingress: self,
-                epoch: self.epoch.load(Ordering::Acquire),
-                stripe: Some(stripe_index),
-                udf: false,
-            },
-            accepted,
-        )
+        let entry = ExportCallGuard {
+            ingress: self,
+            epoch: self.epoch.load(Ordering::Acquire),
+            stripe: Some(stripe_index),
+            udf: false,
+        };
+        if accepted {
+            ExportEntry::Admitted(AdmittedExport { guard: entry })
+        } else {
+            ExportEntry::Rejected(RejectedExport { _guard: entry })
+        }
     }
 
     /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
     /// refinement linearization point as the accepting state transition.
-    pub fn enter_udf_with<F>(&self, on_accepted: F) -> (ExportCallGuard<'_>, bool)
+    pub fn enter_udf_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
     {
@@ -419,18 +460,18 @@ impl ExportIngress {
             .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         let stripe_index = current_ingress_stripe();
         let stripe = &self.stripes[stripe_index];
         if !stripe.try_enter() {
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         stripe.enter_udf();
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
             self.release_reservation(stripe_index, true);
-            return (self.rejected_guard(), false);
+            return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
         if accepted {
@@ -439,15 +480,17 @@ impl ExportIngress {
                 .expect("ingress acceptance hook called once");
             hook();
         }
-        (
-            ExportCallGuard {
-                ingress: self,
-                epoch: self.epoch.load(Ordering::Acquire),
-                stripe: Some(stripe_index),
-                udf: true,
-            },
-            accepted,
-        )
+        let entry = ExportCallGuard {
+            ingress: self,
+            epoch: self.epoch.load(Ordering::Acquire),
+            stripe: Some(stripe_index),
+            udf: true,
+        };
+        if accepted {
+            ExportEntry::Admitted(AdmittedExport { guard: entry })
+        } else {
+            ExportEntry::Rejected(RejectedExport { _guard: entry })
+        }
     }
 
     /// Stops accepting new export calls and runs `on_closed` at the same
@@ -619,12 +662,14 @@ impl ExportIngress {
         self.stripes.iter().map(IngressStripe::active_udfs).sum()
     }
 
-    fn rejected_guard(&self) -> ExportCallGuard<'_> {
-        ExportCallGuard {
-            ingress: self,
-            epoch: self.epoch.load(Ordering::Acquire),
-            stripe: None,
-            udf: false,
+    fn rejected_guard(&self) -> RejectedExport<'_> {
+        RejectedExport {
+            _guard: ExportCallGuard {
+                ingress: self,
+                epoch: self.epoch.load(Ordering::Acquire),
+                stripe: None,
+                udf: false,
+            },
         }
     }
 
@@ -639,6 +684,7 @@ impl ExportIngress {
     }
 }
 
+#[derive(Debug)]
 pub struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
@@ -670,23 +716,23 @@ mod tests {
         let ingress = Arc::new(ExportIngress::new());
         ingress.begin_opening();
         ingress.begin_close_with(|| {});
-        let (guard, accepted) = ingress.enter_with(|| {});
-        assert!(!accepted);
+        let entry = ingress.enter_with(|| {});
+        assert!(matches!(&entry, ExportEntry::Rejected(_)));
 
         let sealing = Arc::clone(&ingress);
         let worker = std::thread::spawn(move || sealing.seal_and_drain());
         std::thread::yield_now();
         assert_eq!(ingress.active_calls(), 1);
-        drop(guard);
+        drop(entry);
         let certificate = worker.join().unwrap();
 
         assert_eq!(certificate.epoch, 1);
         assert_eq!(ingress.phase(), PHASE_CLOSED);
         assert_eq!(ingress.active_calls(), 0);
-        let (closed_guard, accepted) = ingress.enter_with(|| {});
-        assert!(!accepted);
+        let closed_entry = ingress.enter_with(|| {});
+        assert!(matches!(&closed_entry, ExportEntry::Rejected(_)));
         assert_eq!(ingress.active_calls(), 0);
-        drop(closed_guard);
+        drop(closed_entry);
     }
 
     #[test]
@@ -696,8 +742,8 @@ mod tests {
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
 
-        let (guard, accepted) = ingress.enter_with(|| {});
-        assert!(accepted);
+        let entry = ingress.enter_with(|| {});
+        assert!(matches!(&entry, ExportEntry::Admitted(_)));
 
         ingress.begin_close_with(|| {});
 
@@ -705,7 +751,7 @@ mod tests {
             let drain = scope.spawn(|| ingress.seal_and_drain());
 
             std::thread::sleep(Duration::from_millis(10));
-            drop(guard);
+            drop(entry);
 
             let _drained = drain.join().unwrap();
         });
@@ -722,12 +768,12 @@ mod tests {
         let (release_hook_tx, release_hook_rx) = mpsc::sync_channel(1);
         let entering = Arc::clone(&ingress);
         let entry = std::thread::spawn(move || {
-            let (guard, accepted) = entering.enter_with(|| {
+            let entry = entering.enter_with(|| {
                 hook_started_tx.send(()).unwrap();
                 release_hook_rx.recv().unwrap();
             });
-            assert!(accepted);
-            drop(guard);
+            assert!(matches!(&entry, ExportEntry::Admitted(_)));
+            drop(entry);
         });
 
         hook_started_rx.recv().unwrap();
@@ -769,9 +815,9 @@ mod tests {
         let first = ingress.seal_and_drain();
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-        let (guard, accepted) = ingress.enter_with(|| {});
-        assert!(accepted);
-        drop(guard);
+        let entry = ingress.enter_with(|| {});
+        assert!(matches!(&entry, ExportEntry::Admitted(_)));
+        drop(entry);
         ingress.begin_close_with(|| {});
         let second = ingress.seal_and_drain();
         assert!(second.epoch > first.epoch);
@@ -785,11 +831,11 @@ mod tests {
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let entering = Arc::clone(&ingress);
         let entry = std::thread::spawn(move || {
-            let (guard, accepted) = entering.enter_with(|| {});
-            assert!(!accepted);
+            let entry = entering.enter_with(|| {});
+            assert!(matches!(&entry, ExportEntry::Rejected(_)));
             entered_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            drop(guard);
+            drop(entry);
         });
         entered_rx.recv().unwrap();
 
@@ -831,11 +877,11 @@ mod tests {
         });
 
         ready_rx.recv().unwrap();
-        let (guard, accepted) = ingress.enter_with(|| {});
-        assert!(!accepted);
+        let entry = ingress.enter_with(|| {});
+        assert!(matches!(&entry, ExportEntry::Rejected(_)));
         assert_eq!(ingress.active_calls(), 1);
         release_tx.send(()).unwrap();
-        drop(guard);
+        drop(entry);
 
         worker.join().unwrap();
         assert_eq!(ingress.phase(), PHASE_CLOSED);

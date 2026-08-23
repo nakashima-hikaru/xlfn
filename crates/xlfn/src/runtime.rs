@@ -1,4 +1,5 @@
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RemovalEpoch, RuntimeGeneration};
+use crate::ingress::AdmittedExport;
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::registration::RegistrationId;
 use crate::{XllError, XllResult};
@@ -628,8 +629,11 @@ impl<A: crate::Addin> Runtime<A> {
         disposition
     }
 
-    pub fn enter(&self) -> XllResult<CallGuard<'_, A>> {
-        crate::module_runtime::ingress().with_linearization(|| {
+    pub(crate) fn enter<'call>(
+        &'call self,
+        ingress: &'call AdmittedExport<'call>,
+    ) -> XllResult<CallGuard<'call, A>> {
+        ingress.with_linearization(|| {
             let admission = self.lifecycle.try_admit()?;
             #[cfg(any(test, feature = "refinement"))]
             self.refinement_hooks().call_entered(self);
@@ -639,6 +643,7 @@ impl<A: crate::Addin> Runtime<A> {
                 #[cfg(not(any(test, feature = "refinement")))]
                 _runtime: std::marker::PhantomData,
                 admission,
+                _ingress: ingress,
             })
         })
     }
@@ -1488,6 +1493,7 @@ impl<A: crate::Addin, Stage> Drop for OpeningTxn<'_, A, Stage> {
 }
 
 pub struct CallGuard<'runtime, A: crate::Addin> {
+    _ingress: &'runtime AdmittedExport<'runtime>,
     #[cfg(any(test, feature = "refinement"))]
     runtime: &'runtime Runtime<A>,
     #[cfg(not(any(test, feature = "refinement")))]
@@ -1563,6 +1569,13 @@ pub(crate) mod tests {
         > {
             Ok(crate::addin::Opened::new(0, (), ()))
         }
+    }
+
+    fn admitted_export() -> crate::ingress::AdmittedExport<'static> {
+        crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN")
     }
 
     fn finish_test_close<A: crate::Addin>(
@@ -1664,7 +1677,8 @@ pub(crate) mod tests {
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(1_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        assert_eq!(runtime.enter().unwrap().state(), &1);
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &1);
         let old_handles = runtime.formula_handle_service().unwrap();
         let old_token = old_handles
             .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
@@ -1678,7 +1692,8 @@ pub(crate) mod tests {
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish(2_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        assert_eq!(runtime.enter().unwrap().state(), &2);
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &2);
         let new_handles = runtime.formula_handle_service().unwrap();
         let new_token = new_handles
             .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
@@ -1730,7 +1745,8 @@ pub(crate) mod tests {
         runtime.publish(11_u32, ());
         runtime.finish_open(&mut first, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
-        assert_eq!(runtime.enter().unwrap().state(), &11);
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
         let close = runtime.begin_final_removal().unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, close);
@@ -1985,12 +2001,14 @@ pub(crate) mod tests {
         runtime.publish(7_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        let (_export_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {});
-        assert!(accepted);
-        let guard = runtime.enter().unwrap();
+        let ingress = crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN");
+        let guard = runtime.enter(&ingress).unwrap();
         assert!(runtime.begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
-        assert!(matches!(runtime.enter(), Err(XllError::Closing)));
+        assert!(matches!(runtime.enter(&ingress), Err(XllError::Closing)));
 
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
@@ -2000,7 +2018,7 @@ pub(crate) mod tests {
 
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
         drop(guard);
-        drop(_export_guard);
+        drop(ingress);
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         handle.join().unwrap();
     }

@@ -718,8 +718,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
             .read(self.services.subscription_host())?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
-        match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.host.callbacks())
-        {
+        match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.host) {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)

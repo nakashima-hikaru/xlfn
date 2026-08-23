@@ -173,10 +173,11 @@ impl ComModuleLifetime {
     }
 
     pub(super) fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
-        let (ingress_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
+        let ingress_guard = crate::module_runtime::ingress().enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
         });
+        let accepted = matches!(&ingress_guard, crate::ingress::ExportEntry::Admitted(_));
         let mut inner = self.inner.lock();
         Self::increment(&mut inner.state.in_flight_calls);
         drop(inner);
@@ -295,7 +296,7 @@ impl ComModuleLifetime {
 
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
-    _ingress_guard: crate::ingress::ExportCallGuard<'static>,
+    _ingress_guard: crate::ingress::ExportEntry<'static>,
     #[cfg(any(test, feature = "refinement"))]
     record_ghost: bool,
 }

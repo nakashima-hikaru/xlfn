@@ -172,9 +172,10 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call, crate::value::PlainInputMode>,
     {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -198,9 +199,10 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
     {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -225,9 +227,10 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_str(&mut self) {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -247,9 +250,10 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_matrix_str(&mut self) {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -268,9 +272,10 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_mixed_cells(&mut self) {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -292,9 +297,10 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
@@ -316,9 +322,10 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =

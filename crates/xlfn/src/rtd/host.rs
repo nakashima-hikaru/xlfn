@@ -1,5 +1,5 @@
 use super::RtdNotifier;
-use crate::ingress::{ExportCallGuard, ExportIngress};
+use crate::ingress::{AdmittedExport, ExportIngress};
 use crate::subscription::SubscriptionHost;
 use crate::{XllError, XllResult};
 
@@ -22,7 +22,7 @@ impl RtdSubscriptionHost {
 }
 
 pub(crate) struct RtdAdmissionGuard {
-    _ingress: Option<ExportCallGuard<'static>>,
+    _ingress: Option<AdmittedExport<'static>>,
 }
 
 impl SubscriptionHost for RtdSubscriptionHost {
@@ -39,12 +39,13 @@ impl SubscriptionHost for RtdSubscriptionHost {
         };
 
         let mut operation_result = None;
-        let (guard, accepted) = ingress.enter_with(|| {
+        let entry = ingress.enter_with(|| {
             operation_result = Some(operation());
         });
-        if !accepted {
-            return Err(XllError::Closing);
-        }
+        let guard = match entry.into_admitted() {
+            Ok(guard) => guard,
+            Err(_) => return Err(XllError::Closing),
+        };
 
         match operation_result.expect("accepted host admission runs its operation") {
             Ok(()) => Ok(RtdAdmissionGuard {

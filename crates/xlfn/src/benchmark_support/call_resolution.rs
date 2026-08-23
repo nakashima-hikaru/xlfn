@@ -47,9 +47,10 @@ impl MultiHandleCallBenchmark {
     }
 
     pub fn run(&mut self) {
+        let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter()
+            .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut frame = crate::__private::v1::CallFrame::<

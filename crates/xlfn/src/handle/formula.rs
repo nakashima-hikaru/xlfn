@@ -92,10 +92,8 @@ pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
     ))
 }
 
-pub(crate) fn resolve_formula_caller(
-    callbacks: &crate::host_callback::HostCallbackSession,
-) -> XllResult<FormulaCaller> {
-    let caller = ExcelHost::new(callbacks).caller()?;
+pub(crate) fn resolve_formula_caller(host: ExcelHost<'_>) -> XllResult<FormulaCaller> {
+    let caller = host.caller()?;
     Ok(FormulaCaller {
         sheet_id: caller.sheet_id,
         row: caller.row,
@@ -104,11 +102,11 @@ pub(crate) fn resolve_formula_caller(
 }
 
 pub(crate) fn formula_revision_key(
-    callbacks: &crate::host_callback::HostCallbackSession,
+    host: ExcelHost<'_>,
     udf_id: &'static str,
     inputs: InputFingerprint,
 ) -> XllResult<HandleTopicKey> {
-    let caller = resolve_formula_caller(callbacks)?;
+    let caller = resolve_formula_caller(host)?;
     Ok(HandleTopicKey::Formula(FormulaRevisionKey::new(
         caller, udf_id, inputs,
     )))

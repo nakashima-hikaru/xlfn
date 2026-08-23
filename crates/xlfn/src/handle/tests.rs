@@ -372,7 +372,7 @@ fn ref_caller_uses_embedded_sheet_id_without_sheet_callbacks() {
     crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::Ref);
 
     let callbacks = crate::host_callback::HostCallbackSession::new();
-    let caller = resolve_formula_caller(&callbacks).unwrap();
+    let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&callbacks)).unwrap();
 
     assert_eq!(
         caller,
@@ -396,7 +396,7 @@ fn sref_caller_keeps_sheet_lookup_fallback() {
     crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::SRef);
 
     let callbacks = crate::host_callback::HostCallbackSession::new();
-    let caller = resolve_formula_caller(&callbacks).unwrap();
+    let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&callbacks)).unwrap();
 
     assert_eq!(
         caller,

@@ -22,6 +22,8 @@ mod value;
 
 pub(crate) type ErasedSink = delivery::ErasedSink;
 pub(crate) type SubscriptionRuntime = runtime::SubscriptionRuntime<crate::rtd::RtdSubscriptionHost>;
+pub(crate) type SubscriptionConnection =
+    runtime::SubscriptionConnection<crate::rtd::RtdSubscriptionHost>;
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::rtd::RtdSubscriptionHost>;
 
@@ -65,8 +67,6 @@ pub(crate) use identity::{
 use parking_lot::{Condvar, Mutex};
 #[cfg(test)]
 pub(crate) use runtime::OperationEnterHook;
-#[cfg(target_os = "windows")]
-pub(crate) use runtime::SubscriptionConnection;
 #[cfg(test)]
 pub(crate) use server::{
     OwnedServerOperation, PANIC_AFTER_TERMINATION_GUARD, PublishCore, RtdRefreshBatch,

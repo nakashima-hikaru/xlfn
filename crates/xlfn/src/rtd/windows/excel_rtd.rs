@@ -2,7 +2,6 @@ use super::registration::TemporaryRegistration;
 use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server};
 use crate::handle::FormulaHandleService;
 use crate::host_api::ExcelHost;
-use crate::host_callback::HostCallbackSession;
 use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
@@ -17,7 +16,7 @@ pub(crate) fn observe(
     ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,
-    callbacks: &HostCallbackSession,
+    host: ExcelHost<'_>,
 ) -> XllResult<()> {
     let _rtd_operation = crate::rtd::begin_operation(handles, ingress)?;
     let ensured = ensure_server(Some(handles), None)?;
@@ -30,7 +29,7 @@ pub(crate) fn observe(
     {
         None
     } else {
-        let module_path = match module_path(callbacks) {
+        let module_path = match module_path(host) {
             Ok(path) => path,
             Err(error) => {
                 discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -75,7 +74,7 @@ pub(crate) fn observe(
         topic.pointer(),
     ];
 
-    let returned = ExcelHost::new(callbacks).invoke(
+    let returned = host.invoke(
         XLF_RTD,
         crate::error::ExcelApiFunction::Rtd,
         &arguments,
@@ -96,7 +95,7 @@ pub(crate) fn observe(
 pub(crate) fn observe_subscription(
     subscriptions: &Arc<SubscriptionRuntime>,
     key: &crate::subscription::SubscriptionKey,
-    callbacks: &HostCallbackSession,
+    host: ExcelHost<'_>,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
     let ensured = ensure_server(None, Some(subscriptions))?;
@@ -109,7 +108,7 @@ pub(crate) fn observe_subscription(
     {
         None
     } else {
-        let module_path = match module_path(callbacks) {
+        let module_path = match module_path(host) {
             Ok(path) => path,
             Err(error) => {
                 discard_unpublished_server(active.pointer, ensured.newly_created);
@@ -157,7 +156,7 @@ pub(crate) fn observe_subscription(
         topic.pointer(),
     ];
 
-    let value = ExcelHost::new(callbacks).invoke(
+    let value = host.invoke(
         XLF_RTD,
         crate::error::ExcelApiFunction::Rtd,
         &arguments,
@@ -169,8 +168,8 @@ pub(crate) fn observe_subscription(
     RtdValue::try_from(value)
 }
 
-fn module_path(callbacks: &HostCallbackSession) -> XllResult<String> {
-    ExcelHost::new(callbacks).module_path()
+fn module_path(host: ExcelHost<'_>) -> XllResult<String> {
+    host.module_path()
 }
 
 struct CountedString {

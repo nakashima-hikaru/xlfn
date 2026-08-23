@@ -11,6 +11,7 @@ mod connection;
 mod formula;
 mod object;
 mod prepare;
+mod publication;
 #[cfg(any(test, feature = "refinement"))]
 mod refinement;
 mod refinement_hooks;
@@ -63,6 +64,7 @@ pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
 pub(crate) use object::SharedObject;
 pub(crate) use prepare::HandlePrepareState;
+pub(crate) use publication::PublicationReservation;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]

@@ -43,16 +43,18 @@ pub unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
-    let (_export_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_entered(runtime);
-    });
+    let ingress = match crate::module_runtime::ingress()
+        .enter_udf_with(|| {
+            #[cfg(any(test, feature = "refinement"))]
+            runtime.refinement_hooks().external_entered(runtime);
+        })
+        .into_admitted()
+    {
+        Ok(ingress) => ingress,
+        Err(_) => return,
+    };
 
-    if !accepted {
-        return;
-    }
-
-    let call = match runtime.enter() {
+    let call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]

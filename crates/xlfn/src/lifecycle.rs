@@ -1778,8 +1778,12 @@ mod tests {
                 crate::cancellation::CancellationGuarantee::BestEffort,
             );
             runtime.start_async(1).unwrap();
+            let ingress = crate::module_runtime::ingress()
+                .enter_with(|| {})
+                .into_admitted()
+                .expect("test call enters during OPEN");
             let call = runtime
-                .enter()
+                .enter(&ingress)
                 .expect("async trace task must be spawned from an admitted call");
             runtime
                 .async_manager()
@@ -2228,13 +2232,15 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let (export_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {});
-            assert!(accepted);
-            let call = runtime.enter().unwrap();
+            let ingress = crate::module_runtime::ingress()
+                .enter_udf_with(|| {})
+                .into_admitted()
+                .expect("test call enters during OPEN");
+            let call = runtime.enter(&ingress).unwrap();
             entered_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             drop(call);
-            drop(export_guard);
+            drop(ingress);
         });
 
         entered_rx
@@ -2261,7 +2267,11 @@ mod tests {
 
         assert_eq!(host_auto_close::<CleanClose>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
-        assert!(runtime.enter().is_ok());
+        let ingress = crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN");
+        assert!(runtime.enter(&ingress).is_ok());
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);

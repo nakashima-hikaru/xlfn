@@ -74,3 +74,10 @@ pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
         runtime
     })
 }
+
+pub(super) fn benchmark_ingress() -> crate::ingress::AdmittedExport<'static> {
+    crate::module_runtime::ingress()
+        .enter_with(|| {})
+        .into_admitted()
+        .expect("benchmark runtime ingress must be open")
+}

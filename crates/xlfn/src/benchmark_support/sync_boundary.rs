@@ -81,20 +81,22 @@ impl SyncBoundaryWorkerPool {
                     match kind {
                         SyncBenchKind::IngressUdfOnly => {
                             for _ in 0..iterations_per_thread {
-                                let (guard, accepted) =
-                                    crate::module_runtime::ingress().enter_udf_with(|| {});
-                                std::hint::black_box(accepted);
-                                drop(guard);
+                                let entry = crate::module_runtime::ingress().enter_udf_with(|| {});
+                                std::hint::black_box(matches!(
+                                    &entry,
+                                    crate::ingress::ExportEntry::Admitted(_)
+                                ));
+                                drop(entry);
                             }
                         }
                         SyncBenchKind::FullAdmission => {
                             for _ in 0..iterations_per_thread {
-                                let (guard, accepted) =
-                                    crate::module_runtime::ingress().enter_udf_with(|| {});
-                                if accepted && let Ok(call) = r.enter() {
+                                let entry = crate::module_runtime::ingress().enter_udf_with(|| {});
+                                if let Ok(ingress) = entry.into_admitted()
+                                    && let Ok(call) = r.enter(&ingress)
+                                {
                                     std::hint::black_box(&call);
                                 }
-                                drop(guard);
                             }
                         }
                         SyncBenchKind::ScalarReturnNoSubscriber

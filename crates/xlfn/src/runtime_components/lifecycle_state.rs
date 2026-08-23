@@ -45,10 +45,10 @@ pub(crate) struct PublishedGeneration<A: crate::Addin> {
 
 /// Read-side admission capability for one coherent open generation.
 ///
-/// The phase projection and the generation publication are deliberately
-/// acquired together. Callers must not perform an independent phase check and
-/// publication load: this capability is the single boundary that turns the
-/// two projections into an admitted call.
+/// The admission publication is the sole hot-path witness that UDF calls may
+/// enter. It is empty throughout opening and is cleared at the beginning of
+/// closing, so a loaded publication already carries the lifecycle decision;
+/// callers do not need to combine it with a separately observed phase.
 pub(crate) struct GenerationAdmission<A: crate::Addin> {
     publication: arc_swap::Guard<Option<Arc<PublishedGeneration<A>>>>,
 }
@@ -606,25 +606,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
     }
 
-    /// Admits one call from the coherent read-side projections.
+    /// Admits one call from the published generation projection.
     ///
-    /// `phase` and `publication` are published independently for different
-    /// readers, but a call must observe them as one protocol decision. Keep
-    /// this check here so hot-path callers cannot accidentally split the
-    /// admission into separate observations.
+    /// Opening has no publication and closing clears it before the lifecycle
+    /// phase changes, so one ArcSwap load is sufficient for the hot path.
     pub(crate) fn try_admit(&self) -> crate::XllResult<GenerationAdmission<A>> {
-        if self.observed_phase() != LifecyclePhase::Open {
-            return Err(crate::XllError::Closing);
-        }
-
         let publication = self.publication.load();
-        if publication.is_none() {
-            return Err(crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
-            });
+        if publication.is_some() {
+            Ok(GenerationAdmission::new(publication))
+        } else {
+            Err(crate::XllError::Closing)
         }
-
-        Ok(GenerationAdmission::new(publication))
     }
 
     pub(crate) fn set_host_intent(&self, intent: HostLifecycleIntent) {
@@ -748,6 +740,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 }
                 core.last_committed_generation = Some(generation);
                 core.state = LifecycleState::Open { bundle };
+                if let LifecycleState::Open { bundle } = core.canonical_state() {
+                    self.publish_publication(bundle);
+                } else {
+                    unreachable!("open bundle was just installed");
+                }
                 self.refresh_projection(core);
                 Ok(())
             }
@@ -843,6 +840,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             },
             LifecycleState::Quarantined { payload } => LifecycleState::Quarantined { payload },
         };
+        if matches!(core.canonical_state(), LifecycleState::Closing { .. }) {
+            self.clear_publication();
+        }
         self.refresh_projection(core);
     }
 
@@ -986,15 +986,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             attempt,
             payload: OpeningPayload::Published(bundle),
         };
-        if let LifecycleState::Opening {
-            payload: OpeningPayload::Published(bundle),
-            ..
-        } = core.canonical_state()
-        {
-            self.publish_publication(bundle);
-        } else {
-            unreachable!("published opening bundle was just installed");
-        }
         Ok(())
     }
 

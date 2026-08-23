@@ -36,10 +36,6 @@ impl<'call> ExcelHost<'call> {
         Self { callbacks }
     }
 
-    pub(crate) const fn callbacks(self) -> &'call HostCallbackSession {
-        self.callbacks
-    }
-
     /// Runs one callback and applies the common status/release protocol.
     ///
     /// The decoder runs while the callback result is still live.  Cleanup is

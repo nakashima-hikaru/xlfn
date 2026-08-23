@@ -1,13 +1,11 @@
-#[cfg(not(target_os = "windows"))]
-use crate::XllError;
-use crate::XllResult;
 use crate::handle::FormulaHandleService;
-use crate::host_callback::HostCallbackSession;
+use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
 pub use crate::subscription::{
     IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
     RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
 };
+use crate::{XllError, XllResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -92,7 +90,7 @@ impl RtdModuleState {
 /// handle and topic state.
 #[cfg(target_os = "windows")]
 pub(crate) struct RtdOperationGuard {
-    ingress_guard: crate::ingress::ExportCallGuard<'static>,
+    ingress_guard: crate::ingress::AdmittedExport<'static>,
     #[cfg(any(test, feature = "refinement"))]
     ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
@@ -115,15 +113,18 @@ pub(crate) fn begin_operation(
 ) -> XllResult<RtdOperationGuard> {
     #[cfg(any(test, feature = "refinement"))]
     let ghost = handles.rtd_ghost();
-    let (ingress_guard, accepted) = ingress.enter_with(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = ghost.as_ref() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
-        }
-    });
-    if !accepted {
-        return Err(XllError::Closing);
-    }
+    let ingress_guard = match ingress
+        .enter_with(|| {
+            #[cfg(any(test, feature = "refinement"))]
+            if let Some(ghost) = ghost.as_ref() {
+                ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+            }
+        })
+        .into_admitted()
+    {
+        Ok(ingress_guard) => ingress_guard,
+        Err(_) => return Err(XllError::Closing),
+    };
     Ok(RtdOperationGuard {
         ingress_guard,
         #[cfg(any(test, feature = "refinement"))]
@@ -160,15 +161,15 @@ pub(crate) fn observe(
     ingress: &'static ExportIngress,
     key: &str,
     token: &str,
-    callbacks: &HostCallbackSession,
+    host: ExcelHost<'_>,
 ) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
-        windows::observe(handles, ingress, key, token, callbacks)
+        windows::observe(handles, ingress, key, token, host)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (handles, ingress, key, token, callbacks);
+        let _ = (handles, ingress, key, token, host);
         Err(XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(
@@ -181,15 +182,15 @@ pub(crate) fn observe(
 pub(crate) fn observe_subscription(
     subscriptions: &Arc<crate::subscription::SubscriptionRuntime>,
     key: &crate::subscription::SubscriptionKey,
-    callbacks: &HostCallbackSession,
+    host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
     #[cfg(target_os = "windows")]
     {
-        windows::observe_subscription(subscriptions, key, callbacks)
+        windows::observe_subscription(subscriptions, key, host)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (subscriptions, key, callbacks);
+        let _ = (subscriptions, key, host);
         Err(XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(

@@ -136,7 +136,7 @@ impl FormulaCallerBenchmark {
         }
 
         let callbacks = HostCallbackSession::new();
-        let caller = resolve_formula_caller(&callbacks)
+        let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&callbacks))
             .expect("benchmark callback must resolve a single-cell caller");
         let expected_sheet = if matches!(case, FormulaCallerBenchCase::Ref) {
             17
@@ -150,7 +150,7 @@ impl FormulaCallerBenchmark {
     }
 
     pub fn run(&self) -> (usize, i32, i32) {
-        let caller = resolve_formula_caller(&self.callbacks)
+        let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&self.callbacks))
             .expect("benchmark callback must resolve a single-cell caller");
         (caller.sheet_id, caller.row, caller.column)
     }

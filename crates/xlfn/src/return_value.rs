@@ -1,5 +1,5 @@
 use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
-use crate::host_callback::HostCallbackSession;
+use crate::host_api::ExcelHost;
 use crate::input_identity::InputFingerprint;
 use crate::return_array::XlArrayOutput;
 use crate::return_storage::ReturnStorage;
@@ -42,7 +42,7 @@ pub(crate) struct FormulaPublisher<'call, 'scope> {
     pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
     pub(crate) udf_id: &'static str,
     pub(crate) inputs: InputFingerprint,
-    pub(crate) callbacks: &'scope HostCallbackSession,
+    pub(crate) host: ExcelHost<'scope>,
 }
 
 impl<'call, 'scope> ReturnContext<'call, 'scope> {
@@ -69,7 +69,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
                 runtime: crate::handle::FormulaHandleServiceResolver::new(call.services()),
                 udf_id,
                 inputs: InputFingerprint::from_bytes(inputs),
-                callbacks: scope.callbacks(),
+                host: ExcelHost::new(scope.callbacks()),
             }),
             lifetime: PhantomData,
         }
@@ -92,7 +92,7 @@ impl<'call> ReturnContext<'call, 'call> {
             runtime: handles.runtime,
             udf_id,
             inputs: InputFingerprint::from_bytes(inputs),
-            callbacks: handles.scope.callbacks(),
+            host: ExcelHost::new(handles.scope.callbacks()),
         });
         Self {
             publisher,
@@ -137,8 +137,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let access = self;
         let handles = access.runtime.get()?;
         let arc_handles = access.runtime.get_arc()?;
-        let key =
-            crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
+        let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
                 crate::rtd::observe(
@@ -146,7 +145,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
                     crate::module_runtime::ingress(),
                     key,
                     token,
-                    access.callbacks,
+                    access.host,
                 )
             })?;
         Ok(preparation.into_token())
@@ -159,15 +158,14 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let access = self;
         let handles = access.runtime.get()?;
         let arc_handles = access.runtime.get_arc()?;
-        let key =
-            crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
+        let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation = handles.prepare_observed(key, operation, |key, token| {
             crate::rtd::observe(
                 arc_handles,
                 crate::module_runtime::ingress(),
                 key,
                 token,
-                access.callbacks,
+                access.host,
             )
         })?;
         Ok(preparation.into_token())
@@ -581,14 +579,17 @@ where
     F: FnOnce() -> XllResult<T>,
     T: ExcelReturn,
 {
-    let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_entered(runtime);
-    });
-    if !accepted {
-        return closing_error_pointer();
-    }
-    let _call = match runtime.enter() {
+    let ingress = match crate::module_runtime::ingress()
+        .enter_with(|| {
+            #[cfg(any(test, feature = "refinement"))]
+            runtime.refinement_hooks().external_entered(runtime);
+        })
+        .into_admitted()
+    {
+        Ok(ingress) => ingress,
+        Err(_) => return closing_error_pointer(),
+    };
+    let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
@@ -627,14 +628,17 @@ where
 /// Excel callbacks.
 #[doc(hidden)]
 pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
-    let (_guard, accepted) = crate::module_runtime::ingress().enter_with(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_entered(runtime);
-    });
-    if !accepted {
-        return;
-    }
-    let _call = match runtime.enter() {
+    let ingress = match crate::module_runtime::ingress()
+        .enter_with(|| {
+            #[cfg(any(test, feature = "refinement"))]
+            runtime.refinement_hooks().external_entered(runtime);
+        })
+        .into_admitted()
+    {
+        Ok(ingress) => ingress,
+        Err(_) => return,
+    };
+    let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
@@ -663,14 +667,17 @@ where
     ) -> XllResult<T>,
     T: ExcelReturn,
 {
-    let (_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_entered(runtime);
-    });
-    if !accepted {
-        return closing_error_pointer();
-    }
-    let call = match runtime.enter() {
+    let ingress = match crate::module_runtime::ingress()
+        .enter_udf_with(|| {
+            #[cfg(any(test, feature = "refinement"))]
+            runtime.refinement_hooks().external_entered(runtime);
+        })
+        .into_admitted()
+    {
+        Ok(ingress) => ingress,
+        Err(_) => return closing_error_pointer(),
+    };
+    let call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
@@ -1552,7 +1559,11 @@ mod tests {
     fn scalar_returns_do_not_evaluate_input_fingerprints() {
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        let call = runtime.enter().unwrap();
+        let ingress = crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN");
+        let call = runtime.enter(&ingress).unwrap();
         crate::value::with_excel_call_scope(|scope| {
             let mut context = ReturnContext::for_call(&call, "scalar", None, scope);
             let value =
