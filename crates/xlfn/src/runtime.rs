@@ -32,7 +32,7 @@ fn opening_publication_lost() -> ! {
 }
 
 /// The published root of an open Add-in generation.
-pub struct ExecutionGeneration<A: crate::Addin> {
+pub(crate) struct ExecutionGeneration<A: crate::Addin> {
     pub(crate) id: RuntimeGeneration,
     pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
@@ -45,7 +45,7 @@ impl<A: crate::Addin> ExecutionGeneration<A> {
 }
 
 /// Unique Add-in state staged during `OPENING`.
-pub struct OpeningGeneration<A: crate::Addin> {
+pub(crate) struct OpeningGeneration<A: crate::Addin> {
     pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
     pub(crate) init_config: crate::addin::RuntimeConfig,
@@ -1608,6 +1608,7 @@ pub(crate) mod tests {
         // are exercised by the real lifecycle close path.
         runtime.disable_ghost_for_test();
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let last_generation = runtime.lifecycle.lock().last_committed_generation();
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
@@ -1615,9 +1616,9 @@ pub(crate) mod tests {
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
-                    crate::generation::RuntimeGeneration::new(1).unwrap(),
-                )),
+                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(
+                    last_generation,
+                ),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
                 generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
@@ -1684,6 +1685,7 @@ pub(crate) mod tests {
             .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
             .unwrap()
             .into_token();
+        drop(ingress);
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
@@ -1716,6 +1718,11 @@ pub(crate) mod tests {
             }),
             Err(XllError::StaleHandle | XllError::InvalidHandle)
         ));
+        drop(ingress);
+
+        let removal_attempt = runtime.begin_final_removal().unwrap();
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 2);
+        finish_test_close(&runtime, removal_attempt);
     }
 
     #[test]
@@ -1747,6 +1754,7 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
+        drop(ingress);
         let close = runtime.begin_final_removal().unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, close);

@@ -240,8 +240,10 @@ mod tests {
             assert!(!arguments.is_null());
             // SAFETY: the test supplies two live argument pointers.
             assert!(!unsafe { *arguments }.is_null());
+            // SAFETY: arguments points to an array of at least two pointers for XL_ASYNC_RETURN.
+            let second = unsafe { arguments.add(1) };
             // SAFETY: the second argument is the live async return value.
-            assert!(!unsafe { *arguments.add(1) }.is_null());
+            assert!(!unsafe { *second }.is_null());
             assert!(!result.is_null());
             // SAFETY: the callback result is the scalar acceptance boolean.
             unsafe {

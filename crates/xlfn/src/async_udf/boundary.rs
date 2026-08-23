@@ -20,14 +20,7 @@ use xlfn_sys::{XLOPER12, XLTYPE_BOOL};
 /// `raw_handle` must point to a valid, aligned, Excel-owned `XLOPER12` async
 /// handle that remains live for the duration of this call.
 #[doc(hidden)]
-/// Runs the synchronous launch portion of a native Excel async UDF.
-///
-/// # Safety
-///
-/// `raw_handle` must point to a valid, aligned, Excel-owned `XLOPER12` async
-/// handle that remains live for the duration of this call.
-#[doc(hidden)]
-pub unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
+pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     runtime: &'static Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -276,10 +269,10 @@ pub(crate) unsafe fn async_return(
 #[cfg(test)]
 pub(crate) static AFTER_ASYNC_EVALUATION_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
-pub fn cancel_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
+pub(crate) fn cancel_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
     runtime.cancel_async();
 }
 
-pub fn end_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
+pub(crate) fn end_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
     runtime.finish_calculation();
 }

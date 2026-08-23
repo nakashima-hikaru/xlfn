@@ -29,10 +29,10 @@ pub(crate) use ledger::{
 pub(crate) use preflight::preflight_registration;
 #[cfg(test)]
 pub(crate) use preflight::validate_descriptors;
-pub use schema::{
-    ArgumentAbi, ArgumentDescriptor, FunctionVisibility, MAX_EXCEL_FUNCTION_ARGUMENTS,
-    MAX_REGISTER_ARGUMENT_HELP_ENTRIES, RegistrationDescriptor, RegistrationFlags, RegistrationId,
-    RegistrationSignature, ResultAbi,
+pub use schema::{ArgumentAbi, ArgumentDescriptor};
+pub(crate) use schema::{
+    FunctionVisibility, MAX_EXCEL_FUNCTION_ARGUMENTS, MAX_REGISTER_ARGUMENT_HELP_ENTRIES,
+    RegistrationDescriptor, RegistrationFlags, RegistrationId, RegistrationSignature, ResultAbi,
 };
 
 pub(crate) struct HostRegistrar {
@@ -158,15 +158,13 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             == XLTYPE_INT;
         let registration_id = if result_is_integer {
+            let pointer = result
+                .raw_pointer()
+                .map_err(RegistrationTransactionError::new)?;
+            // SAFETY: pointer is non-null and points to a live result XLOPER12.
+            let reference = unsafe { pointer.as_ref() };
             // SAFETY: XLTYPE_INT selects the integer union field.
-            unsafe {
-                result
-                    .raw_pointer()
-                    .map_err(RegistrationTransactionError::new)?
-                    .as_ref()
-                    .value
-                    .integer
-            }
+            unsafe { reference.value.integer }
         } else {
             0
         };
@@ -390,15 +388,13 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             == XLTYPE_ERR
         {
+            let pointer = result
+                .raw_pointer()
+                .map_err(RegistrationTransactionError::new)?;
+            // SAFETY: pointer is non-null and points to a live result XLOPER12.
+            let reference = unsafe { pointer.as_ref() };
             // SAFETY: XLTYPE_ERR selects the error union member.
-            let code = unsafe {
-                result
-                    .raw_pointer()
-                    .map_err(RegistrationTransactionError::new)?
-                    .as_ref()
-                    .value
-                    .error
-            };
+            let code = unsafe { reference.value.error };
             result
                 .try_release()
                 .map_err(RegistrationTransactionError::new)?;
@@ -474,16 +470,13 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
             == XLTYPE_ERR
         {
+            let pointer = result
+                .raw_pointer()
+                .map_err(RegistrationTransactionError::new)?;
+            // SAFETY: pointer is non-null and points to a live result XLOPER12.
+            let reference = unsafe { pointer.as_ref() };
             // SAFETY: XLTYPE_ERR selects the error union member.
-            unsafe {
-                result
-                    .raw_pointer()
-                    .map_err(RegistrationTransactionError::new)?
-                    .as_ref()
-                    .value
-                    .error
-                    != XLERR_NAME
-            }
+            unsafe { reference.value.error != XLERR_NAME }
         } else if result
             .base_type()
             .map_err(RegistrationTransactionError::new)?
@@ -864,10 +857,12 @@ fn metadata_debt_binding(
         }
     };
     if base_type == XLTYPE_ERR {
-        // SAFETY: XLTYPE_ERR selects the error union member.
-        let code = result
-            .raw_pointer()
-            .map(|pointer| unsafe { pointer.as_ref().value.error });
+        let code = result.raw_pointer().map(|pointer| {
+            // SAFETY: pointer is non-null and points to a live result XLOPER12.
+            let reference = unsafe { pointer.as_ref() };
+            // SAFETY: XLTYPE_ERR selects the error union member.
+            unsafe { reference.value.error }
+        });
         let release = result.try_release();
         let code = code?;
         release?;
@@ -1284,12 +1279,14 @@ mod tests {
     fn temporary_strings_are_counted_utf16() {
         let mut texts = [TemporaryString::new("価格").unwrap()];
         let pointer = texts[0].pointer();
+        // SAFETY: pointer is non-null and valid for live temporary string.
+        let oper = unsafe { &*pointer.as_ptr() };
         // SAFETY: pointer and its active string member belong to text.
-        let units = unsafe { (*pointer.as_ptr()).value.string };
+        let units = unsafe { oper.value.string };
         // SAFETY: the counted allocation contains the prefix and two units.
         let units = unsafe { std::slice::from_raw_parts(units, 3) };
         assert_eq!(units, &[2, 0x4fa1, 0x683c]);
-    }
+    }   
 
     #[test]
     fn signatures_encode_canonical_excel_type_text() {

@@ -171,7 +171,8 @@ impl<A: crate::Addin> ClosingPayload<A> {
     fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
         match self {
             Self::Retiring(retirement) => Some(&retirement.services),
-            Self::Empty | Self::Staged(_) | Self::Published(_) => None,
+            Self::Published(bundle) => Some(&bundle.services),
+            Self::Empty | Self::Staged(_) => None,
         }
     }
 

@@ -49,6 +49,10 @@ struct ThreadAffineEntry {
 }
 
 impl Drop for ThreadAffineEntry {
+    #[allow(
+        clippy::mem_forget,
+        reason = "TLS destruction is not an unload proof; leaking is safer than running add-in destruction"
+    )]
     fn drop(&mut self) {
         // TLS destruction is not an unload proof. A failed or abandoned
         // lifecycle binding must never run add-in code from a thread-local
@@ -238,10 +242,18 @@ impl<T: 'static> ThreadAffineSlot<T> {
                 .ok_or(ThreadAffineError::MissingValue)?;
             let mut entry = values.swap_remove(index);
             let value = entry.value.take().ok_or(ThreadAffineError::MissingValue)?;
+            #[allow(
+                clippy::mem_forget,
+                reason = "entry.value was extracted; dropping the empty entry wrapper must not invoke TLS fallback cleanup"
+            )]
             std::mem::forget(entry);
             match value.downcast::<T>() {
                 Ok(value) => Ok(*value),
                 Err(value) => {
+                    #[allow(
+                        clippy::mem_forget,
+                        reason = "type mismatch on dynamic downcast; avoid invoking add-in Drop if type is unexpected"
+                    )]
                     std::mem::forget(value);
                     Err(ThreadAffineError::TypeMismatch)
                 }

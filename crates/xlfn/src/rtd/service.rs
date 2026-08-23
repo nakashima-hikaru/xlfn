@@ -79,7 +79,7 @@ impl SubscriptionServiceSlot {
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
                     if let Some(ghost) = self.ghost.get() {
-                        _runtime.set_ghost(ghost.clone());
+                        _runtime.set_ghost(std::sync::Arc::clone(ghost));
                     }
                 },
             )
@@ -108,7 +108,7 @@ impl SubscriptionServiceSlot {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(ghost.clone());
+        let _ = self.ghost.set(std::sync::Arc::clone(&ghost));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
                 runtime.set_ghost(ghost);

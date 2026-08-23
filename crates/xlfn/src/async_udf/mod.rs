@@ -16,7 +16,9 @@ mod manager;
 mod task;
 mod worker;
 
-pub use boundary::{async_udf_boundary_named, cancel_async_calculation, end_async_calculation};
+pub(crate) use boundary::{
+    async_udf_boundary_named, cancel_async_calculation, end_async_calculation,
+};
 pub(crate) use manager::{AsyncManager, AsyncStopped};
 
 // Test modules exercise the protocol pieces directly. Keep these imports

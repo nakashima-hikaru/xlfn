@@ -46,7 +46,7 @@ pub(crate) struct PreparedRegistration {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreparedRegistrationSet {
+pub(crate) struct PreparedRegistrationSet {
     pub(crate) prepared: Vec<PreparedRegistration>,
 }
 

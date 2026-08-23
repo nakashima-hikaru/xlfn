@@ -11,7 +11,7 @@ use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
 
 /// Handles the generated `xlAutoOpen` boundary.
-pub fn host_auto_open<A>(
+pub(crate) fn host_auto_open<A>(
     runtime: &Runtime<A>,
     addin_id: &AddinId,
     version: &'static str,
@@ -74,7 +74,7 @@ where
 }
 
 /// Handles Excel's ambiguous close/deactivation hint.
-pub fn host_auto_close<A>(runtime: &Runtime<A>) -> i32
+pub(crate) fn host_auto_close<A>(runtime: &Runtime<A>) -> i32
 where
     A: Addin,
 {
@@ -92,7 +92,7 @@ where
 }
 
 /// Handles the explicit terminal-removal boundary.
-pub fn host_auto_remove<A>(runtime: &Runtime<A>) -> i32
+pub(crate) fn host_auto_remove<A>(runtime: &Runtime<A>) -> i32
 where
     A: Addin,
 {

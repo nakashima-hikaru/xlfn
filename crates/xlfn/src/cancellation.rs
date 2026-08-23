@@ -1,17 +1,20 @@
+#![allow(
+    unreachable_pub,
+    dead_code,
+    reason = "Cancellation types are exported as public API when async feature is enabled; unused helpers are exercised under async or test configurations"
+)]
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
-#[cfg(any(feature = "async", test))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use triomphe::Arc;
 
-#[cfg(any(feature = "async", test))]
 const STATE_RUNNING: u8 = 0;
 const STATE_CANCELED: u8 = 1;
-#[cfg(any(feature = "async", test))]
 const STATE_DELIVERING: u8 = 2;
 #[cfg(feature = "async")]
 const STATE_DONE: u8 = 3;

@@ -240,7 +240,7 @@ pub(crate) struct ReturnFreeGuard {
 
 /// Keeps one generated `xlAutoFree12` callback visible to terminal removal.
 #[doc(hidden)]
-pub struct ReturnFreeBoundaryGuard {
+pub(crate) struct ReturnFreeBoundaryGuard {
     pub(crate) _operation: Option<ReturnFreeGuard>,
 }
 

@@ -1403,7 +1403,7 @@ mod tests {
             let mut second = XLOPER12::number(1.0);
             let mut explicit =
                 ArgumentContext::<FormulaInputMode>::from_services(services, scope, 2);
-            // SAFETY: both raw values remain live for this call.
+            // SAFETY: first raw value remains live for this call.
             unsafe {
                 argument_from_raw_with_arguments::<FormulaInputMode, f64>(
                     &mut explicit,
@@ -1412,6 +1412,9 @@ mod tests {
                     &mut first,
                 )
                 .unwrap();
+            }
+            // SAFETY: second raw value remains live for this call.
+            unsafe {
                 argument_from_raw_with_arguments::<FormulaInputMode, f64>(
                     &mut explicit,
                     1,

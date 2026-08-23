@@ -16,11 +16,11 @@ mod rollback;
 mod state;
 mod teardown;
 
-pub use boundary::{host_auto_close, host_auto_open, host_auto_remove};
+pub(crate) use boundary::{host_auto_close, host_auto_open, host_auto_remove};
 pub(super) use open::open_addin_boundary as open_addin;
 use rollback::{active_runtime_generation, rollback_open};
 pub(crate) use state::HostLifecycleIntent;
-pub use state::LifecyclePhase;
+pub(crate) use state::LifecyclePhase;
 use teardown::drain_execution;
 
 macro_rules! lifecycle_token {
@@ -253,6 +253,10 @@ where
     // become part of the cross-thread generation root.
     if let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state) {
         let (lifecycle_state, _) = error.into_parts();
+        #[allow(
+            clippy::mem_forget,
+            reason = "failed add-in lifecycle installation; intentionally leaked to prevent running untrusted destruction"
+        )]
         std::mem::forget(lifecycle_state);
         runtime.quarantine_shared_state(
             active_runtime_generation(runtime),
@@ -303,7 +307,7 @@ fn retain_transaction_error<A: Addin, Stage: open::OpenTransactionStage>(
 }
 
 #[must_use]
-pub fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &AddinLifecycleAccess<'_, A>) -> i32
+pub(crate) fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &AddinLifecycleAccess<'_, A>) -> i32
 where
     A: Addin,
 {
@@ -2272,6 +2276,7 @@ mod tests {
             .into_admitted()
             .expect("test call enters during OPEN");
         assert!(runtime.enter(&ingress).is_ok());
+        drop(ingress);
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);

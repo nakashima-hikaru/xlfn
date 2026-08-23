@@ -86,14 +86,14 @@ impl From<RegistrationId> for PendingRegistration {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum CleanupSeverity {
+pub(crate) enum CleanupSeverity {
     BestEffort,
     UnloadUnsafe,
 }
 
 impl CleanupSeverity {
     #[must_use]
-    pub fn is_unload_unsafe(self) -> bool {
+    pub(crate) fn is_unload_unsafe(self) -> bool {
         matches!(self, Self::UnloadUnsafe)
     }
 }

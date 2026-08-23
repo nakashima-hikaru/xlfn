@@ -229,7 +229,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             _gate_guard: gate_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
             #[cfg(any(test, feature = "refinement"))]
-            parent: self.parent.clone(),
+            parent: std::sync::Weak::clone(&self.parent),
         })
     }
 
@@ -255,7 +255,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             server,
             _host_guard: host_guard,
             #[cfg(any(test, feature = "refinement"))]
-            parent: self.parent.clone(),
+            parent: std::sync::Weak::clone(&self.parent),
         })
     }
 

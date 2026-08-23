@@ -12,7 +12,7 @@ use xlfn_sys::{XLOPER12, excel_free, excel12_with_invocation};
 const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallbackValueReleaseState {
+pub(crate) enum CallbackValueReleaseState {
     Live,
     Released,
     TerminalSuppressed { status: ExcelCallbackStatus },
@@ -60,7 +60,7 @@ fn state_after_call(
 /// statuses suppress read access but still allow `xlFree` cleanup once per value
 /// during the active invocation lifetime. Once cleanup is indeterminate or the
 /// scope is closed, Excel is no longer called.
-pub struct ExcelCallbackValue {
+pub(crate) struct ExcelCallbackValue {
     raw: XLOPER12,
     release_required: bool,
     audit_failures: bool,
@@ -156,7 +156,7 @@ impl ExcelCallbackValue {
         }
     }
 
-    pub fn borrow(&mut self) -> XllResult<XlValueRef<'_>> {
+    pub(crate) fn borrow(&mut self) -> XllResult<XlValueRef<'_>> {
         self.ensure_live()?;
         // SAFETY: `Live` means this guard still owns a readable callback result.
         unsafe { XlValueRef::from_raw(&mut self.raw) }
@@ -172,13 +172,13 @@ impl ExcelCallbackValue {
         Ok(&self.raw)
     }
 
-    pub fn base_type(&self) -> XllResult<u32> {
+    pub(crate) fn base_type(&self) -> XllResult<u32> {
         self.ensure_live()?;
         Ok(self.raw.base_type())
     }
 
     #[must_use]
-    pub const fn release_state(&self) -> CallbackValueReleaseState {
+    pub(crate) const fn release_state(&self) -> CallbackValueReleaseState {
         self.state
     }
 
@@ -188,7 +188,7 @@ impl ExcelCallbackValue {
     /// failed `xlFree` is returned as an error and permanently changes the
     /// state to `Indeterminate`; neither `Drop` nor a later explicit call can
     /// retry it.
-    pub fn try_release(&mut self) -> XllResult<()> {
+    pub(crate) fn try_release(&mut self) -> XllResult<()> {
         match self.state {
             CallbackValueReleaseState::Released => return Ok(()),
             CallbackValueReleaseState::Indeterminate { status } => {

@@ -864,7 +864,9 @@ fn async_handle_payload_is_deep_copied() {
     // SAFETY: raw is a live, well-formed test async handle.
     let mut owned = unsafe { OwnedAsyncHandle::from_raw("test_payload", &mut raw) }.unwrap();
     // SAFETY: the owned value remains XLTYPE_BIG_DATA with a positive size.
-    let copied = unsafe { owned.raw.value.big_data.handle.data };
+    let big_data = unsafe { owned.raw.value.big_data };
+    // SAFETY: the big_data union contains the raw byte pointer in `handle.data`.
+    let copied = unsafe { big_data.handle.data };
     assert_ne!(copied, original);
     bytes.fill(9);
     assert_eq!(

@@ -5,10 +5,10 @@ use std::sync::{Condvar, Mutex};
 use std::thread::ThreadId;
 use std::time::Duration;
 
-pub const PHASE_OPENING: u8 = 0;
-pub const PHASE_OPEN: u8 = 1;
-pub const PHASE_CLOSING: u8 = 2;
-pub const PHASE_CLOSED: u8 = 3;
+pub(crate) const PHASE_OPENING: u8 = 0;
+pub(crate) const PHASE_OPEN: u8 = 1;
+pub(crate) const PHASE_CLOSING: u8 = 2;
+pub(crate) const PHASE_CLOSED: u8 = 3;
 
 const INGRESS_STRIPE_COUNT: usize = 32;
 const STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
@@ -188,7 +188,7 @@ impl Drop for TestModuleLease {
 
 /// Proof token certifying that all module export entries have been drained.
 #[derive(Debug)]
-pub struct ExportsDrained {
+pub(crate) struct ExportsDrained {
     #[allow(
         dead_code,
         reason = "Linear proof token tracking epoch for ingress drain"
@@ -203,7 +203,7 @@ pub struct ExportsDrained {
 /// cannot become active, which makes the drain certificate linearizable with
 /// the CLOSED transition.
 #[derive(Debug)]
-pub struct ExportIngress {
+pub(crate) struct ExportIngress {
     // The phase is global, while reservations are striped. Each stripe is
     // independently sealed by terminal drain, so ordinary UDF entry does not
     // contend on one cache line and close cannot overtake a reservation that
@@ -291,7 +291,7 @@ impl Default for ExportIngress {
 }
 
 impl ExportIngress {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             phase: AtomicU8::new(PHASE_CLOSED),
             epoch: AtomicU64::new(0),
@@ -309,7 +309,7 @@ impl ExportIngress {
     }
 
     /// Starts a new ingress epoch in the non-admitting opening phase.
-    pub fn begin_opening(&self) {
+    pub(crate) fn begin_opening(&self) {
         let _opening_guard = self
             .opening_lock
             .lock()
@@ -392,7 +392,7 @@ impl ExportIngress {
 
     /// Attempts to enter an export entry and runs `on_accepted` at the same
     /// refinement linearization point as the accepting state transition.
-    pub fn enter_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
+    pub(crate) fn enter_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
     {
@@ -443,7 +443,7 @@ impl ExportIngress {
 
     /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
     /// refinement linearization point as the accepting state transition.
-    pub fn enter_udf_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
+    pub(crate) fn enter_udf_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
     {
@@ -495,7 +495,7 @@ impl ExportIngress {
 
     /// Stops accepting new export calls and runs `on_closed` at the same
     /// refinement linearization point as the closing state transition.
-    pub fn begin_close_with<F>(&self, on_closed: F)
+    pub(crate) fn begin_close_with<F>(&self, on_closed: F)
     where
         F: FnOnce(),
     {
@@ -558,7 +558,7 @@ impl ExportIngress {
 
     /// Runs a refinement-sensitive operation in the same serialization domain
     /// as ingress admission and close initiation.
-    pub fn with_linearization<F, R>(&self, operation: F) -> R
+    pub(crate) fn with_linearization<F, R>(&self, operation: F) -> R
     where
         F: FnOnce() -> R,
     {
@@ -588,7 +588,7 @@ impl ExportIngress {
 
     /// Waits for the current epoch to drain and seals it CLOSED in the same
     /// synchronization region that observes `active == 0`.
-    pub fn seal_and_drain(&self) -> ExportsDrained {
+    pub(crate) fn seal_and_drain(&self) -> ExportsDrained {
         self.seal_and_drain_with_hook(|| {})
     }
 
@@ -639,7 +639,7 @@ impl ExportIngress {
         }
     }
 
-    pub fn phase(&self) -> u8 {
+    pub(crate) fn phase(&self) -> u8 {
         self.phase.load(Ordering::Acquire)
     }
 
@@ -654,11 +654,11 @@ impl ExportIngress {
             || (phase == PHASE_CLOSED && self.epoch.load(Ordering::Acquire) == 0)
     }
 
-    pub fn active_calls(&self) -> usize {
+    pub(crate) fn active_calls(&self) -> usize {
         self.stripes.iter().map(IngressStripe::active).sum()
     }
 
-    pub fn active_udfs(&self) -> usize {
+    pub(crate) fn active_udfs(&self) -> usize {
         self.stripes.iter().map(IngressStripe::active_udfs).sum()
     }
 
@@ -685,7 +685,7 @@ impl ExportIngress {
 }
 
 #[derive(Debug)]
-pub struct ExportCallGuard<'a> {
+pub(crate) struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
     stripe: Option<usize>,

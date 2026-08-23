@@ -937,7 +937,7 @@ fn server_terminate_callback_drop_failure_reaches_waiter() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::new(state)))
         .unwrap();
 
-    let server_clone = server.inner.clone();
+    let server_clone = std::sync::Arc::clone(&server.inner);
     let admission = server_clone.begin_termination();
     let TerminationAdmission::Owner(owner) = admission else {
         panic!("expected Owner admission");
@@ -960,7 +960,7 @@ fn server_terminate_owner_unwind_notifies_waiter() {
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let server_clone = server.inner.clone();
+    let server_clone = std::sync::Arc::clone(&server.inner);
     let admission = server_clone.begin_termination();
     let TerminationAdmission::Owner(owner) = admission else {
         panic!("expected Owner admission");

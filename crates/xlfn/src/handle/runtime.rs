@@ -132,12 +132,12 @@ impl FormulaHandleService {
 
     #[cfg(test)]
     #[must_use]
-    pub fn new(maximum_bindings: usize) -> Self {
+    pub(crate) fn new(maximum_bindings: usize) -> Self {
         Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 
     #[cfg(test)]
-    pub fn prepare<T, K>(
+    pub(crate) fn prepare<T, K>(
         &self,
         key: K,
         create: impl FnOnce() -> XllResult<T>,
@@ -412,7 +412,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn claim_server(
+    pub(crate) fn claim_server(
         &self,
         rtd_key: &str,
         server_generation: ServerGeneration,
@@ -424,7 +424,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(test)]
-    pub fn connect(
+    pub(crate) fn connect(
         &self,
         server_generation: ServerGeneration,
         excel_topic_id: i32,
@@ -507,7 +507,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(test)]
-    pub fn rollback(&self, rtd_key: &str) {
+    pub(crate) fn rollback(&self, rtd_key: &str) {
         if let Some(removed) = self.topics.remove_by_rtd_key(rtd_key) {
             self.remove_topic_value(&removed, "handle topic rollback");
         }
@@ -533,7 +533,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
+    pub(crate) fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
         let owner = HandleTopicOwner {
             server_generation,
             topic_id: excel_topic_id,
@@ -545,7 +545,7 @@ impl FormulaHandleService {
         self.remove_topic_value(&removed, "handle topic disconnect");
     }
 
-    pub fn lookup<'call, T>(
+    pub(crate) fn lookup<'call, T>(
         &self,
         scope: &'call crate::call::CallScope<'call>,
         token: &str,
@@ -556,7 +556,7 @@ impl FormulaHandleService {
         self.store.lookup(scope, token)
     }
 
-    pub fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
+    pub(crate) fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
         self.prepares.close_admission();
         self.store.begin_close();
         let initializations = self.topics.close();
@@ -593,7 +593,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub fn terminate_topics(&self, server_generation: ServerGeneration) {
+    pub(crate) fn terminate_topics(&self, server_generation: ServerGeneration) {
         let removals = self.topics.remove_generation(server_generation);
         if !removals.is_empty() {
             self.refinement.observe_detach_generation(server_generation);
@@ -603,7 +603,7 @@ impl FormulaHandleService {
         }
     }
 
-    pub fn terminate_all_topics(&self) {
+    pub(crate) fn terminate_all_topics(&self) {
         let removals = self.topics.remove_all();
         for removed in removals {
             self.remove_topic_value(&removed, "handle RTD termination");
@@ -722,7 +722,7 @@ impl FormulaHandleServiceSlot {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(ghost.clone());
+        let _ = self.ghost.set(std::sync::Arc::clone(&ghost));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
                 runtime.set_ghost(ghost);

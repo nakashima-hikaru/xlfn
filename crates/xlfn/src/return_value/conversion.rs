@@ -1,6 +1,4 @@
-//! Typed callback status and cleanup-debt conversion values.
-
-pub use crate::error::ExcelCallbackStatus;
+pub(crate) use crate::error::ExcelCallbackStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct RegistrationDebt {

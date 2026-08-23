@@ -86,7 +86,7 @@ impl Drop for PendingHandleValue {
 }
 
 impl HandleRegistry {
-    pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+    pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
         Self::try_new_with(maximum_bindings, |entropy| getrandom::fill(entropy), true)
     }
 
@@ -144,13 +144,13 @@ impl HandleRegistry {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.lifetime.set_ghost(Arc::clone(&ghost));
+        self.lifetime.set_ghost(std::sync::Arc::clone(&ghost));
         *self.ghost.lock() = Some(ghost);
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
+        if let Some(ghost) = self.ghost.lock().as_ref() {
             ghost.record_event(event);
         }
     }
@@ -162,13 +162,13 @@ impl HandleRegistry {
 
     #[cfg(test)]
     #[must_use]
-    pub fn new(maximum_bindings: usize) -> Self {
+    pub(crate) fn new(maximum_bindings: usize) -> Self {
         Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 
     #[cfg(test)]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         usize::try_from(self.bindings.read_state().live_bindings)
             .expect("binding count fits in usize")
     }
@@ -198,7 +198,7 @@ impl HandleRegistry {
     }
 
     #[cfg(test)]
-    pub fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
+    pub(crate) fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
     where
         T: Send + Sync + 'static,
     {
@@ -272,7 +272,7 @@ impl HandleRegistry {
     }
 
     #[cfg(test)]
-    pub fn lookup<T>(&self, token: &str) -> XllResult<T>
+    pub(crate) fn lookup<T>(&self, token: &str) -> XllResult<T>
     where
         T: Send + Sync + Clone + 'static,
     {

@@ -826,6 +826,10 @@ pub(crate) fn read_stable_snapshot_with_limit(
 
     file.seek(SeekFrom::Start(0))?;
     let mut limited = file.take(before.len.saturating_add(1));
+    #[allow(
+        clippy::large_stack_arrays,
+        reason = "64KB chunk buffer on CLI staging thread stack avoids heap allocation"
+    )]
     let mut first_chunk = [0_u8; 64 * 1024];
     let count = limited.read(&mut first_chunk)?;
     if count != 0 {
@@ -873,6 +877,10 @@ pub(crate) fn verify_snapshot_against_second_read(
     let expected_digest = Sha256::digest(expected);
     let mut hasher = Sha256::new();
     let mut limited = file.take(before.len.saturating_add(1));
+    #[allow(
+        clippy::large_stack_arrays,
+        reason = "64KB chunk buffer on CLI staging thread stack avoids heap allocation"
+    )]
     let mut buffer = [0_u8; 64 * 1024];
 
     loop {

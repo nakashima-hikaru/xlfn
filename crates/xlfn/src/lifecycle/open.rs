@@ -215,7 +215,7 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A, HostMutated> {
     }
 }
 
-pub fn open_addin_boundary<A>(
+pub(crate) fn open_addin_boundary<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     addin_id: &AddinId,

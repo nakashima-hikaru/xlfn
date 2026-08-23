@@ -109,6 +109,8 @@ pub use addin::{
 };
 #[cfg(feature = "async")]
 pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
+#[cfg(feature = "async")]
+pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
     ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, XllError, XllResult,
 };
@@ -367,9 +369,10 @@ pub(crate) mod test_callback {
                 ASYNC_RETURN_CALLS.fetch_add(1, Ordering::Release);
                 return XLRET_FAILED;
             }
-            // SAFETY: the callback contract supplies the two live argument
-            // pointers for xlAsyncReturn.
-            let returned = unsafe { *arguments.add(1) };
+            // SAFETY: arguments points to an array of at least 2 pointers for xlAsyncReturn.
+            let returned_slot = unsafe { arguments.add(1) };
+            // SAFETY: the callback contract supplies the live argument pointer.
+            let returned = unsafe { *returned_slot };
             let value = if returned.is_null() {
                 -1
             } else {

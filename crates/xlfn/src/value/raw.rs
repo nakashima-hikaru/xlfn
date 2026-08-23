@@ -174,8 +174,10 @@ impl<'call> XlValueRef<'call> {
                 },
             ));
         }
+        // SAFETY: pointer points to a valid Excel string with at least length+1 units.
+        let data = unsafe { pointer.add(1) };
         // SAFETY: The Excel string contract guarantees length following units.
-        Ok(unsafe { slice::from_raw_parts(pointer.add(1), length) })
+        Ok(unsafe { slice::from_raw_parts(data, length) })
     }
 
     pub(crate) fn array(&self, argument: &'static str) -> XllResult<XLOPER12Array> {
@@ -412,7 +414,9 @@ pub(crate) fn encode_raw_value(
                 for index in 0..elements {
                     // SAFETY: XlValueRef::array validated the contiguous
                     // element range and index is within its dimensions.
-                    match unsafe { XlValueRef::from_raw(array.values.add(index)) } {
+                    let elem_ptr = unsafe { array.values.add(index) };
+                    // SAFETY: elem_ptr is a valid pointer within the array allocation.
+                    match unsafe { XlValueRef::from_raw(elem_ptr) } {
                         Ok(element) => encode_raw_value(element, true, encoder),
                         Err(error) => encoder.fail(error),
                     }

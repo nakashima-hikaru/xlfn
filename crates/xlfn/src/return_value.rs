@@ -23,7 +23,7 @@ pub(crate) mod conversion;
 pub(crate) mod ownership;
 
 pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
-pub use ownership::ReturnFreeBoundaryGuard;
+pub(crate) use ownership::ReturnFreeBoundaryGuard;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
 /// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
@@ -236,7 +236,10 @@ impl ReturnBlockSlot {
         self.state.set(ReturnBlockSlotState::Occupied);
         // SAFETY: Vacant is the only state in which the slot may be acquired,
         // so no initialized ReturnBlock is being aliased or overwritten.
-        Some(unsafe { NonNull::new_unchecked((*self.block.get()).as_mut_ptr()) })
+        let raw_block = unsafe { &mut *self.block.get() };
+        let block_ptr = raw_block.as_mut_ptr();
+        // SAFETY: pointer to internal UnsafeCell storage is non-null.
+        Some(unsafe { NonNull::new_unchecked(block_ptr) })
     }
 
     fn owns(&self, pointer: *mut ReturnBlock) -> bool {
@@ -573,7 +576,7 @@ impl Drop for AsyncReturnPointer {
 /// return-admission gate.
 #[doc(hidden)]
 #[must_use]
-pub fn ffi_boundary<A, F, T>(runtime: &'static Runtime<A>, operation: F) -> *mut XLOPER12
+pub(crate) fn ffi_boundary<A, F, T>(runtime: &'static Runtime<A>, operation: F) -> *mut XLOPER12
 where
     A: crate::Addin,
     F: FnOnce() -> XllResult<T>,
@@ -627,7 +630,7 @@ where
 /// wrappers, async calculation lifecycle exports, and similar void-returning
 /// Excel callbacks.
 #[doc(hidden)]
-pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
+pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
     let ingress = match crate::module_runtime::ingress()
         .enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]
@@ -653,7 +656,7 @@ pub fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl 
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
 #[must_use]
-pub fn udf_boundary_named<A, F, T>(
+pub(crate) fn udf_boundary_named<A, F, T>(
     runtime: &'static Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -884,7 +887,7 @@ where
 ///
 /// `pointer` must be null or the exact live pointer returned by this crate.
 /// It must be freed exactly once.
-pub unsafe fn free_return(pointer: *mut XLOPER12) {
+pub(crate) unsafe fn free_return(pointer: *mut XLOPER12) {
     // SAFETY: caller contract guarantees pointer is a live return pointer or null.
     let operation = unsafe { enter_return_free_operation(pointer) };
     // SAFETY: caller contract guarantees pointer is a live return pointer or null.
@@ -897,7 +900,7 @@ pub unsafe fn free_return(pointer: *mut XLOPER12) {
 ///
 /// The pointer must satisfy `free_return`'s ownership contract.
 #[must_use = "the guard must remain live until the generated xlAutoFree12 callback returns"]
-pub unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundaryGuard {
+pub(crate) unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundaryGuard {
     // SAFETY: caller contract guarantees pointer is a live return pointer or null.
     let operation = unsafe { enter_return_free_operation(pointer) };
     let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -1121,12 +1124,10 @@ mod tests {
             let second = ffi_boundary(runtime, || Ok(2.0));
             assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
 
-            // SAFETY: both pointers are live Excel-owned returns from this
-            // thread and are released exactly once.
-            unsafe {
-                free_return(second);
-                free_return(first);
-            }
+            // SAFETY: `second` is a live Excel-owned return from this thread.
+            unsafe { free_return(second) };
+            // SAFETY: `first` is a live Excel-owned return from this thread.
+            unsafe { free_return(first) };
 
             let reused = ffi_boundary(runtime, || Ok(3.0));
             assert_eq!(backing_of(reused), ReturnBlockBacking::ThreadLocal);
@@ -1239,8 +1240,10 @@ mod tests {
             "日本語".to_owned(),
         )))
         .unwrap();
+        // SAFETY: pointer is live and non-null.
+        let oper = unsafe { &*pointer };
         // SAFETY: pointer is live and the type selects the string member.
-        let text = unsafe { (*pointer).value.string };
+        let text = unsafe { oper.value.string };
         // SAFETY: the return block owns a prefix and three UTF-16 units.
         let text = unsafe { std::slice::from_raw_parts(text, 4) };
         assert_eq!(text[0], 3);
@@ -1255,12 +1258,16 @@ mod tests {
         let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
         let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
         let pointer = allocate_local_for_test(value).unwrap();
+        // SAFETY: pointer is live and non-null.
+        let oper = unsafe { &*pointer };
         // SAFETY: pointer is live and its root type is multi.
-        let array = unsafe { (*pointer).value.array };
+        let array = unsafe { oper.value.array };
         assert_eq!(array.rows, 1);
         assert_eq!(array.columns, 2);
-        // SAFETY: the array contains two live cells.
-        assert_eq!(unsafe { (*array.values.add(1)).base_type() }, XLTYPE_NUM);
+        // SAFETY: array contains two live cells.
+        let second_cell = unsafe { array.values.add(1) };
+        // SAFETY: second_cell is a live XLOPER12 pointer.
+        assert_eq!(unsafe { (*second_cell).base_type() }, XLTYPE_NUM);
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
     }
@@ -1274,8 +1281,10 @@ mod tests {
         let encoded = builder.finish().unwrap();
         let original_cells = encoded.cells.as_ptr();
         let pointer = allocate_local_for_test(ExcelOutput::Array(encoded)).unwrap();
+        // SAFETY: pointer is live and non-null.
+        let oper = unsafe { &*pointer };
         // SAFETY: pointer is a live encoded array return.
-        let returned_cells = unsafe { (*pointer).value.array.values };
+        let returned_cells = unsafe { oper.value.array.values };
         assert_eq!(returned_cells.cast_const(), original_cells);
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
@@ -1302,9 +1311,10 @@ mod tests {
         )))
         .unwrap();
         // SAFETY: pointer is a live encoded return value.
-        assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
+        let oper = unsafe { &*pointer };
+        assert_eq!(oper.base_type(), XLTYPE_ERR);
         // SAFETY: XLTYPE_ERR selects the error union member.
-        let error = unsafe { (*pointer).value.error };
+        let error = unsafe { oper.value.error };
         assert_eq!(error, ExcelError::NotAvailable.code());
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
@@ -1319,9 +1329,10 @@ mod tests {
             Err::<f64, _>(XllError::input("x", crate::error::InputError::NonFinite))
         });
         // SAFETY: pointer is a live encoded error.
-        assert_eq!(unsafe { (*error_pointer).base_type() }, XLTYPE_ERR);
+        let oper = unsafe { &*error_pointer };
+        assert_eq!(oper.base_type(), XLTYPE_ERR);
         // SAFETY: XLTYPE_ERR selects the error union member.
-        let error_code = unsafe { (*error_pointer).value.error };
+        let error_code = unsafe { oper.value.error };
         assert_eq!(error_code, ExcelError::Value.code());
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(error_pointer) };
@@ -1585,14 +1596,17 @@ mod tests {
             allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
                 .unwrap();
 
-        // SAFETY: both pointers are valid ReturnBlock pointers
-        unsafe {
-            assert_ne!((*excel_ptr).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
-            assert_eq!((*async_ptr.as_ptr()).xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
+        // SAFETY: excel_ptr is a valid ReturnBlock pointer.
+        let excel_oper = unsafe { &*excel_ptr };
+        // SAFETY: async_ptr is a valid ReturnBlock pointer.
+        let async_oper = unsafe { &*async_ptr.as_ptr() };
+        assert_ne!(excel_oper.xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
+        assert_eq!(async_oper.xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
 
-            free_return(excel_ptr);
-            free_return(async_ptr.as_ptr());
-        }
+        // SAFETY: excel_ptr is freed once.
+        unsafe { free_return(excel_ptr) };
+        // SAFETY: async_ptr is freed once.
+        unsafe { free_return(async_ptr.as_ptr()) };
     }
 
     #[test]
@@ -1773,17 +1787,26 @@ mod tests {
 
         let prepared = PreparedReturn::encode(value).unwrap();
         let cells = prepared.array.as_ref().unwrap();
-        // SAFETY: array values pointer is non-null and valid.
-        unsafe {
-            let str0 = cells[0].value.string;
-            let str1 = cells[1].value.string;
-            let len0 = *str0 as usize;
-            let len1 = *str1 as usize;
-            let s0 = String::from_utf16(std::slice::from_raw_parts(str0.add(1), len0)).unwrap();
-            let s1 = String::from_utf16(std::slice::from_raw_parts(str1.add(1), len1)).unwrap();
-            assert_eq!(s0, "hello");
-            assert_eq!(s1, "world");
-        }
+        // SAFETY: cells[0] selects string member.
+        let str0 = unsafe { cells[0].value.string };
+        // SAFETY: cells[1] selects string member.
+        let str1 = unsafe { cells[1].value.string };
+        // SAFETY: str0 is valid counted UTF-16.
+        let len0 = unsafe { *str0 } as usize;
+        // SAFETY: str1 is valid counted UTF-16.
+        let len1 = unsafe { *str1 } as usize;
+        // SAFETY: str0 points to at least len0+1 units.
+        let offset0 = unsafe { str0.add(1) };
+        // SAFETY: str1 points to at least len1+1 units.
+        let offset1 = unsafe { str1.add(1) };
+        // SAFETY: offset0 has len0 initialized UTF-16 units.
+        let slice0 = unsafe { std::slice::from_raw_parts(offset0, len0) };
+        // SAFETY: offset1 has len1 initialized UTF-16 units.
+        let slice1 = unsafe { std::slice::from_raw_parts(offset1, len1) };
+        let s0 = String::from_utf16(slice0).unwrap();
+        let s1 = String::from_utf16(slice1).unwrap();
+        assert_eq!(s0, "hello");
+        assert_eq!(s1, "world");
     }
 
     #[test]

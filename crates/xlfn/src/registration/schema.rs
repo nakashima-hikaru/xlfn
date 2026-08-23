@@ -6,8 +6,8 @@
 
 use crate::{XllError, XllResult};
 
-pub const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
-pub const MAX_REGISTER_ARGUMENT_HELP_ENTRIES: usize = 244;
+pub(crate) const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
+pub(crate) const MAX_REGISTER_ARGUMENT_HELP_ENTRIES: usize = 244;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArgumentDescriptor {
@@ -22,20 +22,20 @@ pub enum ArgumentAbi {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResultAbi {
+pub(crate) enum ResultAbi {
     Xloper,
     AsyncVoid,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RegistrationFlags {
-    pub thread_safe: bool,
-    pub macro_sheet: bool,
-    pub volatile: bool,
+pub(crate) struct RegistrationFlags {
+    pub(crate) thread_safe: bool,
+    pub(crate) macro_sheet: bool,
+    pub(crate) volatile: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum FunctionVisibility {
+pub(crate) enum FunctionVisibility {
     #[default]
     Public,
     Hidden,
@@ -51,14 +51,14 @@ impl FunctionVisibility {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RegistrationSignature {
-    pub result: ResultAbi,
-    pub arguments: &'static [ArgumentAbi],
-    pub flags: RegistrationFlags,
+pub(crate) struct RegistrationSignature {
+    pub(crate) result: ResultAbi,
+    pub(crate) arguments: &'static [ArgumentAbi],
+    pub(crate) flags: RegistrationFlags,
 }
 
 impl RegistrationSignature {
-    pub fn encode(self) -> XllResult<String> {
+    pub(crate) fn encode(self) -> XllResult<String> {
         if self.flags.thread_safe && self.flags.macro_sheet
             || self.arguments.contains(&ArgumentAbi::RawReference) && !self.flags.macro_sheet
         {
@@ -94,19 +94,19 @@ impl RegistrationSignature {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct RegistrationDescriptor {
-    pub export_name: &'static str,
-    pub excel_name: &'static str,
-    pub signature: RegistrationSignature,
-    pub category: &'static str,
-    pub description: &'static str,
-    pub help_topic: &'static str,
-    pub visibility: FunctionVisibility,
-    pub arguments: &'static [ArgumentDescriptor],
+pub(crate) struct RegistrationDescriptor {
+    pub(crate) export_name: &'static str,
+    pub(crate) excel_name: &'static str,
+    pub(crate) signature: RegistrationSignature,
+    pub(crate) category: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) help_topic: &'static str,
+    pub(crate) visibility: FunctionVisibility,
+    pub(crate) arguments: &'static [ArgumentDescriptor],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RegistrationId {
-    pub id: f64,
-    pub excel_name: &'static str,
+pub(crate) struct RegistrationId {
+    pub(crate) id: f64,
+    pub(crate) excel_name: &'static str,
 }
