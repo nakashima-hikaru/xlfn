@@ -42,18 +42,20 @@ fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> Inpu
     let mut builder = InputFingerprintBuilder::new(1);
     builder
         .with_argument(0, "handle", |encoder| {
-            encoder.u64(value.object_id().0);
+            encoder.u64(value.object_id().session());
+            encoder.u64(value.object_id().sequence());
             Ok(())
         })
         .unwrap();
     builder.finish().unwrap()
 }
 
-fn reference_handle_identity(object_id: u64) -> InputFingerprint {
+fn reference_handle_identity(object_id: ObjectId) -> InputFingerprint {
     let mut builder = InputFingerprintBuilder::new(1);
     builder
         .with_argument(0, "handle", |encoder| {
-            encoder.u64(object_id);
+            encoder.u64(object_id.session());
+            encoder.u64(object_id.sequence());
             Ok(())
         })
         .unwrap();
@@ -611,6 +613,20 @@ fn corruption_and_cross_session_tokens_are_rejected() {
     );
     assert!(first.lookup::<u32>(&forged).is_err());
     assert!(second.lookup::<u32>(&token).is_err());
+}
+
+#[test]
+fn object_ids_are_namespaced_by_handle_session() {
+    let first = HandleRegistry::from_entropy(2, [0x11; 40]);
+    let second = HandleRegistry::from_entropy(2, [0x22; 40]);
+
+    let first_object = first.new_object(1_u32).unwrap();
+    let second_object = second.new_object(1_u32).unwrap();
+
+    assert_eq!(first_object.id().sequence(), 1);
+    assert_eq!(second_object.id().sequence(), 1);
+    assert_ne!(first_object.id(), second_object.id());
+    assert_ne!(first_object.id().session(), second_object.id().session());
 }
 
 #[test]
@@ -1259,7 +1275,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         assert_eq!(input_identity(&source), input_identity(&alias));
         assert_eq!(
             input_identity(&source),
-            reference_handle_identity(source.object_id().0)
+            reference_handle_identity(source.object_id())
         );
         assert_ne!(source.object_id(), other.object_id());
         assert_ne!(input_identity(&source), input_identity(&other));
@@ -2858,7 +2874,7 @@ fn alias_capability_does_not_extend_object_lifetime() {
         // The binding snapshot keeps the object readable until the scope
         // ends, but the borrowed alias is not an ownership extension.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(alias.object_id().0, 1);
+        assert_eq!(alias.object_id().sequence(), 1);
     });
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

@@ -332,19 +332,10 @@ where
     // explicitly taken and dropped below.
     let execution_drained = drain_execution(runtime, false);
 
-    #[cfg(feature = "async")]
-    let async_stopped = {
-        runtime.cancel_async();
-        let outcome = runtime.close_async();
-        for issue in outcome.issues {
-            report_cleanup_issue(&issue);
-        }
-        Some(outcome.certificate)
-    };
-    #[cfg(not(feature = "async"))]
-    let async_stopped = Some(crate::shutdown::AsyncStopped::new());
-    let subscriptions_stopped = match runtime.close_subscriptions() {
-        Ok(certificate) => Some(certificate),
+    let producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+        report_cleanup_issue(issue);
+    }) {
+        Ok(stage) => Some(stage),
         Err(error) => {
             report_boundary_error("xlAutoOpen subscription rollback", &error);
             local_quiescent = false;
@@ -607,31 +598,20 @@ where
         && host_callbacks_detached
         && registration_state_known
     {
-        let proof = crate::runtime::QuiescenceProof {
-            exports: execution_drained.into_exports(),
-            rtd: rtd_quiescent
-                .expect("RTD certificate is present when rollback is local-quiescent"),
-            host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
-            async_stopped: {
-                #[allow(
-                    clippy::unnecessary_literal_unwrap,
-                    reason = "Constant Some when feature async is disabled"
-                )]
-                async_stopped
-                    .expect("async certificate is present when rollback is local-quiescent")
-            },
-            subscriptions_stopped: subscriptions_stopped
-                .expect("subscription certificate is present when rollback is local-quiescent"),
-            handle_store_quiescent: handle_store_quiescent
+        let proof = teardown::ResourcesReclaimed::new(
+            producers_stopped.expect("producer stage is present when rollback is local-quiescent"),
+            rtd_quiescent.expect("RTD certificate is present when rollback is local-quiescent"),
+            crate::shutdown::HostCallbacksDetached::new(),
+            handle_store_quiescent
                 .expect("handle certificate is present when rollback is local-quiescent"),
-            diagnostics_stopped: diagnostics_stopped
+            diagnostics_stopped
                 .expect("diagnostic certificate is present when rollback is local-quiescent"),
-            addin_quiesced: addin_quiesced
-                .expect("addin certificate is present when rollback is local-quiescent"),
-            generation_reclaimed: generation_reclaimed.expect(
+            addin_quiesced.expect("addin certificate is present when rollback is local-quiescent"),
+            generation_reclaimed.expect(
                 "generation reclaimed certificate is present when rollback is local-quiescent",
             ),
-        };
+        )
+        .into_proof();
         match runtime
             .certify::<crate::runtime::OpenRollback>(proof)
             .and_then(|certificate| runtime.finish_open_rollback(certificate))
@@ -833,23 +813,10 @@ where
 
     let execution_drained = drain_execution(runtime, true);
 
-    #[cfg(feature = "async")]
-    let async_stopped = {
-        runtime.cancel_async();
-        let outcome = runtime.close_async();
-        report.extend(outcome.issues);
-        outcome.certificate
-    };
-    #[cfg(not(feature = "async"))]
-    let async_stopped = crate::shutdown::AsyncStopped::new();
-
-    #[cfg(any(test, feature = "unstable"))]
-    runtime.record_ghost_async_stopped();
-    #[cfg(any(test, feature = "unstable"))]
-    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::AsyncDrained);
-
-    let subscriptions_stopped = match runtime.close_subscriptions() {
-        Ok(certificate) => certificate,
+    let producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+        report.push(issue.component, issue.kind, issue.error.clone());
+    }) {
+        Ok(stage) => stage,
         Err(error) => {
             return Err(handle_unload_hazard(
                 runtime,
@@ -859,6 +826,11 @@ where
             ));
         }
     };
+
+    #[cfg(any(test, feature = "unstable"))]
+    runtime.record_ghost_async_stopped();
+    #[cfg(any(test, feature = "unstable"))]
+    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::AsyncDrained);
 
     #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::SubscriptionsDrained);
@@ -1298,28 +1270,28 @@ where
     #[cfg(any(test, feature = "unstable"))]
     runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::RtdDrained);
 
-    let certificate =
-        match runtime.certify::<crate::runtime::FinalRemoval>(crate::runtime::QuiescenceProof {
-            exports: execution_drained.into_exports(),
-            rtd: rtd_quiescent,
+    let certificate = match runtime.certify::<crate::runtime::FinalRemoval>(
+        teardown::ResourcesReclaimed::new(
+            producers_stopped,
+            rtd_quiescent,
             host_callbacks,
-            async_stopped,
-            subscriptions_stopped,
             handle_store_quiescent,
             diagnostics_stopped,
             addin_quiesced,
             generation_reclaimed,
-        }) {
-            Ok(certificate) => certificate,
-            Err(error) => {
-                return Err(handle_unload_hazard(
-                    runtime,
-                    crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                    "xlAutoRemove certification",
-                    &error,
-                ));
-            }
-        };
+        )
+        .into_proof(),
+    ) {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                "xlAutoRemove certification",
+                &error,
+            ));
+        }
+    };
     let closed_witness = match runtime.finish_removal(certificate) {
         Ok(witness) => witness,
         Err(error) => {

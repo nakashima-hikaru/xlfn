@@ -186,7 +186,7 @@ impl HandleRegistry {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
-            .map(ObjectId)
+            .map(|sequence| ObjectId::new(self.codec.session, sequence))
             .map_err(|_| XllError::Domain {
                 code: DomainErrorCode::Overflow,
             })

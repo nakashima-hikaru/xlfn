@@ -988,12 +988,16 @@ where
             .scratch()
             .decode_utf16(value.utf16(argument)?, argument)?;
         let handle = context.resolve_handle::<T>(token)?;
-        M::u64(identity, handle.object_id().0);
+        let object_id = handle.object_id();
+        M::u64(identity, object_id.session());
+        M::u64(identity, object_id.sequence());
         Ok(handle)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
-        M::u64(identity, self.object_id().0);
+        let object_id = self.object_id();
+        M::u64(identity, object_id.session());
+        M::u64(identity, object_id.sequence());
     }
 }
 
@@ -1012,12 +1016,16 @@ where
             .scratch()
             .decode_utf16(value.utf16(argument)?, argument)?;
         let handle = context.resolve_handle::<T>(token)?.pin()?;
-        M::u64(identity, handle.object_id().raw());
+        let object_id = handle.object_id();
+        M::u64(identity, object_id.session());
+        M::u64(identity, object_id.sequence());
         Ok(handle)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
-        M::u64(identity, self.object_id().raw());
+        let object_id = self.object_id();
+        M::u64(identity, object_id.session());
+        M::u64(identity, object_id.sequence());
     }
 }
 

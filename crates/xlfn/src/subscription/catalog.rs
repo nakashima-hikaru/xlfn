@@ -56,6 +56,20 @@ impl SubscriptionCatalog {
 
             assert!(self.pending.contains_key(key) || self.active_keys.contains_key(key),);
         }
+
+        let mut expected_source_refs = FxHashMap::default();
+        for identity in self.identities.key_by_identity.keys() {
+            *expected_source_refs
+                .entry(identity.source_id.0)
+                .or_insert(0) += 1;
+        }
+        assert_eq!(expected_source_refs.len(), self.sources.refs.len());
+        for (source_id, refs) in expected_source_refs {
+            assert_eq!(
+                self.sources.refs.get(&source_id).map(|value| value.get()),
+                Some(refs),
+            );
+        }
     }
 }
 
@@ -63,7 +77,10 @@ pub(crate) fn remove_identity_if_unbound(catalog: &mut SubscriptionCatalog, key:
     let has_pending = catalog.pending.contains_key(key);
     let has_active = catalog.active_keys.contains_key(key);
 
-    if !has_pending && !has_active {
-        let _ = catalog.identities.remove_by_key(key);
+    if !has_pending
+        && !has_active
+        && let Some(identity) = catalog.identities.remove_by_key(key)
+    {
+        catalog.sources.release_source(identity.source_id.0);
     }
 }

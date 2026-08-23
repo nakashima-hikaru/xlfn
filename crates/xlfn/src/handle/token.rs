@@ -43,10 +43,28 @@ pub(crate) struct HandleId {
     pub(crate) generation: BindingGeneration,
 }
 
-/// Runtime-local identity of the shared object behind one or more formula
-/// bindings. It is deliberately not encoded in an Excel token.
+/// Session-scoped identity of the shared object behind one or more formula
+/// bindings. The session namespace prevents object identities from being
+/// confused after a runtime generation is reopened.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ObjectId(pub(crate) u64);
+pub(crate) struct ObjectId {
+    session: u64,
+    sequence: u64,
+}
+
+impl ObjectId {
+    pub(crate) const fn new(session: u64, sequence: u64) -> Self {
+        Self { session, sequence }
+    }
+
+    pub(crate) const fn session(self) -> u64 {
+        self.session
+    }
+
+    pub(crate) const fn sequence(self) -> u64 {
+        self.sequence
+    }
+}
 
 /// A raw token received at an Excel/runtime boundary.
 ///

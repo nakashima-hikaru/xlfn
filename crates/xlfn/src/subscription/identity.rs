@@ -1,64 +1,73 @@
 use super::source::SourceHandleId;
 use super::topic::{SubscriptionIdentity, SubscriptionKey};
 use crate::{XllError, XllResult};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ResolvedSourceIdentity {
+pub(crate) struct SourceIdentityReservation {
     pub(crate) source_id: SourceHandleId,
-    pub(crate) newly_registered: bool,
 }
 
 // Source handles carry a generation-owned identity. The registry therefore
 // stores only that typed identity; it never derives identity from an allocation
-// address and does not need an ownership anchor. Registered handle identities
-// remain reserved until the subscription runtime is cleared.
+// address and does not need an ownership anchor. The reference count tracks
+// the number of live subscription identities using each source, so the limit
+// is a limit on live distinct sources rather than a lifetime allocation quota.
 pub(crate) struct SourceIdentityRegistry {
-    pub(crate) ids: FxHashSet<SourceHandleId>,
+    pub(crate) refs: FxHashMap<SourceHandleId, NonZeroUsize>,
 }
 
 impl SourceIdentityRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            ids: FxHashSet::default(),
+            refs: FxHashMap::default(),
         }
     }
 
-    pub(crate) fn resolve(
+    pub(crate) fn reserve(
         &mut self,
         source_id: SourceHandleId,
         limit: usize,
-    ) -> XllResult<ResolvedSourceIdentity> {
-        if self.ids.contains(&source_id) {
-            return Ok(ResolvedSourceIdentity {
-                source_id,
-                newly_registered: false,
-            });
+    ) -> XllResult<SourceIdentityReservation> {
+        if let Some(refs) = self.refs.get_mut(&source_id) {
+            let next = refs.get().checked_add(1).ok_or(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+            })?;
+            *refs = NonZeroUsize::new(next).expect("the incremented source refcount is non-zero");
+        } else {
+            if self.refs.len() >= limit {
+                return Err(XllError::Overloaded);
+            }
+
+            self.refs
+                .insert(source_id, NonZeroUsize::new(1).expect("one is non-zero"));
         }
 
-        if self.ids.len() >= limit {
-            return Err(XllError::Overloaded);
-        }
-
-        self.ids.insert(source_id);
-
-        Ok(ResolvedSourceIdentity {
-            source_id,
-            newly_registered: true,
-        })
+        Ok(SourceIdentityReservation { source_id })
     }
 
-    pub(crate) fn rollback_registration(&mut self, identity: ResolvedSourceIdentity) {
-        if !identity.newly_registered {
-            return;
-        }
+    pub(crate) fn release(&mut self, reservation: SourceIdentityReservation) {
+        self.release_source(reservation.source_id);
+    }
 
-        self.ids.remove(&identity.source_id);
+    pub(crate) fn release_source(&mut self, source_id: SourceHandleId) {
+        let Some(refs) = self.refs.get_mut(&source_id) else {
+            debug_assert!(false, "source identity release is balanced");
+            return;
+        };
+
+        if refs.get() == 1 {
+            self.refs.remove(&source_id);
+        } else {
+            *refs = NonZeroUsize::new(refs.get() - 1)
+                .expect("a source refcount greater than one remains non-zero");
+        }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.ids.clear();
+        self.refs.clear();
     }
 }
 

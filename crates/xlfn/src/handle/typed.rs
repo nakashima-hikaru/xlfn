@@ -14,11 +14,25 @@ type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -
 
 /// Opaque identity of a registry-owned handle payload.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct HandleObjectId(u64);
+pub struct HandleObjectId {
+    session: u64,
+    sequence: u64,
+}
 
 impl HandleObjectId {
-    pub(crate) const fn raw(self) -> u64 {
-        self.0
+    pub(crate) const fn from_object_id(id: ObjectId) -> Self {
+        Self {
+            session: id.session(),
+            sequence: id.sequence(),
+        }
+    }
+
+    pub(crate) const fn session(self) -> u64 {
+        self.session
+    }
+
+    pub(crate) const fn sequence(self) -> u64 {
+        self.sequence
     }
 }
 
@@ -42,7 +56,7 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         }
     }
 
-    /// Returns the runtime-local identity used by formula input semantics.
+    /// Returns the session-scoped identity used by formula input semantics.
     pub(crate) fn object_id(&self) -> ObjectId {
         self.binding.object().id()
     }
@@ -98,9 +112,9 @@ pub struct HandleLease<T: ExcelHandleObject> {
 }
 
 impl<T: ExcelHandleObject> HandleLease<T> {
-    /// Returns the stable runtime-local object identity.
+    /// Returns the stable session-scoped object identity.
     pub fn object_id(&self) -> HandleObjectId {
-        HandleObjectId(self.object.id().0)
+        HandleObjectId::from_object_id(self.object.id())
     }
 }
 

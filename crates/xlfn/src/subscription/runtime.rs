@@ -202,13 +202,8 @@ impl SubscriptionRuntime {
         topic.validate_protocol()?;
         let mut catalog = self.catalog.lock();
 
-        let source_identity = catalog
-            .sources
-            .resolve(source.id, self.limits.max_source_ids)?;
-        let source_id = source_identity.source_id;
-
         let identity = SubscriptionIdentity {
-            source_id: SourceId(source_id),
+            source_id: SourceId(source.id),
             topic: topic.clone(),
         };
 
@@ -246,21 +241,24 @@ impl SubscriptionRuntime {
         }
 
         if catalog.pending.len() >= self.limits.max_pending {
-            catalog.sources.rollback_registration(source_identity);
             return Err(XllError::Overloaded);
         }
 
         let new_total = match catalog.pending_topic_bytes.checked_add(topic.byte_len()) {
             Some(total) if total <= self.limits.max_total_topic_bytes => total,
-            _ => {
-                catalog.sources.rollback_registration(source_identity);
-                return Err(XllError::Overloaded);
-            }
+            _ => return Err(XllError::Overloaded),
         };
 
         let key = catalog.allocate_key(self.runtime_id)?;
 
-        catalog.identities.insert(identity, key)?;
+        let source_reservation = catalog
+            .sources
+            .reserve(source.id, self.limits.max_source_ids)?;
+
+        if let Err(error) = catalog.identities.insert(identity, key) {
+            catalog.sources.release(source_reservation);
+            return Err(error);
+        }
 
         let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;

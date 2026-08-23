@@ -54,8 +54,8 @@ pub(crate) use delivery::{
 };
 #[cfg(test)]
 pub(crate) use identity::{
-    NEXT_RTD_RUNTIME_ID, ResolvedSourceIdentity, SourceIdentityRegistry, SubscriptionIdentityIndex,
-    allocate_runtime_id,
+    NEXT_RTD_RUNTIME_ID, SourceIdentityRegistry, SourceIdentityReservation,
+    SubscriptionIdentityIndex, allocate_runtime_id,
 };
 #[cfg(test)]
 pub(crate) use operation_gate::{CLOSING_BIT, OperationGate, OperationGuard, TerminationWaitGuard};
