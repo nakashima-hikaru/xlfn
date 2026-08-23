@@ -1,6 +1,6 @@
+use crate::XllResult;
+use crate::host_api::ExcelHost;
 use crate::input_identity::InputFingerprint;
-use crate::return_value::ExcelCallbackStatus;
-use crate::{XllError, XllResult};
 use core::fmt::NumBuffer;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -95,154 +95,11 @@ pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
 pub(crate) fn resolve_formula_caller(
     callbacks: &crate::host_callback::HostCallbackSession,
 ) -> XllResult<FormulaCaller> {
-    use xlfn_sys::{XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLTYPE_REF, XLTYPE_SREF};
-
-    // SAFETY: this runs synchronously on the generated main-thread UDF boundary.
-    let (status, mut caller) = unsafe {
-        callbacks
-            .call(XLF_CALLER, &[])
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Caller,
-                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
-    if status != ExcelCallbackStatus::Success {
-        return Err(caller.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::Caller,
-            failure: crate::error::ExcelApiFailure::Status(status),
-        }));
-    }
-    let (row, column, sheet_id) = {
-        let value = caller.borrow()?;
-        match value.base_type() {
-            XLTYPE_SREF => {
-                // SAFETY: the type selects the SRef member.
-                let reference = unsafe { value.raw().value.sref };
-                if reference.count != 1
-                    || reference.reference.rw_first != reference.reference.rw_last
-                    || reference.reference.col_first != reference.reference.col_last
-                {
-                    return Err(XllError::input(
-                        "caller",
-                        crate::error::InputError::Malformed(
-                            "handle-producing functions require a single-cell caller",
-                        ),
-                    ));
-                }
-                (
-                    reference.reference.rw_first,
-                    reference.reference.col_first,
-                    None,
-                )
-            }
-            XLTYPE_REF => {
-                // SAFETY: the type selects the MRef member.
-                let reference = unsafe { value.raw().value.mref };
-                // SAFETY: Excel supplies a readable reference table.
-                let table = unsafe { reference.references.as_ref() }.ok_or_else(|| {
-                    XllError::input("caller", crate::error::InputError::NullPointer)
-                })?;
-                if table.count != 1 {
-                    return Err(XllError::input(
-                        "caller",
-                        crate::error::InputError::Malformed(
-                            "handle-producing functions require a single-cell caller",
-                        ),
-                    ));
-                }
-                let area = table.reftbl[0];
-                if area.rw_first != area.rw_last || area.col_first != area.col_last {
-                    return Err(XllError::input(
-                        "caller",
-                        crate::error::InputError::Malformed(
-                            "handle-producing functions require a single-cell caller",
-                        ),
-                    ));
-                }
-                (area.rw_first, area.col_first, Some(reference.sheet_id))
-            }
-            _ => {
-                return Err(XllError::input(
-                    "caller",
-                    crate::error::InputError::Malformed(
-                        "handle-producing functions require a worksheet caller",
-                    ),
-                ));
-            }
-        }
-    };
-
-    if let Some(sheet_id) = sheet_id {
-        caller.try_release()?;
-        return Ok(FormulaCaller {
-            sheet_id,
-            row,
-            column,
-        });
-    }
-
-    let caller_arguments = [caller.raw_pointer()?];
-    // SAFETY: caller remains live for the nested xlSheetNm callback.
-    let (sheet_status, mut sheet) = unsafe {
-        callbacks
-            .call(XL_SHEET_NM, &caller_arguments)
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::SheetName,
-                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
-    if sheet_status != ExcelCallbackStatus::Success {
-        return Err(sheet.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::SheetName,
-            failure: crate::error::ExcelApiFailure::Status(sheet_status),
-        }));
-    }
-    // `xlSheetId` accepts the counted external sheet name returned by
-    // `xlSheetNm`. The name is only a lookup input; it must never become part
-    // of the formula revision key because workbook and worksheet names can
-    // change.
-    let sheet_name_argument = [sheet.raw_pointer()?];
-    // SAFETY: the counted sheet-name result remains live for this nested
-    // callback and the callback session owns its release obligation.
-    let (sheet_id_status, mut sheet_id_value) = unsafe {
-        callbacks
-            .call(XL_SHEET_ID, &sheet_name_argument)
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::SheetId,
-                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
-    if sheet_id_status != ExcelCallbackStatus::Success {
-        return Err(sheet_id_value
-            .try_release()
-            .err()
-            .unwrap_or(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::SheetId,
-                failure: crate::error::ExcelApiFailure::Status(sheet_id_status),
-            }));
-    }
-    let sheet_id = {
-        let value = sheet_id_value.borrow()?;
-        if value.base_type() != XLTYPE_REF {
-            return Err(XllError::input(
-                "caller",
-                crate::error::InputError::Malformed(
-                    "xlSheetId did not return an external reference",
-                ),
-            ));
-        }
-        // SAFETY: XLTYPE_REF selects the MRef member, whose sheet_id is the
-        // stable Excel worksheet identifier returned by xlSheetId.
-        unsafe { value.raw().value.mref.sheet_id }
-    };
-    sheet_id_value.try_release()?;
-    sheet.try_release()?;
-    caller.try_release()?;
-
+    let caller = ExcelHost::new(callbacks).caller()?;
     Ok(FormulaCaller {
-        sheet_id,
-        row,
-        column,
+        sheet_id: caller.sheet_id,
+        row: caller.row,
+        column: caller.column,
     })
 }
 

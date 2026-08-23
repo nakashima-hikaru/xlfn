@@ -1,16 +1,16 @@
 use super::registration::TemporaryRegistration;
 use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server};
-use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::handle::FormulaHandleService;
+use crate::host_api::ExcelHost;
 use crate::host_callback::HostCallbackSession;
 use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
-use crate::value::{ExcelValue, FromExcel};
-use crate::{ExcelCallbackStatus, XllError, XllResult};
+use crate::value::ExcelValue;
+use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
+use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 pub(crate) fn observe(
     handles: &Arc<FormulaHandleService>,
@@ -75,28 +75,14 @@ pub(crate) fn observe(
         topic.pointer(),
     ];
 
-    // SAFETY: every pointer in `arguments` refers to a live XLOPER12 that
-    // remains valid and stationary for the duration of the Excel callback.
-    let (status, mut result) = unsafe {
-        callbacks
-            .call(XLF_RTD, &arguments)
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: ExcelApiFunction::Rtd,
-                failure: ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
+    let returned = ExcelHost::new(callbacks).invoke(
+        XLF_RTD,
+        crate::error::ExcelApiFunction::Rtd,
+        &arguments,
+        |result| <String as crate::value::FromExcel>::from_excel(result.borrow()?, "RTD handle"),
+    )?;
 
     drop(registration);
-
-    if status != ExcelCallbackStatus::Success {
-        return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: ExcelApiFunction::Rtd,
-            failure: ExcelApiFailure::Status(status),
-        }));
-    }
-
-    let returned = <String as FromExcel>::from_excel(result.borrow()?, "RTD handle")?;
-    result.try_release()?;
 
     if returned != token {
         return Err(XllError::Internal {
@@ -171,55 +157,20 @@ pub(crate) fn observe_subscription(
         topic.pointer(),
     ];
 
-    // SAFETY: every pointer in `arguments` refers to a live XLOPER12 that
-    // remains valid and stationary for the duration of the Excel callback.
-    let (status, mut result) = unsafe {
-        callbacks
-            .call(XLF_RTD, &arguments)
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: ExcelApiFunction::Rtd,
-                failure: ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
+    let value = ExcelHost::new(callbacks).invoke(
+        XLF_RTD,
+        crate::error::ExcelApiFunction::Rtd,
+        &arguments,
+        |result| <ExcelValue as crate::value::FromExcel>::from_excel(result.borrow()?, "RTD value"),
+    )?;
 
     drop(registration);
-
-    if status != ExcelCallbackStatus::Success {
-        return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: ExcelApiFunction::Rtd,
-            failure: ExcelApiFailure::Status(status),
-        }));
-    }
-
-    let value = <ExcelValue as FromExcel>::from_excel(result.borrow()?, "RTD value")?;
-    result.try_release()?;
 
     RtdValue::try_from(value)
 }
 
 fn module_path(callbacks: &HostCallbackSession) -> XllResult<String> {
-    // SAFETY: xlGetName takes no arguments. ExcelCallbackValue assumes ownership
-    // of the callback result and exposes it through its managed result wrapper.
-    let (status, mut result) = unsafe {
-        callbacks
-            .call(XL_GET_NAME, &[])
-            .map_err(|suppressed| XllError::ExcelApi {
-                function: ExcelApiFunction::GetName,
-                failure: ExcelApiFailure::Suppressed(suppressed.status),
-            })?
-    };
-
-    if status != ExcelCallbackStatus::Success {
-        return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-            function: ExcelApiFunction::GetName,
-            failure: ExcelApiFailure::Status(status),
-        }));
-    }
-
-    let path = <String as FromExcel>::from_excel(result.borrow()?, "module")?;
-    result.try_release()?;
-
-    Ok(path)
+    ExcelHost::new(callbacks).module_path()
 }
 
 struct CountedString {

@@ -59,6 +59,11 @@ pub mod execution;
 mod generation;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod handle;
+#[allow(
+    unsafe_code,
+    reason = "Typed Excel host operations decode raw ABI values"
+)]
+mod host_api;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod host_callback;
 mod input_identity;

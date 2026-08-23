@@ -2,15 +2,14 @@ use crate::call::CallScope;
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
-use crate::error::{ExcelApiFailure, ExcelApiFunction, IntoXllError};
+use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
-use crate::host_callback::HostCallbackSession;
+use crate::host_api::ExcelHost;
 use crate::reference::ExcelReference;
-use crate::return_value::ExcelCallbackStatus;
 use crate::runtime_components::GenerationServices;
 use crate::shutdown::CleanupReporter;
 use crate::subscription::{RtdLimits, RtdSource, RtdSourceHandle, RtdTopic, RtdValue};
-use crate::value::{ExcelValue, FromExcel, Matrix, decode_owned_matrix};
+use crate::value::{ExcelValue, FromExcel, Matrix};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
@@ -18,7 +17,6 @@ use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use xlfn_sys::{XL_COERCE, XL_SHEET_NM};
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -604,7 +602,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
     services: &'call GenerationServices,
-    callbacks: &'call HostCallbackSession,
+    host: ExcelHost<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -613,7 +611,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
         Self {
             state: self.state,
             services: self.services,
-            callbacks: self.callbacks,
+            host: self.host,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -626,7 +624,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// not need an owned generation lease.
 pub struct MacroSheetContext<'call, A: Addin> {
     state: &'call A::SharedState,
-    scope: &'call CallScope<'call>,
+    host: ExcelHost<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -634,7 +632,7 @@ impl<A: Addin> Clone for MacroSheetContext<'_, A> {
     fn clone(&self) -> Self {
         Self {
             state: self.state,
-            scope: self.scope,
+            host: self.host,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -655,7 +653,7 @@ impl<A: Addin> MacroSheetContext<'_, A> {
     ) -> MacroSheetContext<'ctx, A> {
         MacroSheetContext {
             state,
-            scope,
+            host: ExcelHost::new(scope.callbacks()),
             _not_send_or_sync: PhantomData,
         }
     }
@@ -668,75 +666,18 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     }
 
     pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
-        let arguments = [reference.raw_pointer()];
-        // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe {
-            self.scope
-                .callbacks()
-                .call(XL_COERCE, &arguments)
-                .map_err(|suppressed| XllError::ExcelApi {
-                    function: ExcelApiFunction::Coerce,
-                    failure: ExcelApiFailure::Suppressed(suppressed.status),
-                })?
-        };
-        if status != ExcelCallbackStatus::Success {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: ExcelApiFunction::Coerce,
-                failure: ExcelApiFailure::Status(status),
-            }));
-        }
-        let converted = <ExcelValue as FromExcel>::from_excel(result.borrow()?, "reference");
-        result.try_release()?;
-        converted
+        self.host.coerce(reference)
     }
 
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
         T: for<'value> FromExcel<'value>,
     {
-        let arguments = [reference.raw_pointer()];
-        // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe {
-            self.scope
-                .callbacks()
-                .call(XL_COERCE, &arguments)
-                .map_err(|suppressed| XllError::ExcelApi {
-                    function: ExcelApiFunction::Coerce,
-                    failure: ExcelApiFailure::Suppressed(suppressed.status),
-                })?
-        };
-        if status != ExcelCallbackStatus::Success {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: ExcelApiFunction::Coerce,
-                failure: ExcelApiFailure::Status(status),
-            }));
-        }
-        let converted = decode_owned_matrix::<T>(result.borrow()?, "reference");
-        result.try_release()?;
-        converted
+        self.host.coerce_matrix(reference)
     }
 
     pub fn sheet_name(&self, reference: &ExcelReference<'_>) -> XllResult<String> {
-        let arguments = [reference.raw_pointer()];
-        // SAFETY: the reference and argument array remain live for the callback.
-        let (status, mut result) = unsafe {
-            self.scope
-                .callbacks()
-                .call(XL_SHEET_NM, &arguments)
-                .map_err(|suppressed| XllError::ExcelApi {
-                    function: ExcelApiFunction::SheetName,
-                    failure: ExcelApiFailure::Suppressed(suppressed.status),
-                })?
-        };
-        if status != ExcelCallbackStatus::Success {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
-                function: ExcelApiFunction::SheetName,
-                failure: ExcelApiFailure::Status(status),
-            }));
-        }
-        let converted = <String as FromExcel>::from_excel(result.borrow()?, "reference");
-        result.try_release()?;
-        converted
+        self.host.sheet_name(reference)
     }
 }
 
@@ -751,7 +692,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
         MainThreadContext {
             state,
             services,
-            callbacks: scope.callbacks(),
+            host: ExcelHost::new(scope.callbacks()),
             _not_send_or_sync: PhantomData,
         }
     }
@@ -777,7 +718,8 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
             .read(self.services.subscription_host())?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
-        match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.callbacks) {
+        match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.host.callbacks())
+        {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)
