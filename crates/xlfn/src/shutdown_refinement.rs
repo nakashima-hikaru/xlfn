@@ -78,6 +78,7 @@ pub(crate) struct GhostResources {
     pub(crate) rtd_server_locks: u64,
     pub(crate) handles: u64,
     pub(crate) handle_pins: u64,
+    pub(crate) handle_objects: u64,
     pub(crate) generation_unique: bool,
     pub(crate) addin_quiesced: bool,
     pub(crate) generation_owned_by_runtime: bool,
@@ -109,6 +110,7 @@ impl GhostResources {
             rtd_server_locks: 0,
             handles: 0,
             handle_pins: 0,
+            handle_objects: 0,
             generation_unique: false,
             addin_quiesced: false,
             generation_owned_by_runtime: true,
@@ -145,6 +147,7 @@ impl GhostResources {
             rtd_server_locks: 0,
             handles: 0,
             handle_pins: 0,
+            handle_objects: 0,
             generation_unique: true,
             addin_quiesced: true,
             generation_owned_by_runtime: false,
@@ -188,7 +191,7 @@ impl GhostResources {
     }
 
     fn handles_drained(&self) -> bool {
-        self.handles == 0 && self.handle_pins == 0
+        self.handles == 0 && self.handle_pins == 0 && self.handle_objects == 0
     }
 
     fn is_generation_reclaimed(&self) -> bool {
@@ -263,6 +266,8 @@ pub(crate) enum GhostEvent {
     UnlockRtdServer,
     AddHandle,
     RemoveHandle,
+    AddHandleObject,
+    RemoveHandleObject,
     AddHandlePin,
     RemoveHandlePin,
     StartDiagnostics,
@@ -651,6 +656,17 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             increment(&mut resources.handles, "handles")?;
         }
         GhostEvent::RemoveHandle => decrement(&mut resources.handles, "handles")?,
+        GhostEvent::AddHandleObject => {
+            if !handle_creation_allowed(&source.phase) {
+                return Err(GhostViolation::Precondition(
+                    "handle object creation is not allowed in this phase",
+                ));
+            }
+            increment(&mut resources.handle_objects, "handle objects")?;
+        }
+        GhostEvent::RemoveHandleObject => {
+            decrement(&mut resources.handle_objects, "handle objects")?
+        }
         GhostEvent::AddHandlePin => {
             if !handle_creation_allowed(&source.phase) {
                 return Err(GhostViolation::Precondition(
@@ -1126,9 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_pin_must_drain_before_handle_milestone() {
+    fn handle_roots_must_drain_before_handle_milestone() {
         let mut machine = open_machine();
         machine.apply(GhostEvent::AddHandlePin).unwrap();
+        machine.apply(GhostEvent::AddHandleObject).unwrap();
         for event in [
             GhostEvent::BeginClose,
             GhostEvent::CallsDrained,
@@ -1149,6 +1166,7 @@ mod tests {
             Err(GhostViolation::Precondition(_))
         ));
         machine.apply(GhostEvent::RemoveHandlePin).unwrap();
+        machine.apply(GhostEvent::RemoveHandleObject).unwrap();
         machine.apply(GhostEvent::HandlesDrained).unwrap();
     }
 

@@ -636,6 +636,16 @@ fn close_invalidates_tokens_and_rejects_new_bindings() {
     ));
 }
 
+#[test]
+fn sealing_a_closed_registry_is_idempotent_without_phase_regression() {
+    let registry = HandleRegistry::new(2);
+    registry.seal().map(|_| ()).unwrap();
+    assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+
+    registry.seal().map(|_| ()).unwrap();
+    assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+}
+
 #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
 #[test]
 #[ignore = "run in the dedicated Shuttle test step"]
@@ -684,6 +694,11 @@ fn close_drops_values_outside_registry_lock() {
     }
     impl Drop for ReenterOnDrop {
         fn drop(&mut self) {
+            assert!(
+                self.registry.bindings.try_read_state().is_some(),
+                "binding lock must not be held while user Drop runs"
+            );
+            assert!(matches!(self.registry.seal(), Err(XllError::Closing)));
             assert!(matches!(
                 insert_production(&self.registry, Arc::new(1_u32)),
                 Err(XllError::Closing)

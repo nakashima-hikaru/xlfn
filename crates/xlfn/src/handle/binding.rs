@@ -4,7 +4,7 @@
 //! record owns the shared [`ObjectCell`] reference that makes its immutable
 //! publication snapshot a complete read-side lifetime proof.
 
-use super::object::{ObjectDropReason, SharedObject};
+use super::object::SharedObject;
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
 use crate::generation::BindingGeneration;
@@ -269,6 +269,11 @@ impl BindingTable {
     }
 
     #[cfg(test)]
+    pub(crate) fn try_read_state(&self) -> Option<parking_lot::RwLockReadGuard<'_, RegistryState>> {
+        self.state.try_read()
+    }
+
+    #[cfg(test)]
     pub(crate) fn write_state(&self) -> parking_lot::RwLockWriteGuard<'_, RegistryState> {
         self.state.write()
     }
@@ -295,9 +300,10 @@ impl BindingTable {
         })
     }
 
-    pub(crate) fn retire_all(&self) -> u32 {
+    pub(crate) fn retire_all(&self) -> (u32, Vec<triomphe::Arc<BindingRecord>>) {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
+        let mut retired = Vec::with_capacity(live_bindings as usize);
         state.free.clear();
         self.published.clear();
         for index in 0..state.slots.len() {
@@ -307,7 +313,7 @@ impl BindingTable {
                     record
                         .state
                         .store(BindingState::Retired as u8, Ordering::Release);
-                    drop(record);
+                    retired.push(record);
                 }
                 if let Some(next) = slot.next_generation.next() {
                     slot.next_generation = next;
@@ -321,16 +327,8 @@ impl BindingTable {
             }
         }
         state.live_bindings = 0;
-        live_bindings
-    }
-
-    pub(crate) fn mark_all_drop_reason(&self, reason: ObjectDropReason) {
-        let state = self.state.read();
-        for slot in &state.slots {
-            if let Some(record) = slot.record.as_ref() {
-                record.object.mark_drop_reason(reason);
-            }
-        }
+        drop(state);
+        (live_bindings, retired)
     }
 }
 
@@ -398,10 +396,6 @@ impl BindingRemoval<'_> {
         &self.record.object
     }
 
-    pub(crate) fn mark_drop_reason(&self, reason: ObjectDropReason) {
-        self.record.object.mark_drop_reason(reason);
-    }
-
     pub(crate) fn commit(mut self) -> bool {
         let mut state = self
             .state
@@ -419,7 +413,6 @@ impl BindingRemoval<'_> {
             .record
             .take()
             .expect("binding record was checked above");
-        drop(slot_record);
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
             true
@@ -435,6 +428,9 @@ impl BindingRemoval<'_> {
         }
         self.active = false;
         drop(state);
+        // The binding lock must never be held while the final `ObjectCell`
+        // reference runs arbitrary user `Drop` code.
+        drop(slot_record);
         reusable
     }
 }

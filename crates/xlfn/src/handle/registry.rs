@@ -6,25 +6,25 @@
 //! resurrection path to keep in sync.
 
 use super::binding::{BindingReadLease, BindingState, BindingTable};
-use super::object::{ObjectCell, ObjectDropReason, ObjectLifetimeTracker, SharedObject};
+use super::object::{ObjectCell, ObjectLifetimeTracker, SharedObject};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::{XllError, XllResult};
+#[cfg(any(test, feature = "unstable"))]
+use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-#[cfg(any(test, feature = "unstable"))]
-use parking_lot::Mutex;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HandleRegistryPhase {
     Open = 0,
     Closing = 1,
-    Closed = 2,
+    Sealing = 2,
+    Closed = 3,
 }
 
 impl HandleRegistryPhase {
@@ -32,6 +32,7 @@ impl HandleRegistryPhase {
         match raw {
             value if value == Self::Open as u8 => Self::Open,
             value if value == Self::Closing as u8 => Self::Closing,
+            value if value == Self::Sealing as u8 => Self::Sealing,
             value if value == Self::Closed as u8 => Self::Closed,
             _ => Self::Closed,
         }
@@ -79,7 +80,6 @@ impl PendingHandleValue {
 impl Drop for PendingHandleValue {
     fn drop(&mut self) {
         if let Some(value) = self.value.take() {
-            value.mark_drop_reason(ObjectDropReason::PublicationRollback);
             drop(value);
         }
     }
@@ -221,6 +221,10 @@ impl HandleRegistry {
         let object = value.as_ref().expect("pending handle object is armed");
         self.validate_type::<T>(object)?;
         let reservation = self.bindings.reserve()?;
+        if !self.is_open() {
+            drop(reservation);
+            return Err(XllError::Closing);
+        }
         let object = value.take().expect("pending handle object is armed");
         let object_id = object.id();
         let (id, reused) = reservation.publish(object);
@@ -242,6 +246,10 @@ impl HandleRegistry {
         self.validate_type::<T>(&object)?;
         let object_id = object.id();
         let reservation = self.bindings.reserve()?;
+        if !self.is_open() {
+            drop(reservation);
+            return Err(XllError::Closing);
+        }
         let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
@@ -338,21 +346,10 @@ impl HandleRegistry {
         if removal.object().typed_ptr::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
-        removal.mark_drop_reason(ObjectDropReason::BindingRemoved);
         removal.commit();
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(())
-    }
-
-    fn drop_reason(operation: &'static str) -> ObjectDropReason {
-        if operation.contains("rollback") {
-            ObjectDropReason::PublicationRollback
-        } else if operation.contains("close") {
-            ObjectDropReason::Shutdown
-        } else {
-            ObjectDropReason::BindingRemoved
-        }
     }
 
     fn remove_with_kind(
@@ -368,7 +365,7 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let removal = self.bindings.begin_removal(verified.id)?;
-        removal.mark_drop_reason(Self::drop_reason(operation));
+        tracing::trace!(operation, "handle binding retired");
         let reusable = removal.commit();
         on_linearized(reusable);
         #[cfg(any(test, feature = "unstable"))]
@@ -395,13 +392,15 @@ impl HandleRegistry {
     }
 
     pub(crate) fn retire_values_for_seal(&self) -> usize {
-        self.bindings
-            .mark_all_drop_reason(ObjectDropReason::Shutdown);
-        let live_bindings = self.bindings.retire_all();
+        let (live_bindings, retired) = self.bindings.retire_all();
         #[cfg(any(test, feature = "unstable"))]
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }
+        // `retire_all` releases the binding-table write lock before returning;
+        // dropping these records here keeps arbitrary user destructors out of
+        // that lock's critical section.
+        drop(retired);
         usize::try_from(live_bindings).expect("binding count fits in usize")
     }
 
@@ -415,12 +414,29 @@ impl HandleRegistry {
     }
 
     pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed> {
-        let previous = self
-            .phase
-            .swap(HandleRegistryPhase::Closing as u8, Ordering::AcqRel);
-        if HandleRegistryPhase::from_raw(previous) == HandleRegistryPhase::Closed {
-            self.cleanup_result()?;
-            return Ok(HandleRegistrySealed::new());
+        loop {
+            let phase = self.phase();
+            match phase {
+                HandleRegistryPhase::Closed => {
+                    self.cleanup_result()?;
+                    return Ok(HandleRegistrySealed::new());
+                }
+                HandleRegistryPhase::Sealing => return Err(XllError::Closing),
+                HandleRegistryPhase::Open | HandleRegistryPhase::Closing => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            phase as u8,
+                            HandleRegistryPhase::Sealing as u8,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            }
         }
         self.lifetime.seal();
         self.retire_values_for_seal();

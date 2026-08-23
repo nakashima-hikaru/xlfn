@@ -41,6 +41,8 @@ inductive Event where
   | unlockRtdServer
   | addHandle
   | removeHandle
+  | addHandleObject
+  | removeHandleObject
   | addHandlePin
   | removeHandlePin
   | startDiagnostics
@@ -279,6 +281,18 @@ inductive Step : State → Event → State → Prop where
       (hCount : s.resources.handles = n + 1) :
       Step s .removeHandle
         { s with resources := { s.resources with handles := n } }
+
+  | addHandleObject {s : State}
+      (hAllowed : s.phase.AllowsHandleCreation) :
+      Step s .addHandleObject
+        { s with resources :=
+            { s.resources with handleObjects := s.resources.handleObjects + 1 } }
+
+  | removeHandleObject {s : State} {n : Nat}
+      (hLive : s.phase.IsLive)
+      (hCount : s.resources.handleObjects = n + 1) :
+      Step s .removeHandleObject
+        { s with resources := { s.resources with handleObjects := n } }
 
   | addHandlePin {s : State}
       (hAllowed : s.phase.AllowsHandleCreation) :

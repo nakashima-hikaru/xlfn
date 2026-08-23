@@ -134,17 +134,20 @@ establishes `generationOwnedByRuntime = false`.
 servers, and server locks. `SubscriptionsDrained` owns the separate
 subscription/callback postcondition.
 
-Handle shutdown has two distinct obligations. `handles = 0` means that no
+Handle shutdown has three distinct obligations. `handles = 0` means that no
 formula binding roots remain; `handlePins = 0` means that no `HandleLease`
-can still retain a retired payload. The model therefore permits
-the registry to be sealed before pin drain, but admits `handlesDrained` only
-after both counters are zero. This matches the Rust order: `FormulaHandleService::seal`
+can still retain a retired payload; and `handleObjects = 0` means that no
+published snapshot or pending ownership edge can still retain an
+`ObjectCell`. The model therefore permits
+the registry to be sealed before lease/object drain, but admits `handlesDrained` only
+after all three counters are zero. This matches the Rust order: `FormulaHandleService::seal`
 retires bindings, Add-in cleanup drops generation state, and only then can
 `HandleStoreQuiescent` be issued.
 
-The Rust shutdown refinement trace carries the same `handlePins` counter and
-`addHandlePin`/`removeHandlePin` events, so the executable trace checker observes
-the same seal-versus-pin-drain boundary as the Lean transition system.
+The Rust shutdown refinement trace carries the same `handlePins` and
+`handleObjects` counters and their corresponding add/remove events, so the
+executable trace checker observes the same seal-versus-lease/object-drain
+boundary as the Lean transition system.
 
 `XlFnFormal/Shutdown/Invariant.lean` proves cumulative certificate
 preservation across the ordered stages. `Safety.lean` proves monotone phase

@@ -12,7 +12,7 @@ use std::any::{Any, TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// The sole shared owner of one erased handle payload.
 pub(crate) type SharedObject = triomphe::Arc<ObjectCell>;
@@ -51,7 +51,7 @@ pub(crate) struct ObjectLifetimeTracker {
     live_objects: AtomicUsize,
     active_leases: AtomicUsize,
     sealed: AtomicBool,
-    lease_gate: Mutex<()>,
+    admission_gate: Mutex<()>,
     #[cfg(any(test, feature = "unstable"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
@@ -63,7 +63,7 @@ impl ObjectLifetimeTracker {
             live_objects: AtomicUsize::new(0),
             active_leases: AtomicUsize::new(0),
             sealed: AtomicBool::new(false),
-            lease_gate: Mutex::new(()),
+            admission_gate: Mutex::new(()),
             #[cfg(any(test, feature = "unstable"))]
             ghost: std::sync::OnceLock::new(),
         })
@@ -74,6 +74,10 @@ impl ObjectLifetimeTracker {
     }
 
     fn register_object(&self) -> XllResult<()> {
+        let _gate = self.admission_gate.lock();
+        if self.sealed.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
         self.live_objects
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
@@ -82,15 +86,21 @@ impl ObjectLifetimeTracker {
             .map_err(|_| XllError::Domain {
                 code: crate::error::DomainErrorCode::Overflow,
             })
+            .inspect(|()| {
+                #[cfg(any(test, feature = "unstable"))]
+                self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandleObject);
+            })
     }
 
     fn release_object(&self) {
         let previous = self.live_objects.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "handle object accounting is unbalanced");
+        #[cfg(any(test, feature = "unstable"))]
+        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandleObject);
     }
 
     fn acquire_lease(self: &Arc<Self>) -> XllResult<ObjectLeaseGuard> {
-        let _gate = self.lease_gate.lock();
+        let _gate = self.admission_gate.lock();
         if self.sealed.load(Ordering::Acquire) {
             return Err(XllError::Closing);
         }
@@ -116,12 +126,12 @@ impl ObjectLifetimeTracker {
     }
 
     pub(crate) fn seal(&self) {
-        let _gate = self.lease_gate.lock();
+        let _gate = self.admission_gate.lock();
         self.sealed.store(true, Ordering::Release);
     }
 
     pub(crate) fn finish_quiescence(&self) -> XllResult<()> {
-        let _gate = self.lease_gate.lock();
+        let _gate = self.admission_gate.lock();
         if self.active_leases.load(Ordering::Acquire) != 0 {
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::HANDLE_PINS,
@@ -148,26 +158,6 @@ impl ObjectLifetimeTracker {
     }
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ObjectDropReason {
-    Normal = 0,
-    BindingRemoved = 1,
-    PublicationRollback = 2,
-    Shutdown = 3,
-}
-
-impl ObjectDropReason {
-    fn operation(self) -> &'static str {
-        match self {
-            Self::Normal => "handle object drop",
-            Self::BindingRemoved => "handle binding removal",
-            Self::PublicationRollback => "handle publication rollback",
-            Self::Shutdown => "handle registry close",
-        }
-    }
-}
-
 /// Stable storage for one typed handle payload.
 pub(crate) struct ObjectCell {
     id: ObjectId,
@@ -176,7 +166,6 @@ pub(crate) struct ObjectCell {
     type_id: TypeId,
     type_name: &'static str,
     lifetime: Arc<ObjectLifetimeTracker>,
-    drop_reason: AtomicU8,
 }
 
 impl ObjectCell {
@@ -195,7 +184,6 @@ impl ObjectCell {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
             lifetime,
-            drop_reason: AtomicU8::new(ObjectDropReason::Normal as u8),
         }))
     }
 
@@ -216,10 +204,6 @@ impl ObjectCell {
         (self.type_id == TypeId::of::<T>()).then(|| self.ptr.cast())
     }
 
-    pub(crate) fn mark_drop_reason(&self, reason: ObjectDropReason) {
-        self.drop_reason.store(reason as u8, Ordering::Release);
-    }
-
     pub(crate) fn acquire_lease(&self) -> XllResult<ObjectLeaseGuard> {
         self.lifetime.acquire_lease()
     }
@@ -238,20 +222,10 @@ impl Drop for ObjectCell {
             .owner
             .take()
             .expect("object cell owner must be present exactly once");
-        let reason = match self.drop_reason.load(Ordering::Acquire) {
-            value if value == ObjectDropReason::BindingRemoved as u8 => {
-                ObjectDropReason::BindingRemoved
-            }
-            value if value == ObjectDropReason::PublicationRollback as u8 => {
-                ObjectDropReason::PublicationRollback
-            }
-            value if value == ObjectDropReason::Shutdown as u8 => ObjectDropReason::Shutdown,
-            _ => ObjectDropReason::Normal,
-        };
         let result = catch_unwind(AssertUnwindSafe(|| drop(owner)));
         if result.is_err() {
             let error = XllError::Panic;
-            crate::diagnostics::report_no_unwind(reason.operation(), &error);
+            crate::diagnostics::report_no_unwind("handle object final drop", &error);
             self.lifetime.cleanup.record(error);
         }
         self.lifetime.release_object();
@@ -268,9 +242,3 @@ impl Drop for ObjectLeaseGuard {
         self.tracker.release_lease();
     }
 }
-
-// SAFETY: the guard contains only an Arc to atomics and a mutex-protected
-// diagnostic state.
-unsafe impl Send for ObjectLeaseGuard {}
-// SAFETY: same invariant as `Send`.
-unsafe impl Sync for ObjectLeaseGuard {}

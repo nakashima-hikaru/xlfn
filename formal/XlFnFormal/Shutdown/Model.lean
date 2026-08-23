@@ -173,6 +173,8 @@ structure Resources where
   /-- Long-lived registry pins are tracked separately from formula bindings.
       A sealed registry is not quiescent while any pin remains. -/
   handlePins : Nat := 0
+  /-- Published or call-scoped object cells whose payload has not been dropped. -/
+  handleObjects : Nat := 0
   generationUnique : Bool := false
   addinQuiesced : Bool := false
   generationOwnedByRuntime : Bool := true
@@ -211,7 +213,7 @@ def RtdDrained (r : Resources) : Prop :=
   r.rtdServerLocks = 0
 
 def HandlesDrained (r : Resources) : Prop :=
-  r.handles = 0 ∧ r.handlePins = 0
+  r.handles = 0 ∧ r.handlePins = 0 ∧ r.handleObjects = 0
 
 def GenerationReclaimed (r : Resources) : Prop :=
   r.generationUnique = true ∧
@@ -268,7 +270,11 @@ theorem quiescent_handlesDrained {r : Resources}
 
 theorem quiescent_handlePinsDrained {r : Resources}
     (h : r.Quiescent) : r.handlePins = 0 :=
-  (quiescent_handlesDrained h).2
+  (quiescent_handlesDrained h).2.1
+
+theorem quiescent_handleObjectsDrained {r : Resources}
+    (h : r.Quiescent) : r.handleObjects = 0 :=
+  (quiescent_handlesDrained h).2.2
 
 theorem quiescent_generationReclaimed {r : Resources}
     (h : r.Quiescent) : r.GenerationReclaimed := h.2.2.2.2.2.2.2.1
