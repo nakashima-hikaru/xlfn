@@ -129,8 +129,7 @@ where
         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let runtime_config =
-        initialize_addin::<A>(runtime, lifecycle, &context, transaction.attempt_mut())?;
+    let runtime_config = initialize_addin::<A>(runtime, lifecycle, &context, transaction)?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
     let has_async_functions = descriptors
@@ -199,7 +198,7 @@ fn initialize_addin<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     context: &OpenContext,
-    attempt: &mut crate::runtime::OpeningTxn<'_, A>,
+    transaction: &mut open::OpeningTransaction<'_, A>,
 ) -> XllResult<RuntimeConfig>
 where
     A: Addin,
@@ -233,14 +232,7 @@ where
         layers,
         init_config: runtime_config,
     };
-    if let Err((error, opening)) = attempt.stage(opening) {
-        runtime.quarantine_opening_generation(
-            active_runtime_generation(runtime),
-            opening,
-            crate::runtime_components::QuarantineReason::OpenStateInvariant,
-        );
-        return Err(error);
-    }
+    transaction.stage_generation(opening)?;
     Ok(runtime_config)
 }
 
@@ -1252,28 +1244,19 @@ mod tests {
         LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let removal_epoch = runtime.removal_epoch();
+        let mut transaction = open::OpeningTransaction::begin(&runtime, removal_epoch).unwrap();
         let lifecycle = lifecycle_access(&runtime);
         initialize_addin::<LayersPanic>(
             &runtime,
             &lifecycle,
             &test_open_context(),
-            &mut open_attempt,
+            &mut transaction,
         )
         .unwrap();
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
-        assert!(open_attempt.fail().requires_rollback());
-        let mut callbacks = HostCallbackSession::new();
-        assert!(
-            rollback_open::<LayersPanic>(
-                &runtime,
-                &lifecycle,
-                &mut callbacks,
-                active_runtime_generation(&runtime),
-            )
-            .unload_safe()
-        );
+        transaction.rollback(&lifecycle);
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }

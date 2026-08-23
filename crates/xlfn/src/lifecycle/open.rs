@@ -1,11 +1,13 @@
 //! Transaction ownership for one logical open attempt.
 
-use super::{open_addin_inner, report_boundary_error, rollback_active_open};
+use super::{
+    active_runtime_generation, open_addin_inner, report_boundary_error, rollback_active_open,
+};
 use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::{HostMutationJournal, RegistrationDescriptor};
-use crate::runtime::{AddinLifecycleAccess, OpeningTxn, Runtime};
+use crate::runtime::{AddinLifecycleAccess, OpeningGeneration, OpeningTxn, Runtime};
 use crate::{XllError, XllResult};
 
 /// Owns one logical open attempt, its host registrations, and the callback
@@ -38,10 +40,23 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    pub(super) fn attempt_mut(&mut self) -> &mut OpeningTxn<'runtime, A> {
-        self.attempt
+    pub(super) fn stage_generation(&mut self, opening: OpeningGeneration<A>) -> XllResult<()> {
+        let result = self
+            .attempt
             .as_mut()
             .expect("an open transaction always owns its attempt")
+            .stage(opening);
+        match result {
+            Ok(()) => Ok(()),
+            Err((error, opening)) => {
+                self.runtime.quarantine_opening_generation(
+                    active_runtime_generation(self.runtime),
+                    opening,
+                    crate::runtime_components::QuarantineReason::OpenStateInvariant,
+                );
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn stage_registrations(

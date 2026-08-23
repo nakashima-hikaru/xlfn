@@ -18,7 +18,7 @@ mod thread_affine;
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
 pub(crate) use lifecycle_state::{
-    GenerationPublication, LifecycleCoordinator, LifecycleCore, OpenFailureDisposition,
+    GenerationAdmission, LifecycleCoordinator, LifecycleCore, OpenFailureDisposition,
 };
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;

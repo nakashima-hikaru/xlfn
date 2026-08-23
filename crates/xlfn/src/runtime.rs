@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
-    GenerationPublication, GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore,
+    GenerationAdmission, GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore,
     ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess,
     ThreadAffineError, ThreadAffineInstallError,
 };
@@ -625,16 +625,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     pub fn enter(&self) -> XllResult<CallGuard<'_, A>> {
         crate::module_runtime::ingress().with_linearization(|| {
-            if self.phase() != LifecyclePhase::Open {
-                return Err(XllError::Closing);
-            }
-
-            let publication = self.lifecycle.load_generation_publication();
-            if publication.is_none() {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
-                });
-            }
+            let admission = self.lifecycle.try_admit()?;
             #[cfg(any(test, feature = "refinement"))]
             self.refinement_hooks().call_entered(self);
             Ok(CallGuard {
@@ -642,7 +633,7 @@ impl<A: crate::Addin> Runtime<A> {
                 runtime: self,
                 #[cfg(not(any(test, feature = "refinement")))]
                 _runtime: std::marker::PhantomData,
-                publication,
+                admission,
             })
         })
     }
@@ -1407,7 +1398,7 @@ pub struct CallGuard<'runtime, A: crate::Addin> {
     runtime: &'runtime Runtime<A>,
     #[cfg(not(any(test, feature = "refinement")))]
     _runtime: std::marker::PhantomData<&'runtime Runtime<A>>,
-    publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>,
+    admission: GenerationAdmission<A>,
 }
 
 impl<A: crate::Addin> CallGuard<'_, A> {
@@ -1429,33 +1420,20 @@ impl<A: crate::Addin> CallGuard<'_, A> {
     /// generation after it has already entered.
     #[must_use]
     pub(crate) fn services(&self) -> &GenerationServices {
-        &self
-            .publication
-            .as_ref()
-            .expect("a live CallGuard always observes published generation services")
-            .services
+        self.admission.services()
     }
 
     fn generation(&self) -> &OpenGeneration<A> {
-        let publication = self
-            .publication
-            .as_ref()
-            .expect("a live CallGuard always observes published runtime generation");
-        let _ = publication.root.id();
-        &publication.root
+        let generation = self.admission.generation();
+        let _ = generation.id();
+        generation
     }
 
     #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn lease(&self) -> GenerationLease<A> {
         GenerationLease {
-            generation: Arc::clone(
-                &self
-                    .publication
-                    .as_ref()
-                    .expect("a live CallGuard always observes published runtime generation")
-                    .root,
-            ),
+            generation: Arc::clone(self.admission.generation_arc()),
         }
     }
 }

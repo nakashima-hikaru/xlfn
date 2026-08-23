@@ -43,6 +43,47 @@ pub(crate) struct GenerationPublication<A: crate::Addin> {
     pub(crate) services: Arc<GenerationServices>,
 }
 
+/// Read-side admission capability for one coherent open generation.
+///
+/// The phase projection and the generation publication are deliberately
+/// acquired together. Callers must not perform an independent phase check and
+/// publication load: this capability is the single boundary that turns the
+/// two projections into an admitted call.
+pub(crate) struct GenerationAdmission<A: crate::Addin> {
+    publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>,
+}
+
+impl<A: crate::Addin> GenerationAdmission<A> {
+    fn new(publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>) -> Self {
+        Self { publication }
+    }
+
+    pub(crate) fn generation(&self) -> &OpenGeneration<A> {
+        &self
+            .publication
+            .as_ref()
+            .expect("a live generation admission always observes a publication")
+            .root
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn generation_arc(&self) -> &Arc<OpenGeneration<A>> {
+        &self
+            .publication
+            .as_ref()
+            .expect("a live generation admission always observes a publication")
+            .root
+    }
+
+    pub(crate) fn services(&self) -> &GenerationServices {
+        &self
+            .publication
+            .as_ref()
+            .expect("a live generation admission always observes a publication")
+            .services
+    }
+}
+
 /// The complete ownership bundle for a published generation.
 pub(crate) struct OpenBundle<A: crate::Addin> {
     generation: Arc<OpenGeneration<A>>,
@@ -563,6 +604,27 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         LifecyclePhase::from_raw(self.phase.load(Ordering::Acquire))
     }
 
+    /// Admits one call from the coherent read-side projections.
+    ///
+    /// `phase` and `publication` are published independently for different
+    /// readers, but a call must observe them as one protocol decision. Keep
+    /// this check here so hot-path callers cannot accidentally split the
+    /// admission into separate observations.
+    pub(crate) fn try_admit(&self) -> crate::XllResult<GenerationAdmission<A>> {
+        if self.observed_phase() != LifecyclePhase::Open {
+            return Err(crate::XllError::Closing);
+        }
+
+        let publication = self.publication.load();
+        if publication.is_none() {
+            return Err(crate::XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
+            });
+        }
+
+        Ok(GenerationAdmission::new(publication))
+    }
+
     pub(crate) fn set_host_intent(&self, intent: HostLifecycleIntent) {
         let mut core = self.lock();
         core.host_intent = intent;
@@ -937,12 +999,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     #[cfg(test)]
     pub(crate) fn has_current_generation(&self) -> bool {
         self.lock().has_current_generation()
-    }
-
-    pub(crate) fn load_generation_publication(
-        &self,
-    ) -> arc_swap::Guard<Option<Arc<GenerationPublication<A>>>> {
-        self.publication.load()
     }
 
     /// Service access is a cold-path operation. It borrows the coherent
