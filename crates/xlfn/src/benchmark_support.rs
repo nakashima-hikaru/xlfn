@@ -1,9 +1,9 @@
 //! Benchmark support utilities for internal crate testing and performance measurement.
 //!
 //! This module is hidden from public API documentation and is enabled only when
-//! compiling with the `unstable` feature.
+//! compiling with the `bench-internals` feature.
 
-#![cfg(feature = "unstable")]
+#![cfg(feature = "bench-internals")]
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 

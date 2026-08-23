@@ -78,7 +78,7 @@ impl RtdModuleState {
     }
 }
 
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
     #[cfg(target_os = "windows")]
     windows::set_ghost(ghost);

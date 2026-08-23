@@ -11,7 +11,7 @@ use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::{XllError, XllResult};
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -56,7 +56,7 @@ pub(crate) struct HandleRegistry {
     pub(super) bindings: BindingTable,
     pub(super) lifetime: Arc<ObjectLifetimeTracker>,
     next_object_id: AtomicU64,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
@@ -137,25 +137,25 @@ impl HandleRegistry {
             bindings: BindingTable::new(maximum_bindings),
             lifetime,
             next_object_id: AtomicU64::new(1),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost: Mutex::new(None),
         }
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.lifetime.set_ghost(Arc::clone(&ghost));
         *self.ghost.lock() = Some(ghost);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(event);
         }
     }
 
-    #[cfg(all(target_os = "windows", any(test, feature = "unstable")))]
+    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
     pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.ghost.lock().clone()
     }
@@ -228,7 +228,7 @@ impl HandleRegistry {
         let object = value.take().expect("pending handle object is armed");
         let object_id = object.id();
         let (id, reused) = reservation.publish(object);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
@@ -251,7 +251,7 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let (id, reused) = reservation.publish(object);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
@@ -347,7 +347,7 @@ impl HandleRegistry {
             return Err(XllError::InvalidHandle);
         }
         removal.commit();
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(())
     }
@@ -368,7 +368,7 @@ impl HandleRegistry {
         tracing::trace!(operation, "handle binding retired");
         let reusable = removal.commit();
         on_linearized(reusable);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(reusable)
     }
@@ -393,7 +393,7 @@ impl HandleRegistry {
 
     pub(crate) fn retire_values_for_seal(&self) -> usize {
         let (live_bindings, retired) = self.bindings.retire_all();
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         }

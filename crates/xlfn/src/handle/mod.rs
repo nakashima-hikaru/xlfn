@@ -11,7 +11,7 @@ mod connection;
 mod formula;
 mod object;
 mod prepare;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 mod refinement;
 mod refinement_hooks;
 mod refinement_wire;
@@ -52,11 +52,11 @@ pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaBinding, HandleTopicOwner, Topic};
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
-#[cfg(any(test, feature = "unstable", feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 pub(crate) use formula::FormulaRevisionKey;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;

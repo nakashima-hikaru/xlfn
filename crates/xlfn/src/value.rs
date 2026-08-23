@@ -25,10 +25,10 @@ pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 pub mod raw;
 
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use crate::call::with_excel_call_scope;
 pub use crate::input_identity::InputIdentityEncoder;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
 pub(crate) use input::{CallContext, ExcelParameter};
 pub use input::{ExcelInputIdentity, FormulaInputMode, FromExcel, InputMode, PlainInputMode};

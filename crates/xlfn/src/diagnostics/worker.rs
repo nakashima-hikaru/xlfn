@@ -5,9 +5,9 @@ use crate::diagnostics::event::DROPPED_EVENTS;
 use parking_lot::Mutex;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 use std::sync::Arc;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -38,9 +38,9 @@ pub(crate) struct AsyncDiagnosticSink {
     pub(crate) sender: Mutex<Option<SyncSender<OwnedDiagnosticEvent>>>,
     pub(crate) worker: Mutex<Option<JoinHandle<()>>>,
     pub(crate) worker_thread_id: std::thread::ThreadId,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) pending: Arc<AtomicU64>,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) ghost: Arc<Mutex<Option<crate::shutdown_refinement::GhostHandle>>>,
 }
 
@@ -61,13 +61,13 @@ impl AsyncDiagnosticSink {
         }
         let (sender, receiver) =
             mpsc::sync_channel::<OwnedDiagnosticEvent>(super::DIAGNOSTIC_QUEUE_CAPACITY);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let pending = Arc::new(AtomicU64::new(0));
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let worker_pending = Arc::clone(&pending);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let ghost = Arc::new(Mutex::new(None::<crate::shutdown_refinement::GhostHandle>));
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let worker_ghost = Arc::clone(&ghost);
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())
@@ -75,13 +75,13 @@ impl AsyncDiagnosticSink {
                 while let Ok(event) = receiver.recv() {
                     event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
-                        #[cfg(any(test, feature = "unstable"))]
+                        #[cfg(any(test, feature = "refinement"))]
                         if let Some(ghost) = worker_ghost.lock().as_ref().cloned() {
                             ghost.record_event(
                                 crate::shutdown_refinement::GhostEvent::FlushDiagnostic,
                             );
                         }
-                        #[cfg(any(test, feature = "unstable"))]
+                        #[cfg(any(test, feature = "refinement"))]
                         worker_pending.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
@@ -92,19 +92,19 @@ impl AsyncDiagnosticSink {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             pending,
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost,
         })
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.ghost.lock() = Some(ghost);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn pending(&self) -> u64 {
         self.pending.load(Ordering::Acquire)
     }
@@ -116,18 +116,18 @@ impl AsyncDiagnosticSink {
     pub(crate) fn report(&self, event: OwnedDiagnosticEvent) {
         let result = crate::ingress::with_diagnostic_linearization(|| {
             let sender = self.sender.lock();
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             self.pending.fetch_add(1, Ordering::AcqRel);
             let result = match sender.as_ref() {
                 Some(sender) => sender.try_send(event),
                 None => Err(TrySendError::Disconnected(event)),
             };
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             if result.is_err() {
                 self.pending.fetch_sub(1, Ordering::AcqRel);
             }
             drop(sender);
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             if result.is_ok()
                 && let Some(ghost) = self.ghost.lock().as_ref().cloned()
             {
@@ -151,7 +151,7 @@ impl AsyncDiagnosticSink {
         if let Some(worker) = worker {
             let result = worker.join();
             if result.is_err() {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 {
                     let discarded = self.pending.swap(0, Ordering::AcqRel);
                     if discarded != 0

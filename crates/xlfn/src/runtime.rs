@@ -117,17 +117,17 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn ghost_handle(&self) -> crate::shutdown_refinement::GhostHandle {
-        self.refinement.ghost_handle()
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn refinement_hooks(&self) -> &RuntimeRefinementHooks {
+        &self.refinement
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn composition_trace(&self) -> &crate::composition_refinement::CompositionTrace {
         self.refinement.composition_trace()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_composition_event(
         &self,
         event: crate::composition_refinement::CompositionEvent,
@@ -135,17 +135,17 @@ impl<A: crate::Addin> Runtime<A> {
         self.composition_trace().record(event);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_composition_begin_open(&self, sampled_epoch: u64, attempt: u64) {
         self.composition_trace().begin_open(sampled_epoch, attempt);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     fn mark_composition_return_pending(&self) {
         self.composition_trace().mark_return_pending();
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn finish_composition_return(&self) {
         self.composition_trace().finish_return();
     }
@@ -153,13 +153,13 @@ impl<A: crate::Addin> Runtime<A> {
     // This is called by the explicit removal boundary after the terminal
     // teardown has returned AlreadyClosed; begin_final_removal only records its
     // lifecycle request and does not claim the host call returned successfully.
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_composition_already_closed_return(&self) {
         self.mark_composition_return_pending();
         self.finish_composition_return();
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     fn mark_composition_terminal_pending(&self) {
         self.composition_trace().mark_terminal_pending();
     }
@@ -291,7 +291,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.lock().protocol_generation()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
         self.lifecycle.lock().canonical_state().open_attempt()
     }
@@ -342,7 +342,7 @@ impl<A: crate::Addin> Runtime<A> {
         RemovalEpoch::new(self.lifecycle.lock().removal_epoch())
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish(&self, state: A::SharedState, layers: A::Layers)
     where
         A::LifecycleState: Default,
@@ -350,7 +350,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.publish_with_lifecycle(state, Default::default(), layers);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish_with_lifecycle(
         &self,
         state: A::SharedState,
@@ -483,7 +483,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.has_current_generation()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn arm_test_generation(&self) {
         let services = GenerationServices::arm_generation(
             crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
@@ -507,7 +507,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.take_generation_for_shutdown()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn finish_open(
         &self,
         attempt: &mut OpeningTxn<'_, A>,
@@ -635,12 +635,12 @@ impl<A: crate::Addin> Runtime<A> {
                     diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
                 });
             }
-            #[cfg(any(test, feature = "unstable"))]
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::EnterCall);
+            #[cfg(any(test, feature = "refinement"))]
+            self.refinement_hooks().call_entered(self);
             Ok(CallGuard {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 runtime: self,
-                #[cfg(not(any(test, feature = "unstable")))]
+                #[cfg(not(any(test, feature = "refinement")))]
                 _runtime: std::marker::PhantomData,
                 publication,
             })
@@ -846,99 +846,23 @@ impl<A: crate::Addin> Runtime<A> {
         self.return_protocol.returns_closed_and_quiescent()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        self.ghost_handle().record_event(event);
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_event_linearized(
-        &self,
-        event: crate::shutdown_refinement::GhostEvent,
-    ) {
-        crate::module_runtime::ingress().with_linearization(|| self.record_ghost_event(event));
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_generation_unique(&self) {
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ProveGenerationUnique);
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_addin_quiesced(&self) {
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::ProveAddinQuiesced);
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_async_stopped(&self) {
-        let ghost = self.ghost_handle();
-        if ghost.state().resources.async_executor_running {
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::StopAsyncExecutor);
-        }
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_diagnostics_stopped(&self) -> XllResult<()> {
-        crate::diagnostics::record_ghost_diagnostics_stopped(self.ghost_handle())
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn ghost_fail_stop(&self, reason: crate::shutdown_refinement::GhostFailure) {
-        if let Err(violation) = self.ghost_handle().fail_stop(reason) {
-            tracing::error!(%violation, "shutdown ghost fail-stop recording failed");
-        }
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn ghost_quarantine(&self, reason: crate::shutdown_refinement::GhostFailure) {
-        if let Err(violation) = self.ghost_handle().quarantine(reason) {
-            tracing::error!(%violation, "shutdown ghost quarantine recording failed");
-        }
-    }
-
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn ghost_generation_active(&self) -> bool {
-        self.ghost_handle().active()
-    }
-
     #[cfg(test)]
     pub(crate) fn disable_ghost_for_test(&self) {
-        self.ghost_handle().disable_for_test();
+        self.refinement_hooks().disable_for_test();
     }
 
-    #[cfg(any(test, feature = "unstable"))]
-    pub(crate) fn record_ghost_returned_success(&self, witness: ClosedWitness) -> XllResult<()> {
-        if witness.runtime_address != std::ptr::from_ref(self).addr()
-            || witness.generation != self.last_committed_generation()
-            || self.phase() != LifecyclePhase::Closed
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
-            });
-        }
-        if self.ghost_handle().active() {
-            self.ghost_handle()
-                .record_returned_success()
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
-                })?;
-            if self.ghost_handle().active() {
-                crate::lifecycle::fail_stop_invariant(
-                    "xlAutoRemove ghost shutdown postcondition",
-                    &XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
-                    },
-                );
-            }
-            self.refinement.retire_committed_shutdown(self);
-        }
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn record_returned_success(&self, witness: ClosedWitness) -> XllResult<()> {
+        self.refinement_hooks()
+            .record_returned_success(self, &witness)?;
         self.mark_composition_return_pending();
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn ghost_trace_json(&self) -> String {
-        self.ghost_handle()
+        self.refinement_hooks()
+            .ghost_handle()
             .trace_json()
             .expect("ghost trace serialization")
     }
@@ -1019,7 +943,7 @@ pub(crate) struct TerminalCertificate<K> {
         reason = "linear proof tokens are consumed by terminal transitions"
     )]
     pub(crate) proof: QuiescenceProof,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) composition_resources: crate::shutdown_refinement::GhostResources,
     pub(crate) runtime_address: usize,
     pub(crate) generation: Option<RuntimeGeneration>,
@@ -1029,13 +953,13 @@ pub(crate) struct TerminalCertificate<K> {
 
 #[derive(Debug)]
 pub(crate) struct ClosedWitness {
-    #[cfg(any(test, feature = "unstable"))]
-    runtime_address: usize,
-    #[cfg(any(test, feature = "unstable"))]
-    generation: Option<RuntimeGeneration>,
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) runtime_address: usize,
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) generation: Option<RuntimeGeneration>,
 }
 
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 fn composition_resources_from_quiescence_proof(
     proof: &QuiescenceProof,
 ) -> crate::shutdown_refinement::GhostResources {
@@ -1103,12 +1027,12 @@ impl<A: crate::Addin> Runtime<A> {
         // quiescence proofs hold, consuming it linearizes generation teardown.
         let module_epoch = self.lifecycle.take_certified_module_epoch(&mut control);
 
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
 
         Ok(TerminalCertificate {
             proof,
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             composition_resources,
             runtime_address: std::ptr::from_ref(self).addr(),
             generation: control.last_committed_generation(),
@@ -1127,7 +1051,7 @@ impl<A: crate::Addin> Runtime<A> {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_CERT_UNKNOWN,
             });
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let composition_resources = certificate.composition_resources;
         let mut control = self.lifecycle.lock();
         if control.canonical_state().open_attempt().is_some()
@@ -1142,13 +1066,13 @@ impl<A: crate::Addin> Runtime<A> {
         }
         crate::module_runtime::global().close_callbacks();
         self.lifecycle.finish_closed(&mut control);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_composition_event(
             crate::composition_refinement::CompositionEvent::FinishOpenRollback(
                 composition_resources,
             ),
         );
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if self.phase() != LifecyclePhase::Closed {
             crate::lifecycle::fail_stop_invariant(
                 "xlAutoOpen rollback close postcondition",
@@ -1157,7 +1081,7 @@ impl<A: crate::Addin> Runtime<A> {
                 },
             );
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.mark_composition_terminal_pending();
         self.lifecycle.notify_all();
         crate::module_runtime::global().certify_logical_quiescence();
@@ -1181,26 +1105,18 @@ impl<A: crate::Addin> Runtime<A> {
                 diagnostic_id: crate::error::DiagnosticId::CLOSE_LEASE_GATE,
             });
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let composition_resources = certificate.composition_resources;
         let mut control = self.lifecycle.lock();
-        #[cfg(any(test, feature = "unstable"))]
-        let committed = self.ghost_handle().active();
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
+        let committed = self.refinement_hooks().generation_active(self);
+        #[cfg(any(test, feature = "refinement"))]
         if committed {
-            let event = crate::shutdown_refinement::GhostEvent::FinishClose;
-            self.ghost_handle()
-                .apply(event.clone())
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_GHOST,
-                })?;
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
-            );
+            self.refinement_hooks().finish_close(self)?;
         }
         crate::module_runtime::global().close_callbacks();
         self.lifecycle.finish_closed(&mut control);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if self.phase() != LifecyclePhase::Closed {
             crate::lifecycle::fail_stop_invariant(
                 "xlAutoRemove close postcondition",
@@ -1209,13 +1125,13 @@ impl<A: crate::Addin> Runtime<A> {
                 },
             );
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if committed {
             self.record_composition_event(
                 crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
             );
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         {
             if !committed {
                 self.record_composition_event(
@@ -1230,9 +1146,9 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(test)]
         drop(self.lifecycle.test_module_lease.lock().take());
         Ok(ClosedWitness {
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             runtime_address: std::ptr::from_ref(self).addr(),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             generation: certificate.generation,
         })
     }
@@ -1264,7 +1180,7 @@ impl<A: crate::Addin> Runtime<A> {
         let _ = self.executors.async_manager.advance_generation();
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn formula_handle_service(
         &self,
     ) -> XllResult<Arc<crate::handle::FormulaHandleService>> {
@@ -1280,7 +1196,7 @@ impl<A: crate::Addin> Runtime<A> {
         })
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn generation_services(&self) -> XllResult<Arc<GenerationServices>> {
         let services = self.generation_services_snapshot();
         services.ok_or(XllError::Closing)
@@ -1487,9 +1403,9 @@ impl<A: crate::Addin> Drop for OpeningTxn<'_, A> {
 }
 
 pub struct CallGuard<'runtime, A: crate::Addin> {
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     runtime: &'runtime Runtime<A>,
-    #[cfg(not(any(test, feature = "unstable")))]
+    #[cfg(not(any(test, feature = "refinement")))]
     _runtime: std::marker::PhantomData<&'runtime Runtime<A>>,
     publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>,
 }
@@ -1546,9 +1462,8 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 
 impl<A: crate::Addin> Drop for CallGuard<'_, A> {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "unstable"))]
-        self.runtime
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::LeaveCall);
+        #[cfg(any(test, feature = "refinement"))]
+        self.runtime.refinement_hooks().call_left(self.runtime);
     }
 }
 
@@ -1585,9 +1500,9 @@ pub(crate) mod tests {
             crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
         ) {
             ingress.begin_close_with(|| {
-                #[cfg(any(test, feature = "unstable"))]
-                if runtime.ghost_generation_active() {
-                    runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
+                #[cfg(any(test, feature = "refinement"))]
+                if runtime.refinement_hooks().generation_active(runtime) {
+                    runtime.refinement_hooks().begin_close(runtime);
                 }
             });
         }
@@ -1822,9 +1737,9 @@ pub(crate) mod tests {
 
         let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
-            #[cfg(any(test, feature = "unstable"))]
-            if runtime.ghost_generation_active() {
-                runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
+            #[cfg(any(test, feature = "refinement"))]
+            if runtime.refinement_hooks().generation_active(&runtime) {
+                runtime.refinement_hooks().begin_close(&runtime);
             }
         });
         let exports = ingress.seal_and_drain();
@@ -1946,9 +1861,9 @@ pub(crate) mod tests {
         runtime.close_subscriptions().unwrap();
         let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
-            #[cfg(any(test, feature = "unstable"))]
-            if runtime.ghost_generation_active() {
-                runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginClose);
+            #[cfg(any(test, feature = "refinement"))]
+            if runtime.refinement_hooks().generation_active(&runtime) {
+                runtime.refinement_hooks().begin_close(&runtime);
             }
         });
         let exports = ingress.seal_and_drain();

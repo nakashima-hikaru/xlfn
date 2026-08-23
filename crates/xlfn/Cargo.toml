@@ -16,57 +16,60 @@ async = [
     "dep:async-task",
     "dep:futures-util",
 ]
-unstable = ["xlfn-sys/abi-probe"]
+unstable-cache = ["dep:moka"]
+unstable-output = []
+refinement = []
+bench-internals = ["refinement", "xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"
 harness = false
-required-features = ["unstable", "async"]
+required-features = ["bench-internals", "async"]
 
 [[bench]]
 name = "sync_boundary"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "handle_prepare"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "formula_revision"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "handle_lookup"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "input_identity"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "formula_caller"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "argument_ingress"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "rtd_publish"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "handle_call_resolution"
 harness = false
-required-features = ["unstable"]
+required-features = ["bench-internals"]
 
 [dependencies]
 xlfn-macros.workspace = true
@@ -81,7 +84,7 @@ constant_time_eq.workspace = true
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
-moka.workspace = true
+moka = { workspace = true, optional = true }
 parking_lot.workspace = true
 scopeguard.workspace = true
 serde.workspace = true

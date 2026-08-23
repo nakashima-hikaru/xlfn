@@ -249,7 +249,7 @@ impl<C, R> GenerationServiceSlot<C, R> {
         guard.is_some().then_some(GenerationServiceRead { guard })
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn with_published(&self, callback: impl FnOnce(Option<&Arc<R>>)) {
         let published = self.published.load();
         callback(published.as_ref());

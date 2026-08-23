@@ -52,7 +52,7 @@ pub(crate) struct ObjectLifetimeTracker {
     active_leases: AtomicUsize,
     sealed: AtomicBool,
     admission_gate: Mutex<()>,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -64,7 +64,7 @@ impl ObjectLifetimeTracker {
             active_leases: AtomicUsize::new(0),
             sealed: AtomicBool::new(false),
             admission_gate: Mutex::new(()),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost: std::sync::OnceLock::new(),
         })
     }
@@ -87,7 +87,7 @@ impl ObjectLifetimeTracker {
                 code: crate::error::DomainErrorCode::Overflow,
             })
             .inspect(|()| {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandleObject);
             })
     }
@@ -95,7 +95,7 @@ impl ObjectLifetimeTracker {
     fn release_object(&self) {
         let previous = self.live_objects.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "handle object accounting is unbalanced");
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandleObject);
     }
 
@@ -111,7 +111,7 @@ impl ObjectLifetimeTracker {
             .map_err(|_| XllError::Domain {
                 code: crate::error::DomainErrorCode::Overflow,
             })?;
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandlePin);
         Ok(ObjectLeaseGuard {
             tracker: Arc::clone(self),
@@ -121,7 +121,7 @@ impl ObjectLifetimeTracker {
     fn release_lease(&self) {
         let previous = self.active_leases.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "handle lease accounting is unbalanced");
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandlePin);
     }
 
@@ -145,12 +145,12 @@ impl ObjectLifetimeTracker {
         self.cleanup.result()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost);
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
         if let Some(ghost) = self.ghost.get() {
             ghost.record_event(event);

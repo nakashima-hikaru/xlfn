@@ -7,7 +7,7 @@ pub(crate) struct SubscriptionRuntimeSlot {
         SubscriptionRuntimeConfig,
         SubscriptionRuntime,
     >,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -40,7 +40,7 @@ impl SubscriptionRuntimeSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: crate::runtime_components::GenerationServiceSlot::new(),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
@@ -68,7 +68,7 @@ impl SubscriptionRuntimeSlot {
                 )))
             },
             |_runtime| {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 if let Some(ghost) = self.ghost.get() {
                     _runtime.set_ghost(ghost.clone());
                 }
@@ -92,7 +92,7 @@ impl SubscriptionRuntimeSlot {
         )
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost.clone());
         self.service.with_published(|runtime| {

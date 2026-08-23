@@ -211,7 +211,7 @@ impl FormulaHandleService {
         })
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.store.set_ghost(ghost);
     }
@@ -227,12 +227,12 @@ impl FormulaHandleService {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let ghost = self.store.ghost_handle();
 
         let ingress_guard = if let Some(ingress) = self._module_ingress {
             let (guard, accepted) = ingress.enter_with(|| {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 if let Some(ghost) = ghost.as_ref() {
                     ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
                 }
@@ -247,7 +247,7 @@ impl FormulaHandleService {
 
         Ok(RtdOperationGuard {
             _ingress_guard: ingress_guard,
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost,
         })
     }
@@ -818,7 +818,7 @@ impl FormulaHandleServiceSealed {
 pub(crate) struct FormulaHandleServiceSlot {
     service:
         crate::runtime_components::GenerationServiceSlot<crate::HandleConfig, FormulaHandleService>,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
 
@@ -832,7 +832,7 @@ impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: crate::runtime_components::GenerationServiceSlot::new(),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
@@ -845,7 +845,7 @@ impl FormulaHandleServiceSlot {
         self.service.disarm()
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         let _ = self.ghost.set(ghost.clone());
         self.service.with_published(|runtime| {
@@ -876,7 +876,7 @@ impl FormulaHandleServiceSlot {
                 .map(Arc::new)
             },
             |_runtime| {
-                #[cfg(any(test, feature = "unstable"))]
+                #[cfg(any(test, feature = "refinement"))]
                 if let Some(ghost) = self.ghost.get() {
                     _runtime.set_ghost(Arc::clone(ghost));
                 }
@@ -886,7 +886,7 @@ impl FormulaHandleServiceSlot {
 
     /// Owned `Arc` escape for test/benchmark code that needs to hold a
     /// `FormulaHandleService` beyond a call scope.
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn get_owned(&self) -> XllResult<Arc<FormulaHandleService>> {
         let read = self.read()?;
         Ok(Arc::clone(read.as_arc()))

@@ -58,21 +58,62 @@ pub(crate) struct OpenRetirement {
     module_epoch: ModuleEpochLease,
 }
 
-/// The only payload that can accompany a lifecycle phase.
+/// Payload states that can exist while an open attempt is still active.
 ///
-/// Keeping this payload below the phase enum prevents a generation root,
-/// staged opening state, and retirement lease from being represented as three
-/// unrelated fields. Each phase owns at most one of these payloads.
-pub(crate) enum LifecyclePayload<A: crate::Addin> {
+/// An opening attempt can only be empty, staged, or published. In particular,
+/// a retirement lease cannot be constructed under `Opening`, which removes a
+/// whole class of lifecycle states that previously required runtime checks.
+pub(crate) enum OpeningPayload<A: crate::Addin> {
     Empty,
-    Opening(OpeningGeneration<A>),
-    Open(OpenBundle<A>),
+    Staged(OpeningGeneration<A>),
+    Published(OpenBundle<A>),
+}
+
+impl<A: crate::Addin> OpeningPayload<A> {
+    fn into_closing(self) -> ClosingPayload<A> {
+        match self {
+            Self::Empty => ClosingPayload::Empty,
+            Self::Staged(opening) => ClosingPayload::Staged(opening),
+            Self::Published(bundle) => ClosingPayload::Published(bundle),
+        }
+    }
+
+    fn take_staged(&mut self) -> Option<OpeningGeneration<A>> {
+        let payload = mem::replace(self, Self::Empty);
+        match payload {
+            Self::Staged(opening) => Some(opening),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+
+    fn take_published(&mut self) -> Option<OpenBundle<A>> {
+        let payload = mem::replace(self, Self::Empty);
+        match payload {
+            Self::Published(bundle) => Some(bundle),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+}
+
+/// Payload states that can survive into a closing, rollback, or quarantine
+/// phase. These phases deliberately share the same retained-resource domain;
+/// the active `LifecycleState` variant supplies the failure policy.
+pub(crate) enum ClosingPayload<A: crate::Addin> {
+    Empty,
+    Staged(OpeningGeneration<A>),
+    Published(OpenBundle<A>),
     Retiring(OpenRetirement),
 }
 
-impl<A: crate::Addin> LifecyclePayload<A> {
-    fn is_open(&self) -> bool {
-        matches!(self, Self::Open(_))
+impl<A: crate::Addin> ClosingPayload<A> {
+    fn is_published(&self) -> bool {
+        matches!(self, Self::Published(_))
     }
 
     fn is_retiring(&self) -> bool {
@@ -82,14 +123,21 @@ impl<A: crate::Addin> LifecyclePayload<A> {
     fn module_epoch_is_current(&self) -> bool {
         match self {
             Self::Retiring(retirement) => retirement.module_epoch.is_current(),
-            Self::Empty | Self::Opening(_) | Self::Open(_) => true,
+            Self::Empty | Self::Staged(_) | Self::Published(_) => true,
         }
     }
 
-    fn take_opening(&mut self) -> Option<OpeningGeneration<A>> {
+    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
+        match self {
+            Self::Retiring(retirement) => Some(&retirement.services),
+            Self::Empty | Self::Staged(_) | Self::Published(_) => None,
+        }
+    }
+
+    fn take_staged(&mut self) -> Option<OpeningGeneration<A>> {
         let payload = mem::replace(self, Self::Empty);
         match payload {
-            Self::Opening(opening) => Some(opening),
+            Self::Staged(opening) => Some(opening),
             other => {
                 *self = other;
                 None
@@ -97,10 +145,10 @@ impl<A: crate::Addin> LifecyclePayload<A> {
         }
     }
 
-    fn take_open(&mut self) -> Option<OpenBundle<A>> {
+    fn take_published(&mut self) -> Option<OpenBundle<A>> {
         let payload = mem::replace(self, Self::Empty);
         match payload {
-            Self::Open(bundle) => Some(bundle),
+            Self::Published(bundle) => Some(bundle),
             other => {
                 *self = other;
                 None
@@ -129,20 +177,20 @@ pub(crate) enum LifecycleState<A: crate::Addin> {
     Closed,
     Opening {
         attempt: OpenAttemptId,
-        payload: LifecyclePayload<A>,
+        payload: OpeningPayload<A>,
     },
     Open {
         bundle: OpenBundle<A>,
     },
     Closing {
         open_attempt: Option<OpenAttemptId>,
-        payload: LifecyclePayload<A>,
+        payload: ClosingPayload<A>,
     },
     OpenRollbackPending {
-        payload: LifecyclePayload<A>,
+        payload: ClosingPayload<A>,
     },
     Quarantined {
-        payload: LifecyclePayload<A>,
+        payload: ClosingPayload<A>,
     },
 }
 
@@ -190,14 +238,17 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Opening { payload, .. } => match payload {
+                OpeningPayload::Staged(opening) => Some(opening),
+                OpeningPayload::Empty | OpeningPayload::Published(_) => None,
+            },
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => match payload {
-                LifecyclePayload::Opening(opening) => Some(opening),
-                LifecyclePayload::Empty
-                | LifecyclePayload::Open(_)
-                | LifecyclePayload::Retiring(_) => None,
+                ClosingPayload::Staged(opening) => Some(opening),
+                ClosingPayload::Empty
+                | ClosingPayload::Published(_)
+                | ClosingPayload::Retiring(_) => None,
             },
             Self::Closed | Self::Open { .. } => None,
         }
@@ -210,56 +261,48 @@ impl<A: crate::Addin> LifecycleState<A> {
     fn has_current_generation(&self) -> bool {
         match self {
             Self::Open { .. } => true,
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Opening { payload, .. } => matches!(payload, OpeningPayload::Published(_)),
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
-            | Self::Quarantined { payload } => payload.is_open(),
+            | Self::Quarantined { payload } => payload.is_published(),
             Self::Closed => false,
         }
     }
 
     fn has_retirement(&self) -> bool {
         match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload.is_retiring(),
-            Self::Closed | Self::Open { .. } => false,
+            Self::Closed | Self::Opening { .. } | Self::Open { .. } => false,
         }
     }
 
     fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
         let payload = match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload,
-            Self::Closed | Self::Open { .. } => return None,
+            Self::Closed | Self::Open { .. } | Self::Opening { .. } => return None,
         };
-        match payload {
-            LifecyclePayload::Retiring(retirement) => Some(&retirement.services),
-            LifecyclePayload::Empty | LifecyclePayload::Opening(_) | LifecyclePayload::Open(_) => {
-                None
-            }
-        }
+        payload.retiring_services()
     }
 
     fn module_epoch_is_current(&self) -> bool {
         match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload.module_epoch_is_current(),
-            Self::Closed | Self::Open { .. } => true,
+            Self::Closed | Self::Open { .. } | Self::Opening { .. } => true,
         }
     }
 
     fn take_opening(&mut self) -> Option<OpeningGeneration<A>> {
         match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Opening { payload, .. } => payload.take_staged(),
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
-            | Self::Quarantined { payload } => payload.take_opening(),
+            | Self::Quarantined { payload } => payload.take_staged(),
             Self::Closed | Self::Open { .. } => None,
         }
     }
@@ -272,7 +315,7 @@ impl<A: crate::Addin> LifecycleState<A> {
                 attempt,
                 mut payload,
             } => {
-                let bundle = payload.take_open();
+                let bundle = payload.take_published();
                 *self = Self::Opening { attempt, payload };
                 bundle
             }
@@ -280,7 +323,7 @@ impl<A: crate::Addin> LifecycleState<A> {
                 open_attempt,
                 mut payload,
             } => {
-                let bundle = payload.take_open();
+                let bundle = payload.take_published();
                 *self = Self::Closing {
                     open_attempt,
                     payload,
@@ -288,12 +331,12 @@ impl<A: crate::Addin> LifecycleState<A> {
                 bundle
             }
             Self::OpenRollbackPending { mut payload } => {
-                let bundle = payload.take_open();
+                let bundle = payload.take_published();
                 *self = Self::OpenRollbackPending { payload };
                 bundle
             }
             Self::Quarantined { mut payload } => {
-                let bundle = payload.take_open();
+                let bundle = payload.take_published();
                 *self = Self::Quarantined { payload };
                 bundle
             }
@@ -306,16 +349,16 @@ impl<A: crate::Addin> LifecycleState<A> {
         *self = match state {
             Self::Closed | Self::Open { .. } => Self::Closing {
                 open_attempt: None,
-                payload: LifecyclePayload::Retiring(retirement),
+                payload: ClosingPayload::Retiring(retirement),
             },
             Self::Opening { attempt, payload } => {
                 require_lifecycle_invariant(
-                    matches!(payload, LifecyclePayload::Empty),
+                    matches!(payload, OpeningPayload::Empty),
                     "retirement installed while opening payload is present",
                 );
                 Self::Closing {
                     open_attempt: Some(attempt),
-                    payload: LifecyclePayload::Retiring(retirement),
+                    payload: ClosingPayload::Retiring(retirement),
                 }
             }
             Self::Closing {
@@ -323,30 +366,30 @@ impl<A: crate::Addin> LifecycleState<A> {
                 payload,
             } => {
                 require_lifecycle_invariant(
-                    matches!(payload, LifecyclePayload::Empty),
+                    matches!(payload, ClosingPayload::Empty),
                     "retirement installed while closing payload is present",
                 );
                 Self::Closing {
                     open_attempt,
-                    payload: LifecyclePayload::Retiring(retirement),
+                    payload: ClosingPayload::Retiring(retirement),
                 }
             }
             Self::OpenRollbackPending { payload } => {
                 require_lifecycle_invariant(
-                    matches!(payload, LifecyclePayload::Empty),
+                    matches!(payload, ClosingPayload::Empty),
                     "retirement installed while rollback payload is present",
                 );
                 Self::OpenRollbackPending {
-                    payload: LifecyclePayload::Retiring(retirement),
+                    payload: ClosingPayload::Retiring(retirement),
                 }
             }
             Self::Quarantined { payload } => {
                 require_lifecycle_invariant(
-                    matches!(payload, LifecyclePayload::Empty),
+                    matches!(payload, ClosingPayload::Empty),
                     "retirement installed while quarantine payload is present",
                 );
                 Self::Quarantined {
-                    payload: LifecyclePayload::Retiring(retirement),
+                    payload: ClosingPayload::Retiring(retirement),
                 }
             }
         };
@@ -354,22 +397,21 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     fn take_retirement(&mut self) -> Option<OpenRetirement> {
         match self {
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload.take_retirement(),
-            Self::Closed | Self::Open { .. } => None,
+            Self::Closed | Self::Open { .. } | Self::Opening { .. } => None,
         }
     }
 
-    fn into_payload(self) -> LifecyclePayload<A> {
+    fn into_payload(self) -> ClosingPayload<A> {
         match self {
-            Self::Closed => LifecyclePayload::Empty,
-            Self::Opening { payload, .. }
-            | Self::Closing { payload, .. }
+            Self::Closed => ClosingPayload::Empty,
+            Self::Opening { payload, .. } => payload.into_closing(),
+            Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload,
-            Self::Open { bundle } => LifecyclePayload::Open(bundle),
+            Self::Open { bundle } => ClosingPayload::Published(bundle),
         }
     }
 }
@@ -479,7 +521,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     publication: ArcSwapOption<GenerationPublication<A>>,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     test_services: Mutex<Option<Arc<GenerationServices>>>,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
@@ -497,7 +539,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             publication: ArcSwapOption::const_empty(),
             core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             test_services: Mutex::new(None),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
@@ -599,7 +641,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         );
         core.state = LifecycleState::Opening {
             attempt,
-            payload: LifecyclePayload::Empty,
+            payload: OpeningPayload::Empty,
         };
         self.refresh_projection(core);
     }
@@ -615,14 +657,14 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         match state {
             LifecycleState::Opening {
                 attempt,
-                payload: LifecyclePayload::Open(bundle),
+                payload: OpeningPayload::Published(bundle),
             } => {
                 if attempt.into_runtime_generation() != generation
                     || bundle.generation.id() != generation
                 {
                     core.state = LifecycleState::Opening {
                         attempt,
-                        payload: LifecyclePayload::Open(bundle),
+                        payload: OpeningPayload::Published(bundle),
                     };
                     return Err(crate::XllError::Internal {
                         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
@@ -667,7 +709,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         let state = mem::replace(&mut core.state, LifecycleState::Closed);
         let (state, disposition) = match state {
             LifecycleState::Opening { payload, .. } => (
-                LifecycleState::OpenRollbackPending { payload },
+                LifecycleState::OpenRollbackPending {
+                    payload: payload.into_closing(),
+                },
                 OpenFailureDisposition::RollbackRequired,
             ),
             LifecycleState::OpenRollbackPending { payload } => (
@@ -699,15 +743,15 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         core.state = match state {
             LifecycleState::Closed => LifecycleState::Closing {
                 open_attempt: None,
-                payload: LifecyclePayload::Empty,
+                payload: ClosingPayload::Empty,
             },
             LifecycleState::Opening { attempt, payload } => LifecycleState::Closing {
                 open_attempt: Some(attempt),
-                payload,
+                payload: payload.into_closing(),
             },
             LifecycleState::Open { bundle } => LifecycleState::Closing {
                 open_attempt: None,
-                payload: LifecyclePayload::Open(bundle),
+                payload: ClosingPayload::Published(bundle),
             },
             LifecycleState::Closing {
                 open_attempt,
@@ -752,11 +796,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 core.canonical_state(),
                 LifecycleState::Closed
                     | LifecycleState::Closing {
-                        payload: LifecyclePayload::Empty,
+                        payload: ClosingPayload::Empty,
                         ..
                     }
                     | LifecycleState::OpenRollbackPending {
-                        payload: LifecyclePayload::Empty
+                        payload: ClosingPayload::Empty
                     }
             ),
             "closed publication requires an empty lifecycle payload",
@@ -782,11 +826,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         match state {
             LifecycleState::Opening {
                 attempt,
-                payload: LifecyclePayload::Empty,
+                payload: OpeningPayload::Empty,
             } => {
                 core.state = LifecycleState::Opening {
                     attempt,
-                    payload: LifecyclePayload::Opening(opening),
+                    payload: OpeningPayload::Staged(opening),
                 };
                 Ok(())
             }
@@ -851,10 +895,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         };
         core.state = LifecycleState::Opening {
             attempt,
-            payload: LifecyclePayload::Open(bundle),
+            payload: OpeningPayload::Published(bundle),
         };
         if let LifecycleState::Opening {
-            payload: LifecyclePayload::Open(bundle),
+            payload: OpeningPayload::Published(bundle),
             ..
         } = core.canonical_state()
         {
@@ -909,11 +953,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if let Some(publication) = publication.as_ref() {
             return Some(Arc::clone(&publication.services));
         }
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         {
             return self.test_services.lock().clone();
         }
-        #[cfg(not(any(test, feature = "unstable")))]
+        #[cfg(not(any(test, feature = "refinement")))]
         None
     }
 
@@ -942,7 +986,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.take_current_bundle(&mut core)
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn install_test_generation_services(&self, services: Arc<GenerationServices>) {
         *self.test_services.lock() = Some(services);
     }

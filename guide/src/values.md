@@ -55,7 +55,7 @@ fn text_count(values: MatrixRef<'_, &str>) -> f64 {
 }
 ```
 
-For large numeric outputs, explicitly enable the `unstable` crate feature and import `xlfn::unstable::output::{XlArrayBuilder, XlArrayOutput}`. Write directly into an `XlArrayBuilder`; the finished cell allocation is adopted by `ReturnBlock` without copying:
+For large numeric outputs, explicitly enable the `unstable-output` crate feature and import `xlfn::unstable::output::{XlArrayBuilder, XlArrayOutput}`. Write directly into an `XlArrayBuilder`; the finished cell allocation is adopted by `ReturnBlock` without copying:
 
 ```rust
 fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {

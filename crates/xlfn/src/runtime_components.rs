@@ -14,7 +14,7 @@ mod service_slot;
 mod services;
 mod thread_affine;
 
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
 pub(crate) use lifecycle_state::{

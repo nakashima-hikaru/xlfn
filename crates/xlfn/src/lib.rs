@@ -33,16 +33,10 @@ pub mod __private;
 mod addin;
 #[cfg(feature = "async")]
 mod async_udf;
-#[cfg(feature = "unstable")]
+#[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub mod benchmark_support;
-#[cfg_attr(
-    not(feature = "unstable"),
-    allow(
-        dead_code,
-        reason = "Unstable cache API is disabled in the stable build"
-    )
-)]
+#[cfg(feature = "unstable-cache")]
 mod cache;
 mod call;
 mod callback_gate;
@@ -54,7 +48,7 @@ mod callback_gate;
 mod callback_value;
 #[cfg(any(feature = "async", test))]
 mod cancellation;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 mod composition_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod crt;
@@ -95,7 +89,7 @@ mod runtime;
 mod runtime_components;
 mod runtime_refinement;
 mod shutdown;
-#[cfg(any(test, feature = "unstable"))]
+#[cfg(any(test, feature = "refinement"))]
 mod shutdown_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod subscription;
@@ -451,10 +445,11 @@ macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {};
 }
 
-/// Unstable lower-level APIs. Enable the `unstable` feature explicitly.
-#[cfg(feature = "unstable")]
+/// Experimental lower-level APIs.
+#[cfg(any(feature = "unstable-cache", feature = "unstable-output"))]
 pub mod unstable {
     /// Calculation-scoped caches.
+    #[cfg(feature = "unstable-cache")]
     pub mod cache {
         pub use crate::cache::{
             BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
@@ -462,6 +457,7 @@ pub mod unstable {
     }
 
     /// Explicit low-level array output construction.
+    #[cfg(feature = "unstable-output")]
     pub mod output {
         pub use crate::return_array::{XlArrayBuilder, XlArrayOutput};
     }

@@ -219,7 +219,7 @@ pub struct ExportIngress {
     // guards leave. Publication takes this lock so the zero-active check and
     // the final OPEN transition cannot be overtaken by a new entry.
     opening_lock: Mutex<()>,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     // Refinement hooks must be serialized with the ingress CAS. Otherwise a
     // thread accepted by `enter` can be descheduled before its ghost event is
     // recorded and let `begin_close` overtake that event.
@@ -260,7 +260,7 @@ impl ExportIngress {
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             opening_lock: Mutex::new(()),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             linearization_lock: Mutex::new(()),
             #[cfg(test)]
             close_waiters: AtomicUsize::new(0),
@@ -324,7 +324,7 @@ impl ExportIngress {
             .opening_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let _linearization_guard = self
             .linearization_lock
             .lock()
@@ -363,7 +363,7 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let _linearization_guard = self
             .linearization_lock
             .lock()
@@ -412,7 +412,7 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let _linearization_guard = self
             .linearization_lock
             .lock()
@@ -482,7 +482,7 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let _linearization_guard = self
             .linearization_lock
             .lock()
@@ -519,7 +519,7 @@ impl ExportIngress {
     where
         F: FnOnce() -> R,
     {
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         let _linearization_guard = self
             .linearization_lock
             .lock()

@@ -4,7 +4,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/*.rs");
     tests.compile_fail("tests/ui/fail/*.rs");
 
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "unstable-output")]
     tests.pass("tests/ui/pass_unstable/*.rs");
 
     #[cfg(feature = "async")]

@@ -84,12 +84,12 @@ impl HandleStore {
         }
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         self.registry.set_ghost(ghost);
     }
 
-    #[cfg(all(target_os = "windows", any(test, feature = "unstable")))]
+    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
     pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
         self.registry.ghost_handle()
     }

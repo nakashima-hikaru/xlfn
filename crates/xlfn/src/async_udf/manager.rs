@@ -42,7 +42,7 @@ pub(crate) struct AsyncManager {
     pub(crate) state_changed: Condvar,
     pub(crate) generation_transition: Mutex<()>,
     pub(crate) current_generation: AtomicU64,
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
     #[cfg(test)]
     pub(crate) after_generation_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -68,7 +68,7 @@ impl AsyncManager {
             state_changed: Condvar::new(),
             generation_transition: Mutex::new(()),
             current_generation: AtomicU64::new(1),
-            #[cfg(any(test, feature = "unstable"))]
+            #[cfg(any(test, feature = "refinement"))]
             ghost: Mutex::new(None),
             #[cfg(test)]
             after_generation_publish_hook: Mutex::new(None),
@@ -90,7 +90,7 @@ impl AsyncManager {
             };
         }
         let executor = Executor::start(worker_count, self.current_generation())?;
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             executor.set_ghost(ghost);
         }
@@ -98,14 +98,14 @@ impl AsyncManager {
         *state = ExecutorState::Running(executor);
         self.published_executor.store(Some(published_executor));
         drop(state);
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
             ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncExecutor);
         }
         Ok(())
     }
 
-    #[cfg(any(test, feature = "unstable"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
         *self.ghost.lock() = Some(Arc::clone(&ghost));
         let mut state = self.state.lock();

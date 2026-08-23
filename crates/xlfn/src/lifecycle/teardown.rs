@@ -46,18 +46,16 @@ impl ExecutionDrained {
     pub(super) fn begin<A: Addin>(runtime: &Runtime<A>, _record_ghost: bool) -> Self {
         let exports = crate::module_runtime::global().seal_and_drain();
 
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if _record_ghost {
-            runtime.record_ghost_event_linearized(
-                crate::shutdown_refinement::GhostEvent::CallsDrained,
-            );
+            runtime.refinement_hooks().calls_drained(runtime);
         }
 
         runtime.wait_for_returns();
 
-        #[cfg(any(test, feature = "unstable"))]
+        #[cfg(any(test, feature = "refinement"))]
         if _record_ghost {
-            runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReturnsDrained);
+            runtime.refinement_hooks().returns_drained(runtime);
         }
 
         Self { exports }
