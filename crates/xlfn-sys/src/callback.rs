@@ -56,16 +56,16 @@ fn resolve_callback() -> Option<Excel12Callback> {
     CALLBACK
         .get_or_init(|| {
             // SAFETY: A null module name asks for the host executable module.
-            // The nul-terminated symbol is static, and the returned address
-            // is checked before it is converted to a callback pointer.
-            let address = unsafe {
-                let host = GetModuleHandleW(ptr::null());
-                if host.is_null() {
-                    return None;
-                }
-                GetProcAddress(host, c"MdCallBack12".as_ptr().cast())
-                    .map_or(ptr::null_mut(), |f| f as *const () as *mut c_void)
-            };
+            let host = unsafe { GetModuleHandleW(ptr::null()) };
+            if host.is_null() {
+                return None;
+            }
+
+            // SAFETY: `host` is a valid module handle and the symbol name is
+            // static and NUL-terminated.
+            let address = unsafe { GetProcAddress(host, c"MdCallBack12".as_ptr().cast()) }
+                .map_or(ptr::null_mut(), |f| f as *const () as *mut c_void);
+
             if address.is_null() {
                 return None;
             }

@@ -1286,7 +1286,7 @@ mod tests {
         // SAFETY: the counted allocation contains the prefix and two units.
         let units = unsafe { std::slice::from_raw_parts(units, 3) };
         assert_eq!(units, &[2, 0x4fa1, 0x683c]);
-    }   
+    }
 
     #[test]
     fn signatures_encode_canonical_excel_type_text() {

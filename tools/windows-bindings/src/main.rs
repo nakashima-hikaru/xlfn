@@ -25,9 +25,8 @@ const BINDINGS: &[(&str, &str)] = &[
 const ALLOW_SUFFIX_LF: &str = " clippy::all\n)]";
 const ALLOW_SUFFIX_CRLF: &str = " clippy::all\r\n)]";
 const ALLOW_SUFFIX_WITH_REASON_LF: &str =
-    " clippy::all,\n    reason = \"Generated code from windows-bindgen\"\n)]";
-const ALLOW_SUFFIX_WITH_REASON_CRLF: &str =
-    " clippy::all,\r\n    reason = \"Generated code from windows-bindgen\"\r\n)]";
+    " unreachable_pub,\n    clippy::all,\n    reason = \"Generated code from windows-bindgen\"\n)]";
+const ALLOW_SUFFIX_WITH_REASON_CRLF: &str = " unreachable_pub,\r\n    clippy::all,\r\n    reason = \"Generated code from windows-bindgen\"\r\n)]";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
