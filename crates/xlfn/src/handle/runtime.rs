@@ -25,8 +25,23 @@ pub(crate) enum PreparedHandleObject {
     Existing { object: SharedObject },
 }
 
-enum WarmPreparation {
-    Reused(String),
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum HandlePreparation {
+    Published { token: String },
+    Reused { token: String },
+}
+
+impl HandlePreparation {
+    pub(crate) fn into_token(self) -> String {
+        match self {
+            Self::Published { token } | Self::Reused { token } => token,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_published(&self) -> bool {
+        matches!(self, Self::Published { .. })
+    }
 }
 
 thread_local! {
@@ -189,7 +204,7 @@ impl FormulaHandleService {
         let registry_session = store.session();
         Ok(Self {
             store,
-            topics: TopicTable::new(),
+            topics: TopicTable::new(maximum_bindings),
             prepares: HandlePrepareState::new(),
             _module_ingress: module_ingress,
             refinement: HandleRefinementHooks::new(registry_session),
@@ -248,7 +263,7 @@ impl FormulaHandleService {
         &self,
         key: K,
         create: impl FnOnce() -> XllResult<T>,
-    ) -> XllResult<(String, bool)>
+    ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
@@ -263,10 +278,10 @@ impl FormulaHandleService {
         token: String,
         generation: TopicGeneration,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-    ) -> XllResult<(String, bool)> {
+    ) -> XllResult<HandlePreparation> {
         observe(&rtd_key, &token)?;
         self.topics.is_current(key, generation, &token)?;
-        Ok((token, false))
+        Ok(HandlePreparation::Reused { token })
     }
 
     fn commit_publication(
@@ -300,7 +315,7 @@ impl FormulaHandleService {
         key: K,
         create: impl FnOnce() -> XllResult<T>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-    ) -> XllResult<(String, bool)>
+    ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
@@ -323,7 +338,7 @@ impl FormulaHandleService {
         key: K,
         object: HandleAlias<'_, T>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-    ) -> XllResult<(String, bool)>
+    ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
@@ -344,7 +359,7 @@ impl FormulaHandleService {
         key: K,
         create: impl FnOnce() -> XllResult<PreparedHandleObject>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-    ) -> XllResult<(String, bool)>
+    ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
         K: Into<HandleTopicKey>,
@@ -354,8 +369,8 @@ impl FormulaHandleService {
         let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         let _refinement_prepare = self.refinement.observe_prepare();
         let mut observe = Some(observe);
-        if let Some(WarmPreparation::Reused(token)) = self.prepare_warm(key, &mut observe)? {
-            return Ok((token, false));
+        if let Some(preparation) = self.prepare_warm(key, &mut observe)? {
+            return Ok(preparation);
         }
 
         let owner = std::thread::current().id();
@@ -470,7 +485,7 @@ impl FormulaHandleService {
         self.commit_publication(key, generation, &initialization, &publication)?;
         provisional.commit();
         reservation.commit();
-        Ok((token, true))
+        Ok(HandlePreparation::Published { token })
     }
 
     /// Attempts the warm publication path and leaves the observation closure
@@ -480,7 +495,7 @@ impl FormulaHandleService {
         &self,
         key: HandleTopicKey,
         observe: &mut Option<F>,
-    ) -> XllResult<Option<WarmPreparation>>
+    ) -> XllResult<Option<HandlePreparation>>
     where
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
@@ -513,7 +528,9 @@ impl FormulaHandleService {
         match publication.state() {
             PublishedTopicState::Live => {
                 self.refinement.observe_finish_warm_read(reader_id);
-                Ok(Some(WarmPreparation::Reused(publication.token.clone())))
+                Ok(Some(HandlePreparation::Reused {
+                    token: publication.token.clone(),
+                }))
             }
             PublishedTopicState::Closing => {
                 self.refinement.observe_abandon_warm_read(reader_id);

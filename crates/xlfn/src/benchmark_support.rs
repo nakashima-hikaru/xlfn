@@ -621,7 +621,7 @@ where
         }
     }
 
-    pub fn run(&self) -> (String, bool) {
+    pub fn run(&self) -> String {
         let key = formula_revision_key(&self.argument, self.caller);
         self.runtime
             .prepare_observed(
@@ -633,6 +633,7 @@ where
                 |_, _| Ok(()),
             )
             .expect("formula handle warm observation failed")
+            .into_token()
     }
 
     pub fn assert_warm_hit(&self) {
@@ -868,7 +869,7 @@ impl HandleLookupBenchmark {
             let token = runtime
                 .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
                 .expect("handle lookup warm seed publication failed")
-                .0;
+                .into_token();
             tokens.push(Arc::<str>::from(token));
         }
 
@@ -1316,7 +1317,7 @@ impl RawArgumentIngressBenchmark {
                 |_, _| Ok(()),
             )
             .expect("benchmark handle preparation must succeed")
-            .0;
+            .into_token();
         let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
         u16_chars.push(token.len() as u16);
         u16_chars.extend(token.encode_utf16());
@@ -1532,7 +1533,7 @@ impl MultiHandleCallBenchmark {
                     |_, _| Ok(()),
                 )
                 .expect("benchmark handle preparation must succeed")
-                .0;
+                .into_token();
             let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
             u16_chars.push(token.len() as u16);
             u16_chars.extend(token.encode_utf16());

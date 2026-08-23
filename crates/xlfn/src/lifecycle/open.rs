@@ -4,7 +4,7 @@ use super::{open_addin_inner, report_boundary_error, rollback_active_open};
 use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
-use crate::registration::RegistrationDescriptor;
+use crate::registration::{HostMutationJournal, RegistrationDescriptor};
 use crate::runtime::{AddinLifecycleAccess, OpeningTxn, Runtime};
 use crate::{XllError, XllResult};
 
@@ -18,7 +18,7 @@ pub(super) struct OpeningTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
     attempt: Option<OpeningTxn<'runtime, A>>,
-    registrations: Vec<crate::registration::RegistrationId>,
+    journal: HostMutationJournal,
 }
 
 impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
@@ -30,7 +30,7 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
             runtime,
             callbacks: HostCallbackSession::new(),
             attempt: Some(runtime.begin_open_if_epoch(removal_epoch)?),
-            registrations: Vec::new(),
+            journal: HostMutationJournal::default(),
         })
     }
 
@@ -48,7 +48,22 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
         &mut self,
         registrations: Vec<crate::registration::RegistrationId>,
     ) {
-        self.registrations = registrations;
+        self.journal.pending_registrations = registrations
+            .into_iter()
+            .map(crate::registration::PendingRegistration::from)
+            .collect();
+    }
+
+    #[cfg(feature = "async")]
+    pub(super) fn stage_events(
+        &mut self,
+        registrations: Vec<crate::registration::EventRegistration>,
+    ) {
+        self.journal.pending_events = registrations;
+    }
+
+    pub(super) fn retain_journal(&mut self, journal: HostMutationJournal) {
+        self.journal.merge(journal);
     }
 
     pub(super) fn commit(&mut self) -> XllResult<()> {
@@ -56,18 +71,12 @@ impl<'runtime, A: Addin> OpeningTransaction<'runtime, A> {
             .attempt
             .as_mut()
             .expect("an open transaction always owns its attempt");
-        attempt.commit(&mut self.registrations)
+        attempt.commit(&mut self.journal)
     }
 
     pub(super) fn rollback(&mut self, lifecycle: &AddinLifecycleAccess<'_, A>) {
-        if !self.registrations.is_empty() {
-            self.runtime.retain_registration_debt(
-                std::mem::take(&mut self.registrations)
-                    .into_iter()
-                    .map(crate::registration::PendingRegistration::from)
-                    .collect(),
-            );
-        }
+        self.runtime
+            .retain_host_mutations(std::mem::take(&mut self.journal));
         rollback_active_open(
             self.runtime,
             lifecycle,

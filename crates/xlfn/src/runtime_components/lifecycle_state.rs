@@ -384,6 +384,18 @@ pub(crate) struct LifecycleCore<A: crate::Addin> {
     removal_attempt_active: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenFailureDisposition {
+    RollbackRequired,
+    ClosingOwnsCleanup,
+}
+
+impl OpenFailureDisposition {
+    pub(crate) const fn requires_rollback(self) -> bool {
+        matches!(self, Self::RollbackRequired)
+    }
+}
+
 impl<A: crate::Addin> LifecycleCore<A> {
     const fn new() -> Self {
         Self {
@@ -648,27 +660,32 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Records an open failure without discarding the owned staged/published
     /// payload. The rollback pipeline can then take that payload explicitly.
-    pub(crate) fn record_open_failure(&self, core: &mut LifecycleCore<A>) -> bool {
+    pub(crate) fn record_open_failure(
+        &self,
+        core: &mut LifecycleCore<A>,
+    ) -> OpenFailureDisposition {
         let state = mem::replace(&mut core.state, LifecycleState::Closed);
-        let (state, should_rollback) = match state {
-            LifecycleState::Opening { payload, .. } => {
-                (LifecycleState::OpenRollbackPending { payload }, true)
-            }
-            LifecycleState::OpenRollbackPending { payload } => {
-                (LifecycleState::OpenRollbackPending { payload }, true)
-            }
+        let (state, disposition) = match state {
+            LifecycleState::Opening { payload, .. } => (
+                LifecycleState::OpenRollbackPending { payload },
+                OpenFailureDisposition::RollbackRequired,
+            ),
+            LifecycleState::OpenRollbackPending { payload } => (
+                LifecycleState::OpenRollbackPending { payload },
+                OpenFailureDisposition::RollbackRequired,
+            ),
             LifecycleState::Closing { payload, .. } => (
                 LifecycleState::Closing {
                     payload,
                     open_attempt: None,
                 },
-                false,
+                OpenFailureDisposition::ClosingOwnsCleanup,
             ),
-            other => (other, false),
+            other => (other, OpenFailureDisposition::ClosingOwnsCleanup),
         };
         core.state = state;
         self.refresh_projection(core);
-        should_rollback
+        disposition
     }
 
     /// Requests closing while moving the active generation payload under the

@@ -2164,11 +2164,12 @@ mod tests {
             crate::input_identity::InputFingerprint::from_bytes([2; 32]),
         ));
 
-        let (token_a, _) = handle_rt
+        let token_a = handle_rt
             .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))
-            .unwrap();
+            .unwrap()
+            .into_token();
 
-        let (token_b, _) = crate::value::with_excel_call_scope(|scope| {
+        let token_b = crate::value::with_excel_call_scope(|scope| {
             let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
                 handle_rt.lookup(scope, &token_a).unwrap();
             handle_rt
@@ -2178,6 +2179,7 @@ mod tests {
                     |_, _| Ok(()),
                 )
                 .unwrap()
+                .into_token()
         });
 
         assert_ne!(token_a, token_b);

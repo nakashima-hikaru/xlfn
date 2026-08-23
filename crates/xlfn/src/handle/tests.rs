@@ -222,7 +222,7 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     let observed = Arc::new(Mutex::new(None::<String>));
     let observed_for_callback = Arc::clone(&observed);
 
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(
             key,
             || Ok(DataRecord(7)),
@@ -233,6 +233,8 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
             },
         )
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
 
     let rtd_key = observed
@@ -307,7 +309,9 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     let second_rtd_key = second_key.format_rtd_key();
     assert_ne!(first_rtd_key, second_rtd_key);
 
-    let (first_token, created) = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    let first_preparation = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    let created = first_preparation.is_published();
+    let first_token = first_preparation.into_token();
     assert!(created);
 
     // Force the state that a formatter collision would present at the
@@ -772,20 +776,24 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
     let rtd_key = key.format_rtd_key();
     let calls = AtomicUsize::new(0);
 
-    let (first, created) = runtime
+    let first_preparation = runtime
         .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(DataRecord(1))
         })
         .unwrap();
+    let created = first_preparation.is_published();
+    let first = first_preparation.into_token();
     assert!(created);
 
-    let (second, created) = runtime
+    let second_preparation = runtime
         .prepare(key, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(DataRecord(2))
         })
         .unwrap();
+    let created = second_preparation.is_published();
+    let second = second_preparation.into_token();
     assert!(!created);
     assert_eq!(first, second);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -811,9 +819,10 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
     runtime.arm_test_generation();
     let handles = runtime.formula_handle_service().unwrap();
     let services = runtime.generation_services().unwrap();
-    let (token, _) = handles
+    let token = handles
         .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
-        .unwrap();
+        .unwrap()
+        .into_token();
     let (_encoded, mut raw) = token_value(&token);
 
     crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
@@ -833,9 +842,10 @@ fn explicit_handle_lease_argument_conversion_leases_the_payload() {
     runtime.arm_test_generation();
     let handles = runtime.formula_handle_service().unwrap();
     let services = runtime.generation_services().unwrap();
-    let (token, _) = handles
+    let token = handles
         .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
-        .unwrap();
+        .unwrap()
+        .into_token();
     let (_encoded, mut raw) = token_value(&token);
 
     let resolved: HandleLease<DataRecord> =
@@ -863,7 +873,10 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     let key = test_topic_key("argument-errors");
     let rtd_key = key.format_rtd_key();
     let services = runtime.generation_services().unwrap();
-    let (token, _) = handles.prepare(key, || Ok(DataRecord(23))).unwrap();
+    let token = handles
+        .prepare(key, || Ok(DataRecord(23)))
+        .unwrap()
+        .into_token();
     handles.connect(server_generation(1), 91, &rtd_key).unwrap();
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
@@ -986,7 +999,10 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("source");
     let source_rtd_key = source_key.format_rtd_key();
-    let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(31))).unwrap();
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(31)))
+        .unwrap()
+        .into_token();
     runtime
         .connect(server_generation(1), 1, &source_rtd_key)
         .unwrap();
@@ -998,8 +1014,9 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         let object_id = resolved.object_id();
         let alias = runtime
             .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
-            .unwrap();
-        (alias.0, object_id)
+            .unwrap()
+            .into_token();
+        (alias, object_id)
     });
     runtime
         .connect(server_generation(1), 2, &alias_rtd_key)
@@ -1069,14 +1086,15 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("alias-binding-source");
     let source_rtd_key = source_key.format_rtd_key();
-    let (source_token, _) = runtime
+    let source_token = runtime
         .prepare(source_key, || {
             Ok(DropTracked {
                 value: 73,
                 drops: Arc::clone(&drops),
             })
         })
-        .unwrap();
+        .unwrap()
+        .into_token();
     runtime
         .connect(server_generation(1), 3, &source_rtd_key)
         .unwrap();
@@ -1088,7 +1106,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
         runtime
             .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap()
-            .0
+            .into_token()
     });
 
     runtime.disconnect(server_generation(1), 3);
@@ -1129,7 +1147,7 @@ fn alias_publication_keeps_a_snapshot_owned_object_alive() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("snapshot-source");
-    let (source_token, _) = runtime
+    let source_preparation = runtime
         .prepare_observed(
             source_key,
             || {
@@ -1141,6 +1159,7 @@ fn alias_publication_keeps_a_snapshot_owned_object_alive() {
             |_, _| Ok(()),
         )
         .unwrap();
+    let source_token = source_preparation.into_token();
 
     let alias_key = test_topic_key("snapshot-alias");
     let alias_token = crate::value::with_excel_call_scope(|scope| {
@@ -1154,9 +1173,10 @@ fn alias_publication_keeps_a_snapshot_owned_object_alive() {
             .registry
             .remove_and_drop(&source_token, "retire source before alias publication");
 
-        let (alias_token, _) = runtime
+        let alias_token = runtime
             .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
-            .unwrap();
+            .unwrap()
+            .into_token();
 
         let alias_id = runtime
             .store
@@ -1199,17 +1219,21 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("identity-source");
     let source_rtd_key = source_key.format_rtd_key();
-    let (source_token, _) = runtime.prepare(source_key, || Ok(DataRecord(91))).unwrap();
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
     runtime
         .connect(server_generation(1), 5, &source_rtd_key)
         .unwrap();
 
     let alias_key = test_topic_key("identity-alias");
-    let (alias_token, _) = crate::value::with_excel_call_scope(|scope| {
+    let alias_token = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         runtime
             .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap()
+            .into_token()
     });
 
     let alias_rtd_key = alias_key.format_rtd_key();
@@ -1219,7 +1243,10 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
 
     let other_key = test_topic_key("identity-other");
     let other_rtd_key = other_key.format_rtd_key();
-    let (other_token, _) = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap();
+    let other_token = runtime
+        .prepare(other_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
     runtime
         .connect(server_generation(1), 7, &other_rtd_key)
         .unwrap();
@@ -1252,7 +1279,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
     let source_token = runtime
         .prepare(source_key, || Ok(DataRecord(91)))
         .unwrap()
-        .0;
+        .into_token();
     let source_rtd_key = source_key.format_rtd_key();
     runtime
         .connect(server_generation(1), 50, &source_rtd_key)
@@ -1264,16 +1291,19 @@ fn semantic_handle_identity_controls_formula_memoization() {
         runtime
             .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap()
+            .into_token()
     });
 
-    let alias_token = alias_token.0;
     let alias_rtd_key = alias_key.format_rtd_key();
     runtime
         .connect(server_generation(1), 51, &alias_rtd_key)
         .unwrap();
 
     let other_key = test_topic_key("semantic-memo-other");
-    let other_token = runtime.prepare(other_key, || Ok(DataRecord(91))).unwrap().0;
+    let other_token = runtime
+        .prepare(other_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
     let other_rtd_key = other_key.format_rtd_key();
     runtime
         .connect(server_generation(1), 52, &other_rtd_key)
@@ -1297,7 +1327,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
 
     let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let first_calls = Arc::clone(&factory_calls);
-    let (token_a, created_a) = runtime
+    let preparation_a = runtime
         .prepare_observed(
             source_revision,
             move || {
@@ -1307,10 +1337,12 @@ fn semantic_handle_identity_controls_formula_memoization() {
             |_, _| Ok(()),
         )
         .unwrap();
+    let created_a = preparation_a.is_published();
+    let token_a = preparation_a.into_token();
     assert!(created_a);
 
     let second_calls = Arc::clone(&factory_calls);
-    let (token_b, created_b) = runtime
+    let preparation_b = runtime
         .prepare_observed(
             alias_revision,
             move || {
@@ -1320,6 +1352,8 @@ fn semantic_handle_identity_controls_formula_memoization() {
             |_, _| Ok(()),
         )
         .unwrap();
+    let created_b = preparation_b.is_published();
+    let token_b = preparation_b.into_token();
     assert!(!created_b);
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
     assert_eq!(token_a, token_b);
@@ -1330,7 +1364,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
     assert_eq!(object_a, object_b);
 
     let third_calls = Arc::clone(&factory_calls);
-    let (token_c, created_c) = runtime
+    let preparation_c = runtime
         .prepare_observed(
             other_revision,
             move || {
@@ -1340,6 +1374,8 @@ fn semantic_handle_identity_controls_formula_memoization() {
             |_, _| Ok(()),
         )
         .unwrap();
+    let created_c = preparation_c.is_published();
+    let token_c = preparation_c.into_token();
     assert!(created_c);
     assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
     assert_ne!(token_a, token_c);
@@ -1423,7 +1459,10 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("transactional");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
 
     let connection = runtime
         .connect_transaction(server_generation(1), 10, &rtd_key)
@@ -1475,7 +1514,10 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("existing-transaction");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = runtime.prepare(key, || Ok(DataRecord(2))).unwrap();
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(2)))
+        .unwrap()
+        .into_token();
     runtime.connect(server_generation(1), 11, &rtd_key).unwrap();
 
     let connection = runtime
@@ -1517,9 +1559,10 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("handle-lease-retirement");
-    let (token, _) = runtime
+    let token = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         runtime
@@ -1544,9 +1587,10 @@ fn handle_lease_survives_terminal_runtime_close() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("handle-lease-close");
-    let (token, _) = runtime
+    let token = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         runtime
@@ -1573,7 +1617,10 @@ fn handle_lease_survives_terminal_runtime_close() {
 fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("snapshot-quiescence");
-    let (token, _) = runtime.prepare(key, || Ok(DataRecord(42))).unwrap();
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
 
     crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
@@ -1595,9 +1642,10 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("handle-lease-after-binding-removal");
-    let (token, _) = runtime
+    let token = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
@@ -1630,9 +1678,18 @@ fn different_formula_keys_create_distinct_handles() {
     let first_key = test_topic_key("sheet:A1:rate=1");
     let second_key = test_topic_key("sheet:A2:rate=1");
     let changed_key = test_topic_key("sheet:A1:rate=2");
-    let (first, _) = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
-    let (second, _) = runtime.prepare(second_key, || Ok(DataRecord(1))).unwrap();
-    let (changed, _) = runtime.prepare(changed_key, || Ok(DataRecord(2))).unwrap();
+    let first = runtime
+        .prepare(first_key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
+    let second = runtime
+        .prepare(second_key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
+    let changed = runtime
+        .prepare(changed_key, || Ok(DataRecord(2)))
+        .unwrap()
+        .into_token();
     assert_ne!(first, second);
     assert_ne!(first, changed);
 }
@@ -1643,9 +1700,10 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("sheet:A1");
     let rtd_key = key.format_rtd_key();
-    let (token, _) = runtime
+    let token = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap();
+        .unwrap()
+        .into_token();
     runtime.connect(server_generation(1), 7, &rtd_key).unwrap();
     crate::value::with_excel_call_scope(|scope| {
         let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
@@ -1693,13 +1751,15 @@ fn panicking_factory_does_not_publish_a_topic() {
 fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("factory-reentry");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare(key, || {
             let nested = runtime.prepare(key, || Ok(DataRecord(2)));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
             Ok(DataRecord(1))
         })
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -1712,13 +1772,15 @@ fn different_key_factory_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
     let outer_key = test_topic_key("outer-factory");
     let inner_key = test_topic_key("inner-factory");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare(outer_key, || {
             let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
             assert!(matches!(nested, Err(XllError::ReentrantCall)));
             Ok(DataRecord(1))
         })
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -1731,7 +1793,7 @@ fn different_key_factory_reentry_returns_an_error_without_waiting() {
 fn same_thread_observer_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("observer-reentry");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(
             key,
             || Ok(DataRecord(1)),
@@ -1742,6 +1804,8 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
             },
         )
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -1754,7 +1818,7 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
     let outer_key = test_topic_key("outer-observer");
     let inner_key = test_topic_key("inner-observer");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(
             outer_key,
             || Ok(DataRecord(1)),
@@ -1765,6 +1829,8 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
             },
         )
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -1792,9 +1858,11 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
     assert!(matches!(first, Err(XllError::ExcelApi { .. })));
     assert_eq!(runtime.len(), 0);
 
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(2)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -1806,9 +1874,11 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
 fn cache_hit_observe_failure_does_not_invalidate_object() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("observed-memoized");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
 
     let calls = AtomicUsize::new(0);
@@ -1844,9 +1914,11 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
 fn cache_hit_observe_failure_preserves_existing_topic() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("observe-retry");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(10)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
 
     // Observation failure on warm hit
@@ -1865,9 +1937,11 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
     assert!(matches!(result, Err(XllError::ExcelApi { .. })));
 
     // Retry with successful observation still reuses the same object
-    let (retry_token, created) = runtime
+    let retry_preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(30)), |_, _| Ok(()))
         .unwrap();
+    let created = retry_preparation.is_published();
+    let retry_token = retry_preparation.into_token();
     assert!(!created);
     assert_eq!(retry_token, token);
     assert_eq!(
@@ -1895,9 +1969,11 @@ fn observation_cannot_commit_a_topic_removed_reentrantly() {
 fn published_warm_observation_rejects_topic_removed_reentrantly() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("published-removed-during-observation");
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
 
     let result = runtime.prepare_observed::<DataRecord, _>(
@@ -1919,9 +1995,11 @@ fn warm_observation_rejects_generation_terminated_topic() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("warm-generation-terminated");
     let rtd_key = key.format_rtd_key();
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
     assert!(created);
 
     runtime
@@ -1949,9 +2027,11 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("warm-same-key-aba");
     let rtd_key = key.format_rtd_key();
-    let (old_token, created) = runtime
+    let old_preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
+    let created = old_preparation.is_published();
+    let old_token = old_preparation.into_token();
     assert!(created);
 
     let (observation_started_tx, observation_started_rx) = std::sync::mpsc::sync_channel(0);
@@ -1962,9 +2042,11 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let replacement = std::thread::spawn(move || {
         observation_started_rx.recv().unwrap();
         replacement_runtime.rollback(&replacement_rtd_key);
-        let (new_token, created) = replacement_runtime
+        let new_preparation = replacement_runtime
             .prepare(key, || Ok(DataRecord(2)))
             .unwrap();
+        let created = new_preparation.is_published();
+        let new_token = new_preparation.into_token();
         assert!(created);
         assert_ne!(new_token, replacement_old_token);
         replacement_ready_tx.send(new_token).unwrap();
@@ -2132,7 +2214,9 @@ fn concurrent_waiter_retries_after_observation_failure() {
         first.join().unwrap(),
         Err(XllError::ExcelApi { .. })
     ));
-    let (token, created) = second.join().unwrap().unwrap();
+    let second_preparation = second.join().unwrap().unwrap();
+    let created = second_preparation.is_published();
+    let token = second_preparation.into_token();
     assert!(created);
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
@@ -2189,10 +2273,13 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
     // thread 1 to finish, then finds the existing topic and reuses it.
     // The factory is invoked exactly once.
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(res1.0, res2.0);
-    assert!(!res2.1);
+    let res1_token = res1.into_token();
+    let res2_reused = !res2.is_published();
+    let res2_token = res2.into_token();
+    assert_eq!(res1_token, res2_token);
+    assert!(res2_reused);
     assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &res1.0, |value| value.0).unwrap(),
+        with_handle::<DataRecord, _>(&runtime, &res1_token, |value| value.0).unwrap(),
         100
     );
     assert_eq!(runtime.len(), 1);
@@ -2205,9 +2292,11 @@ fn handle_dependency_chain_propagates_identity_change() {
     // Upstream: different semantic input fingerprint → different revision key
     // → different token.
     let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
-    let (upstream_a, created) = runtime
+    let upstream_a_preparation = runtime
         .prepare(upstream_a_key, || Ok(DataRecord(10)))
         .unwrap();
+    let created = upstream_a_preparation.is_published();
+    let upstream_a = upstream_a_preparation.into_token();
     assert!(created);
 
     // Downstream uses the converted upstream Handle as part of its key,
@@ -2217,16 +2306,20 @@ fn handle_dependency_chain_propagates_identity_change() {
     let downstream_key_a =
         with_handle::<DataRecord, _>(&runtime, &upstream_a, |handle| semantic_handle_key(&handle))
             .unwrap();
-    let (downstream_a, created) = runtime
+    let downstream_a_preparation = runtime
         .prepare(downstream_key_a, || Ok(DataRecord(100)))
         .unwrap();
+    let created = downstream_a_preparation.is_published();
+    let downstream_a = downstream_a_preparation.into_token();
     assert!(created);
 
     // Upstream changes (different arguments → different key)
     let upstream_b_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_b");
-    let (upstream_b, created) = runtime
+    let upstream_b_preparation = runtime
         .prepare(upstream_b_key, || Ok(DataRecord(20)))
         .unwrap();
+    let created = upstream_b_preparation.is_published();
+    let upstream_b = upstream_b_preparation.into_token();
     assert!(created);
     assert_ne!(upstream_a, upstream_b);
 
@@ -2234,9 +2327,11 @@ fn handle_dependency_chain_propagates_identity_change() {
     let downstream_key_b =
         with_handle::<DataRecord, _>(&runtime, &upstream_b, |handle| semantic_handle_key(&handle))
             .unwrap();
-    let (downstream_b, created) = runtime
+    let downstream_b_preparation = runtime
         .prepare(downstream_key_b, || Ok(DataRecord(200)))
         .unwrap();
+    let created = downstream_b_preparation.is_published();
+    let downstream_b = downstream_b_preparation.into_token();
     assert!(created);
     assert_ne!(downstream_a, downstream_b);
 
@@ -2329,15 +2424,17 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("warm-fast");
 
-    let (token, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
 
     assert!(created);
 
     let calls = AtomicUsize::new(0);
 
-    let (second, created) = runtime
+    let second_preparation = runtime
         .prepare_observed(
             key,
             || {
@@ -2361,6 +2458,8 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
             },
         )
         .unwrap();
+    let created = second_preparation.is_published();
+    let second = second_preparation.into_token();
 
     assert!(!created);
     assert_eq!(token, second);
@@ -2441,9 +2540,10 @@ fn handle_type_mismatch_returns_invalid_handle() {
 
     let runtime = FormulaHandleService::new(16);
     let key = test_topic_key("type_mismatch");
-    let (token, _) = runtime
+    let token = runtime
         .prepare_observed(key, || Ok(TypeA(42)), |_, _| Ok(()))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     // Looking up TypeA as TypeB must fail with InvalidHandle
     crate::value::with_excel_call_scope(|scope| {
@@ -2466,9 +2566,10 @@ fn alias_preserves_pointer_and_object_identity() {
 
     let runtime = FormulaHandleService::new(16);
     let key1 = test_topic_key("alias_identity_1");
-    let (token1, _) = runtime
+    let token1 = runtime
         .prepare_observed(key1, || Ok(TrackedObj(12345)), |_, _| Ok(()))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let (token2, object_id1, ptr1) = crate::value::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
@@ -2476,9 +2577,10 @@ fn alias_preserves_pointer_and_object_identity() {
         let ptr = handle1.value.addr();
         let alias = handle1.alias();
         let key2 = test_topic_key("alias_identity_2");
-        let (token2, _) = runtime
+        let token2 = runtime
             .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
-            .unwrap();
+            .unwrap()
+            .into_token();
         (token2, object_id, ptr)
     });
 
@@ -2509,7 +2611,7 @@ fn removing_original_binding_keeps_aliased_object_alive() {
 
     let runtime = FormulaHandleService::new(16);
     let key1 = test_topic_key("retire_alias_1");
-    let (token1, _) = runtime
+    let token1 = runtime
         .prepare_observed(
             key1,
             || {
@@ -2520,16 +2622,17 @@ fn removing_original_binding_keeps_aliased_object_alive() {
             },
             |_, _| Ok(()),
         )
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let key2 = test_topic_key("retire_alias_2");
     let token2 = crate::value::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
         let alias = handle1.alias();
-        let (token2, _) = runtime
+        runtime
             .prepare_observed_alias::<DropCounter, _>(key2, alias, |_, _| Ok(()))
-            .unwrap();
-        token2
+            .unwrap()
+            .into_token()
     });
 
     // Remove token1 binding
@@ -2570,7 +2673,7 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
 
     let runtime = FormulaHandleService::new(16);
     let key = test_topic_key("call_borrow_alive");
-    let (token, _) = runtime
+    let token = runtime
         .prepare_observed(
             key,
             || {
@@ -2581,7 +2684,8 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
             },
             |_, _| Ok(()),
         )
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
@@ -2645,9 +2749,10 @@ fn drop_panic_is_recorded_in_handle_cleanup_state() {
 
     let runtime = FormulaHandleService::new(16);
     let key = test_topic_key("drop_panic_test");
-    let (token, _) = runtime
+    let token = runtime
         .prepare_observed(key, || Ok(PanickingDrop), |_, _| Ok(()))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     // Removing and dropping the object should catch the panic and record it
     runtime
@@ -2669,9 +2774,10 @@ fn zero_sized_type_handle_lifecycle() {
 
     let runtime = FormulaHandleService::new(16);
     let key1 = test_topic_key("zst_test_1");
-    let (token1, _) = runtime
+    let token1 = runtime
         .prepare_observed(key1, || Ok(ZeroSized), |_, _| Ok(()))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     let (token2, object_id) = crate::value::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
@@ -2679,9 +2785,10 @@ fn zero_sized_type_handle_lifecycle() {
         let object_id = handle1.object_id();
         let alias = handle1.alias();
         let key2 = test_topic_key("zst_test_2");
-        let (token2, _) = runtime
+        let token2 = runtime
             .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
-            .unwrap();
+            .unwrap()
+            .into_token();
         (token2, object_id)
     });
 
@@ -2724,7 +2831,7 @@ fn alias_capability_does_not_extend_object_lifetime() {
 
     let runtime = FormulaHandleService::new(16);
     let key = test_topic_key("alias_alone_alive");
-    let (token, _) = runtime
+    let token = runtime
         .prepare_observed(
             key,
             || {
@@ -2735,7 +2842,8 @@ fn alias_capability_does_not_extend_object_lifetime() {
             },
             |_, _| Ok(()),
         )
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
@@ -2783,9 +2891,10 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     .commit();
     let handle_rt = services.formula_handle_slot().get_owned().unwrap();
     let key = test_topic_key("resolver_test");
-    let (token, _) = handle_rt
+    let token = handle_rt
         .prepare_observed(key, || Ok(TestObj(123)), |_, _| Ok(()))
-        .unwrap();
+        .unwrap()
+        .into_token();
 
     crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
         let resolver = FormulaHandleServiceResolver::new(services);

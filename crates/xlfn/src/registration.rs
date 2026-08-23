@@ -22,9 +22,9 @@ pub(crate) mod schema;
 #[cfg(test)]
 pub(crate) use ledger::CleanupSeverity;
 pub(crate) use ledger::{
-    EventRegistration, ExcelNameKey, MetadataDebt, MetadataDebtRetryResult, PendingRegistration,
-    RegistrationCleanupState, RegistrationTransactionError, UnknownRegistrationState,
-    UnregisterResult,
+    EventRegistration, ExcelNameKey, HostMutationJournal, MetadataDebt, MetadataDebtRetryResult,
+    PendingRegistration, RegistrationCertainty, RegistrationCleanupState,
+    RegistrationTransactionError, UnknownRegistrationState, UnregisterResult,
 };
 pub(crate) use preflight::preflight_registration;
 #[cfg(test)]
@@ -144,7 +144,7 @@ impl HostRegistrar {
             });
             let mut error = RegistrationTransactionError::new(source);
             if status.is_terminal() {
-                error.pending_events.push(EventRegistration {
+                error.journal.pending_events.push(EventRegistration {
                     procedure,
                     event,
                     registration_id: 0,
@@ -286,7 +286,7 @@ impl HostRegistrar {
             });
             let mut error = RegistrationTransactionError::new(source);
             if status.is_terminal() {
-                error.unknown_registrations.push(UnknownRegistrationState {
+                error.journal.mark_unknown(UnknownRegistrationState {
                     export_name: descriptor.export_name,
                     excel_name: descriptor.excel_name,
                     recovery_error: XllError::ExcelApi {
@@ -1078,13 +1078,14 @@ fn register_all_transaction(
                 if !callbacks.permits_callbacks() {
                     // A terminal status suppresses rollback as well. Preserve
                     // every already-registered item as host cleanup debt.
-                    error.pending_registrations.extend(pending);
+                    error.journal.pending_registrations.extend(pending);
                 } else {
                     let outcome = unregister(callbacks, &pending);
                     error
+                        .journal
                         .pending_registrations
                         .extend(outcome.failed.into_iter().map(|(entry, _)| entry));
-                    error.metadata_debt.extend(outcome.metadata_debt);
+                    error.journal.metadata_debt.extend(outcome.metadata_debt);
                 }
                 return Err(error);
             }
@@ -1115,15 +1116,18 @@ fn reconcile_malformed_registration_result(
             let recovery_source = *recovery_error.source;
             let mut error = RegistrationTransactionError::new(source);
             error
+                .journal
                 .pending_registrations
-                .append(&mut recovery_error.pending_registrations);
+                .append(&mut recovery_error.journal.pending_registrations);
             error
+                .journal
                 .metadata_debt
-                .append(&mut recovery_error.metadata_debt);
+                .append(&mut recovery_error.journal.metadata_debt);
             error
+                .journal
                 .pending_events
-                .append(&mut recovery_error.pending_events);
-            error.unknown_registrations.push(UnknownRegistrationState {
+                .append(&mut recovery_error.journal.pending_events);
+            error.journal.mark_unknown(UnknownRegistrationState {
                 export_name: descriptor.export_name,
                 excel_name: descriptor.excel_name,
                 recovery_error: recovery_source,
@@ -1145,12 +1149,16 @@ fn registration_release_failure(
     let pending = [PendingRegistration::from(registration)];
     let mut error = RegistrationTransactionError::new(source);
     if !callbacks.permits_callbacks() {
-        error.pending_registrations.extend_from_slice(&pending);
+        error
+            .journal
+            .pending_registrations
+            .extend_from_slice(&pending);
         return error;
     }
     let outcome = unregister(callbacks, &pending);
-    error.pending_registrations = outcome.failed.into_iter().map(|(entry, _)| entry).collect();
-    error.metadata_debt = outcome.metadata_debt;
+    error.journal.pending_registrations =
+        outcome.failed.into_iter().map(|(entry, _)| entry).collect();
+    error.journal.metadata_debt = outcome.metadata_debt;
     error
 }
 
@@ -1166,10 +1174,10 @@ fn event_release_failure(
 ) -> RegistrationTransactionError {
     let mut error = RegistrationTransactionError::new(source);
     if !callbacks.permits_callbacks() {
-        error.pending_events.push(registration);
+        error.journal.pending_events.push(registration);
         return error;
     }
-    error.pending_events = unregister(callbacks, &[registration])
+    error.journal.pending_events = unregister(callbacks, &[registration])
         .failed
         .into_iter()
         .map(|(entry, _)| entry)
@@ -1208,9 +1216,9 @@ fn register_async_events_transaction(
         Err(mut error) => {
             if !callbacks.permits_callbacks() {
                 // Terminal status: no further C API calls are safe.
-                error.pending_events.extend(registrations);
+                error.journal.pending_events.extend(registrations);
             } else {
-                error.pending_events.extend(
+                error.journal.pending_events.extend(
                     unregister(callbacks, &registrations)
                         .failed
                         .into_iter()
@@ -1711,7 +1719,7 @@ mod tests {
                         function: ExcelApiFunction::EventRegister,
                         failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                     });
-                    error.pending_events.push(EventRegistration {
+                    error.journal.pending_events.push(EventRegistration {
                         procedure,
                         event,
                         registration_id: 0,
@@ -1737,9 +1745,9 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(unregister_calls.get(), 0);
-        assert_eq!(error.pending_events.len(), 2);
-        assert_eq!(error.pending_events[0].registration_id, 0);
-        assert_eq!(error.pending_events[1].registration_id, 1);
+        assert_eq!(error.journal.pending_events.len(), 2);
+        assert_eq!(error.journal.pending_events[0].registration_id, 0);
+        assert_eq!(error.journal.pending_events[1].registration_id, 1);
         assert!(!callbacks.permits_callbacks());
     }
 
@@ -1800,8 +1808,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(result.pending_registrations.len(), 1);
-        assert_eq!(result.pending_registrations[0].registration.id, 1.0);
+        assert_eq!(result.journal.pending_registrations.len(), 1);
+        assert_eq!(result.journal.pending_registrations[0].registration.id, 1.0);
     }
 
     #[test]
@@ -1861,9 +1869,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(result.pending_registrations.is_empty());
-        assert_eq!(result.metadata_debt.len(), 1);
-        assert_eq!(result.metadata_debt[0].excel_name(), "FIRST");
+        assert!(result.journal.pending_registrations.is_empty());
+        assert_eq!(result.journal.metadata_debt.len(), 1);
+        assert_eq!(result.journal.metadata_debt[0].excel_name(), "FIRST");
     }
 
     #[test]
@@ -1900,7 +1908,7 @@ mod tests {
                         function: ExcelApiFunction::Register,
                         failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                     });
-                    error.unknown_registrations.push(UnknownRegistrationState {
+                    error.journal.mark_unknown(UnknownRegistrationState {
                         export_name: descriptor.export_name,
                         excel_name: descriptor.excel_name,
                         recovery_error: XllError::ExcelApi {
@@ -1926,9 +1934,9 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(unregister_calls.get(), 0);
-        assert_eq!(error.pending_registrations.len(), 1);
-        assert_eq!(error.pending_registrations[0].registration.id, 1.0);
-        assert_eq!(error.unknown_registrations.len(), 1);
+        assert_eq!(error.journal.pending_registrations.len(), 1);
+        assert_eq!(error.journal.pending_registrations[0].registration.id, 1.0);
+        assert_eq!(error.journal.unknown_registrations.len(), 1);
         assert!(!callbacks.permits_callbacks());
     }
 
@@ -1974,8 +1982,8 @@ mod tests {
         );
 
         assert_eq!(unregistered.get(), Some(42.0));
-        assert!(error.pending_registrations.is_empty());
-        assert!(error.unknown_registrations.is_empty());
+        assert!(error.journal.pending_registrations.is_empty());
+        assert!(error.journal.unknown_registrations.is_empty());
     }
 
     #[test]
@@ -2013,9 +2021,15 @@ mod tests {
             |_callbacks, _| panic!("an unknown registration must not be treated as recoverable"),
         );
 
-        assert_eq!(error.unknown_registrations.len(), 1);
-        assert_eq!(error.unknown_registrations[0].export_name, "unknown_export");
-        assert_eq!(error.unknown_registrations[0].excel_name, "UNKNOWN.NAME");
+        assert_eq!(error.journal.unknown_registrations.len(), 1);
+        assert_eq!(
+            error.journal.unknown_registrations[0].export_name,
+            "unknown_export"
+        );
+        assert_eq!(
+            error.journal.unknown_registrations[0].excel_name,
+            "UNKNOWN.NAME"
+        );
     }
 
     #[test]
@@ -2054,9 +2068,9 @@ mod tests {
             |_callbacks, _| panic!("terminal recovery must not attempt unregister"),
         );
 
-        assert_eq!(error.unknown_registrations.len(), 1);
+        assert_eq!(error.journal.unknown_registrations.len(), 1);
         assert_eq!(
-            error.unknown_registrations[0].excel_name,
+            error.journal.unknown_registrations[0].excel_name,
             "TERMINAL.RECOVERY"
         );
         assert!(!callbacks.permits_callbacks());
@@ -2088,8 +2102,11 @@ mod tests {
             },
         );
 
-        assert_eq!(result.pending_registrations.len(), 1);
-        assert_eq!(result.pending_registrations[0].registration, registration);
+        assert_eq!(result.journal.pending_registrations.len(), 1);
+        assert_eq!(
+            result.journal.pending_registrations[0].registration,
+            registration
+        );
     }
 
     #[test]
@@ -2129,8 +2146,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(result.pending_events.len(), 1);
-        assert_eq!(result.pending_events[0].registration_id, 1);
+        assert_eq!(result.journal.pending_events.len(), 1);
+        assert_eq!(result.journal.pending_events[0].registration_id, 1);
     }
 
     #[test]
@@ -2266,7 +2283,7 @@ mod tests {
         );
 
         assert_eq!(rollback_calls.get(), 1);
-        assert_eq!(error.pending_events, vec![registration]);
+        assert_eq!(error.journal.pending_events, vec![registration]);
     }
 
     #[test]

@@ -24,7 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
 
-const PUBLISHED_TOPIC_SHARD_COUNT: usize = 64;
+const MIN_PUBLISHED_TOPIC_SHARDS: usize = 64;
+const TARGET_TOPICS_PER_SHARD: usize = 64;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,30 +74,35 @@ pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, triomphe::Arc<Publ
 pub(crate) type PublishedTopicMapArc = triomphe::Arc<PublishedTopicMap>;
 
 pub(crate) struct PublishedTopics {
-    shards: [ArcSwapAny<PublishedTopicMapArc>; PUBLISHED_TOPIC_SHARD_COUNT],
+    shards: Box<[ArcSwapAny<PublishedTopicMapArc>]>,
+    shard_mask: usize,
 }
 
 impl PublishedTopics {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(maximum_bindings: usize) -> Self {
+        let shard_count = shard_count_for(maximum_bindings);
         let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
         Self {
-            shards: std::array::from_fn(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_map))),
+            shards: (0..shard_count)
+                .map(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_map)))
+                .collect(),
+            shard_mask: shard_count - 1,
         }
     }
 
-    fn shard_index(key: &HandleTopicKey) -> usize {
+    fn shard_index(&self, key: &HandleTopicKey) -> usize {
         let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
-        (hasher.finish() as usize) & (PUBLISHED_TOPIC_SHARD_COUNT - 1)
+        (hasher.finish() as usize) & self.shard_mask
     }
 
     pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<PublishedTopicMapArc> {
-        self.shards[Self::shard_index(key)].load()
+        self.shards[self.shard_index(key)].load()
     }
 
     /// Update the publication snapshot while holding the canonical topic lock.
     pub(crate) fn insert(&self, key: HandleTopicKey, topic: triomphe::Arc<PublishedTopic>) {
-        let shard = &self.shards[Self::shard_index(&key)];
+        let shard = &self.shards[self.shard_index(&key)];
         let current = shard.load_full();
         let mut next = current.as_ref().clone();
         next.insert(key, topic);
@@ -105,7 +111,7 @@ impl PublishedTopics {
 
     /// Update the publication snapshot while holding the canonical topic lock.
     pub(crate) fn remove(&self, key: HandleTopicKey) {
-        let shard = &self.shards[Self::shard_index(&key)];
+        let shard = &self.shards[self.shard_index(&key)];
         let current = shard.load_full();
         if !current.contains_key(&key) {
             return;
@@ -122,6 +128,11 @@ impl PublishedTopics {
             shard.store(triomphe::Arc::clone(&empty_map));
         }
     }
+}
+
+fn shard_count_for(maximum_bindings: usize) -> usize {
+    let required = maximum_bindings.max(1).div_ceil(TARGET_TOPICS_PER_SHARD);
+    required.next_power_of_two().max(MIN_PUBLISHED_TOPIC_SHARDS)
 }
 
 pub(crate) struct TopicTableState {
@@ -155,10 +166,10 @@ pub(crate) struct TopicTable {
 }
 
 impl TopicTable {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(maximum_bindings: usize) -> Self {
         Self {
             state: RwLock::new(TopicTableState::default()),
-            published: PublishedTopics::new(),
+            published: PublishedTopics::new(maximum_bindings),
         }
     }
 
@@ -635,4 +646,20 @@ pub(crate) enum PrepareDecision {
         initialization: Arc<Initialization>,
         generation: TopicGeneration,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublishedTopics, shard_count_for};
+
+    #[test]
+    fn publication_shards_follow_the_configured_binding_capacity() {
+        assert_eq!(shard_count_for(1), 64);
+        assert_eq!(shard_count_for(4_096), 64);
+        assert_eq!(shard_count_for(16_384), 256);
+        assert_eq!(shard_count_for(100_000), 2_048);
+        assert_eq!(shard_count_for(1_048_576), 16_384);
+
+        assert_eq!(PublishedTopics::new(16_384).shards.len(), 256);
+    }
 }

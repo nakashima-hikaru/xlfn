@@ -123,22 +123,71 @@ pub(crate) struct UnknownRegistrationState {
     pub(crate) recovery_error: XllError,
 }
 
-pub(crate) struct RegistrationTransactionError {
-    pub(crate) source: Box<XllError>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegistrationCertainty {
+    Known,
+    Unknown,
+}
+
+/// Host mutations that belong to one registration/open transaction.
+///
+/// The journal is the sole owner of cleanup obligations until the transaction
+/// commits them into [`HostLedger`].  Keeping registrations, events, metadata
+/// debt, and certainty together prevents one failure path from retaining only
+/// part of the host-side side effects.
+pub(crate) struct HostMutationJournal {
     pub(crate) pending_registrations: Vec<PendingRegistration>,
     pub(crate) pending_events: Vec<EventRegistration>,
     pub(crate) metadata_debt: Vec<MetadataDebt>,
     pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
+    pub(crate) certainty: RegistrationCertainty,
+}
+
+impl Default for HostMutationJournal {
+    fn default() -> Self {
+        Self {
+            pending_registrations: Vec::new(),
+            pending_events: Vec::new(),
+            metadata_debt: Vec::new(),
+            unknown_registrations: Vec::new(),
+            certainty: RegistrationCertainty::Known,
+        }
+    }
+}
+
+impl HostMutationJournal {
+    pub(crate) fn mark_unknown(&mut self, unknown: UnknownRegistrationState) {
+        self.certainty = RegistrationCertainty::Unknown;
+        self.unknown_registrations.push(unknown);
+    }
+
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        self.pending_registrations
+            .append(&mut other.pending_registrations);
+        self.pending_events.append(&mut other.pending_events);
+        self.metadata_debt.append(&mut other.metadata_debt);
+        self.unknown_registrations
+            .append(&mut other.unknown_registrations);
+        if other.certainty == RegistrationCertainty::Unknown {
+            self.certainty = RegistrationCertainty::Unknown;
+        }
+    }
+
+    pub(crate) fn is_unknown(&self) -> bool {
+        self.certainty == RegistrationCertainty::Unknown
+    }
+}
+
+pub(crate) struct RegistrationTransactionError {
+    pub(crate) source: Box<XllError>,
+    pub(crate) journal: HostMutationJournal,
 }
 
 impl RegistrationTransactionError {
     pub(crate) fn new(source: XllError) -> Self {
         Self {
             source: Box::new(source),
-            pending_registrations: Vec::new(),
-            pending_events: Vec::new(),
-            metadata_debt: Vec::new(),
-            unknown_registrations: Vec::new(),
+            journal: HostMutationJournal::default(),
         }
     }
 }

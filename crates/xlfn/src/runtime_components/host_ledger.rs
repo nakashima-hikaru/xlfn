@@ -3,7 +3,10 @@
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 
-use crate::registration::{EventRegistration, ExcelNameKey, MetadataDebt, PendingRegistration};
+use crate::registration::{
+    EventRegistration, ExcelNameKey, HostMutationJournal, MetadataDebt, PendingRegistration,
+    RegistrationCertainty,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistrationState {
@@ -46,18 +49,20 @@ impl HostLedger {
         }
     }
 
-    pub(crate) fn append_registrations(
-        &self,
-        registrations: impl IntoIterator<Item = PendingRegistration>,
-    ) {
-        self.state.lock().registrations.extend(registrations);
-    }
-
-    pub(crate) fn append_event_registrations(
-        &self,
-        registrations: impl IntoIterator<Item = EventRegistration>,
-    ) {
-        self.state.lock().event_registrations.extend(registrations);
+    pub(crate) fn merge(&self, journal: HostMutationJournal) {
+        let mut state = self.state.lock();
+        state.registrations.extend(journal.pending_registrations);
+        state.event_registrations.extend(journal.pending_events);
+        for debt in journal.metadata_debt {
+            state
+                .metadata_debt
+                .entry(debt.key())
+                .or_default()
+                .push(debt);
+        }
+        if journal.certainty == RegistrationCertainty::Unknown {
+            state.registration_state = RegistrationState::Unknown;
+        }
     }
 
     pub(crate) fn registrations_snapshot(&self) -> Vec<PendingRegistration> {
@@ -86,10 +91,6 @@ impl HostLedger {
 
     pub(crate) fn replace_event_registrations(&self, registrations: Vec<EventRegistration>) {
         self.state.lock().event_registrations = registrations;
-    }
-
-    pub(crate) fn mark_registration_state_unknown(&self) {
-        self.state.lock().registration_state = RegistrationState::Unknown;
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {

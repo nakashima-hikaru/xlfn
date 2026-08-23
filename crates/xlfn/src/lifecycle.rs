@@ -122,7 +122,7 @@ where
     crate::diagnostics::reset_diagnostic_router()?;
     let _prepared_set = crate::registration::preflight_registration(descriptors)?;
     let registrar = HostRegistrar::connect(transaction.callbacks_mut())
-        .map_err(|error| retain_transaction_error(runtime, error))?;
+        .map_err(|error| retain_transaction_error(transaction, error))?;
     let generation = runtime.protocol_generation().ok_or(XllError::Internal {
         diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
     })?;
@@ -139,8 +139,8 @@ where
         {
             runtime.start_async(runtime_config.async_worker_count())?;
             match registrar.register_async_events(transaction.callbacks_mut()) {
-                Ok(events) => runtime.set_event_registrations(events),
-                Err(error) => return Err(retain_transaction_error(runtime, error)),
+                Ok(events) => transaction.stage_events(events),
+                Err(error) => return Err(retain_transaction_error(transaction, error)),
             }
         }
         #[cfg(not(feature = "async"))]
@@ -152,7 +152,7 @@ where
     }
     registrar
         .register_all(transaction.callbacks_mut(), descriptors)
-        .map_err(|error| retain_transaction_error(runtime, error))
+        .map_err(|error| retain_transaction_error(transaction, error))
 }
 
 fn rollback_active_open<A>(
@@ -173,7 +173,7 @@ fn rollback_active_open<A>(
         RuntimeGeneration::new(attempt.attempt_id().get())
             .expect("an active open attempt has a runtime generation"),
     );
-    if attempt.fail() {
+    if attempt.fail().requires_rollback() {
         match catch_unwind(AssertUnwindSafe(|| {
             rollback_open::<A>(runtime, lifecycle, callbacks, generation)
         })) {
@@ -243,16 +243,12 @@ where
 }
 
 fn retain_transaction_error<A: Addin>(
-    runtime: &Runtime<A>,
+    transaction: &mut open::OpeningTransaction<'_, A>,
     error: crate::registration::RegistrationTransactionError,
 ) -> XllError {
-    runtime.retain_registration_debt(error.pending_registrations);
-    runtime.retain_event_registration_debt(error.pending_events);
-    runtime.retain_metadata_debt(error.metadata_debt);
-    if !error.unknown_registrations.is_empty() {
-        runtime.mark_registration_state_unknown();
-        for unknown in error.unknown_registrations {
-            let recovery_error = unknown.recovery_error;
+    if error.journal.is_unknown() {
+        for unknown in &error.journal.unknown_registrations {
+            let recovery_error = unknown.recovery_error.clone();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::error!(
                     export = unknown.export_name,
@@ -264,7 +260,9 @@ fn retain_transaction_error<A: Addin>(
             report_boundary_error("xlAutoOpen registration recovery", &recovery_error);
         }
     }
-    *error.source
+    let source = *error.source;
+    transaction.retain_journal(error.journal);
+    source
 }
 
 enum OpenRollbackStatus {
@@ -1658,7 +1656,7 @@ mod tests {
         .unwrap();
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
-        assert!(open_attempt.fail());
+        assert!(open_attempt.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         assert!(
             rollback_open::<LayersPanic>(
@@ -1982,7 +1980,7 @@ mod tests {
             (),
         );
 
-        assert!(open_attempt.fail());
+        assert!(open_attempt.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&runtime);
         let outcome = rollback_open::<RetryClose>(
@@ -2539,7 +2537,7 @@ mod tests {
 
         let rollback = Runtime::<CleanClose>::new();
         let mut opening = rollback.begin_open().unwrap();
-        assert!(opening.fail());
+        assert!(opening.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&rollback);
         let outcome = rollback_open::<CleanClose>(
@@ -2619,7 +2617,7 @@ mod tests {
         let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), ());
 
-        assert!(open_attempt.fail());
+        assert!(open_attempt.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&runtime);
         assert!(
@@ -2754,13 +2752,15 @@ mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
-        runtime.retain_registration_debt(vec![
+        let mut journal = crate::registration::HostMutationJournal::default();
+        journal.pending_registrations.push(
             crate::registration::RegistrationId {
                 id: 1.0,
                 excel_name: "TEST.CLOSE.ORDER",
             }
             .into(),
-        ]);
+        );
+        runtime.retain_host_mutations(journal);
 
         let _callback_guard = crate::test_callback::lock();
         crate::test_callback::install();
@@ -3136,7 +3136,7 @@ mod tests {
         );
         assert!(runtime.has_opening_generation());
 
-        assert!(open_attempt.fail());
+        assert!(open_attempt.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&runtime);
         let outcome = rollback_open::<PanicLayersAddin>(

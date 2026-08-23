@@ -135,10 +135,13 @@ fn same_key_aba_trace() {
     entered_rx.recv().expect("old warm reader did not enter");
     runtime.disconnect(server_generation(1), 77);
 
-    let (_, created) = runtime
+    let preparation = runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
         .expect("replacement publication succeeds");
-    assert!(created, "same-key replacement must be a cold publication");
+    assert!(
+        preparation.is_published(),
+        "same-key replacement must be a cold publication"
+    );
 
     release_tx.send(()).expect("release old warm reader");
     assert!(matches!(

@@ -513,14 +513,20 @@ impl<A: crate::Addin> Runtime<A> {
         attempt: &mut OpeningTxn<'_, A>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
-        let mut registrations = registrations;
-        attempt.commit(&mut registrations)
+        let mut journal = crate::registration::HostMutationJournal {
+            pending_registrations: registrations
+                .into_iter()
+                .map(crate::registration::PendingRegistration::from)
+                .collect(),
+            ..Default::default()
+        };
+        attempt.commit(&mut journal)
     }
 
     fn finish_open_for_attempt(
         &self,
         attempt: &mut OpeningTxn<'_, A>,
-        registrations: &mut Vec<RegistrationId>,
+        journal: &mut crate::registration::HostMutationJournal,
     ) -> XllResult<()> {
         let mut control = self.lifecycle.lock();
         if control.canonical_state().open_attempt() != Some(attempt.attempt_id) {
@@ -532,12 +538,13 @@ impl<A: crate::Addin> Runtime<A> {
         // registration even when a concurrent close has already won the phase
         // transition. The close owner needs those IDs to unregister the host
         // mutations before publishing Closed.
-        self.clear_metadata_debt_for_registrations(registrations);
-        let new_items: Vec<_> = std::mem::take(registrations)
-            .into_iter()
-            .map(crate::registration::PendingRegistration::from)
-            .collect();
-        self.host.append_registrations(new_items);
+        let registration_ids = journal
+            .pending_registrations
+            .iter()
+            .map(|entry| entry.registration)
+            .collect::<Vec<_>>();
+        self.clear_metadata_debt_for_registrations(&registration_ids);
+        self.host.merge(std::mem::take(journal));
         let can_commit = control.canonical_state().phase() == LifecyclePhase::Opening;
         if can_commit {
             let ingress = crate::module_runtime::ingress();
@@ -583,30 +590,8 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(feature = "async")]
-    pub(crate) fn set_event_registrations(
-        &self,
-        registrations: Vec<crate::registration::EventRegistration>,
-    ) {
-        self.host.append_event_registrations(registrations);
-    }
-
-    pub(crate) fn retain_registration_debt(
-        &self,
-        registrations: Vec<crate::registration::PendingRegistration>,
-    ) {
-        self.host.append_registrations(registrations);
-    }
-
-    pub(crate) fn retain_event_registration_debt(
-        &self,
-        registrations: Vec<crate::registration::EventRegistration>,
-    ) {
-        self.host.append_event_registrations(registrations);
-    }
-
-    pub(crate) fn mark_registration_state_unknown(&self) {
-        self.host.mark_registration_state_unknown();
+    pub(crate) fn retain_host_mutations(&self, journal: crate::registration::HostMutationJournal) {
+        self.host.merge(journal);
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {
@@ -619,20 +604,23 @@ impl<A: crate::Addin> Runtime<A> {
         attempt.active = false;
     }
 
-    fn fail_and_record(&self, attempt_id: OpenAttemptId) -> bool {
+    fn fail_and_record(
+        &self,
+        attempt_id: OpenAttemptId,
+    ) -> crate::runtime_components::OpenFailureDisposition {
         let mut control = self.lifecycle.lock();
         if control.canonical_state().open_attempt() != Some(attempt_id) {
-            return false;
+            return crate::runtime_components::OpenFailureDisposition::ClosingOwnsCleanup;
         }
 
         if control.canonical_state().phase() == LifecyclePhase::Opening {
             self.return_protocol.close_admission();
         }
-        let should_rollback = self.lifecycle.record_open_failure(&mut control);
+        let disposition = self.lifecycle.record_open_failure(&mut control);
         self.lifecycle.notify_all();
         drop(control);
         self.refinement.fail_open(self, attempt_id);
-        should_rollback
+        disposition
     }
 
     pub fn enter(&self) -> XllResult<CallGuard<'_, A>> {
@@ -1467,19 +1455,22 @@ impl<A: crate::Addin> OpeningTxn<'_, A> {
             .stage_opening_generation_for_attempt(self.attempt_id, opening)
     }
 
-    pub(crate) fn commit(&mut self, registrations: &mut Vec<RegistrationId>) -> XllResult<()> {
+    pub(crate) fn commit(
+        &mut self,
+        journal: &mut crate::registration::HostMutationJournal,
+    ) -> XllResult<()> {
         let runtime = self.runtime;
-        runtime.finish_open_for_attempt(self, registrations)
+        runtime.finish_open_for_attempt(self, journal)
     }
 
-    pub(crate) fn fail(&mut self) -> bool {
+    pub(crate) fn fail(&mut self) -> crate::runtime_components::OpenFailureDisposition {
         if !self.active {
-            return false;
+            return crate::runtime_components::OpenFailureDisposition::ClosingOwnsCleanup;
         }
-        let should_rollback = self.runtime.fail_and_record(self.attempt_id);
+        let disposition = self.runtime.fail_and_record(self.attempt_id);
         let _ = self.module_opening.take();
         self.active = false;
-        should_rollback
+        disposition
     }
 }
 
@@ -1672,9 +1663,10 @@ pub(crate) mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &1);
         let old_handles = runtime.formula_handle_service().unwrap();
-        let (old_token, _) = old_handles
+        let old_token = old_handles
             .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
-            .unwrap();
+            .unwrap()
+            .into_token();
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime
@@ -1690,9 +1682,10 @@ pub(crate) mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(runtime.enter().unwrap().state(), &2);
         let new_handles = runtime.formula_handle_service().unwrap();
-        let (new_token, _) = new_handles
+        let new_token = new_handles
             .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
-            .unwrap();
+            .unwrap()
+            .into_token();
         assert_eq!(
             crate::value::with_excel_call_scope(|scope| {
                 new_handles
@@ -1882,7 +1875,7 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let mut opening = runtime.begin_open().unwrap();
-        assert!(opening.fail());
+        assert!(opening.fail().requires_rollback());
         let rollback = runtime.acquire_open_rollback().unwrap();
 
         let closing_runtime = Arc::clone(&runtime);
@@ -2016,14 +2009,16 @@ pub(crate) mod tests {
     #[test]
     fn registration_storage_is_replaceable() {
         let runtime = Runtime::<()>::new();
-        runtime
-            .host
-            .append_registrations([crate::registration::PendingRegistration::from(
+        let mut journal = crate::registration::HostMutationJournal::default();
+        journal
+            .pending_registrations
+            .push(crate::registration::PendingRegistration::from(
                 RegistrationId {
                     id: 1.0,
                     excel_name: "TEST",
                 },
-            )]);
+            ));
+        runtime.retain_host_mutations(journal);
         assert_eq!(runtime.registrations().len(), 1);
     }
 

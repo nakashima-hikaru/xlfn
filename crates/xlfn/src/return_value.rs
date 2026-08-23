@@ -139,11 +139,11 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let arc_handles = access.runtime.get_arc()?;
         let key =
             crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
-        let (token, _) =
+        let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
                 crate::rtd::observe(arc_handles, key, token, access.callbacks)
             })?;
-        Ok(token)
+        Ok(preparation.into_token())
     }
 
     fn publish_new_handle<T>(&self, operation: impl FnOnce() -> XllResult<T>) -> XllResult<String>
@@ -155,10 +155,10 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let arc_handles = access.runtime.get_arc()?;
         let key =
             crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
-        let (token, _) = handles.prepare_observed(key, operation, |key, token| {
+        let preparation = handles.prepare_observed(key, operation, |key, token| {
             crate::rtd::observe(arc_handles, key, token, access.callbacks)
         })?;
-        Ok(token)
+        Ok(preparation.into_token())
     }
 }
 
