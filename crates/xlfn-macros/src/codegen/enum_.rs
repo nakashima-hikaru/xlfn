@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, Fields};
 
-use crate::options::{parse_expr_path, resolve_crate_path};
+use crate::options::parse_expr_path;
+use crate::support::resolve_crate_path;
 
 pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut ascii_case_insensitive = false;

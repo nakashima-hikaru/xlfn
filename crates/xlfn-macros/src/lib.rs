@@ -15,17 +15,17 @@
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{DeriveInput, FnArg, ItemFn, ItemStruct, ReturnType, parse_macro_input};
+use quote::quote;
+use syn::{DeriveInput, ItemFn, ItemStruct, parse_macro_input};
 mod codegen;
 mod model;
 mod options;
+mod support;
+mod validation;
 
-use model::{ExecutionMode, FunctionModel};
-use options::{
-    ContextKind, doc_comment, gating_tokens, parse_addin_options, parse_context_attribute,
-    parse_function_options, resolve_crate_path, validate_addin_metadata, validate_export_id,
-};
+use options::parse_addin_options;
+use support::{extract_gating_attributes, resolve_crate_path};
+use validation::validate_addin_metadata;
 
 /// Attributes a function as an Excel UDF.
 ///
@@ -82,137 +82,43 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
 
 fn expand_excel_function(
     attributes: proc_macro2::TokenStream,
-    mut function: ItemFn,
+    function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let options = parse_function_options(attributes)?;
-    let krate = resolve_crate_path(options.krate.as_ref());
-    let gating = gating_tokens(&function.attrs);
-    let return_type = match &function.sig.output {
-        ReturnType::Default => syn::parse_quote!(()),
-        ReturnType::Type(_, ty) => ty.as_ref().clone(),
-    };
-    if function.sig.constness.is_some()
-        || matches!(function.sig.safety, syn::Safety::Unsafe(_))
-        || function.sig.abi.is_some()
-    {
-        return Err(syn::Error::new_spanned(
-            &function.sig,
-            "Excel functions must be ordinary safe Rust functions",
-        ));
-    }
-    if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some() {
-        return Err(syn::Error::new_spanned(
-            &function.sig.generics,
-            "Excel functions cannot be generic",
-        ));
-    }
-    if function.sig.variadic.is_some() {
-        return Err(syn::Error::new_spanned(
-            &function.sig,
-            "Excel functions cannot be variadic",
-        ));
-    }
+    let parsed = model::parse_udf(attributes, function)?;
+    let spec = model::analyze(parsed)?;
+    let plan = model::lower(spec);
+    Ok(emit_excel_function(&plan))
+}
 
-    let function_ident = function.sig.ident.clone();
-    let udf_id = options
-        .id
-        .clone()
-        .unwrap_or_else(|| function_ident.to_string());
-    validate_export_id(&udf_id, &function_ident)?;
-    let excel_name = options
-        .name
-        .clone()
-        .unwrap_or_else(|| function_ident.to_string());
-    if excel_name.trim().is_empty() {
-        return Err(syn::Error::new_spanned(
-            &function_ident,
-            "Excel function name cannot be empty",
-        ));
-    }
-    let category = options.category.clone().unwrap_or_default();
-    let description = options
-        .description
-        .clone()
-        .unwrap_or_else(|| doc_comment(&function.attrs));
-    let help_topic = options.help_topic.clone().unwrap_or_default();
-    let hidden = options.hidden;
-    let export_ident = format_ident!("xll_{}", udf_id);
-    let descriptor_ident = format_ident!("__XLFN_DESCRIPTOR_{}", udf_id);
-    let export_manifest_entry_ident = format_ident!("__XLFN_EXP_{}", udf_id);
-    let export_name_nul = format!("xll_{udf_id}\0");
-    let export_name_bytes =
-        syn::LitByteStr::new(export_name_nul.as_bytes(), proc_macro2::Span::call_site());
-
-    let mut context = None;
-    let mut context_type = None;
-    for (index, input) in function.sig.inputs.iter_mut().enumerate() {
-        let FnArg::Typed(argument) = input else {
-            continue;
-        };
-        let mut retained = Vec::new();
-        let mut argument_context = None;
-        let mut has_excel_arg = false;
-        for attribute in std::mem::take(&mut argument.attrs) {
-            if attribute.path().is_ident("excel_context") {
-                let kind = parse_context_attribute(&attribute)?;
-                if argument_context.replace(kind).is_some() {
-                    return Err(syn::Error::new_spanned(
-                        attribute,
-                        "an argument can have only one #[excel_context(...)] role",
-                    ));
-                }
-            } else {
-                has_excel_arg |= attribute.path().is_ident("excel_arg");
-                retained.push(attribute);
-            }
-        }
-        argument.attrs = retained;
-        if let Some(kind) = argument_context {
-            if context.is_some() {
-                return Err(syn::Error::new_spanned(
-                    argument,
-                    "only one #[excel_context(...)] parameter is allowed",
-                ));
-            }
-            if index != 0 {
-                return Err(syn::Error::new_spanned(
-                    argument,
-                    "the #[excel_context(...)] parameter must be the first argument",
-                ));
-            }
-            if has_excel_arg {
-                return Err(syn::Error::new_spanned(
-                    argument,
-                    "#[excel_context(...)] cannot be combined with #[excel_arg(...)]",
-                ));
-            }
-            context = Some(kind);
-            context_type = Some(argument.ty.as_ref().clone());
-        }
-    }
-    let validated =
-        FunctionModel::new(&function, &options, context, context_type).validate(&function)?;
-    let mode = validated.mode;
-    let context = validated.context;
-    let model = validated.with_arguments(model::validate_arguments(&mut function, mode, context)?);
-    let is_async = mode.is_async();
-    let context_type = model.context_type.as_ref();
-    let arguments = &model.arguments;
-    let argument_types = arguments
-        .iter()
-        .map(|argument| argument.ty.clone())
-        .collect::<Vec<_>>();
-    let argument_options = arguments
-        .iter()
-        .map(|argument| &argument.options)
-        .collect::<Vec<_>>();
+fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenStream {
+    let function = &plan.function;
+    let krate = &plan.crate_path;
+    let gating = &plan.gating;
+    let return_type = &plan.return_type;
+    let function_ident = &function.sig.ident;
+    let udf_id = plan.metadata.id.as_str();
+    let excel_name = &plan.metadata.excel_name;
+    let category = &plan.metadata.category;
+    let description = &plan.metadata.description;
+    let help_topic = &plan.metadata.help_topic;
+    let export_ident = &plan.symbols.export_ident;
+    let descriptor_ident = &plan.symbols.descriptor_ident;
+    let export_manifest_entry_ident = &plan.symbols.manifest_ident;
+    let export_name_bytes = syn::LitByteStr::new(
+        &plan.symbols.export_name_bytes,
+        proc_macro2::Span::call_site(),
+    );
+    let execution = &plan.execution;
+    let is_async = execution.is_async();
+    let context_type = execution.context_type();
+    let arguments = &plan.arguments;
     let raw_names = arguments
         .iter()
-        .map(|argument| argument.raw_name.clone())
+        .map(|argument| argument.raw_ident.clone())
         .collect::<Vec<_>>();
     let converted_names = arguments
         .iter()
-        .map(|argument| argument.converted_name.clone())
+        .map(|argument| argument.local_ident.clone())
         .collect::<Vec<_>>();
     let argument_name_literals = arguments
         .iter()
@@ -222,43 +128,34 @@ fn expand_excel_function(
         .iter()
         .map(|argument| argument.description.clone())
         .collect::<Vec<_>>();
-    let reference_arguments = arguments
-        .iter()
-        .map(|argument| argument.options.reference)
-        .collect::<Vec<_>>();
     let argument_count = arguments.len();
-    let generated_context_expression = context.map(|kind| match kind {
-        ContextKind::ThreadSafe => {
-            quote!(#krate::__private::v1::thread_safe_context(__state))
-        }
-        ContextKind::MainThread => quote!(#krate::__private::v1::main_thread_context(
+    let generated_context_expression = match execution {
+        model::ExecutionSpec::ThreadSafe {
+            context_ty: Some(_),
+        } => Some(quote!(#krate::__private::v1::thread_safe_context(__state))),
+        model::ExecutionSpec::MainThread {
+            context_ty: Some(_),
+        } => Some(quote!(#krate::__private::v1::main_thread_context(
             __frame,
             __state,
-        )),
-        ContextKind::MacroSheet => {
-            quote!(#krate::__private::v1::macro_sheet_context(
-                __frame,
-                __state,
-            ))
-        }
-        ContextKind::Async => {
-            quote!(#krate::__private::v1::async_context(&__lease, &__cancellation))
-        }
-    });
-    let macro_sheet = mode.is_macro_sheet();
-    let thread_safe = mode.is_thread_safe();
-    if is_async && reference_arguments.iter().any(|reference| *reference) {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            "an async Excel function cannot accept reference arguments",
-        ));
-    }
-    if reference_arguments.iter().any(|reference| *reference) && !macro_sheet {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            "a reference argument requires `macro_sheet` or MacroSheetContext",
-        ));
-    }
+        ))),
+        model::ExecutionSpec::MacroSheet {
+            context_ty: Some(_),
+        } => Some(quote!(#krate::__private::v1::macro_sheet_context(
+            __frame,
+            __state,
+        ))),
+        model::ExecutionSpec::Async {
+            context_ty: Some(_),
+        } => Some(quote!(#krate::__private::v1::async_context(&__lease, &__cancellation))),
+        model::ExecutionSpec::MainThread { context_ty: None }
+        | model::ExecutionSpec::ThreadSafe { context_ty: None }
+        | model::ExecutionSpec::MacroSheet { context_ty: None }
+        | model::ExecutionSpec::Async { context_ty: None } => None,
+    };
+    let macro_sheet = execution.is_macro_sheet();
+    let thread_safe = execution.is_thread_safe();
+    let hidden = plan.hidden;
     let invocation = if generated_context_expression.is_some() {
         quote!(#function_ident(__context, #(#converted_names),*))
     } else {
@@ -277,18 +174,18 @@ fn expand_excel_function(
             let __context: #ty = __generated_context;
         }
     });
-    let volatile = options.volatile;
-    let mode_assertion = match mode {
-        ExecutionMode::Async => {
+    let volatile = plan.volatile;
+    let mode_assertion = match execution {
+        model::ExecutionSpec::Async { .. } => {
             quote!(#krate::__private::v1::assert_async_return::<#return_type>();)
         }
-        ExecutionMode::MacroSheet => {
+        model::ExecutionSpec::MacroSheet { .. } => {
             quote!(#krate::__private::v1::assert_macro_sheet_return::<#return_type>();)
         }
-        ExecutionMode::ThreadSafe => {
+        model::ExecutionSpec::ThreadSafe { .. } => {
             quote!(#krate::__private::v1::assert_thread_safe_return::<#return_type>();)
         }
-        ExecutionMode::MainThread => {
+        model::ExecutionSpec::MainThread { .. } => {
             quote!(#krate::__private::v1::assert_main_thread_return::<#return_type>();)
         }
     };
@@ -298,82 +195,97 @@ fn expand_excel_function(
         #mode_assertion
         #volatile_assertion
     };
-    let conversions = converted_names
+    let conversions = arguments
         .iter()
-        .zip(argument_types.iter())
-        .zip(argument_name_literals.iter())
-        .zip(raw_names.iter())
-        .zip(argument_options.iter())
-        .enumerate()
-        .map(|(index, ((((converted, ty), argument), raw), options))| {
-            let conversion = if options.reference {
-                quote! {
+        .map(|argument| {
+            let index = argument.index;
+            let ty = &argument.ty;
+            let converted = &argument.local_ident;
+            let raw = &argument.raw_ident;
+            let argument_name = &argument.excel_name;
+            let conversion = match &argument.conversion {
+                model::ArgumentConversion::Reference => quote! {
                     // SAFETY: Excel supplies the live reference pointer for this ABI call.
                     unsafe {
-                        #krate::__private::v1::convert_reference(__frame, #argument, #raw)
+                        #krate::__private::v1::convert_reference(__frame, #argument_name, #raw)
                     }
-                }
-            } else {
-                let async_assertion = is_async.then(|| {
-                    quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
-                });
-                quote! {
-                    {
-                        #async_assertion
-                        #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
-                        // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
-                        unsafe {
-                            #krate::__private::v1::convert_argument::<#return_type, #ty>(
-                                __frame,
-                                #index,
-                                #argument,
-                                #raw,
-                            )
+                },
+                model::ArgumentConversion::Value(_) => {
+                    let async_assertion = is_async.then(|| {
+                        quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
+                    });
+                    quote! {
+                        {
+                            #async_assertion
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
+                            // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
+                            unsafe {
+                                #krate::__private::v1::convert_argument::<#return_type, #ty>(
+                                    __frame,
+                                    #index,
+                                    #argument_name,
+                                    #raw,
+                                )
+                            }
                         }
                     }
                 }
             };
-            let blank_default = options.blank.as_deref() == Some("default");
-            let missing_default = options.missing.as_deref() == Some("default");
-            let blank_error = options.blank.as_deref() == Some("error");
-            let missing_error = options.missing.as_deref() == Some("error");
-            if blank_default || missing_default || blank_error || missing_error {
-                let default_expr = options.default.as_ref();
-                let blank_arm = if blank_default {
-                    let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::v1::CellPresence::Blank => {
-                        #krate::__private::v1::CallFrame::default_argument(
-                            __frame,
-                            #index,
-                            #argument,
-                            #default,
-                        )?
-                    },)
-                } else if blank_error {
-                    quote!(#krate::__private::v1::CellPresence::Blank => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("blank cell is not allowed"))),)
-                } else {
-                    quote!()
+
+            if argument.conversion.requires_presence_check() {
+                let model::ArgumentConversion::Value(value) = &argument.conversion
+                else {
+                    unreachable!("reference conversion does not inspect cell presence");
                 };
-                let missing_arm = if missing_default {
-                    let default = default_expr.expect("validated default policy has an expression");
-                    quote!(#krate::__private::v1::CellPresence::Missing => {
-                        #krate::__private::v1::CallFrame::default_argument(
-                            __frame,
-                            #index,
-                            #argument,
-                            #default,
-                        )?
-                    },)
-                } else if missing_error {
-                    quote!(#krate::__private::v1::CellPresence::Missing => return ::core::result::Result::Err(#krate::error::XllError::input(#argument, #krate::error::InputError::Malformed("missing argument is not allowed"))),)
-                } else {
-                    quote!()
+                let blank = &value.blank;
+                let missing = &value.missing;
+                let blank_arm = match blank {
+                    model::PresenceAction::Convert => quote!(),
+                    model::PresenceAction::Error => quote!(
+                        #krate::__private::v1::CellPresence::Blank => return ::core::result::Result::Err(
+                            #krate::error::XllError::input(
+                                #argument_name,
+                                #krate::error::InputError::Malformed("blank cell is not allowed"),
+                            )
+                        ),
+                    ),
+                    model::PresenceAction::Default(default) => quote!(
+                        #krate::__private::v1::CellPresence::Blank => {
+                            #krate::__private::v1::CallFrame::default_argument(
+                                __frame,
+                                #index,
+                                #argument_name,
+                                #default,
+                            )?
+                        },
+                    ),
+                };
+                let missing_arm = match missing {
+                    model::PresenceAction::Convert => quote!(),
+                    model::PresenceAction::Error => quote!(
+                        #krate::__private::v1::CellPresence::Missing => return ::core::result::Result::Err(
+                            #krate::error::XllError::input(
+                                #argument_name,
+                                #krate::error::InputError::Malformed("missing argument is not allowed"),
+                            )
+                        ),
+                    ),
+                    model::PresenceAction::Default(default) => quote!(
+                        #krate::__private::v1::CellPresence::Missing => {
+                            #krate::__private::v1::CallFrame::default_argument(
+                                __frame,
+                                #index,
+                                #argument_name,
+                                #default,
+                            )?
+                        },
+                    ),
                 };
                 quote! {
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
                     let #converted: #ty = match unsafe {
-                        #krate::__private::v1::argument_presence(__frame, #argument, #raw)
+                        #krate::__private::v1::argument_presence(__frame, #argument_name, #raw)
                     }? {
                         #blank_arm
                         #missing_arm
@@ -435,7 +347,7 @@ fn expand_excel_function(
     };
     let wrapper = if is_async {
         quote! {
-            #gating
+            #(#gating)*
             #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
@@ -450,7 +362,7 @@ fn expand_excel_function(
         }
     } else {
         quote! {
-            #gating
+            #(#gating)*
             #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
@@ -464,18 +376,18 @@ fn expand_excel_function(
         }
     };
 
-    let argument_abi_tokens = reference_arguments.iter().map(|&is_ref| {
-        if is_ref {
+    let argument_abi_tokens = arguments.iter().map(|argument| {
+        if argument.conversion.is_reference() {
             quote!(#krate::__private::v1::ArgumentAbi::RawReference)
         } else {
             quote!(#krate::__private::v1::ArgumentAbi::CoercedValue)
         }
     });
 
-    Ok(quote! {
+    quote! {
         #function
 
-        #gating
+        #(#gating)*
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
         static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
@@ -503,12 +415,12 @@ fn expand_excel_function(
                 #hidden,
             );
 
-        #gating
+        #(#gating)*
         #krate::__private::v1::submit_registration! {
             #descriptor_ident
         }
 
-        #gating
+        #(#gating)*
         #[doc(hidden)]
         #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
         #[used]
@@ -518,7 +430,7 @@ fn expand_excel_function(
             *#export_name_bytes;
 
         #wrapper
-    })
+    }
 }
 
 fn expand_excel_addin(
@@ -527,7 +439,7 @@ fn expand_excel_addin(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let options = parse_addin_options(attributes)?;
     let krate = resolve_crate_path(options.krate.as_ref());
-    let gating = gating_tokens(&item.attrs);
+    let gating = extract_gating_attributes(&item.attrs);
     if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
             &item.generics,
@@ -544,23 +456,23 @@ fn expand_excel_addin(
     Ok(quote! {
         #item
 
-        #gating
+        #(#gating)*
         #[doc(hidden)]
         static __XLFN_RUNTIME: #krate::__private::v1::MacroRuntime<
             #ident,
         > = #krate::__private::v1::MacroRuntime::new();
 
-        #gating
+        #(#gating)*
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
         static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0".len()] =
             *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
 
-        #gating
+        #(#gating)*
         #krate::__private::v1::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
 
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
             #krate::__private::v1::open_generated_addin::<#ident>(
@@ -574,13 +486,13 @@ fn expand_excel_addin(
             )
         }
 
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
             #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
         }
 
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoRemove() -> i32 {
             #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
@@ -590,7 +502,7 @@ fn expand_excel_addin(
         ///
         /// # Safety
         /// The pointer must be the live value returned by this XLL and used once.
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoFree12(
             __pointer: *mut #krate::__private::v1::XLOPER12,
@@ -603,7 +515,7 @@ fn expand_excel_addin(
         ///
         /// # Safety
         /// `action` must be a live XLOPER12 supplied by Excel.
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAddInManagerInfo12(
             __action: *mut #krate::__private::v1::XLOPER12,
@@ -618,7 +530,7 @@ fn expand_excel_addin(
             }
         }
 
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn DllGetClassObject(
             __class_id: *const ::core::ffi::c_void,
@@ -636,7 +548,7 @@ fn expand_excel_addin(
             }
         }
 
-        #gating
+        #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn DllCanUnloadNow() -> i32 {
             #krate::__private::v1::dll_can_unload_now(&crate::__XLFN_RUNTIME)
@@ -1041,12 +953,13 @@ mod tests {
     }
 
     #[test]
-    fn gating_tokens_filter_non_gating_cfg_attr_payloads() {
+    fn gating_attributes_filter_non_gating_cfg_attr_payloads() {
         let item = function(quote! {
             #[cfg_attr(feature = "gated", cfg(any()), allow(dead_code))]
             fn gated() -> f64 { 1.0 }
         });
-        let gating = gating_tokens(&item.attrs).to_string();
+        let gating_attributes = extract_gating_attributes(&item.attrs);
+        let gating = quote!(#(#gating_attributes)*).to_string();
         assert!(gating.contains("cfg_attr"));
         assert!(gating.contains("cfg (any ())"));
         assert!(!gating.contains("allow"));

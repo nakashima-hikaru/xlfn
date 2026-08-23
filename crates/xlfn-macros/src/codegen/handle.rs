@@ -1,7 +1,8 @@
 use quote::quote;
 use syn::DeriveInput;
 
-use crate::options::{parse_expr_path, resolve_crate_path};
+use crate::options::parse_expr_path;
+use crate::support::resolve_crate_path;
 
 pub(crate) fn expand_excel_handle_object(
     input: DeriveInput,

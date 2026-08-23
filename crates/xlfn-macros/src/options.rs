@@ -1,10 +1,9 @@
-//! Attribute parsing and semantic option validation.
+//! Raw attribute parsing for the procedural macro front end.
 
 use proc_macro2::TokenStream;
-use quote::quote;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
-use syn::{Expr, ExprLit, Lit, Meta, Token};
+use syn::{Attribute, Expr, ExprLit, Lit, Meta, Token};
 
 pub(super) fn parse_expr_path(expr: &Expr) -> syn::Result<syn::Path> {
     match expr {
@@ -20,22 +19,8 @@ pub(super) fn parse_expr_path(expr: &Expr) -> syn::Result<syn::Path> {
     }
 }
 
-pub(super) fn resolve_crate_path(explicit_crate: Option<&syn::Path>) -> TokenStream {
-    if let Some(path) = explicit_crate {
-        return quote!(#path);
-    }
-    match proc_macro_crate::crate_name("xlfn") {
-        Ok(proc_macro_crate::FoundCrate::Itself) => quote!(crate),
-        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
-        }
-        Err(_) => quote!(::xlfn),
-    }
-}
-
 #[derive(Default)]
-pub(super) struct FunctionOptions {
+pub(super) struct ParsedFunctionOptions {
     pub(super) name: Option<String>,
     pub(super) id: Option<String>,
     pub(super) category: Option<String>,
@@ -49,7 +34,7 @@ pub(super) struct FunctionOptions {
 }
 
 #[derive(Default)]
-pub(super) struct ArgumentOptions {
+pub(super) struct ParsedArgumentOptions {
     pub(super) name: Option<String>,
     pub(super) description: Option<String>,
     pub(super) default: Option<Expr>,
@@ -59,41 +44,11 @@ pub(super) struct ArgumentOptions {
 }
 
 #[derive(Default)]
-pub(super) struct AddinOptions {
+pub(super) struct ParsedAddinOptions {
     pub(super) name: Option<String>,
     pub(super) id: Option<String>,
     pub(super) category: Option<String>,
     pub(super) krate: Option<syn::Path>,
-}
-
-pub(super) fn gating_tokens(attributes: &[syn::Attribute]) -> TokenStream {
-    let mut gating = Vec::new();
-    for attribute in attributes {
-        if attribute.path().is_ident("cfg") {
-            gating.push(quote!(#attribute));
-            continue;
-        }
-        if !attribute.path().is_ident("cfg_attr") {
-            continue;
-        }
-
-        let Ok(entries) =
-            attribute.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-        else {
-            continue;
-        };
-        let mut entries = entries.into_iter();
-        let Some(predicate) = entries.next() else {
-            continue;
-        };
-        let nested_gating = entries
-            .filter(|meta| meta.path().is_ident("cfg") || meta.path().is_ident("cfg_attr"))
-            .collect::<Vec<_>>();
-        if !nested_gating.is_empty() {
-            gating.push(quote!(#[cfg_attr(#predicate, #(#nested_gating),*)]));
-        }
-    }
-    quote!(#(#gating)*)
 }
 
 #[derive(Clone, Copy)]
@@ -138,8 +93,76 @@ pub(super) fn parse_context_attribute(attribute: &syn::Attribute) -> syn::Result
     }
 }
 
-pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<FunctionOptions> {
-    let mut options = FunctionOptions::default();
+/// Parses one `#[excel_arg(...)]` attribute without interpreting its policy
+/// values. The parser only owns syntax concerns such as duplicate keys and
+/// literal kinds; semantic normalization belongs to the UDF analyzer.
+pub(super) fn parse_argument_options(
+    attribute: &Attribute,
+    options: &mut ParsedArgumentOptions,
+) -> syn::Result<()> {
+    for entry in attribute.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
+        match entry {
+            Meta::NameValue(value) if value.path.is_ident("name") => {
+                if options.name.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate excel_arg name"));
+                }
+                options.name = Some(string_value(&value.value, "name")?);
+            }
+            Meta::NameValue(value) if value.path.is_ident("description") => {
+                if options.description.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate excel_arg description",
+                    ));
+                }
+                options.description = Some(string_value(&value.value, "description")?);
+            }
+            Meta::NameValue(value) if value.path.is_ident("default") => {
+                if options.default.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate excel_arg default",
+                    ));
+                }
+                options.default = Some(value.value);
+            }
+            Meta::NameValue(value) if value.path.is_ident("blank") => {
+                if options.blank.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate excel_arg blank policy",
+                    ));
+                }
+                options.blank = Some(string_value(&value.value, "blank")?);
+            }
+            Meta::NameValue(value) if value.path.is_ident("missing") => {
+                if options.missing.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate excel_arg missing policy",
+                    ));
+                }
+                options.missing = Some(string_value(&value.value, "missing")?);
+            }
+            Meta::Path(path) if path.is_ident("reference") => {
+                if options.reference {
+                    return Err(syn::Error::new_spanned(path, "duplicate `reference`"));
+                }
+                options.reference = true;
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "expected `name`, `description`, `default`, `blank`, `missing`, or `reference`",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedFunctionOptions> {
+    let mut options = ParsedFunctionOptions::default();
     for meta in parse_meta(tokens)? {
         match meta {
             Meta::Path(path) if path.is_ident("thread_safe") => {
@@ -213,31 +236,8 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<Functio
     Ok(options)
 }
 
-pub(super) fn doc_comment(attributes: &[syn::Attribute]) -> String {
-    let lines = attributes
-        .iter()
-        .filter_map(|attribute| {
-            if !attribute.path().is_ident("doc") {
-                return None;
-            }
-            let Meta::NameValue(value) = &attribute.meta else {
-                return None;
-            };
-            let Expr::Lit(ExprLit {
-                lit: Lit::Str(value),
-                ..
-            }) = &value.value
-            else {
-                return None;
-            };
-            Some(value.value().trim().to_owned())
-        })
-        .collect::<Vec<_>>();
-    lines.join("\n").trim().to_owned()
-}
-
-pub(super) fn parse_addin_options(tokens: TokenStream) -> syn::Result<AddinOptions> {
-    let mut options = AddinOptions::default();
+pub(super) fn parse_addin_options(tokens: TokenStream) -> syn::Result<ParsedAddinOptions> {
+    let mut options = ParsedAddinOptions::default();
     for meta in parse_meta(tokens)? {
         match meta {
             Meta::NameValue(value) if value.path.is_ident("name") => {
@@ -275,46 +275,6 @@ pub(super) fn parse_addin_options(tokens: TokenStream) -> syn::Result<AddinOptio
     Ok(options)
 }
 
-pub(super) fn validate_addin_metadata(
-    display_name: &str,
-    id: &str,
-    category: &str,
-    span: &impl quote::ToTokens,
-) -> syn::Result<()> {
-    for (field, value) in [("name", display_name), ("category", category)] {
-        let length = value.encode_utf16().count();
-        if value.is_empty() || length > 255 {
-            return Err(syn::Error::new_spanned(
-                span,
-                format!("add-in `{field}` must contain 1..=255 UTF-16 code units"),
-            ));
-        }
-    }
-
-    let valid_slug = !id.is_empty()
-        && id.len() <= 64
-        && id
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic())
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    let upper = id.to_ascii_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || upper
-            .strip_prefix("COM")
-            .or_else(|| upper.strip_prefix("LPT"))
-            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
-    if !valid_slug || reserved {
-        return Err(syn::Error::new_spanned(
-            span,
-            "add-in `id` must be a non-reserved ASCII slug beginning with a letter and containing only letters, digits, `-`, or `_`",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn parse_meta(tokens: TokenStream) -> syn::Result<Punctuated<Meta, Token![,]>> {
     Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)
 }
@@ -330,19 +290,4 @@ pub(super) fn string_value(expression: &Expr, name: &str) -> syn::Result<String>
             format!("`{name}` must be a string literal"),
         )),
     }
-}
-
-pub(super) fn validate_export_id(id: &str, span: &impl quote::ToTokens) -> syn::Result<()> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|character| character == '_' || character.is_ascii_alphanumeric())
-        || id.starts_with(|character: char| character.is_ascii_digit())
-    {
-        return Err(syn::Error::new_spanned(
-            span,
-            "`id` must be a Rust identifier fragment",
-        ));
-    }
-    Ok(())
 }
