@@ -9,10 +9,8 @@
 mod binding;
 mod connection;
 mod formula;
-mod object_access;
-mod object_store;
+mod object;
 mod prepare;
-mod reclamation;
 #[cfg(any(test, feature = "unstable"))]
 mod refinement;
 mod refinement_hooks;
@@ -22,13 +20,12 @@ mod runtime;
 mod store;
 mod token;
 mod topic;
-mod transaction;
 mod typed;
 
 #[cfg(test)]
 use crate::error::DomainErrorCode;
 #[cfg(test)]
-pub(crate) use crate::generation::{BindingGeneration, ObjectGeneration, TopicGeneration};
+pub(crate) use crate::generation::{BindingGeneration, TopicGeneration};
 #[cfg(test)]
 use crate::return_value::{ExcelCallbackStatus, ReturnContext};
 #[cfg(test)]
@@ -64,14 +61,10 @@ pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
-pub(crate) use object_access::{BorrowedObject, ObjectLease};
-#[cfg(test)]
-pub(crate) use object_store::ObjectKey;
-pub(crate) use object_store::{ErasedObject, ObjectLocator};
+pub(crate) use object::SharedObject;
 pub(crate) use prepare::HandlePrepareState;
 #[cfg(target_os = "windows")]
 pub(crate) use prepare::RtdOperationGuard;
-pub(crate) use reclamation::HandleCallGuard;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]

@@ -1,26 +1,18 @@
-use super::object_store::{LiveObjectRef, ObjectLocator};
-use super::reclamation::PinContext;
-use super::{BorrowedObject, ObjectLease};
+use super::binding::BindingReadLease;
+use super::object::{ObjectLeaseGuard, SharedObject};
+use super::token::ObjectId;
 use crate::XllResult;
 use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::ptr::NonNull;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
-///
-/// A handle-producing UDF is memoized by its formula revision. For one live
-/// formula revision, the producer is evaluated at most once and the resulting
-/// handle token identifies that object for the token's entire lifetime.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
 
 type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -> T);
 
 /// Opaque identity of a registry-owned handle payload.
-///
-/// The value is stable only within the runtime that issued it. It is intended
-/// for in-process correlation and diagnostics, not for persistence or wire
-/// serialization. Keeping the representation private leaves the identity
-/// format free to evolve without making `u64` part of the public contract.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HandleObjectId(u64);
 
@@ -30,54 +22,55 @@ impl HandleObjectId {
     }
 }
 
-/// A call-scoped read capability for an object owned by a formula handle.
+/// A call-scoped read capability for an object owned by a formula binding.
 ///
-/// The handle borrows an object-registry entry for the generated Excel call
-/// scope. The call guard retains the runtime-local object arena and protects
-/// the pointed-to value from epoch reclamation for exactly that scope.
+/// The binding read lease owns the immutable publication snapshot. That
+/// snapshot owns the binding record, which owns the `ObjectCell` containing
+/// the payload. A warm lookup therefore does not clone the object `Arc`.
 pub struct Handle<'call, T: ExcelHandleObject> {
-    pub(crate) object: LiveObjectRef,
-    pub(crate) value: BorrowedObject<'call, T>,
-    pub(crate) pin: PinContext<'call>,
+    pub(crate) binding: BindingReadLease,
+    pub(crate) value: NonNull<T>,
     pub(crate) _call: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(
-        object: LiveObjectRef,
-        value: BorrowedObject<'call, T>,
-        pin: PinContext<'call>,
-    ) -> Self {
+    pub(crate) fn new(binding: BindingReadLease, value: NonNull<T>) -> Self {
         Self {
-            object,
+            binding,
             value,
-            pin,
             _call: PhantomData,
         }
     }
 
-    /// Promotes this call-scoped capability to an owned registry lease.
-    ///
-    /// Promotion is explicit because it changes the lifetime kind: the
-    /// resulting value may outlive the Excel call and keeps the registry
-    /// payload alive until it is dropped.
-    fn promote(self) -> XllResult<ObjectLease<T>> {
-        self.pin.pin(self.object)
+    /// Returns the runtime-local identity used by formula input semantics.
+    pub(crate) fn object_id(&self) -> ObjectId {
+        self.binding.object().id()
     }
 
-    /// Promotes this capability to a long-lived synchronous handle.
+    /// Promotes this call-scoped capability to an owned handle lease.
+    ///
+    /// This is the only handle operation on the warm path that increments an
+    /// object reference count. The lease also contributes to the shutdown
+    /// liveness certificate until it is dropped.
     pub fn pin(self) -> XllResult<HandleLease<T>> {
-        self.promote().map(|lease| HandleLease { lease })
+        let object = triomphe::Arc::clone(self.binding.object());
+        let lease = object.acquire_lease()?;
+        let value = object
+            .typed_ptr::<T>()
+            .expect("handle type was validated before promotion");
+        Ok(HandleLease {
+            object,
+            value,
+            _lease: lease,
+        })
     }
 
     /// Converts this borrowed capability into an explicit republish
-    /// capability. A handle itself is never an Excel return value.
+    /// capability. The source snapshot remains the alias's lifetime anchor
+    /// until publication consumes it.
     pub fn alias(self) -> HandleAlias<'call, T> {
         HandleAlias {
-            object: ObjectLocator {
-                id: self.object.id,
-                key_hint: self.object.key,
-            },
+            binding: self.binding,
             _call: PhantomData,
         }
     }
@@ -86,48 +79,64 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
 impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.value
+        let _anchor = &self.binding;
+        // SAFETY: `value` points into the `ObjectCell` transitively owned by
+        // `binding`, and that cell cannot be dropped while this binding lease
+        // is alive.
+        unsafe { self.value.as_ref() }
     }
 }
 
 /// A long-lived handle lease. Use this when a handle must cross Excel calls or
 /// be moved into an asynchronous future.
 pub struct HandleLease<T: ExcelHandleObject> {
-    lease: ObjectLease<T>,
+    pub(crate) object: SharedObject,
+    pub(crate) value: NonNull<T>,
+    pub(crate) _lease: ObjectLeaseGuard,
 }
 
 impl<T: ExcelHandleObject> HandleLease<T> {
     /// Returns the stable runtime-local object identity.
     pub fn object_id(&self) -> HandleObjectId {
-        HandleObjectId(self.lease.object_id())
+        HandleObjectId(self.object.id().0)
     }
 }
 
 impl<T: ExcelHandleObject> Deref for HandleLease<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.lease
+        // SAFETY: `object` owns the payload for the entire lifetime of this
+        // lease, and `value` was created from that same object cell.
+        unsafe { self.value.as_ref() }
     }
 }
 
+// SAFETY: the object cell and lease guard are Send/Sync, and T is constrained
+// by ExcelHandleObject.
+unsafe impl<T: ExcelHandleObject> Send for HandleLease<T> {}
+// SAFETY: same invariant as `Send`.
+unsafe impl<T: ExcelHandleObject> Sync for HandleLease<T> {}
+
 /// A call-scoped capability that creates a formula binding to an existing
-/// object identity.
-///
-/// This type carries only the object identity and current storage key. It is
-/// not an ownership extension; the target binding must be installed before the
-/// surrounding call guard is released. If the source binding was retired in
-/// the same call, publication can recover its payload from the epoch-retired
-/// queue and assign a fresh storage key.
+/// object. It carries the source binding snapshot directly, so address-reuse
+/// and resurrection machinery are unnecessary.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
-    pub(crate) object: ObjectLocator,
+    pub(crate) binding: BindingReadLease,
     pub(crate) _call: PhantomData<HandleAliasMarker<'call, T>>,
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_locator(self) -> ObjectLocator {
-        self.object
+    pub(crate) fn into_shared_object(self) -> SharedObject {
+        triomphe::Arc::clone(self.binding.object())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn object_id(&self) -> ObjectId {
+        self.binding.object().id()
     }
 }
 

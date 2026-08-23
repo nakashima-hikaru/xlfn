@@ -987,13 +987,13 @@ where
         let token = context
             .scratch()
             .decode_utf16(value.utf16(argument)?, argument)?;
-        let handle = context.resolve_handle(token)?;
-        M::u64(identity, handle.object.id.0.0);
+        let handle = context.resolve_handle::<T>(token)?;
+        M::u64(identity, handle.object_id().0);
         Ok(handle)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
-        M::u64(identity, self.object.id.0.0);
+        M::u64(identity, self.object_id().0);
     }
 }
 
@@ -2166,15 +2166,17 @@ mod tests {
             .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))
             .unwrap();
 
-        let object = crate::value::with_excel_call_scope(|scope| {
+        let (token_b, _) = crate::value::with_excel_call_scope(|scope| {
             let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
                 handle_rt.lookup(scope, &token_a).unwrap();
-            resolved.alias().into_locator()
+            handle_rt
+                .prepare_observed_alias::<SemanticHandleTestObj, _>(
+                    topic_b,
+                    resolved.alias(),
+                    |_, _| Ok(()),
+                )
+                .unwrap()
         });
-
-        let (token_b, _) = handle_rt
-            .prepare_observed_alias::<SemanticHandleTestObj, _>(topic_b, object, |_, _| Ok(()))
-            .unwrap();
 
         assert_ne!(token_a, token_b);
 
@@ -2209,7 +2211,7 @@ mod tests {
             }
             .unwrap();
             let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object.id)
+            (handle.data, id, handle.object_id())
         });
 
         let (handle_data_b, id_b, object_id_b) = crate::value::with_excel_call_scope(|scope| {
@@ -2223,7 +2225,7 @@ mod tests {
             }
             .unwrap();
             let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object.id)
+            (handle.data, id, handle.object_id())
         });
 
         assert_eq!(handle_data_a, 99);

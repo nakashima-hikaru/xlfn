@@ -1,9 +1,9 @@
 #[cfg(target_os = "windows")]
 use super::RtdOperationGuard;
 use super::{
-    ErasedObject, ExcelHandleObject, FormulaBinding, Handle, HandlePrepareState,
-    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, ObjectId, ObjectLocator,
-    PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
+    ExcelHandleObject, FormulaBinding, Handle, HandleAlias, HandlePrepareState,
+    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, PrepareDecision,
+    PublishedTopic, PublishedTopicState, SharedObject, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{HandleConnection, HandleTopicOwner};
@@ -21,13 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 pub(crate) enum PreparedHandleObject {
-    New {
-        object_id: Option<ObjectId>,
-        value: ErasedObject,
-    },
-    Existing {
-        object: ObjectLocator,
-    },
+    New { value: SharedObject },
+    Existing { object: SharedObject },
 }
 
 thread_local! {
@@ -105,10 +100,10 @@ impl Drop for TopicReservation<'_> {
 
 /// Owns a binding and its provisional topic until publication is committed.
 ///
-/// The object registry and topic table are intentionally rolled back together:
+/// The binding table and topic table are intentionally rolled back together:
 /// a provisional token must never survive a failed observation or a topic
-/// collision.  This is the cold-path transaction boundary for handle
-/// publication.
+/// collision. The provisional object owner is dropped by the same
+/// `ObjectCell` path when publication fails.
 struct ProvisionalPublication<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
@@ -309,10 +304,11 @@ impl FormulaHandleService {
         self.prepare_observed_object::<T, K>(
             key,
             || {
-                create().map(|value| PreparedHandleObject::New {
-                    object_id: None,
-                    value: self.store.erase(value),
-                })
+                create().map(|value| {
+                    self.store
+                        .erase(value)
+                        .map(|value| PreparedHandleObject::New { value })
+                })?
             },
             observe,
         )
@@ -321,7 +317,7 @@ impl FormulaHandleService {
     pub(crate) fn prepare_observed_alias<T, K>(
         &self,
         key: K,
-        object: ObjectLocator,
+        object: HandleAlias<'_, T>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<(String, bool)>
     where
@@ -330,7 +326,11 @@ impl FormulaHandleService {
     {
         self.prepare_observed_object::<T, K>(
             key,
-            || Ok(PreparedHandleObject::Existing { object }),
+            || {
+                Ok(PreparedHandleObject::Existing {
+                    object: object.into_shared_object(),
+                })
+            },
             observe,
         )
     }
@@ -444,9 +444,7 @@ impl FormulaHandleService {
         // Cold path: no existing topic, invoke the factory.
         //
         let (token, binding_id, object_id, reused) = match create()? {
-            PreparedHandleObject::New { object_id, value } => {
-                self.store.insert_pending::<T>(value, object_id)?
-            }
+            PreparedHandleObject::New { value } => self.store.insert_pending::<T>(value)?,
             PreparedHandleObject::Existing { object } => self.store.insert_existing::<T>(object)?,
         };
         let binding = FormulaBinding {
@@ -702,9 +700,9 @@ impl FormulaHandleService {
     }
 }
 
-/// The handle runtime has stopped accepting work and its registry has moved
-/// every payload root to the retired store. The token keeps the runtime alive
-/// until add-in state cleanup has completed and pin quiescence is certified.
+/// The handle runtime has stopped accepting work and its registry has removed
+/// every live binding. The service keeps the generation alive until add-in
+/// state cleanup has completed and object/lease quiescence is certified.
 pub(crate) enum FormulaHandleServiceSealed {
     Absent {
         generation: Option<RuntimeGeneration>,
@@ -716,9 +714,10 @@ pub(crate) enum FormulaHandleServiceSealed {
     },
 }
 
-/// Proof that the handle registry for one specific runtime generation has no
-/// remaining pins. The generation identity travels with the proof so a
-/// certificate cannot be silently reused for a different service instance.
+/// Proof that the handle registry for one specific runtime generation has
+/// completed its object/lease quiescence check. The generation identity
+/// travels with the proof so a certificate cannot be silently reused for a
+/// different service instance.
 #[derive(Debug)]
 pub(crate) struct HandleStoreQuiescent {
     generation: Option<RuntimeGeneration>,

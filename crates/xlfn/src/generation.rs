@@ -85,30 +85,6 @@ impl BindingGeneration {
     }
 }
 
-/// Identity of an object-storage slot incarnation.  This is intentionally a
-/// different type from [`BindingGeneration`]: the two counters protect
-/// different ABA boundaries.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ObjectGeneration(NonZeroU64);
-
-impl ObjectGeneration {
-    pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
-
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    pub(crate) const fn next(self) -> Option<Self> {
-        match self.0.get().checked_add(1) {
-            Some(raw) => Self::new(raw),
-            None => None,
-        }
-    }
-}
-
 /// Identity of one mutable topic-table incarnation.  It is separate from
 /// the runtime generation because a topic table may reject an initializer
 /// without creating a new runtime.

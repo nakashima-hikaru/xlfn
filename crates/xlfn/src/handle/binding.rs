@@ -1,11 +1,10 @@
 //! Binding ownership and its immutable read-side publication.
 //!
-//! This module owns the formula-token side of the handle registry. Object
-//! payload ownership lives in [`super::object_store`]; binding records carry
-//! only the generation-checked object reference and its published pointer.
+//! This module owns the formula-token side of the handle registry. A binding
+//! record owns the shared [`ObjectCell`] reference that makes its immutable
+//! publication snapshot a complete read-side lifetime proof.
 
-use super::object_store::LiveObjectRef;
-use super::reclamation::PublishedObjectPtr;
+use super::object::{ObjectDropReason, SharedObject};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
 use crate::generation::BindingGeneration;
@@ -35,17 +34,15 @@ impl BindingState {
 /// the immutable read-side publication snapshot.
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
-    pub(crate) object: LiveObjectRef,
-    pub(crate) object_ref: PublishedObjectPtr,
+    pub(crate) object: SharedObject,
     pub(crate) state: AtomicU8,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object: LiveObjectRef, object_ref: PublishedObjectPtr) -> Self {
+    fn new(id: HandleId, object: SharedObject) -> Self {
         Self {
             id,
             object,
-            object_ref,
             state: AtomicU8::new(BindingState::Live as u8),
         }
     }
@@ -77,6 +74,35 @@ pub(crate) struct BindingSnapshot {
 impl BindingSnapshot {
     pub(crate) fn get(&self, slot: u32) -> Option<&triomphe::Arc<BindingRecord>> {
         self.guard.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)].as_ref()
+    }
+}
+
+/// A call-scoped read capability. The snapshot transitively owns the binding
+/// record and its `ObjectCell`; no object `Arc` is cloned on warm lookup.
+pub(crate) struct BindingReadLease {
+    snapshot: BindingSnapshot,
+    id: HandleId,
+}
+
+impl BindingReadLease {
+    pub(crate) fn new(snapshot: BindingSnapshot, id: HandleId) -> XllResult<Self> {
+        let valid = snapshot.get(id.slot).is_some_and(|record| record.id == id);
+        if !valid {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(Self { snapshot, id })
+    }
+
+    pub(crate) fn record(&self) -> &BindingRecord {
+        self.snapshot
+            .get(self.id.slot)
+            .filter(|record| record.id == self.id)
+            .map(triomphe::Arc::as_ref)
+            .expect("validated binding read lease")
+    }
+
+    pub(crate) fn object(&self) -> &SharedObject {
+        &self.record().object
     }
 }
 
@@ -237,6 +263,7 @@ impl BindingTable {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn read_state(&self) -> parking_lot::RwLockReadGuard<'_, RegistryState> {
         self.state.read()
     }
@@ -263,7 +290,6 @@ impl BindingTable {
             table: self,
             state: Some(state),
             id,
-            object: record.object,
             record,
             active: true,
         })
@@ -297,6 +323,15 @@ impl BindingTable {
         state.live_bindings = 0;
         live_bindings
     }
+
+    pub(crate) fn mark_all_drop_reason(&self, reason: ObjectDropReason) {
+        let state = self.state.read();
+        for slot in &state.slots {
+            if let Some(record) = slot.record.as_ref() {
+                record.object.mark_drop_reason(reason);
+            }
+        }
+    }
 }
 
 pub(crate) struct BindingReservation<'table> {
@@ -310,16 +345,12 @@ pub(crate) struct BindingReservation<'table> {
 }
 
 impl BindingReservation<'_> {
-    pub(crate) fn publish(
-        mut self,
-        object: LiveObjectRef,
-        object_ref: PublishedObjectPtr,
-    ) -> (HandleId, bool) {
+    pub(crate) fn publish(mut self, object: SharedObject) -> (HandleId, bool) {
         let mut state = self
             .state
             .take()
             .expect("binding reservation must own the table write lock");
-        let record = triomphe::Arc::new(BindingRecord::new(self.id, object, object_ref));
+        let record = triomphe::Arc::new(BindingRecord::new(self.id, object));
         state.slots[self.index].record = Some(triomphe::Arc::clone(&record));
         self.table.published.insert(self.id, record);
         state.live_bindings = state
@@ -357,14 +388,18 @@ pub(crate) struct BindingRemoval<'table> {
     pub(super) table: &'table BindingTable,
     pub(super) state: Option<RwLockWriteGuard<'table, RegistryState>>,
     pub(super) id: HandleId,
-    pub(super) object: LiveObjectRef,
     pub(super) record: triomphe::Arc<BindingRecord>,
     pub(super) active: bool,
 }
 
 impl BindingRemoval<'_> {
-    pub(crate) fn object(&self) -> LiveObjectRef {
-        self.object
+    #[cfg(test)]
+    pub(crate) fn object(&self) -> &SharedObject {
+        &self.record.object
+    }
+
+    pub(crate) fn mark_drop_reason(&self, reason: ObjectDropReason) {
+        self.record.object.mark_drop_reason(reason);
     }
 
     pub(crate) fn commit(mut self) -> bool {

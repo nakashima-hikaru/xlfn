@@ -42,7 +42,7 @@ fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> Inpu
     let mut builder = InputFingerprintBuilder::new(1);
     builder
         .with_argument(0, "handle", |encoder| {
-            encoder.u64(value.object.id.0.0);
+            encoder.u64(value.object_id().0);
             Ok(())
         })
         .unwrap();
@@ -437,7 +437,7 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
 }
 
 #[test]
-fn one_call_scope_carries_one_object_store_capability() {
+fn one_call_scope_can_borrow_from_each_runtime() {
     struct ScopeObject(u32);
     impl ExcelHandleObject for ScopeObject {}
 
@@ -449,20 +449,18 @@ fn one_call_scope_carries_one_object_store_capability() {
     crate::value::with_excel_call_scope(|scope| {
         let first_handle = first
             .lookup_handle::<ScopeObject>(scope, &first_token)
-            .expect("the first runtime establishes the call object store");
+            .expect("the first runtime publishes the handle");
         assert_eq!(first_handle.0, 1);
 
-        assert!(matches!(
-            second.lookup_handle::<ScopeObject>(scope, &second_token),
-            Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT
-            })
-        ));
+        let second_handle = second
+            .lookup_handle::<ScopeObject>(scope, &second_token)
+            .expect("binding snapshots are runtime-local and independently owned");
+        assert_eq!(second_handle.0, 2);
     });
 }
 
 #[test]
-fn published_binding_snapshot_does_not_own_object_after_retirement() {
+fn published_binding_snapshot_keeps_object_alive_after_retirement() {
     struct Counted(Arc<AtomicUsize>);
     impl ExcelHandleObject for Counted {}
     impl Drop for Counted {
@@ -489,7 +487,7 @@ fn published_binding_snapshot_does_not_own_object_after_retirement() {
 
     registry.remove::<Counted>(&token).unwrap();
     assert_eq!(publication.state(), BindingState::Retired);
-    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(snapshot);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -973,11 +971,11 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     let alias_rtd_key = alias_key.format_rtd_key();
     let (alias_token, object_id) = crate::value::with_excel_call_scope(|scope| {
         let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        let object = resolved.alias().into_locator();
+        let object_id = resolved.object_id();
         let alias = runtime
-            .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
+            .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
             .unwrap();
-        (alias.0, object.id)
+        (alias.0, object_id)
     });
     runtime
         .connect(server_generation(1), 2, &alias_rtd_key)
@@ -1009,7 +1007,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         .as_ref()
         .unwrap()
         .object
-        .id;
+        .id();
     assert_ne!(source_binding, alias_binding);
     assert_eq!(alias_object_id, object_id);
     drop(state);
@@ -1063,9 +1061,8 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     let alias_rtd_key = alias_key.format_rtd_key();
     let alias_token = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
-        let object = source.alias().into_locator();
         runtime
-            .prepare_observed_alias::<DropTracked, _>(alias_key, object, |_, _| Ok(()))
+            .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap()
             .0
     });
@@ -1091,7 +1088,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
 }
 
 #[test]
-fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
+fn alias_publication_keeps_a_snapshot_owned_object_alive() {
     struct DropTracked {
         value: u32,
         drops: Arc<AtomicUsize>,
@@ -1107,7 +1104,7 @@ fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
 
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
-    let source_key = test_topic_key("resurrection-source");
+    let source_key = test_topic_key("snapshot-source");
     let (source_token, _) = runtime
         .prepare_observed(
             source_key,
@@ -1121,20 +1118,20 @@ fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
         )
         .unwrap();
 
-    let alias_key = test_topic_key("resurrection-alias");
+    let alias_key = test_topic_key("snapshot-alias");
     let alias_token = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
-        let object = source.alias().into_locator();
+        let object_id = source.object_id();
 
-        // The active call epoch keeps the detached payload available for the
-        // alias publication even though its last live binding is gone.
+        // The source binding snapshot keeps the object available for alias
+        // publication even though its last live binding is gone.
         runtime
             .store
             .registry
             .remove_and_drop(&source_token, "retire source before alias publication");
 
         let (alias_token, _) = runtime
-            .prepare_observed_alias::<DropTracked, _>(alias_key, object, |_, _| Ok(()))
+            .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap();
 
         let alias_id = runtime
@@ -1151,12 +1148,11 @@ fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
         let alias_record = state.slots[alias_id.slot as usize]
             .record
             .as_ref()
-            .expect("resurrected alias must have a canonical record");
-        assert_eq!(alias_record.object.id, object.id);
-        assert_ne!(alias_record.object.key, object.key_hint);
+            .expect("aliased object must have a canonical record");
+        assert_eq!(alias_record.object.id(), object_id);
         drop(state);
 
-        (alias_token, object.id)
+        (alias_token, object_id)
     })
     .0;
 
@@ -1169,7 +1165,7 @@ fn alias_publication_resurrects_a_retired_object_with_a_new_storage_key() {
     runtime
         .store
         .registry
-        .remove_and_drop(&alias_token, "remove resurrected alias");
+        .remove_and_drop(&alias_token, "remove snapshot alias");
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     runtime.seal().map(|_| ()).unwrap();
 }
@@ -1184,16 +1180,15 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         .connect(server_generation(1), 5, &source_rtd_key)
         .unwrap();
 
-    let object = crate::value::with_excel_call_scope(|scope| {
+    let alias_key = test_topic_key("identity-alias");
+    let (alias_token, _) = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        source.alias().into_locator()
+        runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
     });
 
-    let alias_key = test_topic_key("identity-alias");
     let alias_rtd_key = alias_key.format_rtd_key();
-    let (alias_token, _) = runtime
-        .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
-        .unwrap();
     runtime
         .connect(server_generation(1), 6, &alias_rtd_key)
         .unwrap();
@@ -1209,13 +1204,13 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
-        assert_eq!(source.object.id, alias.object.id);
+        assert_eq!(source.object_id(), alias.object_id());
         assert_eq!(input_identity(&source), input_identity(&alias));
         assert_eq!(
             input_identity(&source),
-            reference_handle_identity(source.object.id.0.0)
+            reference_handle_identity(source.object_id().0)
         );
-        assert_ne!(source.object.id, other.object.id);
+        assert_ne!(source.object_id(), other.object_id());
         assert_ne!(input_identity(&source), input_identity(&other));
     });
 
@@ -1239,16 +1234,15 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .connect(server_generation(1), 50, &source_rtd_key)
         .unwrap();
 
-    let object = crate::value::with_excel_call_scope(|scope| {
+    let alias_key = test_topic_key("semantic-memo-alias");
+    let alias_token = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        source.alias().into_locator()
+        runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
     });
 
-    let alias_key = test_topic_key("semantic-memo-alias");
-    let alias_token = runtime
-        .prepare_observed_alias::<DataRecord, _>(alias_key, object, |_, _| Ok(()))
-        .unwrap()
-        .0;
+    let alias_token = alias_token.0;
     let alias_rtd_key = alias_key.format_rtd_key();
     runtime
         .connect(server_generation(1), 51, &alias_rtd_key)
@@ -1266,7 +1260,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
             let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
             let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
             let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
-            assert_eq!(source.object.id, alias.object.id);
+            assert_eq!(source.object_id(), alias.object_id());
             (
                 semantic_handle_key(&source),
                 semantic_handle_key(&alias),
@@ -1306,9 +1300,9 @@ fn semantic_handle_identity_controls_formula_memoization() {
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
     assert_eq!(token_a, token_b);
     let object_a =
-        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object.id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object_id()).unwrap();
     let object_b =
-        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object.id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object_id()).unwrap();
     assert_eq!(object_a, object_b);
 
     let third_calls = Arc::clone(&factory_calls);
@@ -1326,7 +1320,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
     assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
     assert_ne!(token_a, token_c);
     let object_c =
-        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object.id).unwrap();
+        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object_id()).unwrap();
     assert_ne!(object_a, object_c);
 
     for (topic_id, rtd_key) in [
@@ -1552,10 +1546,31 @@ fn handle_lease_survives_terminal_runtime_close() {
 }
 
 #[test]
-fn pin_promotion_resurrects_a_retired_payload_without_a_binding() {
+fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("snapshot-quiescence");
+    let (token, _) = runtime.prepare(key, || Ok(DataRecord(42))).unwrap();
+
+    crate::value::with_excel_call_scope(|scope| {
+        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+        let sealed = runtime.seal().unwrap();
+
+        assert!(matches!(
+            runtime.store.registry.finish_quiescence(&sealed),
+            Err(XllError::Internal { diagnostic_id })
+                if diagnostic_id == crate::error::DiagnosticId::HANDLE_OBJECTS
+        ));
+
+        drop(handle);
+        runtime.store.registry.finish_quiescence(&sealed).unwrap();
+    });
+}
+
+#[test]
+fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
-    let key = test_topic_key("handle-lease-resurrection");
+    let key = test_topic_key("handle-lease-after-binding-removal");
     let (token, _) = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap();
@@ -1565,7 +1580,7 @@ fn pin_promotion_resurrects_a_retired_payload_without_a_binding() {
         runtime
             .store
             .registry
-            .remove_and_drop(&token, "test retire before pin promotion");
+            .remove_and_drop(&token, "test remove before lease promotion");
         handle.pin().unwrap()
     });
 
@@ -2000,7 +2015,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
 }
 
 #[test]
-fn disconnect_rejects_provisional_excel_commit_without_resurrection() {
+fn disconnect_rejects_provisional_excel_commit_after_topic_detach() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let observed_runtime = Arc::clone(&runtime);
     let key = test_topic_key("disconnect-before-excel-commit");
@@ -2433,22 +2448,22 @@ fn alias_preserves_pointer_and_object_identity() {
 
     let (token2, object_id1, ptr1) = crate::value::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
-        let object = handle1.object;
-        let ptr = handle1.value.address();
+        let object_id = handle1.object_id();
+        let ptr = handle1.value.addr();
         let alias = handle1.alias();
         let key2 = test_topic_key("alias_identity_2");
         let (token2, _) = runtime
-            .prepare_observed_alias::<TrackedObj, _>(key2, alias.object, |_, _| Ok(()))
+            .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
             .unwrap();
-        (token2, object.id, ptr)
+        (token2, object_id, ptr)
     });
 
     assert_ne!(token1, token2);
 
     crate::value::with_excel_call_scope(|scope| {
         let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
-        assert_eq!(handle2.object.id, object_id1);
-        assert_eq!(handle2.value.address(), ptr1);
+        assert_eq!(handle2.object_id(), object_id1);
+        assert_eq!(handle2.value.addr(), ptr1);
         assert_eq!(*handle2, TrackedObj(12345));
     });
 }
@@ -2488,7 +2503,7 @@ fn removing_original_binding_keeps_aliased_object_alive() {
         let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
         let alias = handle1.alias();
         let (token2, _) = runtime
-            .prepare_observed_alias::<DropCounter, _>(key2, alias.object, |_, _| Ok(()))
+            .prepare_observed_alias::<DropCounter, _>(key2, alias, |_, _| Ok(()))
             .unwrap();
         token2
     });
@@ -2548,13 +2563,14 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
         let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
         assert_eq!(handle.val, 777);
 
-        // Retire the binding while the call guard is still in scope.
+        // Remove the binding while the call scope is still in scope.
         runtime
             .store
             .registry
             .remove_and_drop(&token, "test remove");
 
-        // The epoch guard, not the publication snapshot, keeps the object alive.
+        // The publication snapshot keeps the object alive after the binding
+        // record is removed.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
         // Dereference remains safe
@@ -2636,18 +2652,19 @@ fn zero_sized_type_handle_lifecycle() {
     let (token2, object_id) = crate::value::with_excel_call_scope(|scope| {
         let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
         assert_eq!(*handle1, ZeroSized);
+        let object_id = handle1.object_id();
         let alias = handle1.alias();
         let key2 = test_topic_key("zst_test_2");
         let (token2, _) = runtime
-            .prepare_observed_alias::<ZeroSized, _>(key2, alias.object, |_, _| Ok(()))
+            .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
             .unwrap();
-        (token2, alias.object.id)
+        (token2, object_id)
     });
 
     crate::value::with_excel_call_scope(|scope| {
         let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
         assert_eq!(*handle2, ZeroSized);
-        assert_eq!(handle2.object.id, object_id);
+        assert_eq!(handle2.object_id(), object_id);
     });
 
     runtime
@@ -2706,10 +2723,10 @@ fn alias_capability_does_not_extend_object_lifetime() {
             .registry
             .remove_and_drop(&token, "remove original");
 
-        // The call epoch keeps the retired object readable until the scope
+        // The binding snapshot keeps the object readable until the scope
         // ends, but the borrowed alias is not an ownership extension.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(alias.object.id.0.0, 1);
+        assert_eq!(alias.object_id().0, 1);
     });
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

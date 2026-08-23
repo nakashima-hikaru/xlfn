@@ -1,26 +1,23 @@
-//! Public-internal facade for the handle registry.
+//! Lifecycle and orchestration for the formula-handle registry.
 //!
-//! Binding publication, object ownership, and write transactions live in
-//! sibling modules. This module owns only the registry lifecycle and the
-//! orchestration exposed to the rest of the handle subsystem.
+//! `BindingTable` is the only mutable binding store. Each published record
+//! owns its `ObjectCell`, while immutable snapshots provide the call-scoped
+//! read capability. There is no second object registry, retired queue, or
+//! resurrection path to keep in sync.
 
-use super::binding::{BindingState, BindingTable};
-use super::object_store::{
-    ErasedObject, HandleCleanupState, LiveObjectRef, ObjectIdentity, ObjectLocator, ObjectRoots,
-    ObjectStore,
-};
-use super::reclamation::CallHandleCapabilities;
+use super::binding::{BindingReadLease, BindingState, BindingTable};
+use super::object::{ObjectCell, ObjectDropReason, ObjectLifetimeTracker, SharedObject};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
-use super::transaction::{RegistryRemovalTxn, RegistryWriteTxn};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::{XllError, XllResult};
-#[cfg(any(test, feature = "unstable"))]
-use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
+#[cfg(any(test, feature = "unstable"))]
+use parking_lot::Mutex;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,42 +53,34 @@ pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
     pub(super) bindings: BindingTable,
-    pub(super) cleanup: Arc<HandleCleanupState>,
-    pub(super) objects: Arc<ObjectStore>,
+    pub(super) lifetime: Arc<ObjectLifetimeTracker>,
+    next_object_id: AtomicU64,
     #[cfg(any(test, feature = "unstable"))]
     pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
 }
 
-pub(crate) struct PendingHandleValue<'a> {
-    registry: &'a HandleRegistry,
-    value: Option<ErasedObject>,
-    operation: &'static str,
+/// Owns an object until a binding reservation consumes it. If publication
+/// fails, dropping this guard releases the object through the same
+/// `ObjectCell` destructor path as every other ownership edge.
+pub(crate) struct PendingHandleValue {
+    value: Option<SharedObject>,
 }
 
-impl<'a> PendingHandleValue<'a> {
-    pub(crate) fn new(
-        registry: &'a HandleRegistry,
-        value: ErasedObject,
-        operation: &'static str,
-    ) -> Self {
-        Self {
-            registry,
-            value: Some(value),
-            operation,
-        }
+impl PendingHandleValue {
+    pub(crate) fn new(value: SharedObject) -> Self {
+        Self { value: Some(value) }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<ErasedObject> {
+    pub(crate) fn slot(&mut self) -> &mut Option<SharedObject> {
         &mut self.value
     }
 }
 
-impl Drop for PendingHandleValue<'_> {
+impl Drop for PendingHandleValue {
     fn drop(&mut self) {
-        if let Some(mut value) = self.value.take() {
-            value.set_drop_operation(self.operation);
+        if let Some(value) = self.value.take() {
+            value.mark_drop_reason(ObjectDropReason::PublicationRollback);
             drop(value);
-            self.registry.objects.reclaim();
         }
     }
 }
@@ -141,14 +130,13 @@ impl HandleRegistry {
         let secret = entropy[8..]
             .try_into()
             .expect("the handle MAC key slice has 32 bytes");
-        let cleanup = Arc::new(HandleCleanupState::new());
-        let objects = Arc::new(ObjectStore::new(session));
+        let lifetime = ObjectLifetimeTracker::new();
         Self {
             codec: TokenCodec::new(session, secret),
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             bindings: BindingTable::new(maximum_bindings),
-            cleanup,
-            objects,
+            lifetime,
+            next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "unstable"))]
             ghost: Mutex::new(None),
         }
@@ -156,7 +144,7 @@ impl HandleRegistry {
 
     #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.objects.set_ghost(Arc::clone(&ghost));
+        self.lifetime.set_ghost(Arc::clone(&ghost));
         *self.ghost.lock() = Some(ghost);
     }
 
@@ -193,24 +181,36 @@ impl HandleRegistry {
         self.phase() == HandleRegistryPhase::Open
     }
 
+    fn allocate_object_id(&self) -> XllResult<ObjectId> {
+        self.next_object_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map(ObjectId)
+            .map_err(|_| XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })
+    }
+
+    pub(crate) fn new_object<T: Send + Sync + 'static>(&self, value: T) -> XllResult<SharedObject> {
+        let object_id = self.allocate_object_id()?;
+        ObjectCell::new(object_id, value, Arc::clone(&self.lifetime))
+    }
+
     #[cfg(test)]
-    pub(crate) fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
+    pub fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
     where
         T: Send + Sync + 'static,
     {
-        let object = ErasedObject::new(
-            value.take().expect("pending handle value is armed"),
-            Arc::clone(&self.cleanup),
-        );
-        let mut object = Some(object);
-        self.insert_pending_object_with_kind::<T>(&mut object, None)
+        let object = self.new_object(value.take().expect("pending handle value is armed"))?;
+        let mut object = PendingHandleValue::new(object);
+        self.insert_pending_object_with_kind::<T>(object.slot())
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<ErasedObject>,
-        requested_object_id: Option<ObjectId>,
+        value: &mut Option<SharedObject>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Send + Sync + 'static,
@@ -218,77 +218,12 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let mut transaction = RegistryWriteTxn::reserve(self)?;
-
         let object = value.as_ref().expect("pending handle object is armed");
-        if object.type_id != TypeId::of::<T>() {
-            let actual_type = object.type_name;
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                tracing::warn!(
-                    expected_type = type_name::<T>(),
-                    actual_type,
-                    "Excel handle object type mismatch"
-                );
-            }));
-            return Err(XllError::InvalidHandle);
-        }
-        let object_id = match requested_object_id {
-            Some(object_id) => object_id,
-            None => self.objects.allocate_object_id()?,
-        };
-        let existing_key =
-            requested_object_id.and_then(|_| transaction.objects().key_for_identity(object_id));
-        let existing_object_ref = if let Some(existing_key) = existing_key {
-            let entry = transaction
-                .objects()
-                .get(existing_key)
-                .expect("object identity index must point at a live entry");
-            if entry.value.type_id != TypeId::of::<T>() {
-                let actual_type = entry.value.type_name;
-                let _ = catch_unwind(AssertUnwindSafe(|| {
-                    tracing::warn!(
-                        expected_type = type_name::<T>(),
-                        actual_type,
-                        "Excel handle alias type mismatch"
-                    );
-                }));
-                return Err(XllError::InvalidHandle);
-            }
-            if entry.value.address() != object.address() {
-                return Err(XllError::StaleHandle);
-            }
-            Some(entry.value.published_ptr())
-        } else {
-            None
-        };
-        let (object_key, object_ref) = match existing_key {
-            Some(existing_key) => {
-                transaction.objects().add_binding(LiveObjectRef {
-                    id: ObjectIdentity(object_id),
-                    key: existing_key,
-                })?;
-                (
-                    existing_key,
-                    existing_object_ref.expect("existing object reference was validated above"),
-                )
-            }
-            None => {
-                let object_ref = value
-                    .as_ref()
-                    .expect("pending handle object is armed")
-                    .published_ptr();
-                let object_key = transaction.objects().insert(object_id, value)?;
-                (object_key, object_ref)
-            }
-        };
-
-        let (id, reused) = transaction.publish(
-            LiveObjectRef {
-                id: ObjectIdentity(object_id),
-                key: object_key,
-            },
-            object_ref,
-        );
+        self.validate_type::<T>(object)?;
+        let reservation = self.bindings.reserve()?;
+        let object = value.take().expect("pending handle object is armed");
+        let object_id = object.id();
+        let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
@@ -296,74 +231,36 @@ impl HandleRegistry {
 
     pub(crate) fn insert_existing_object_binding<T>(
         &self,
-        object: ObjectLocator,
+        object: SharedObject,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
-        T: ExcelHandleObject,
+        T: Send + Sync + 'static,
     {
-        let object_id = object.id.0;
-        let requested_object_key = object.key_hint;
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let mut transaction = RegistryWriteTxn::reserve(self)?;
-        let live_key = transaction
-            .objects()
-            .get(requested_object_key)
-            .map(|_| requested_object_key)
-            .or_else(|| transaction.objects().key_for_identity(object_id));
-        let (object_key, object_ref) = if let Some(object_key) = live_key {
-            let entry = transaction
-                .objects()
-                .get(object_key)
-                .expect("object identity index must point at a live entry");
-            if entry.object_id != object_id {
-                return Err(XllError::StaleHandle);
-            }
-            if entry.value.type_id != TypeId::of::<T>() {
-                let actual_type = entry.value.type_name;
-                let _ = catch_unwind(AssertUnwindSafe(|| {
-                    tracing::warn!(
-                        expected_type = type_name::<T>(),
-                        actual_type,
-                        "Excel handle alias type mismatch"
-                    );
-                }));
-                return Err(XllError::InvalidHandle);
-            }
-            let object_ref = entry.value.published_ptr();
-            transaction.objects().add_binding(LiveObjectRef {
-                id: ObjectIdentity(object_id),
-                key: object_key,
-            })?;
-            (object_key, object_ref)
-        } else {
-            let Some((object_key, object_ref)) = self.objects.resurrect(
-                transaction.objects(),
-                ObjectLocator {
-                    id: ObjectIdentity(object_id),
-                    key_hint: requested_object_key,
-                },
-                TypeId::of::<T>(),
-                type_name::<T>(),
-                ObjectRoots::with_binding(),
-            )?
-            else {
-                return Err(XllError::StaleHandle);
-            };
-            (object_key, object_ref)
-        };
-
-        let (id, reused) = transaction.publish(
-            LiveObjectRef {
-                id: ObjectIdentity(object_id),
-                key: object_key,
-            },
-            object_ref,
-        );
+        self.validate_type::<T>(&object)?;
+        let object_id = object.id();
+        let reservation = self.bindings.reserve()?;
+        let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
+    }
+
+    fn validate_type<T: Send + Sync + 'static>(&self, object: &SharedObject) -> XllResult<()> {
+        if object.type_id() == TypeId::of::<T>() {
+            return Ok(());
+        }
+        let actual_type = object.type_name();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            tracing::warn!(
+                expected_type = type_name::<T>(),
+                actual_type,
+                "Excel handle object type mismatch"
+            );
+        }));
+        Err(XllError::InvalidHandle)
     }
 
     #[cfg(test)]
@@ -374,48 +271,28 @@ impl HandleRegistry {
         let verified = self
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
-        let id = verified.id;
-        let state = self.bindings.read_state();
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let slot = state
-            .slots
-            .get(id.slot as usize)
-            .ok_or(XllError::StaleHandle)?;
-        let record = slot
-            .record
-            .as_ref()
-            .filter(|record| record.id == id)
-            .ok_or(XllError::StaleHandle)?;
-        let objects = self.objects.lock_live();
-        let object = objects
-            .get(record.object.key)
-            .ok_or(XllError::StaleHandle)?;
-        let object_ref = object.value.published_ptr();
-        let Some(value) = object_ref.typed_ptr::<T>() else {
-            let actual_type = object.value.type_name;
-            drop(state);
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                tracing::warn!(
-                    expected_type = type_name::<T>(),
-                    actual_type,
-                    "Excel handle type mismatch"
-                );
-            }));
-            return Err(XllError::InvalidHandle);
-        };
-        // SAFETY: `value` points to the live data payload owned by the object
-        // registry while the read lock is held.
-        let value = unsafe { value.as_ref().clone() };
-        drop(objects);
-        drop(state);
-        Ok(value)
+        let lease = BindingReadLease::new(
+            self.bindings.published().load(verified.id.slot),
+            verified.id,
+        )?;
+        let record = lease.record();
+        if record.state() != BindingState::Live {
+            return Err(XllError::StaleHandle);
+        }
+        let value = record
+            .object
+            .typed_ptr::<T>()
+            .ok_or(XllError::InvalidHandle)?;
+        // SAFETY: the read lease owns the object cell containing this value.
+        Ok(unsafe { value.as_ref().clone() })
     }
 
     pub(crate) fn lookup_handle<'call, T>(
         &self,
-        scope: &'call crate::call::CallScope<'call>,
+        _scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where
@@ -424,78 +301,19 @@ impl HandleRegistry {
         let verified = self
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
-        let id = verified.id;
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let capabilities = scope.handle_guard().register(&self.objects)?;
-        let published_snapshot = self.bindings.published().load(id.slot);
-        if let Some(record) = published_snapshot
-            .get(id.slot)
-            .filter(|record| record.id == id)
-        {
-            if !self.is_open() {
-                return Err(XllError::Closing);
-            }
-            if record.state() != BindingState::Live {
-                return Err(XllError::StaleHandle);
-            }
-            let Some(value) = record.object_ref.resolve::<T>(capabilities.read_guard()) else {
-                let actual_type = record.object_ref.type_name;
-                let _ = catch_unwind(AssertUnwindSafe(|| {
-                    tracing::warn!(
-                        expected_type = type_name::<T>(),
-                        actual_type,
-                        "Excel handle type mismatch"
-                    );
-                }));
-                return Err(XllError::InvalidHandle);
-            };
-            if record.state() != BindingState::Live {
-                return Err(XllError::StaleHandle);
-            }
-
-            let object = record.object;
-            drop(published_snapshot);
-            return Ok(Handle::new(object, value, capabilities.pin_context()));
-        }
-        drop(published_snapshot);
-
-        self.lookup_handle_slow(id, capabilities)
-    }
-
-    fn lookup_handle_slow<'call, T>(
-        &self,
-        id: HandleId,
-        capabilities: CallHandleCapabilities<'call>,
-    ) -> XllResult<Handle<'call, T>>
-    where
-        T: ExcelHandleObject,
-    {
-        let state = self.bindings.read_state();
-        if !self.is_open() {
-            return Err(XllError::Closing);
-        }
-        let slot = state
-            .slots
-            .get(id.slot as usize)
-            .ok_or(XllError::StaleHandle)?;
-        let record = slot
-            .record
-            .as_ref()
-            .filter(|record| record.id == id)
-            .ok_or(XllError::StaleHandle)?;
-        let published_snapshot = self.bindings.published().load(id.slot);
-        let record = published_snapshot
-            .get(id.slot)
-            .filter(|published| triomphe::Arc::ptr_eq(published, record))
-            .ok_or(XllError::StaleHandle)?;
+        let binding = BindingReadLease::new(
+            self.bindings.published().load(verified.id.slot),
+            verified.id,
+        )?;
+        let record = binding.record();
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
-        let Some(value) = record.object_ref.resolve::<T>(capabilities.read_guard()) else {
-            let actual_type = record.object_ref.type_name;
-            drop(state);
+        let Some(value) = record.object.typed_ptr::<T>() else {
+            let actual_type = record.object.type_name();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
                     expected_type = type_name::<T>(),
@@ -505,41 +323,36 @@ impl HandleRegistry {
             }));
             return Err(XllError::InvalidHandle);
         };
-
-        let object = record.object;
-        drop(state);
-        Ok(Handle::new(object, value, capabilities.pin_context()))
+        if record.state() != BindingState::Live {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(Handle::new(binding, value))
     }
 
     #[cfg(test)]
-    pub(crate) fn remove<T>(&self, token: &str) -> XllResult<()>
-    where
-        T: Send + Sync + 'static,
-    {
+    pub(crate) fn remove<T: Send + Sync + 'static>(&self, token: &str) -> XllResult<()> {
         let verified = self
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
-        let id = verified.id;
-        if !self.is_open() {
-            return Err(XllError::Closing);
-        }
-        let mut transaction = RegistryRemovalTxn::begin(self, id)?;
-        let object_key = transaction.object().key;
-        let object = transaction
-            .objects()
-            .get(object_key)
-            .ok_or(XllError::StaleHandle)?;
-        if object.value.published_ptr().typed_ptr::<T>().is_none() {
+        let removal = self.bindings.begin_removal(verified.id)?;
+        if removal.object().typed_ptr::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
-        let value = transaction.objects().release_binding(object_key);
-        let _reusable = transaction.commit();
-        if let Some(value) = value {
-            self.objects.retire(value, "handle registry test removal");
-        }
+        removal.mark_drop_reason(ObjectDropReason::BindingRemoved);
+        removal.commit();
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(())
+    }
+
+    fn drop_reason(operation: &'static str) -> ObjectDropReason {
+        if operation.contains("rollback") {
+            ObjectDropReason::PublicationRollback
+        } else if operation.contains("close") {
+            ObjectDropReason::Shutdown
+        } else {
+            ObjectDropReason::BindingRemoved
+        }
     }
 
     fn remove_with_kind(
@@ -551,25 +364,20 @@ impl HandleRegistry {
         let verified = self
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
-        let id = verified.id;
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let mut transaction = RegistryRemovalTxn::begin(self, id)?;
-        let object_key = transaction.object().key;
-        let value = transaction.objects().release_binding(object_key);
-        let reusable = transaction.commit();
+        let removal = self.bindings.begin_removal(verified.id)?;
+        removal.mark_drop_reason(Self::drop_reason(operation));
+        let reusable = removal.commit();
         on_linearized(reusable);
-        if let Some(value) = value {
-            self.objects.retire(value, operation);
-        }
         #[cfg(any(test, feature = "unstable"))]
         self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
         Ok(reusable)
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
-        self.cleanup.result()
+        self.lifetime.cleanup().result()
     }
 
     #[cfg(test)]
@@ -587,10 +395,9 @@ impl HandleRegistry {
     }
 
     pub(crate) fn retire_values_for_seal(&self) -> usize {
+        self.bindings
+            .mark_all_drop_reason(ObjectDropReason::Shutdown);
         let live_bindings = self.bindings.retire_all();
-        self.objects.seal();
-        let values = self.objects.lock_live().take_all();
-        self.objects.retire_all(values, "handle registry close");
         #[cfg(any(test, feature = "unstable"))]
         for _ in 0..live_bindings {
             self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
@@ -598,8 +405,6 @@ impl HandleRegistry {
         usize::try_from(live_bindings).expect("binding count fits in usize")
     }
 
-    /// Reject new token resolutions while the runtime drains topic and
-    /// prepare work. Actual value retirement remains in [`Self::seal`].
     pub(crate) fn begin_close(&self) {
         let _ = self.phase.compare_exchange(
             HandleRegistryPhase::Open as u8,
@@ -609,7 +414,6 @@ impl HandleRegistry {
         );
     }
 
-    /// Seal the registry after the handle runtime has drained calls.
     pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed> {
         let previous = self
             .phase
@@ -618,8 +422,8 @@ impl HandleRegistry {
             self.cleanup_result()?;
             return Ok(HandleRegistrySealed::new());
         }
+        self.lifetime.seal();
         self.retire_values_for_seal();
-        self.objects.reclaim();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()?;
@@ -627,7 +431,6 @@ impl HandleRegistry {
     }
 
     pub(super) fn finish_quiescence(&self, _sealed: &HandleRegistrySealed) -> XllResult<()> {
-        self.objects.finish_quiescence()?;
-        Ok(())
+        self.lifetime.finish_quiescence()
     }
 }

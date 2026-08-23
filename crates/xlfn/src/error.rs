@@ -138,6 +138,7 @@ impl DiagnosticId {
     pub(crate) const HANDLE_CONTEXT: Self = Self::from_ascii8(*b"HANDCTXT");
     pub(crate) const INPUT_FINGERPRINT: Self = Self::from_ascii8(*b"INPFRMPT");
     pub(crate) const HANDLE_PINS: Self = Self::from_ascii8(*b"HANDPINS");
+    pub(crate) const HANDLE_OBJECTS: Self = Self::from_ascii8(*b"HANDOBJS");
     pub(crate) const RETURN_REOPEN: Self = Self::from_ascii8(*b"RTNREOPN");
     pub(crate) const RTD_HANDLE: Self = Self::from_ascii8(*b"RTDHANDL");
     pub(crate) const RTD_MULTI: Self = Self::from_ascii8(*b"RTDMULTI");

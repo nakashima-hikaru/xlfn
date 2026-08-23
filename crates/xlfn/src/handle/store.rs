@@ -1,18 +1,17 @@
 //! Object ownership for formula-owned Excel handles.
 //!
-//! `HandleStore` is the sole owner of the token registry, object payloads, and
-//! reclamation roots. Formula revision memoization and RTD topic state live in
+//! `HandleStore` is the sole owner of the token registry and object payloads.
+//! Formula revision memoization and RTD topic state live in
 //! [`super::runtime::FormulaHandleService`]; they use this façade instead of
 //! reaching into the registry lifecycle directly.
 
-use super::object_store::{ErasedObject, ObjectLocator};
+use super::object::SharedObject;
 use super::registry::{HandleRegistry, HandleRegistrySealed, PendingHandleValue};
 use super::{ExcelHandleObject, Handle, HandleId, HandleToken, ObjectId, TokenWire};
 use crate::XllResult;
 use crate::generation::RuntimeGeneration;
-use std::sync::Arc;
 
-/// Owns the object registry and its payload/reclamation state.
+/// Owns the binding registry and its `ObjectCell` lifetime state.
 ///
 /// This type deliberately has no formula identity, topic, or RTD state. Those
 /// concerns belong to the formula publication service above it.
@@ -27,8 +26,8 @@ impl HandleStore {
         })
     }
 
-    pub(crate) fn erase<T: ExcelHandleObject>(&self, value: T) -> ErasedObject {
-        ErasedObject::new(value, Arc::clone(&self.registry.cleanup))
+    pub(crate) fn erase<T: ExcelHandleObject>(&self, value: T) -> XllResult<SharedObject> {
+        self.registry.new_object(value)
     }
 
     pub(crate) const fn session(&self) -> u64 {
@@ -37,18 +36,16 @@ impl HandleStore {
 
     pub(crate) fn insert_pending<T: ExcelHandleObject>(
         &self,
-        value: ErasedObject,
-        requested_object_id: Option<ObjectId>,
+        value: SharedObject,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        let mut pending =
-            PendingHandleValue::new(&self.registry, value, "unpublished handle formula value");
+        let mut pending = PendingHandleValue::new(value);
         self.registry
-            .insert_pending_object_with_kind::<T>(pending.slot(), requested_object_id)
+            .insert_pending_object_with_kind::<T>(pending.slot())
     }
 
     pub(crate) fn insert_existing<T: ExcelHandleObject>(
         &self,
-        object: ObjectLocator,
+        object: SharedObject,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
         self.registry.insert_existing_object_binding::<T>(object)
     }

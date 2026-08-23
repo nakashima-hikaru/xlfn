@@ -50,7 +50,6 @@ impl CallScratch {
 #[doc(hidden)]
 pub struct CallScope<'call> {
     callbacks: HostCallbackSession,
-    handle_guard: crate::handle::HandleCallGuard,
     scratch: CallScratch,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
@@ -59,7 +58,6 @@ impl<'call> CallScope<'call> {
     pub(crate) fn new() -> Self {
         Self {
             callbacks: HostCallbackSession::new(),
-            handle_guard: crate::handle::HandleCallGuard::new(),
             scratch: CallScratch::new(),
             lifetime: PhantomData,
         }
@@ -67,10 +65,6 @@ impl<'call> CallScope<'call> {
 
     pub(crate) fn callbacks(&self) -> &HostCallbackSession {
         &self.callbacks
-    }
-
-    pub(crate) fn handle_guard(&'call self) -> &'call crate::handle::HandleCallGuard {
-        &self.handle_guard
     }
 
     pub(crate) fn scratch(&'call self) -> &'call CallScratch {
