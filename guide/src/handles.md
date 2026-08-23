@@ -101,12 +101,13 @@ fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<HandleLease<Data
 }
 ```
 
-These types own a registry pin, not an `Arc<T>`. The registry remains the sole
-owner of the payload, and the payload is released when its formula bindings and
-all explicit pins are gone. A pin may therefore survive formula disconnect or
-terminal runtime close, but it must be dropped when the application no longer
-needs it. `HandleLease` is not an Excel return value. It is the owned handle
-type used when a value must cross Excel calls or enter an asynchronous UDF.
+These types own an explicit registry lease backed by the shared handle object;
+xlfn never exposes the payload as an `Arc<T>`. A call-scoped binding snapshot
+keeps the object alive for `Handle` and `HandleAlias`, while `HandleLease`
+adds the long-lived lease needed across Excel calls or inside an asynchronous
+UDF. A lease may outlive formula disconnect and may remain alive while
+terminal close is being attempted, but a successful terminal close requires
+all leases to be dropped. `HandleLease` is not an Excel return value.
 
 ## Re-evaluation semantics
 
@@ -154,15 +155,13 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 ```
 
 `HandleAlias<'call, T>` is the only handle return capability. It is an
-identity-only, call-scoped capability: it carries the underlying `ObjectId` and
-current `ObjectKey`, but it owns neither the object nor an `Arc` pin. Consume it
-while the originating call scope is active. If the source binding was the last
-live binding and was removed earlier in that scope, publication may resurrect
-the detached payload from the epoch-retired queue and install the new binding
-with a fresh `ObjectKey`. Once the call scope ends, an unconsumed alias is not a
-way to keep the object alive. Publishing creates a new formula binding to the
-same registry-owned value; it does not clone the business object. A plain
-`Handle` cannot be returned, cloned, or retained after the call.
+identity-only, call-scoped capability whose binding snapshot keeps the shared
+object alive until publication or disposal. Consume it while the originating
+call scope is active. Publishing clones the shared object ownership only for
+the new binding and installs a fresh formula binding; it does not clone the
+business value. Once the call scope ends, an unconsumed alias is not a way to
+keep the object alive. A plain `Handle` cannot be returned, cloned, or retained
+after the call.
 
 ## Lifetime
 

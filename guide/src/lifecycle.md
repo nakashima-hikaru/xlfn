@@ -82,15 +82,18 @@ impl Addin for ServiceAddin {
 
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         Ok(Opened::new(State::new(), (), ()).with_runtime_config(
-            RuntimeConfig::new().with_async_worker_count(4),
+            RuntimeConfig::new().with_async_worker_count(
+                AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+            ),
         ))
     }
 }
 ```
 
-The framework clamps the value to `1..=32`; the default is four. This pool
-executes Rust futures and is separate from any executor, worker, connection
-pool, or other runtime created by the application.
+`AsyncWorkerCount` accepts only values in `1..=32`; values outside that range
+are rejected, and the default is four. This pool executes Rust futures and is
+separate from any executor, worker, connection pool, or other runtime created
+by the application.
 
 ## Quiescence, cleanup, and unload safety
 

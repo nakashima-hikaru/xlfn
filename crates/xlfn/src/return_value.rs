@@ -59,18 +59,14 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     /// Creates return services for one generated synchronous UDF call.
     ///
     pub fn for_call<A: crate::Addin>(
-        runtime: &'call Runtime<A>,
+        call: &'call crate::runtime::CallGuard<'_, A>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
         scope: &'scope crate::call::CallScope<'scope>,
     ) -> Self {
         Self {
             publisher: inputs.map(|inputs| FormulaPublisher {
-                runtime: crate::handle::FormulaHandleServiceResolver::new(
-                    runtime.generation_services().unwrap_or_else(|_| {
-                        std::sync::Arc::new(crate::runtime_components::GenerationServices::new())
-                    }),
-                ),
+                runtime: crate::handle::FormulaHandleServiceResolver::new(call.services()),
                 udf_id,
                 inputs: InputFingerprint::from_bytes(inputs),
                 callbacks: scope.callbacks(),
@@ -649,7 +645,10 @@ pub fn udf_boundary_named<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::SharedState) -> XllResult<T>,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<T>,
     T: ExcelReturn,
 {
     let (_guard, accepted) = crate::module_runtime::ingress().enter_udf_with(|| {
@@ -700,7 +699,10 @@ fn udf_boundary_named_inner<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::SharedState) -> XllResult<T>,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<T>,
     T: ExcelReturn,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
@@ -734,12 +736,15 @@ fn udf_boundary_uninstrumented<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::SharedState) -> XllResult<T>,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<T>,
     T: ExcelReturn,
 {
     let prepared = catch_unwind(AssertUnwindSafe(|| {
         let mut context = ReturnContext::new();
-        let value = T::invoke(&mut context, || operation(guard.state()))?;
+        let value = T::invoke(&mut context, || operation(guard.state(), guard))?;
         PreparedReturn::encode(value)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -769,7 +774,10 @@ fn udf_boundary_instrumented<A, F, T>(
 ) -> *mut XLOPER12
 where
     A: crate::Addin,
-    F: FnOnce(&A::SharedState) -> XllResult<T>,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<T>,
     T: ExcelReturn,
 {
     use crate::execution::{UdfLayerGuard, UdfLayers};
@@ -816,7 +824,7 @@ where
 
     let prepared = catch_unwind(AssertUnwindSafe(|| {
         let mut return_context = ReturnContext::new();
-        let value = T::invoke(&mut return_context, || operation(guard.state()))?;
+        let value = T::invoke(&mut return_context, || operation(guard.state(), guard))?;
         PreparedReturn::encode(value)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -1352,7 +1360,7 @@ mod tests {
         let (converting_tx, converting_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let caller = std::thread::spawn(move || {
-            let pointer = udf_boundary_named(runtime, "test", "TEST", |_| {
+            let pointer = udf_boundary_named(runtime, "test", "TEST", |_, _| {
                 Ok(BlockingReturn {
                     converting: converting_tx,
                     release: release_rx,
@@ -1480,7 +1488,7 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
 
-        let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_| {
+        let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_, _| {
             Err::<f64, _>(XllError::input(
                 "value",
                 crate::error::InputError::NonFinite,
@@ -1497,10 +1505,12 @@ mod tests {
             assert_eq!(recorded[0].2, 1);
         }
 
-        let panic_pointer =
-            udf_boundary_named(runtime, "test_panic", "TEST.PANIC", |_| -> XllResult<f64> {
-                panic!("injected UDF panic")
-            });
+        let panic_pointer = udf_boundary_named(
+            runtime,
+            "test_panic",
+            "TEST.PANIC",
+            |_, _| -> XllResult<f64> { panic!("injected UDF panic") },
+        );
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(panic_pointer) };
 
@@ -1524,9 +1534,11 @@ mod tests {
 
     #[test]
     fn scalar_returns_do_not_evaluate_input_fingerprints() {
-        let runtime: Runtime<()> = Runtime::new();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let call = runtime.enter().unwrap();
         crate::value::with_excel_call_scope(|scope| {
-            let mut context = ReturnContext::for_call(&runtime, "scalar", None, scope);
+            let mut context = ReturnContext::for_call(&call, "scalar", None, scope);
             let value =
                 <f64 as crate::value::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
             assert!(matches!(
@@ -1713,7 +1725,7 @@ mod tests {
             runtime,
             "test_panic_obligation",
             "TEST.PANIC_OBLIGATION",
-            |_| -> XllResult<f64> { panic!("injected UDF panic") },
+            |_, _| -> XllResult<f64> { panic!("injected UDF panic") },
         );
 
         let tracker = runtime.return_tracker();
@@ -1756,7 +1768,8 @@ mod tests {
         let before = runtime.peek_next_call_id();
 
         for _ in 0..100 {
-            let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_| Ok(42.0));
+            let ptr =
+                udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| Ok(42.0));
             // SAFETY: ptr is a live ReturnBlock produced above.
             let free_guard = unsafe { free_return_boundary(ptr) };
             drop(free_guard);

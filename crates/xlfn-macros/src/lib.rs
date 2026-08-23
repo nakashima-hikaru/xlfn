@@ -234,7 +234,6 @@ fn expand_excel_function(
         ContextKind::MainThread => quote!(#krate::__private::v1::main_thread_context(
             __frame,
             __state,
-            &crate::__XLFN_RUNTIME,
         )),
         ContextKind::MacroSheet => {
             quote!(#krate::__private::v1::macro_sheet_context(
@@ -401,7 +400,7 @@ fn expand_excel_function(
                         #excel_name,
                         #argument_count,
                         __async_handle,
-                        |__lease, __cancellation, __frame| {
+                        |__call, __lease, __cancellation, __frame| {
                             #(#conversions)*
                             ::core::result::Result::Ok(async move {
                                 #context_setup

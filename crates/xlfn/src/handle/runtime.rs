@@ -883,30 +883,44 @@ impl FormulaHandleServiceSlot {
             crate::error::DiagnosticId::HANDLE_SLOT,
             || FormulaHandleServiceSealed::empty(generation),
             |handles| {
-                let rtd_result = crate::rtd::shutdown(Arc::clone(&handles));
                 let handle_result = handles.seal();
-                rtd_result.and(handle_result).map(|registry| {
+                handle_result.map(|registry| {
                     FormulaHandleServiceSealed::from_service(generation, handles, registry)
                 })
             },
         )
     }
+
+    /// Stops the RTD/COM producer associated with the currently initialized
+    /// handle service. This is intentionally separate from formula-handle
+    /// sealing so lifecycle teardown owns the cross-subsystem ordering.
+    pub(crate) fn shutdown_rtd(&self) -> XllResult<()> {
+        let Some(handles) = self.service.read_if_ready() else {
+            return Ok(());
+        };
+        crate::rtd::shutdown(Arc::clone(handles.as_arc()))
+    }
 }
 
 pub(crate) struct FormulaHandleServiceResolver<'call> {
-    services: Arc<GenerationServices>,
+    services: &'call GenerationServices,
     _call: std::marker::PhantomData<&'call ()>,
     resolved: OnceCell<XllResult<FormulaHandleServiceRead>>,
 }
 
 impl<'call> FormulaHandleServiceResolver<'call> {
     #[inline]
-    pub(crate) fn new(services: Arc<GenerationServices>) -> Self {
+    pub(crate) fn new(services: &'call GenerationServices) -> Self {
         Self {
             services,
             _call: std::marker::PhantomData,
             resolved: OnceCell::new(),
         }
+    }
+
+    #[inline]
+    pub(crate) fn services(&self) -> &'call GenerationServices {
+        self.services
     }
 
     /// Returns a shared reference to the `FormulaHandleService`.

@@ -2,11 +2,11 @@ error[E0308]: mismatched types
  --> tests/ui/fail/context_kind_mismatch.rs:6:1
   |
 6 | #[excel_function(name = "FAIL.CONTEXT")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ThreadSafeContext<'_, ()>`, found `MainThreadContext<'_, ()>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ThreadSafeContext<'_, ()>`, found `MainThreadContext<'_, _>`
 7 | fn bad(
 8 |     #[excel_context(main_thread)] context: ThreadSafeContext<'_, ()>,
   |                                            ------------------------- expected due to this
   |
   = note: expected struct `xlfn::ThreadSafeContext<'_, ()>`
-             found struct `MainThreadContext<'_, ()>`
+             found struct `MainThreadContext<'_, _>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

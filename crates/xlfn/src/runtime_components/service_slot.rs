@@ -240,6 +240,17 @@ impl<C, R> GenerationServiceSlot<C, R> {
             )
     }
 
+    /// Loads an already initialized service without turning a cold slot into
+    /// a live one. Shutdown orchestration uses this to operate on an existing
+    /// producer before sealing its owning slot.
+    pub(crate) fn read_if_ready(&self) -> Option<GenerationServiceRead<R>> {
+        if !matches!(*self.state.lock(), GenerationServiceState::Ready) {
+            return None;
+        }
+        let guard = self.published.load();
+        guard.is_some().then_some(GenerationServiceRead { guard })
+    }
+
     #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn with_published(&self, callback: impl FnOnce(Option<&Arc<R>>)) {
         let published = self.published.load();

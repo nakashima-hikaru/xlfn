@@ -9,12 +9,17 @@
 use crate::addin::Addin;
 use crate::runtime::Runtime;
 
-/// The concrete witness produced by the common execution-drain stage.
-pub(super) struct ExecutionDrain {
+/// The concrete stage produced by the common execution-drain transition.
+///
+/// The exports certificate is deliberately kept behind this stage until the
+/// terminal proof is assembled. Both rollback and final removal therefore
+/// carry the same execution-drained witness through their remaining cleanup
+/// stages instead of immediately unwrapping it at the call site.
+pub(super) struct ExecutionDrained {
     exports: crate::ingress::ExportsDrained,
 }
 
-impl ExecutionDrain {
+impl ExecutionDrained {
     pub(super) fn begin<A: Addin>(runtime: &Runtime<A>, _record_ghost: bool) -> Self {
         let exports = crate::module_runtime::global().seal_and_drain();
 
@@ -43,6 +48,6 @@ impl ExecutionDrain {
 pub(super) fn drain_execution<A: Addin>(
     runtime: &Runtime<A>,
     record_ghost: bool,
-) -> crate::ingress::ExportsDrained {
-    ExecutionDrain::begin(runtime, record_ghost).into_exports()
+) -> ExecutionDrained {
+    ExecutionDrained::begin(runtime, record_ghost)
 }

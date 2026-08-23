@@ -83,10 +83,40 @@ pub fn with_excel_call_scope<R>(
 
 /// Runs an operation under a fresh call scope while borrowing existing state.
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn with_excel_call_scope_and_state<S, R>(
     state: &S,
     operation: impl for<'scope> FnOnce(&'scope S, &'scope CallScope<'scope>) -> R,
 ) -> R {
     let scope = CallScope::new();
     operation(state, &scope)
+}
+
+/// Runs an operation under a fresh call scope while reborrowing the already
+/// entered runtime call guard for exactly that scope. Generation-scoped
+/// services therefore come from the guard's pinned publication without
+/// extending the guard's borrow into the generated call frame.
+pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
+    call: &crate::runtime::CallGuard<'_, A>,
+    operation: impl for<'scope> FnOnce(
+        &'scope crate::runtime::CallGuard<'_, A>,
+        &'scope CallScope<'scope>,
+    ) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(call, &scope)
+}
+
+/// Test-side equivalent for direct conversion helpers that already own a
+/// generation service bundle but do not need a full runtime call guard.
+#[cfg(test)]
+pub(crate) fn with_excel_call_scope_and_services<R>(
+    services: &crate::runtime_components::GenerationServices,
+    operation: impl for<'scope> FnOnce(
+        &'scope crate::runtime_components::GenerationServices,
+        &'scope CallScope<'scope>,
+    ) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(services, &scope)
 }

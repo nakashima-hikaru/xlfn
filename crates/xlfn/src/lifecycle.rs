@@ -332,7 +332,7 @@ where
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let exports_drained = drain_execution(runtime, false);
+    let execution_drained = drain_execution(runtime, false);
 
     #[cfg(feature = "async")]
     let async_stopped = {
@@ -557,6 +557,11 @@ where
         );
     }
 
+    if local_quiescent && let Err(error) = runtime.shutdown_rtd() {
+        report_boundary_error("xlAutoOpen RTD rollback", &error);
+        local_quiescent = false;
+    }
+
     let handle_store_quiescent = if local_quiescent {
         match runtime.finish_formula_handle_quiescence(
             handles_sealed
@@ -605,7 +610,7 @@ where
         && registration_state_known
     {
         let proof = crate::runtime::QuiescenceProof {
-            exports: exports_drained,
+            exports: execution_drained.into_exports(),
             rtd: rtd_quiescent
                 .expect("RTD certificate is present when rollback is local-quiescent"),
             host_callbacks: crate::shutdown::HostCallbacksDetached::new(),
@@ -828,7 +833,7 @@ where
         }
     };
 
-    let exports_drained = drain_execution(runtime, true);
+    let execution_drained = drain_execution(runtime, true);
 
     #[cfg(feature = "async")]
     let async_stopped = {
@@ -1112,6 +1117,15 @@ where
         runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::GenerationReclaimed);
     }
 
+    if let Err(error) = runtime.shutdown_rtd() {
+        return Err(handle_unload_hazard(
+            runtime,
+            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
+            "xlAutoRemove RTD shutdown",
+            &error,
+        ));
+    }
+
     let handles_sealed = match runtime.seal_formula_handle_service() {
         Ok(token) => token,
         Err(error) => {
@@ -1288,7 +1302,7 @@ where
 
     let certificate =
         match runtime.certify::<crate::runtime::FinalRemoval>(crate::runtime::QuiescenceProof {
-            exports: exports_drained,
+            exports: execution_drained.into_exports(),
             rtd: rtd_quiescent,
             host_callbacks,
             async_stopped,
@@ -1449,7 +1463,7 @@ fn report_boundary_error(boundary: &'static str, error: &XllError) {
 }
 
 #[cold]
-fn fail_stop_invariant(boundary: &'static str, error: &XllError) -> ! {
+pub(crate) fn fail_stop_invariant(boundary: &'static str, error: &XllError) -> ! {
     report_boundary_error(boundary, error);
 
     // Only an internal invariant or module-bookkeeping corruption reaches this
@@ -1567,6 +1581,7 @@ mod tests {
 
     static LAYERS_PANIC_CLOSES: AtomicUsize = AtomicUsize::new(0);
     static LAYERS_PANIC_QUIESCES: AtomicUsize = AtomicUsize::new(0);
+    static LAYERS_PANIC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct LayersPanic;
 
@@ -1626,6 +1641,9 @@ mod tests {
 
     #[test]
     fn open_transaction_stages_state_and_layers_together() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
@@ -1657,6 +1675,9 @@ mod tests {
 
     #[test]
     fn controlled_reload_reclaims_old_generation_before_new_open() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
@@ -2765,7 +2786,7 @@ mod tests {
                 "test_async_close_order",
                 "TEST.ASYNC.CLOSE.ORDER",
                 &mut handle,
-                move |_, _| {
+                move |_, _, _| {
                     Ok(async move {
                         started_tx.send(()).unwrap();
                         std::future::pending::<()>().await;

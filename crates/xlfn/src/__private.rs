@@ -13,7 +13,6 @@ pub mod v1 {
     use std::future::Future;
 
     use crate::addin::Addin;
-    use crate::call::with_excel_call_scope_and_state;
     pub use crate::call::{CallScope, with_excel_call_scope};
     #[cfg(feature = "async")]
     use crate::cancellation::CancellationToken;
@@ -32,7 +31,7 @@ pub mod v1 {
     pub use crate::value::input::{
         ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
         PlainInputMode, argument_from_raw, argument_from_raw_with_arguments,
-        argument_from_raw_with_context, cell_presence_from_raw,
+        cell_presence_from_raw,
     };
 
     #[doc(hidden)]
@@ -124,9 +123,8 @@ pub mod v1 {
     pub fn main_thread_context<'call, A: Addin, M: InputMode>(
         frame: &CallFrame<'call, M>,
         state: &'call A::SharedState,
-        runtime: &'call MacroRuntime<A>,
     ) -> crate::addin::MainThreadContext<'call, A> {
-        crate::addin::MainThreadContext::new(state, runtime.runtime(), frame.scope)
+        crate::addin::MainThreadContext::new(state, frame.services(), frame.scope)
     }
 
     /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
@@ -388,14 +386,18 @@ pub mod v1 {
     impl<'call, M: InputMode> CallFrame<'call, M> {
         #[doc(hidden)]
         pub fn new<A: Addin>(
-            runtime: &'call Runtime<A>,
+            call: &'call crate::runtime::CallGuard<'_, A>,
             scope: &'call CallScope<'call>,
             argument_count: usize,
         ) -> Self {
             Self {
-                arguments: ArgumentContext::new(runtime, scope, argument_count),
+                arguments: ArgumentContext::new(call, scope, argument_count),
                 scope,
             }
+        }
+
+        pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
+            self.arguments.services()
         }
 
         #[doc(hidden)]
@@ -518,11 +520,10 @@ pub mod v1 {
             &mut CallFrame<'call, R::InputMode>,
         ) -> XllResult<ExcelOutput>,
     {
-        udf_boundary_named(runtime.runtime(), udf_id, excel_name, |state| {
-            with_excel_call_scope_and_state(state, |state, scope| {
-                let mut frame =
-                    CallFrame::<R::InputMode>::new(runtime.runtime(), scope, argument_count);
-                execute(state, &mut frame)
+        udf_boundary_named(runtime.runtime(), udf_id, excel_name, |_, call| {
+            crate::call::with_excel_call_scope_and_call(call, |call, scope| {
+                let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
+                execute(call.state(), &mut frame)
             })
         })
     }
@@ -542,6 +543,7 @@ pub mod v1 {
         A: Addin,
         R: ExcelReturn + Send + 'static,
         F: for<'call> FnOnce(
+            &'call crate::runtime::CallGuard<'call, A>,
             crate::runtime::GenerationLease<A>,
             CancellationToken,
             &mut CallFrame<'call, R::InputMode>,
@@ -555,14 +557,10 @@ pub mod v1 {
                 udf_id,
                 excel_name,
                 async_handle,
-                |lease, cancellation| {
-                    with_excel_call_scope(|scope| {
-                        let mut frame = CallFrame::<R::InputMode>::new(
-                            runtime.runtime(),
-                            scope,
-                            argument_count,
-                        );
-                        let future = execute(lease, cancellation, &mut frame)?;
+                |call, lease, cancellation| {
+                    crate::call::with_excel_call_scope_and_call(call, |call, scope| {
+                        let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
+                        let future = execute(call, lease, cancellation, &mut frame)?;
                         frame.arguments.finish()?;
                         Ok(future)
                     })

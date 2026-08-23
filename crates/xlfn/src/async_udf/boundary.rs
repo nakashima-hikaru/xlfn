@@ -35,7 +35,11 @@ pub unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     start: Start,
 ) where
     A: crate::Addin,
-    Start: FnOnce(crate::runtime::GenerationLease<A>, CancellationToken) -> XllResult<Fut>,
+    Start: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::runtime::GenerationLease<A>,
+        CancellationToken,
+    ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
@@ -83,7 +87,11 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     start: Start,
 ) where
     A: crate::Addin,
-    Start: FnOnce(crate::runtime::GenerationLease<A>, CancellationToken) -> XllResult<Fut>,
+    Start: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::runtime::GenerationLease<A>,
+        CancellationToken,
+    ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
@@ -133,8 +141,10 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_unwind(AssertUnwindSafe(|| start(guard.lease(), token.clone())))
-        .unwrap_or(Err(XllError::Panic));
+    let future = catch_unwind(AssertUnwindSafe(|| {
+        start(guard, guard.lease(), token.clone())
+    }))
+    .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
             let tracker_task = Arc::clone(&tracker);

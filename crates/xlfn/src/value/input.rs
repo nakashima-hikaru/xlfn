@@ -223,17 +223,26 @@ impl<'call> CallContext<'call> {
         }
     }
 
-    pub(crate) fn with_runtime<A: crate::Addin>(
-        runtime: &'call crate::runtime::Runtime<A>,
+    pub(crate) fn with_call<A: crate::Addin>(
+        call: &'call crate::runtime::CallGuard<'_, A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
         Self {
             access: CallAccess::Handles(HandleCallAccess {
-                runtime: crate::handle::FormulaHandleServiceResolver::new(
-                    runtime.generation_services().unwrap_or_else(|_| {
-                        std::sync::Arc::new(crate::runtime_components::GenerationServices::new())
-                    }),
-                ),
+                runtime: crate::handle::FormulaHandleServiceResolver::new(call.services()),
+                scope,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_services(
+        services: &'call crate::runtime_components::GenerationServices,
+        scope: &'call CallScope<'call>,
+    ) -> Self {
+        Self {
+            access: CallAccess::Handles(HandleCallAccess {
+                runtime: crate::handle::FormulaHandleServiceResolver::new(services),
                 scope,
             }),
         }
@@ -247,6 +256,15 @@ impl<'call> CallContext<'call> {
         match &self.access {
             CallAccess::Plain(scope) => scope,
             CallAccess::Handles(access) => access.scope,
+        }
+    }
+
+    fn services(&self) -> &'call crate::runtime_components::GenerationServices {
+        match &self.access {
+            CallAccess::Handles(access) => access.runtime.services(),
+            CallAccess::Plain(_) => {
+                panic!("plain conversion context has no generation services")
+            }
         }
     }
 
@@ -293,14 +311,30 @@ pub struct ArgumentContext<'call, M: InputMode> {
 
 impl<'call, M: InputMode> ArgumentContext<'call, M> {
     pub fn new<A: crate::Addin>(
-        runtime: &'call crate::runtime::Runtime<A>,
+        call: &'call crate::runtime::CallGuard<'_, A>,
         scope: &'call CallScope<'call>,
         argument_count: usize,
     ) -> Self {
         Self {
-            call: CallContext::with_runtime(runtime, scope),
+            call: CallContext::with_call(call, scope),
             inputs: Some(M::new_fingerprint(argument_count)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_services(
+        services: &'call crate::runtime_components::GenerationServices,
+        scope: &'call CallScope<'call>,
+        argument_count: usize,
+    ) -> Self {
+        Self {
+            call: CallContext::with_services(services, scope),
+            inputs: Some(M::new_fingerprint(argument_count)),
+        }
+    }
+
+    pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
+        self.call.services()
     }
 
     pub(crate) fn take_handle_access(&mut self) -> HandleCallAccess<'call> {
@@ -374,14 +408,14 @@ where
 }
 
 #[doc(hidden)]
-pub unsafe fn argument_from_raw_with_context<'call, A, T>(
+#[cfg(test)]
+pub(crate) unsafe fn argument_from_raw_with_context<'call, T>(
     scope: &'call CallScope<'call>,
-    runtime: &'call crate::runtime::Runtime<A>,
+    services: &'call crate::runtime_components::GenerationServices,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
 where
-    A: crate::Addin,
     T: ExcelParameter<'call, PlainInputMode>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
@@ -392,7 +426,7 @@ where
     T::decode(
         borrowed,
         argument,
-        &CallContext::with_runtime(runtime, scope),
+        &CallContext::with_services(services, scope),
         &mut (),
     )
 }

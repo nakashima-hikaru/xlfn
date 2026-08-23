@@ -79,7 +79,9 @@ pub(crate) use server::{
     cleanup_catalog_binding_and_pending, disconnect_all_no_unwind, disconnect_one_no_unwind,
     drop_notifier_no_unwind,
 };
-pub(crate) use slot::{SubscriptionRuntimeRead, SubscriptionsStopped};
+#[cfg(test)]
+pub(crate) use slot::SubscriptionRuntimeRead;
+pub(crate) use slot::SubscriptionsStopped;
 pub(crate) use source::SourceHandleAllocator;
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};

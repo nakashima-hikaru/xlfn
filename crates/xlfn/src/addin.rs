@@ -7,7 +7,7 @@ use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
 use crate::return_value::ExcelCallbackStatus;
-use crate::runtime::Runtime;
+use crate::runtime_components::GenerationServices;
 use crate::shutdown::CleanupReporter;
 use crate::subscription::{RtdLimits, RtdSource, RtdSourceHandle, RtdTopic, RtdValue};
 use crate::value::{ExcelValue, FromExcel, Matrix, decode_owned_matrix};
@@ -603,7 +603,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// second generation lease and makes the ownership relationship explicit.
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
-    runtime: &'call Runtime<A>,
+    services: &'call GenerationServices,
     callbacks: &'call HostCallbackSession,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -612,7 +612,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
     fn clone(&self) -> Self {
         Self {
             state: self.state,
-            runtime: self.runtime,
+            services: self.services,
             callbacks: self.callbacks,
             _not_send_or_sync: PhantomData,
         }
@@ -743,14 +743,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
 impl<A: Addin> MainThreadContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new<'ctx, 'scope>(
+    pub(crate) fn new<'ctx, 'scope>(
         state: &'ctx A::SharedState,
-        runtime: &'ctx Runtime<A>,
+        services: &'ctx GenerationServices,
         scope: &'ctx CallScope<'scope>,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
-            runtime,
+            services,
             callbacks: scope.callbacks(),
             _not_send_or_sync: PhantomData,
         }
@@ -771,7 +771,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     where
         Source: RtdSource,
     {
-        let subscriptions = self.runtime.subscriptions()?;
+        let subscriptions = self.services.subscriptions_slot().read()?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
         match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.callbacks) {
@@ -848,9 +848,11 @@ mod tests {
         let mut opening = runtime.begin_open().unwrap();
         runtime.publish(state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let services = runtime.generation_services().unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
-            let main_thread = MainThreadContext::<TestU32Addin>::new(state, &runtime, scope);
+            let main_thread =
+                MainThreadContext::<TestU32Addin>::new(state, services.as_ref(), scope);
             let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
 
             assert_eq!(thread_safe.state(), &17);
@@ -983,6 +985,7 @@ mod tests {
         );
         conn.commit().unwrap();
 
+        let services = runtime.generation_services().unwrap();
         let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
         assert_eq!(repeated.key(), &key_obj);
         assert!(!repeated.has_reservation());
@@ -990,7 +993,7 @@ mod tests {
 
         let _state = ();
         crate::value::with_excel_call_scope(|scope| {
-            let context = MainThreadContext::new(&_state, &runtime, scope);
+            let context = MainThreadContext::<()>::new(&_state, services.as_ref(), scope);
             assert!(matches!(
                 context.subscribe(&source, topic),
                 Err(crate::XllError::ExcelApi {

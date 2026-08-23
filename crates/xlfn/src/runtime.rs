@@ -554,11 +554,19 @@ impl<A: crate::Addin> Runtime<A> {
                     )?;
                     let generation = attempt.attempt_id.into_runtime_generation();
                     self.refinement.commit_open(self, attempt.attempt_id, || {
-                        self.lifecycle.commit_open(&mut control, generation);
+                        self.lifecycle.commit_open(&mut control, generation)?;
+                        if control.canonical_state().phase() != LifecyclePhase::Open
+                            || control.last_committed_generation() != Some(generation)
+                            || control.canonical_state().open_attempt().is_some()
+                        {
+                            crate::lifecycle::fail_stop_invariant(
+                                "xlAutoOpen commit postcondition",
+                                &XllError::Internal {
+                                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                                },
+                            );
+                        }
                         attempt.active = false;
-                        debug_assert_eq!(control.canonical_state().phase(), LifecyclePhase::Open);
-                        debug_assert_eq!(control.last_committed_generation(), Some(generation));
-                        debug_assert_eq!(control.canonical_state().open_attempt(), None);
                         Ok(())
                     })?;
                     Ok::<(), XllError>(())
@@ -705,10 +713,17 @@ impl<A: crate::Addin> Runtime<A> {
                 }
 
                 if !request_recorded {
-                    debug_assert!(matches!(
+                    if !matches!(
                         wait_guard.canonical_state().phase(),
                         LifecyclePhase::Closed | LifecyclePhase::Closing
-                    ));
+                    ) {
+                        crate::lifecycle::fail_stop_invariant(
+                            "xlAutoRemove close-request postcondition",
+                            &XllError::Internal {
+                                diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                            },
+                        );
+                    }
                     self.refinement
                         .request_final_close(self, &mut request_recorded);
                 }
@@ -919,7 +934,14 @@ impl<A: crate::Addin> Runtime<A> {
                 .map_err(|_| XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
                 })?;
-            debug_assert!(!self.ghost_handle().active());
+            if self.ghost_handle().active() {
+                crate::lifecycle::fail_stop_invariant(
+                    "xlAutoRemove ghost shutdown postcondition",
+                    &XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
+                    },
+                );
+            }
             self.refinement.retire_committed_shutdown(self);
         }
         self.mark_composition_return_pending();
@@ -1120,11 +1142,12 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(any(test, feature = "unstable"))]
         let composition_resources = certificate.composition_resources;
         let mut control = self.lifecycle.lock();
-        debug_assert_eq!(control.canonical_state().open_attempt(), None);
-        if !matches!(
-            control.canonical_state().phase(),
-            LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
-        ) {
+        if control.canonical_state().open_attempt().is_some()
+            || !matches!(
+                control.canonical_state().phase(),
+                LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
+            )
+        {
             return Err(XllError::Internal {
                 diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PHASE,
             });
@@ -1138,7 +1161,14 @@ impl<A: crate::Addin> Runtime<A> {
             ),
         );
         #[cfg(any(test, feature = "unstable"))]
-        debug_assert_eq!(self.phase(), LifecyclePhase::Closed);
+        if self.phase() != LifecyclePhase::Closed {
+            crate::lifecycle::fail_stop_invariant(
+                "xlAutoOpen rollback close postcondition",
+                &XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PHASE,
+                },
+            );
+        }
         #[cfg(any(test, feature = "unstable"))]
         self.mark_composition_terminal_pending();
         self.lifecycle.notify_all();
@@ -1183,7 +1213,14 @@ impl<A: crate::Addin> Runtime<A> {
         crate::module_runtime::global().close_callbacks();
         self.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "unstable"))]
-        debug_assert_eq!(self.phase(), LifecyclePhase::Closed);
+        if self.phase() != LifecyclePhase::Closed {
+            crate::lifecycle::fail_stop_invariant(
+                "xlAutoRemove close postcondition",
+                &XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                },
+            );
+        }
         #[cfg(any(test, feature = "unstable"))]
         if committed {
             self.record_composition_event(
@@ -1255,6 +1292,7 @@ impl<A: crate::Addin> Runtime<A> {
         })
     }
 
+    #[cfg(any(test, feature = "unstable"))]
     pub(crate) fn generation_services(&self) -> XllResult<Arc<GenerationServices>> {
         let services = self.generation_services_snapshot();
         services.ok_or(XllError::Closing)
@@ -1270,6 +1308,13 @@ impl<A: crate::Addin> Runtime<A> {
         services.formula_handle_slot().seal(generation)
     }
 
+    pub(crate) fn shutdown_rtd(&self) -> XllResult<()> {
+        let Some(services) = self.generation_services_snapshot() else {
+            return Ok(());
+        };
+        services.formula_handle_slot().shutdown_rtd()
+    }
+
     pub(crate) fn finish_formula_handle_quiescence(
         &self,
         sealed: crate::handle::FormulaHandleServiceSealed,
@@ -1278,6 +1323,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn subscriptions(&self) -> XllResult<crate::subscription::SubscriptionRuntimeRead> {
         self.generation_services()?.subscriptions_slot().read()
     }
@@ -1381,7 +1427,14 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
     fn drop(&mut self) {
         let mut control = self.runtime.lifecycle.lock();
         self.runtime.lifecycle.release_removal_owner(&mut control);
-        debug_assert!(!control.removal_attempt_active());
+        if control.removal_attempt_active() {
+            crate::lifecycle::fail_stop_invariant(
+                "xlAutoRemove removal-owner release",
+                &XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                },
+            );
+        }
         self.runtime.refinement.release_cleanup_owner(self.runtime);
         self.runtime.lifecycle.notify_all();
     }
@@ -1461,6 +1514,21 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         &self.generation().layers
     }
 
+    /// Returns the generation services pinned by this call.
+    ///
+    /// A call must derive every generation-scoped service from the same
+    /// publication as its state and layers. Reloading the service projection
+    /// through `Runtime` would permit a call to observe a different
+    /// generation after it has already entered.
+    #[must_use]
+    pub(crate) fn services(&self) -> &GenerationServices {
+        &self
+            .publication
+            .as_ref()
+            .expect("a live CallGuard always observes published generation services")
+            .services
+    }
+
     fn generation(&self) -> &OpenGeneration<A> {
         let publication = self
             .publication
@@ -1534,6 +1602,7 @@ pub(crate) mod tests {
         }
         let exports = ingress.seal_and_drain();
         let _ = runtime.close_subscriptions();
+        let _ = runtime.shutdown_rtd();
         let _ = runtime
             .seal_formula_handle_service()
             .and_then(|sealed| runtime.finish_formula_handle_quiescence(sealed));

@@ -225,7 +225,7 @@ impl SyncBoundaryWorkerPool {
                                     r,
                                     "bench_udf",
                                     "BENCH.UDF",
-                                    |_| Ok(42.0),
+                                    |_, _| Ok(42.0),
                                 );
                                 #[allow(
                                     unsafe_code,
@@ -1154,6 +1154,15 @@ fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
     RUNTIME.get_or_init(|| {
         let runtime = crate::runtime::Runtime::new();
         runtime.arm_test_generation();
+        let removal_epoch = runtime.removal_epoch();
+        let mut opening = runtime
+            .begin_open_if_epoch(removal_epoch)
+            .expect("benchmark runtime open attempt");
+        runtime.publish((), ());
+        runtime
+            .finish_open(&mut opening, Vec::new())
+            .expect("benchmark runtime open");
+        drop(opening);
         runtime
     })
 }
@@ -1329,12 +1338,13 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call, crate::value::PlainInputMode>,
     {
-        crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
-                self.runtime,
-                scope,
-                1,
-            );
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<crate::value::PlainInputMode, T>(
@@ -1354,12 +1364,14 @@ impl RawArgumentIngressBenchmark {
     where
         T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
     {
-        crate::value::with_excel_call_scope(|scope| {
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
                 crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
-                    self.runtime,
-                    scope,
-                    1,
+                    call, scope, 1,
                 );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value =
@@ -1379,12 +1391,13 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_str(&mut self) {
-        crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
-                self.runtime,
-                scope,
-                1,
-            );
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value =
                 unsafe {
@@ -1400,12 +1413,13 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_matrix_str(&mut self) {
-        crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
-                self.runtime,
-                scope,
-                1,
-            );
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -1420,12 +1434,13 @@ impl RawArgumentIngressBenchmark {
     }
 
     pub fn run_borrowed_mixed_cells(&mut self) {
-        crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
-                self.runtime,
-                scope,
-                1,
-            );
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -1443,12 +1458,13 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
-        crate::value::with_excel_call_scope(|scope| {
-            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
-                self.runtime,
-                scope,
-                1,
-            );
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -1466,12 +1482,14 @@ impl RawArgumentIngressBenchmark {
     where
         T: ExcelHandleObject,
     {
-        crate::value::with_excel_call_scope(|scope| {
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =
                 crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
-                    self.runtime,
-                    scope,
-                    1,
+                    call, scope, 1,
                 );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
@@ -1536,10 +1554,14 @@ impl MultiHandleCallBenchmark {
     }
 
     pub fn run(&mut self) {
-        crate::value::with_excel_call_scope(|scope| {
+        let call = self
+            .runtime
+            .enter()
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut frame = crate::__private::v1::CallFrame::<
                 <f64 as crate::value::ExcelReturn>::InputMode,
-            >::new(self.runtime, scope, 1);
+            >::new(call, scope, 1);
             for raw in &mut self.raw_tokens {
                 // SAFETY: raw points to valid benchmark storage.
                 let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {
@@ -1587,7 +1609,7 @@ impl ConcurrentHandleResolutionBenchmark {
                 while s_rx.recv().is_ok() {
                     for _ in 0..iterations_per_thread {
                         let resolver =
-                            crate::handle::FormulaHandleServiceResolver::new(Arc::clone(&services));
+                            crate::handle::FormulaHandleServiceResolver::new(services.as_ref());
                         let rt = resolver.get().expect("handle runtime must resolve");
                         std::hint::black_box(rt);
                     }

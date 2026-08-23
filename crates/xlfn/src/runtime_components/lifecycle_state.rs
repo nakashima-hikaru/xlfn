@@ -6,6 +6,27 @@ use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+#[cold]
+fn lifecycle_invariant_violation(message: &'static str) -> ! {
+    #[cfg(not(test))]
+    {
+        tracing::error!(
+            invariant = message,
+            "lifecycle ownership invariant violated"
+        );
+        std::process::abort();
+    }
+    #[cfg(test)]
+    panic!("lifecycle ownership invariant violated: {message}");
+}
+
+#[inline]
+fn require_lifecycle_invariant(condition: bool, message: &'static str) {
+    if !condition {
+        lifecycle_invariant_violation(message);
+    }
+}
+
 use super::services::GenerationServices;
 use crate::generation::{OpenAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
@@ -288,7 +309,10 @@ impl<A: crate::Addin> LifecycleState<A> {
                 payload: LifecyclePayload::Retiring(retirement),
             },
             Self::Opening { attempt, payload } => {
-                debug_assert!(matches!(payload, LifecyclePayload::Empty));
+                require_lifecycle_invariant(
+                    matches!(payload, LifecyclePayload::Empty),
+                    "retirement installed while opening payload is present",
+                );
                 Self::Closing {
                     open_attempt: Some(attempt),
                     payload: LifecyclePayload::Retiring(retirement),
@@ -298,20 +322,29 @@ impl<A: crate::Addin> LifecycleState<A> {
                 open_attempt,
                 payload,
             } => {
-                debug_assert!(matches!(payload, LifecyclePayload::Empty));
+                require_lifecycle_invariant(
+                    matches!(payload, LifecyclePayload::Empty),
+                    "retirement installed while closing payload is present",
+                );
                 Self::Closing {
                     open_attempt,
                     payload: LifecyclePayload::Retiring(retirement),
                 }
             }
             Self::OpenRollbackPending { payload } => {
-                debug_assert!(matches!(payload, LifecyclePayload::Empty));
+                require_lifecycle_invariant(
+                    matches!(payload, LifecyclePayload::Empty),
+                    "retirement installed while rollback payload is present",
+                );
                 Self::OpenRollbackPending {
                     payload: LifecyclePayload::Retiring(retirement),
                 }
             }
             Self::Quarantined { payload } => {
-                debug_assert!(matches!(payload, LifecyclePayload::Empty));
+                require_lifecycle_invariant(
+                    matches!(payload, LifecyclePayload::Empty),
+                    "retirement installed while quarantine payload is present",
+                );
                 Self::Quarantined {
                     payload: LifecyclePayload::Retiring(retirement),
                 }
@@ -528,7 +561,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Clears host intent before the external module-open protocol is started.
     pub(crate) fn prepare_open(&self, core: &mut LifecycleCore<A>) {
-        debug_assert_eq!(core.canonical_state().phase(), LifecyclePhase::Closed);
+        require_lifecycle_invariant(
+            core.canonical_state().phase() == LifecyclePhase::Closed,
+            "open preparation requires the closed lifecycle phase",
+        );
         core.host_intent = HostLifecycleIntent::None;
         self.refresh_projection(core);
     }
@@ -541,8 +577,14 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     pub(crate) fn begin_opening(&self, core: &mut LifecycleCore<A>, attempt: OpenAttemptId) {
-        debug_assert_eq!(core.canonical_state().phase(), LifecyclePhase::Closed);
-        debug_assert!(!core.removal_attempt_active());
+        require_lifecycle_invariant(
+            core.canonical_state().phase() == LifecyclePhase::Closed,
+            "opening requires the closed lifecycle phase",
+        );
+        require_lifecycle_invariant(
+            !core.removal_attempt_active(),
+            "opening cannot begin while removal owns the lifecycle",
+        );
         core.state = LifecycleState::Opening {
             attempt,
             payload: LifecyclePayload::Empty,
@@ -552,23 +594,38 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Publishes a successfully assembled generation while retaining the
     /// opening attempt until `commit_open` completes the lifecycle transition.
-    pub(crate) fn commit_open(&self, core: &mut LifecycleCore<A>, generation: RuntimeGeneration) {
-        debug_assert_eq!(core.canonical_state().phase(), LifecyclePhase::Opening);
+    pub(crate) fn commit_open(
+        &self,
+        core: &mut LifecycleCore<A>,
+        generation: RuntimeGeneration,
+    ) -> crate::XllResult<()> {
         let state = mem::replace(&mut core.state, LifecycleState::Closed);
         match state {
             LifecycleState::Opening {
                 attempt,
                 payload: LifecyclePayload::Open(bundle),
             } => {
-                debug_assert_eq!(attempt.into_runtime_generation(), generation);
-                debug_assert_eq!(bundle.generation.id(), generation);
+                if attempt.into_runtime_generation() != generation
+                    || bundle.generation.id() != generation
+                {
+                    core.state = LifecycleState::Opening {
+                        attempt,
+                        payload: LifecyclePayload::Open(bundle),
+                    };
+                    return Err(crate::XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                    });
+                }
                 core.last_committed_generation = Some(generation);
                 core.state = LifecycleState::Open { bundle };
                 self.refresh_projection(core);
+                Ok(())
             }
             other => {
                 core.state = other;
-                debug_assert!(false, "open commit requires a published opening bundle");
+                Err(crate::XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                })
             }
         }
     }
@@ -673,17 +730,20 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     pub(crate) fn finish_closed(&self, core: &mut LifecycleCore<A>) {
-        debug_assert!(matches!(
-            core.canonical_state(),
-            LifecycleState::Closed
-                | LifecycleState::Closing {
-                    payload: LifecyclePayload::Empty,
-                    ..
-                }
-                | LifecycleState::OpenRollbackPending {
-                    payload: LifecyclePayload::Empty
-                }
-        ));
+        require_lifecycle_invariant(
+            matches!(
+                core.canonical_state(),
+                LifecycleState::Closed
+                    | LifecycleState::Closing {
+                        payload: LifecyclePayload::Empty,
+                        ..
+                    }
+                    | LifecycleState::OpenRollbackPending {
+                        payload: LifecyclePayload::Empty
+                    }
+            ),
+            "closed publication requires an empty lifecycle payload",
+        );
         core.state = LifecycleState::Closed;
         self.refresh_projection(core);
     }

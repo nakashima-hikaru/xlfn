@@ -543,7 +543,7 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
             "test_async_reentrant_layer_close",
             "TEST.ASYNC.REENTRANT.LAYER.CLOSE",
             &mut handle,
-            move |_, _| {
+            move |_, _, _| {
                 Ok(async move {
                     started_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
@@ -904,7 +904,7 @@ fn async_boundary_returns_completed_value_through_callback() {
             "test_async",
             "TEST.ASYNC",
             &mut handle,
-            |_, token| {
+            |_, _, token| {
                 assert_eq!(token.guarantee(), CancellationGuarantee::BestEffort);
                 Ok(async { Ok::<_, XllError>(42.0) })
             },
@@ -983,7 +983,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
             "test_async_failure",
             "TEST.ASYNC.FAILURE",
             &mut handle,
-            |_, _| {
+            |_, _, _| {
                 Ok(async {
                     Err::<f64, _>(XllError::Native {
                         code: 73,
@@ -1065,7 +1065,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
             "test_async_delivery_failure",
             "TEST.ASYNC.DELIVERY.FAILURE",
             &mut handle,
-            |_, _| Ok(async { Ok::<_, XllError>(42.0) }),
+            |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
         );
     }
 
@@ -1107,7 +1107,7 @@ fn async_boundary_returns_error_on_cancellation() {
             "test_async_cancel",
             "TEST.ASYNC.CANCEL",
             &mut handle,
-            move |_, _| {
+            move |_, _, _| {
                 let release_rx = release_rx;
                 Ok(async move {
                     let _ = release_rx.recv();
@@ -1154,7 +1154,7 @@ fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
             "test_async_terminal_gate",
             "TEST.ASYNC.TERMINAL.GATE",
             &mut handle,
-            move |_, _| {
+            move |_, _, _| {
                 Ok(async move {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
@@ -1227,7 +1227,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
             "test_async_cancel_after_evaluation",
             "TEST.ASYNC.CANCEL.AFTER.EVALUATION",
             &mut handle,
-            |_, _| Ok(async { Ok::<_, XllError>("allocated return payload".to_owned()) }),
+            |_, _, _| Ok(async { Ok::<_, XllError>("allocated return payload".to_owned()) }),
         );
     }
 
@@ -1829,7 +1829,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
             "test_async_panic_boundary",
             "TEST.ASYNC.PANIC",
             &mut handle,
-            |_, _| Ok(async { Ok::<_, XllError>(42.0) }),
+            |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
         );
     }));
 
