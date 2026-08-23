@@ -44,6 +44,13 @@ impl OpenRollbackOutcome {
     }
 }
 
+fn incomplete<A: Addin>(runtime: &Runtime<A>) -> OpenRollbackOutcome {
+    runtime.quarantine();
+    OpenRollbackOutcome {
+        status: OpenRollbackStatus::Incomplete,
+    }
+}
+
 pub(super) fn rollback_open<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
@@ -70,27 +77,30 @@ where
     };
     crate::module_runtime::global().begin_close(|| {});
 
-    let mut local_quiescent = true;
-    let mut lifecycle_release_ready = match runtime.has_addin_lifecycle(lifecycle) {
-        Ok(present) => !present,
+    let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
+        Ok(present) => present,
         Err(error) => {
             report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
-            false
+            return incomplete(runtime);
         }
     };
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
     let execution_drained = drain_execution(runtime, false);
-
-    let mut producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+    let teardown: teardown::TeardownTxn<
+        '_,
+        A,
+        crate::runtime::OpenRollback,
+        teardown::ExecutionDrained,
+    > = teardown::TeardownTxn::new(rollback_attempt, execution_drained);
+    let teardown = match teardown.stop_producers(|issue| {
         report_cleanup_issue(issue);
     }) {
-        Ok(stage) => Some(stage),
+        Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen subscription rollback", &error);
-            local_quiescent = false;
-            None
+            return incomplete(runtime);
         }
     };
 
@@ -149,15 +159,28 @@ where
 
     crate::module_runtime::global().close_callbacks();
 
+    if runtime.registration_state_unknown() {
+        let error = XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
+        };
+        report_boundary_error("xlAutoOpen registration state unknown", &error);
+        return incomplete(runtime);
+    }
+    if !runtime.host_callbacks_detached() {
+        let error = XllError::Internal {
+            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
+        };
+        report_boundary_error("xlAutoOpen callbacks remain registered", &error);
+        return incomplete(runtime);
+    }
+    let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
+
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
     // are call-scoped borrows and cannot be stored in state.
-    let mut addin_shared_state = None;
-    let mut addin_quiesced = None;
-    let mut generation_reclaimed = None;
-    if let Some(opening) = runtime.take_opening_for_rollback() {
+    let addin = if let Some(opening) = runtime.take_opening_for_rollback() {
         let (mut shared_state, layers, _config) = opening.into_parts();
-        match catch_unwind(AssertUnwindSafe(|| {
+        let quiesce = catch_unwind(AssertUnwindSafe(|| {
             runtime
                 .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     A::quiesce(&mut shared_state, lifecycle_state)
@@ -166,237 +189,122 @@ where
                 .map_err(lifecycle_access_error)?
         }))
         .map_err(|_| XllError::Panic)
-        .and_then(|result| result)
-        {
-            Ok(()) => {
-                drop(layers);
-                addin_shared_state = Some(shared_state);
-                addin_quiesced = Some(crate::shutdown::AddinQuiesced::new());
-                generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
-            }
-            Err(error) => {
-                report_boundary_error("xlAutoOpen rollback quiesce", &error);
-                // A failed quiesce cannot prove that shared-state-owned
-                // execution resources have stopped. Preserve it until
-                // the caller enters the quarantine path.
-                runtime.quarantine_layers(
-                    generation,
-                    layers,
-                    crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                );
-                runtime.quarantine_shared_state(
-                    generation,
-                    shared_state,
-                    crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                );
-                local_quiescent = false;
-            }
-        }
-    } else {
-        addin_quiesced = Some(crate::shutdown::AddinQuiesced::new());
-        generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
-    }
-
-    let mut services_sealed = if local_quiescent {
-        let subscriptions_stopped = producers_stopped
-            .as_mut()
-            .expect("producer stage is present when rollback is local-quiescent")
-            .take_subscriptions();
-        match runtime.seal_generation_services(subscriptions_stopped) {
-            Ok(token) => Some(token),
-            Err(error) => {
-                report_boundary_error("xlAutoOpen handle rollback", &error);
-                local_quiescent = false;
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let rtd_quiescent = if local_quiescent {
-        match crate::rtd::wait_for_module_quiescence() {
-            Ok(certificate) => Some(certificate),
-            Err(_) => {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
-                };
-                report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
-                local_quiescent = false;
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    if local_quiescent && let Some(shared_state) = addin_shared_state.take() {
-        let mut report = crate::shutdown::CloseReport::default();
-        let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            runtime
-                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                    let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
-                    A::cleanup(lifecycle_state, &mut reporter);
-                })
-                .map_err(lifecycle_access_error)
-        }));
-        if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
-            report.push(
-                "Addin::cleanup",
-                crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                XllError::Panic,
+        .and_then(|result| result);
+        if let Err(error) = quiesce {
+            report_boundary_error("xlAutoOpen rollback quiesce", &error);
+            // A failed quiesce cannot prove that shared-state-owned execution
+            // resources have stopped. Preserve both parts until quarantine.
+            runtime.quarantine_layers(
+                generation,
+                layers,
+                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
             runtime.quarantine_shared_state(
                 generation,
                 shared_state,
-                crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
+                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
-            local_quiescent = false;
-        } else {
-            let lifecycle_dropped = match runtime.take_addin_lifecycle(lifecycle) {
-                Ok(lifecycle_state) => {
-                    if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
-                        report.push(
-                            "Addin::LifecycleState::drop",
-                            crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                            XllError::Panic,
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-                Err(error) => {
-                    report.push(
-                        "Addin::LifecycleState",
-                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                        lifecycle_access_error(error),
-                    );
-                    false
-                }
+            return incomplete(runtime);
+        }
+        drop(layers);
+        teardown::QuiescedAddin::shared(runtime, generation, shared_state)
+    } else {
+        if lifecycle_present {
+            let error = XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
             };
-            let shared_state_dropped =
-                catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
-            if !shared_state_dropped {
-                report.push(
-                    "Addin::SharedState::drop",
-                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    XllError::Panic,
-                );
-            }
-            lifecycle_release_ready = lifecycle_dropped && shared_state_dropped;
-            if !lifecycle_release_ready {
-                local_quiescent = false;
-            }
+            report_boundary_error("xlAutoOpen lifecycle rollback state", &error);
+            return incomplete(runtime);
         }
-        for issue in report.issues() {
-            report_cleanup_issue(issue);
+        teardown::QuiescedAddin::empty(runtime, generation)
+    };
+
+    let teardown = match teardown.seal_services(addin) {
+        Ok(stage) => stage,
+        Err(error) => {
+            report_boundary_error("xlAutoOpen handle rollback", &error);
+            return incomplete(runtime);
         }
-    }
-    if let Some(shared_state) = addin_shared_state {
-        runtime.quarantine_shared_state(
-            generation,
-            shared_state,
-            crate::runtime_components::QuarantineReason::BoundaryFailure,
-        );
+    };
+
+    let rtd_quiescent = match crate::rtd::wait_for_module_quiescence() {
+        Ok(certificate) => certificate,
+        Err(_) => {
+            let error = XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
+            };
+            report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
+            return incomplete(runtime);
+        }
+    };
+
+    let mut cleanup_report = crate::shutdown::CloseReport::default();
+    let teardown = match teardown.cleanup_addin(lifecycle, &mut cleanup_report) {
+        Ok(stage) => stage,
+        Err(error) => {
+            for issue in cleanup_report.issues() {
+                report_cleanup_issue(issue);
+            }
+            report_boundary_error("xlAutoOpen rollback cleanup", &error);
+            return incomplete(runtime);
+        }
+    };
+    for issue in cleanup_report.issues() {
+        report_cleanup_issue(issue);
     }
 
-    if local_quiescent && let Err(error) = runtime.shutdown_rtd() {
+    if let Err(error) = runtime.shutdown_rtd() {
         report_boundary_error("xlAutoOpen RTD rollback", &error);
-        local_quiescent = false;
+        return incomplete(runtime);
     }
 
-    let handle_store_quiescent =
-        if local_quiescent {
-            match runtime.finish_generation_services(services_sealed.take().expect(
-                "generation service seal token is present when rollback is local-quiescent",
-            )) {
-                Ok((certificate, subscriptions_stopped)) => {
-                    producers_stopped
-                        .as_mut()
-                        .expect("producer stage is present when rollback is local-quiescent")
-                        .restore_subscriptions(subscriptions_stopped);
-                    Some(certificate)
-                }
-                Err(error) => {
-                    report_boundary_error("xlAutoOpen handle pin rollback", &error);
-                    local_quiescent = false;
-                    None
-                }
-            }
-        } else {
-            None
-        };
+    let teardown = match teardown.finish_services() {
+        Ok(stage) => stage,
+        Err(error) => {
+            report_boundary_error("xlAutoOpen handle pin rollback", &error);
+            return incomplete(runtime);
+        }
+    };
 
-    if runtime.registration_state_unknown() {
-        let error = XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
-        };
-        report_boundary_error("xlAutoOpen registration state unknown", &error);
-    }
-    let mut diagnostics_stopped = None;
-    if local_quiescent {
-        match crate::diagnostics::close_diagnostic_router() {
-            Ok(outcome) => {
-                for issue in outcome.issues {
-                    report_cleanup_issue(&issue);
-                }
-                diagnostics_stopped = Some(outcome.certificate);
+    let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router() {
+        Ok(outcome) => {
+            for issue in outcome.issues {
+                report_cleanup_issue(&issue);
             }
-            Err(error) => {
-                let error = error.into_xll_error();
-                report_boundary_error("xlAutoOpen diagnostic rollback", &error);
-                local_quiescent = false;
-            }
+            outcome.certificate
         }
-    }
-    let host_callbacks_detached = runtime.host_callbacks_detached();
-    let registration_state_known = !runtime.registration_state_unknown();
-    let mut finalized = false;
-    if local_quiescent
-        && lifecycle_release_ready
-        && host_callbacks_detached
-        && registration_state_known
-    {
-        let proof = teardown::ResourcesReclaimed::new(
-            producers_stopped.expect("producer stage is present when rollback is local-quiescent"),
-            rtd_quiescent.expect("RTD certificate is present when rollback is local-quiescent"),
-            crate::shutdown::HostCallbacksDetached::new(),
-            handle_store_quiescent
-                .expect("handle certificate is present when rollback is local-quiescent"),
-            diagnostics_stopped
-                .expect("diagnostic certificate is present when rollback is local-quiescent"),
-            addin_quiesced.expect("addin certificate is present when rollback is local-quiescent"),
-            generation_reclaimed.expect(
-                "generation reclaimed certificate is present when rollback is local-quiescent",
-            ),
-        )
-        .into_proof();
-        match rollback_attempt.certify::<crate::runtime::OpenRollback>(proof) {
-            Ok(certificate) => match certificate.finish() {
-                Ok(_rollback_attempt) => match runtime.release_empty_addin_lifecycle(lifecycle) {
-                    Ok(()) => finalized = true,
-                    Err(error) => {
-                        report_boundary_error(
-                            "xlAutoOpen lifecycle binding release",
-                            &lifecycle_access_error(error),
-                        );
-                    }
-                },
-                Err((error, _certificate)) => {
-                    report_boundary_error("xlAutoOpen rollback completion", &error);
-                }
-            },
-            Err((error, _rollback_attempt)) => {
-                report_boundary_error("xlAutoOpen rollback certification", &error);
-            }
+        Err(error) => {
+            let error = error.into_xll_error();
+            report_boundary_error("xlAutoOpen diagnostic rollback", &error);
+            return incomplete(runtime);
         }
+    };
+
+    let teardown = teardown.reclaim(rtd_quiescent, host_callbacks, diagnostics_stopped);
+    let certificate = match teardown.certify() {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            report_boundary_error("xlAutoOpen rollback certification", &error);
+            return incomplete(runtime);
+        }
+    };
+    let rollback_attempt = match certificate.finish() {
+        Ok(attempt) => attempt,
+        Err((error, _certificate)) => {
+            report_boundary_error("xlAutoOpen rollback completion", &error);
+            return incomplete(runtime);
+        }
+    };
+    if let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle) {
+        report_boundary_error(
+            "xlAutoOpen lifecycle binding release",
+            &lifecycle_access_error(error),
+        );
+        drop(rollback_attempt);
+        return incomplete(runtime);
     }
+    drop(rollback_attempt);
     OpenRollbackOutcome {
-        status: if finalized {
-            OpenRollbackStatus::Finalized
-        } else {
-            OpenRollbackStatus::Incomplete
-        },
+        status: OpenRollbackStatus::Finalized,
     }
 }

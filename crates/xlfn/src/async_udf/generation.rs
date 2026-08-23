@@ -23,13 +23,13 @@ pub(crate) struct TaskShard {
 pub(crate) const ADMISSION_CLOSED: usize = 1usize << (usize::BITS - 1);
 pub(crate) const ADMISSION_COUNT_MASK: usize = ADMISSION_CLOSED - 1;
 
-pub(crate) struct GenerationAdmission {
+pub(crate) struct TaskAdmission {
     pub(crate) state: AtomicUsize,
     pub(crate) wait_lock: Mutex<()>,
     pub(crate) idle: Condvar,
 }
 
-impl GenerationAdmission {
+impl TaskAdmission {
     const fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
@@ -38,7 +38,7 @@ impl GenerationAdmission {
         }
     }
 
-    pub(crate) fn try_enter(&self) -> Option<AdmissionPermit<'_>> {
+    pub(crate) fn try_enter(&self) -> Option<TaskAdmissionPermit<'_>> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & ADMISSION_CLOSED != 0 {
@@ -51,7 +51,7 @@ impl GenerationAdmission {
                 Some(state + 1)
             })
             .ok()
-            .map(|_| AdmissionPermit { admission: self })
+            .map(|_| TaskAdmissionPermit { admission: self })
     }
 
     pub(crate) fn close(&self) {
@@ -66,11 +66,11 @@ impl GenerationAdmission {
     }
 }
 
-pub(crate) struct AdmissionPermit<'a> {
-    pub(crate) admission: &'a GenerationAdmission,
+pub(crate) struct TaskAdmissionPermit<'a> {
+    pub(crate) admission: &'a TaskAdmission,
 }
 
-impl Drop for AdmissionPermit<'_> {
+impl Drop for TaskAdmissionPermit<'_> {
     fn drop(&mut self) {
         let previous = self.admission.state.fetch_sub(1, Ordering::AcqRel);
 
@@ -89,7 +89,7 @@ impl Drop for AdmissionPermit<'_> {
 
 pub(crate) struct GenerationState {
     pub(crate) id: u64,
-    pub(crate) admission: GenerationAdmission,
+    pub(crate) admission: TaskAdmission,
     pub(crate) task_count: AtomicUsize,
     pub(crate) shards: Box<[TaskShard]>,
 }
@@ -104,7 +104,7 @@ impl GenerationState {
             .into_boxed_slice();
         Self {
             id,
-            admission: GenerationAdmission::new(),
+            admission: TaskAdmission::new(),
             task_count: AtomicUsize::new(0),
             shards,
         }

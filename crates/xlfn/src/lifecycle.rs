@@ -364,13 +364,6 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
             .take()
             .expect("a removal transaction always owns its attempt")
     }
-
-    fn restore_attempt(&mut self, attempt: crate::runtime::RemovalOwner<'runtime, A>) {
-        assert!(
-            self.attempt.replace(attempt).is_none(),
-            "a removal transaction cannot restore two removal owners"
-        );
-    }
 }
 
 impl<A: Addin> Drop for RemovalTransaction<'_, A> {
@@ -424,23 +417,28 @@ where
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let mut lifecycle_release_ready = match runtime.has_addin_lifecycle(lifecycle) {
-        Ok(present) => !present,
+    let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
+        Ok(present) => present,
         Err(error) => {
             let error = lifecycle_access_error(error);
-            report_boundary_error("xlAutoRemove lifecycle slot", &error);
-            unload_failure = Some((
+            return Err(handle_unload_hazard(
+                runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,
                 "xlAutoRemove lifecycle slot",
-                error,
+                &error,
             ));
-            false
         }
     };
 
     let execution_drained = drain_execution(runtime, true);
-
-    let mut producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+    let owner = transaction.take_attempt();
+    let teardown: teardown::TeardownTxn<
+        'runtime,
+        A,
+        crate::runtime::FinalRemoval,
+        teardown::ExecutionDrained,
+    > = teardown::TeardownTxn::new(owner, execution_drained);
+    let teardown = match teardown.stop_producers(|issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
         Ok(stage) => stage,
@@ -608,8 +606,7 @@ where
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().host_detached(runtime);
 
-    let mut addin_shared_state = None;
-    if let Some(generation) = runtime.take_generation_for_shutdown() {
+    let addin = if let Some(generation) = runtime.take_generation_for_shutdown() {
         match generation {
             crate::runtime::ShutdownGeneration::Open(generation) => {
                 match std::sync::Arc::try_unwrap(generation) {
@@ -640,7 +637,11 @@ where
                             ));
                         }
                         drop(generation.layers);
-                        addin_shared_state = Some(generation.shared_state);
+                        teardown::QuiescedAddin::shared(
+                            runtime,
+                            active_runtime_generation(runtime),
+                            generation.shared_state,
+                        )
                     }
                     Err(generation) => {
                         let error = XllError::Internal {
@@ -695,17 +696,27 @@ where
                     ));
                 }
                 drop(layers);
-                addin_shared_state = Some(shared_state);
+                teardown::QuiescedAddin::shared(
+                    runtime,
+                    active_runtime_generation(runtime),
+                    shared_state,
+                )
             }
         }
     } else {
-        // A missing runtime root is the already-consumed state case. The
-        // abstract proof still records uniqueness and quiescence explicitly
-        // before advancing the state milestone.
-    }
-
-    let addin_quiesced = crate::shutdown::AddinQuiesced::new();
-    let generation_reclaimed = crate::shutdown::GenerationReclaimed::new();
+        if lifecycle_present {
+            let error = XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+            };
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                "xlAutoRemove lifecycle state",
+                &error,
+            ));
+        }
+        teardown::QuiescedAddin::empty(runtime, active_runtime_generation(runtime))
+    };
 
     #[cfg(any(test, feature = "refinement"))]
     {
@@ -723,91 +734,34 @@ where
         ));
     }
 
-    let services_sealed =
-        match runtime.seal_generation_services(producers_stopped.take_subscriptions()) {
-            Ok(token) => token,
-            Err(error) => {
-                return Err(handle_unload_hazard(
-                    runtime,
-                    crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-                    "xlAutoRemove handle table shutdown",
-                    &error,
-                ));
-            }
-        };
-
-    if let Some(shared_state) = addin_shared_state.take() {
-        let cleanup = catch_unwind(AssertUnwindSafe(|| {
-            runtime
-                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                    let mut reporter = crate::shutdown::CleanupReporter::new(&mut report);
-                    A::cleanup(lifecycle_state, &mut reporter);
-                })
-                .map_err(lifecycle_access_error)
-        }));
-        if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
-            report.push(
-                "Addin::cleanup",
-                crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                XllError::Panic,
-            );
-            runtime.quarantine_shared_state(
-                active_runtime_generation(runtime),
-                shared_state,
-                crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
-            );
-            let error = XllError::Panic;
-            if unload_failure.is_none() {
-                unload_failure = Some((
-                    crate::shutdown::UnloadHazard::AddinCleanupFailed,
-                    "xlAutoRemove cleanup",
-                    error,
-                ));
-            }
-        } else {
-            let lifecycle_dropped = match runtime.take_addin_lifecycle(lifecycle) {
-                Ok(lifecycle_state) => {
-                    if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
-                        report.push(
-                            "Addin::LifecycleState::drop",
-                            crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                            XllError::Panic,
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-                Err(error) => {
-                    report.push(
-                        "Addin::LifecycleState",
-                        crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                        lifecycle_access_error(error),
-                    );
-                    false
-                }
-            };
-            let shared_state_dropped =
-                catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
-            if !shared_state_dropped {
-                report.push(
-                    "Addin::SharedState::drop",
-                    crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    XllError::Panic,
-                );
-            }
-            lifecycle_release_ready = lifecycle_dropped && shared_state_dropped;
-            if !lifecycle_release_ready && unload_failure.is_none() {
-                unload_failure = Some((
-                    crate::shutdown::UnloadHazard::AddinCleanupFailed,
-                    "xlAutoRemove lifecycle cleanup",
-                    XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
-                    },
-                ));
-            }
+    let teardown = match teardown.seal_services(addin) {
+        Ok(stage) => stage,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+                "xlAutoRemove handle table shutdown",
+                &error,
+            ));
         }
-    }
+    };
+
+    let teardown = match teardown.cleanup_addin(lifecycle, &mut report) {
+        Ok(stage) => stage,
+        Err(error) => {
+            for issue in report.issues() {
+                #[cfg(any(test, feature = "refinement"))]
+                runtime.refinement_hooks().cleanup_issue(runtime);
+                report_cleanup_issue(issue);
+            }
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::AddinCleanupFailed,
+                "xlAutoRemove cleanup",
+                &error,
+            ));
+        }
+    };
     for issue in report.issues() {
         #[cfg(any(test, feature = "refinement"))]
         runtime.refinement_hooks().cleanup_issue(runtime);
@@ -817,31 +771,17 @@ where
     if let Some((hazard, boundary, error)) = unload_failure.take() {
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
-    if !lifecycle_release_ready {
-        let error = XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
-        };
-        return Err(handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::CloseInvariantViolation,
-            "xlAutoRemove lifecycle binding",
-            &error,
-        ));
-    }
-
-    let (handle_store_quiescent, subscriptions_stopped) =
-        match runtime.finish_generation_services(services_sealed) {
-            Ok(certificates) => certificates,
-            Err(error) => {
-                return Err(handle_unload_hazard(
-                    runtime,
-                    crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-                    "xlAutoRemove handle pin quiescence",
-                    &error,
-                ));
-            }
-        };
-    producers_stopped.restore_subscriptions(subscriptions_stopped);
+    let teardown = match teardown.finish_services() {
+        Ok(stage) => stage,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+                "xlAutoRemove handle pin quiescence",
+                &error,
+            ));
+        }
+    };
 
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().handles_drained(runtime);
@@ -900,21 +840,10 @@ where
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().rtd_drained(runtime);
 
-    let proof = teardown::ResourcesReclaimed::new(
-        producers_stopped,
-        rtd_quiescent,
-        host_callbacks,
-        handle_store_quiescent,
-        diagnostics_stopped,
-        addin_quiesced,
-        generation_reclaimed,
-    )
-    .into_proof();
-    let owner = transaction.take_attempt();
-    let certificate = match owner.certify::<crate::runtime::FinalRemoval>(proof) {
+    let teardown = teardown.reclaim(rtd_quiescent, host_callbacks, diagnostics_stopped);
+    let certificate = match teardown.certify() {
         Ok(certificate) => certificate,
-        Err((error, owner)) => {
-            transaction.restore_attempt(owner);
+        Err(error) => {
             return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,

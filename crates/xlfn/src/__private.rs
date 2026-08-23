@@ -141,13 +141,13 @@ pub mod v1 {
     }
 
     #[doc(hidden)]
-    pub use crate::runtime::GenerationLease;
+    pub use crate::runtime::ExecutionLease;
 
     /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
     #[cfg(feature = "async")]
     #[doc(hidden)]
     pub fn async_context<'call, A: Addin>(
-        lease: &'call crate::runtime::GenerationLease<A>,
+        lease: &'call crate::runtime::ExecutionLease<A>,
         cancellation: &'call CancellationToken,
     ) -> crate::addin::AsyncContext<'call, A> {
         crate::addin::AsyncContext::new(lease.state(), cancellation)
@@ -548,7 +548,7 @@ pub mod v1 {
         R: ExcelReturn + Send + 'static,
         F: for<'call> FnOnce(
             &'call crate::runtime::CallGuard<'call, A>,
-            crate::runtime::GenerationLease<A>,
+            crate::runtime::ExecutionLease<A>,
             CancellationToken,
             &mut CallFrame<'call, R::InputMode>,
         ) -> XllResult<Fut>,

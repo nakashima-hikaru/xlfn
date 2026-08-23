@@ -5,7 +5,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use crate::generation::RuntimeGeneration;
-use crate::runtime::OpenGeneration;
+use crate::runtime::ExecutionGeneration;
 
 /// A terminal reason for retaining a resource instead of running its
 /// destructor after unload safety could not be established.
@@ -15,7 +15,7 @@ pub(crate) enum QuarantineReason {
     AddinQuiesceFailed,
     AddinGenerationEscaped,
     AddinCleanupPanicked,
-    BoundaryFailure,
+    TeardownIncomplete,
 }
 
 /// Explicit ownership for resources that are intentionally never dropped
@@ -41,7 +41,7 @@ pub(crate) enum QuarantinedResource<A: crate::Addin> {
     },
     SharedGeneration {
         generation: Option<RuntimeGeneration>,
-        generation_root: ManuallyDrop<Arc<OpenGeneration<A>>>,
+        generation_root: ManuallyDrop<Arc<ExecutionGeneration<A>>>,
         reason: QuarantineReason,
     },
 }
@@ -88,10 +88,10 @@ impl<A: crate::Addin> QuarantineVault<A> {
     pub(crate) fn retain_generation(
         &self,
         generation: Option<RuntimeGeneration>,
-        root: OpenGeneration<A>,
+        root: ExecutionGeneration<A>,
         reason: QuarantineReason,
     ) {
-        let OpenGeneration {
+        let ExecutionGeneration {
             shared_state,
             layers,
             ..
@@ -107,7 +107,7 @@ impl<A: crate::Addin> QuarantineVault<A> {
     pub(crate) fn retain_shared_generation(
         &self,
         generation: Option<RuntimeGeneration>,
-        root: Arc<OpenGeneration<A>>,
+        root: Arc<ExecutionGeneration<A>>,
         reason: QuarantineReason,
     ) {
         self.resources

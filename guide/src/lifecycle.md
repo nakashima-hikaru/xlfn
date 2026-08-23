@@ -50,7 +50,7 @@ Do not perform unbounded I/O or long-running initialization in `open`. Excel is 
 ## Shared state
 
 Synchronous contexts borrow `&SharedState`. The framework-owned asynchronous
-future keeps the current open generation (`GenerationLease`) alive, while
+future keeps the current execution generation (`ExecutionLease`) alive, while
 `AsyncContext<'_, A>` borrows the shared generation state and per-call
 cancellation token for the invocation. Shared state therefore needs explicit
 synchronization for mutable data:

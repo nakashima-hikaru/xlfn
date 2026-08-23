@@ -30,13 +30,13 @@ fn opening_publication_lost() -> ! {
 }
 
 /// The published root of an open Add-in generation.
-pub struct OpenGeneration<A: crate::Addin> {
+pub struct ExecutionGeneration<A: crate::Addin> {
     pub(crate) id: RuntimeGeneration,
     pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
 }
 
-impl<A: crate::Addin> OpenGeneration<A> {
+impl<A: crate::Addin> ExecutionGeneration<A> {
     pub(crate) const fn id(&self) -> RuntimeGeneration {
         self.id
     }
@@ -59,16 +59,16 @@ impl<A: crate::Addin> OpeningGeneration<A> {
 /// Generation reclaimed during shutdown.
 pub(crate) enum ShutdownGeneration<A: crate::Addin> {
     Opening(OpeningGeneration<A>),
-    Open(Arc<OpenGeneration<A>>),
+    Open(Arc<ExecutionGeneration<A>>),
 }
 
 /// Explicit open-generation lifetime lease for call-scoped and asynchronous
 /// UDF executions.
-pub struct GenerationLease<A: crate::Addin> {
-    pub(crate) generation: Arc<OpenGeneration<A>>,
+pub struct ExecutionLease<A: crate::Addin> {
+    pub(crate) generation: Arc<ExecutionGeneration<A>>,
 }
 
-impl<A: crate::Addin> Clone for GenerationLease<A> {
+impl<A: crate::Addin> Clone for ExecutionLease<A> {
     fn clone(&self) -> Self {
         Self {
             generation: Arc::clone(&self.generation),
@@ -76,7 +76,7 @@ impl<A: crate::Addin> Clone for GenerationLease<A> {
     }
 }
 
-impl<A: crate::Addin> GenerationLease<A> {
+impl<A: crate::Addin> ExecutionLease<A> {
     #[must_use]
     pub fn state(&self) -> &A::SharedState {
         &self.generation.shared_state
@@ -237,7 +237,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn quarantine_generation(
         &self,
         generation: Option<RuntimeGeneration>,
-        root: OpenGeneration<A>,
+        root: ExecutionGeneration<A>,
         reason: QuarantineReason,
     ) {
         self.quarantine.retain_generation(generation, root, reason);
@@ -246,7 +246,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn quarantine_shared_generation(
         &self,
         generation: Option<RuntimeGeneration>,
-        root: Arc<OpenGeneration<A>>,
+        root: Arc<ExecutionGeneration<A>>,
         reason: QuarantineReason,
     ) {
         self.quarantine
@@ -267,7 +267,7 @@ impl<A: crate::Addin> Runtime<A> {
         if let Some(id) = generation {
             self.quarantine.retain_generation(
                 Some(id),
-                OpenGeneration {
+                ExecutionGeneration {
                     id,
                     shared_state,
                     layers,
@@ -506,7 +506,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<A>>> {
+    pub(crate) fn take_current_generation(&self) -> Option<Arc<ExecutionGeneration<A>>> {
         self.lifecycle.take_current_generation()
     }
 
@@ -1255,6 +1255,7 @@ impl<A: crate::Addin> Runtime<A> {
         services.shutdown_rtd()
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_generation_services(
         &self,
         sealed: SealedGenerationServices,
@@ -1389,6 +1390,12 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
     }
 }
 
+impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
+    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
+        self.runtime
+    }
+}
+
 pub(crate) struct OpeningTxn<'runtime, A: crate::Addin> {
     runtime: &'runtime Runtime<A>,
     attempt_id: OpenAttemptId,
@@ -1477,7 +1484,7 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         self.admission.services()
     }
 
-    fn generation(&self) -> &OpenGeneration<A> {
+    fn generation(&self) -> &ExecutionGeneration<A> {
         let generation = self.admission.generation();
         let _ = generation.id();
         generation
@@ -1485,8 +1492,8 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 
     #[cfg(feature = "async")]
     #[must_use]
-    pub(crate) fn lease(&self) -> GenerationLease<A> {
-        GenerationLease {
+    pub(crate) fn lease(&self) -> ExecutionLease<A> {
+        ExecutionLease {
             generation: Arc::clone(self.admission.generation_arc()),
         }
     }

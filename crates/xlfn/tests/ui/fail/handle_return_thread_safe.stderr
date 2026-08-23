@@ -20,7 +20,7 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i32
              i64
              std::string::String
-   = note: required for `Dataset` to implement `xlfn::value::ThreadSafeReturn`
+   = note: required for `Dataset` to implement `value::output::ThreadSafeReturn`
 note: required by a bound in `value::output::assert_thread_safe_return`
   --> src/value/output.rs
    |

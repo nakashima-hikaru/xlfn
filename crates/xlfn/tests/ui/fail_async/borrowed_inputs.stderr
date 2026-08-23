@@ -1,11 +1,11 @@
-error[E0277]: the trait bound `for<'call> &str: value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `for<'call> &str: value::input::ExcelParameter<'call, value::input::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/borrowed_inputs.rs:20:31
    |
 20 | async fn borrowed_text(value: &str) -> f64 {
-   |                               ^^^^ the trait `for<'call> value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `&str`
+   |                               ^^^^ the trait `for<'call> value::input::ExcelParameter<'call, value::input::PlainInputMode>` is not implemented for `&str`
    |
-help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `&str`
-      but trait `ExcelParameter<'_, xlfn::value::PlainInputMode>` is implemented for it
+help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not implemented for `&str`
+      but trait `ExcelParameter<'_, value::input::PlainInputMode>` is implemented for it
   --> src/value.rs
    |
    | impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
@@ -19,14 +19,14 @@ note: required by a bound in `value::input::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
-error[E0277]: the trait bound `for<'call> xlfn::value::MatrixRef<'_, f64>: value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `for<'call> xlfn::value::MatrixRef<'_, f64>: value::input::ExcelParameter<'call, value::input::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/borrowed_inputs.rs:25:33
    |
 25 | async fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
    |                                 ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
-      but trait `ExcelParameter<'_, xlfn::value::PlainInputMode>` is implemented for it
+help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not implemented for `xlfn::value::MatrixRef<'_, f64>`
+      but trait `ExcelParameter<'_, value::input::PlainInputMode>` is implemented for it
   --> src/value.rs
    |
    | / impl<'call, T, M> ExcelParameter<'call, M> for MatrixRef<'call, T>
@@ -43,14 +43,14 @@ note: required by a bound in `value::input::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
-error[E0277]: the trait bound `for<'call> xlfn::value::ExcelCellRef<'_>: value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `for<'call> xlfn::value::ExcelCellRef<'_>: value::input::ExcelParameter<'call, value::input::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/borrowed_inputs.rs:30:31
    |
 30 | async fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
    |                               ^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `xlfn::value::ExcelCellRef<'_>`
-      but trait `ExcelParameter<'_, xlfn::value::PlainInputMode>` is implemented for it
+help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not implemented for `xlfn::value::ExcelCellRef<'_>`
+      but trait `ExcelParameter<'_, value::input::PlainInputMode>` is implemented for it
   --> src/value.rs
    |
    | impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {

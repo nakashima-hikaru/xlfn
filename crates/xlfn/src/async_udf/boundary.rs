@@ -37,7 +37,7 @@ pub unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     A: crate::Addin,
     Start: FnOnce(
         &crate::runtime::CallGuard<'_, A>,
-        crate::runtime::GenerationLease<A>,
+        crate::runtime::ExecutionLease<A>,
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
@@ -89,7 +89,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     A: crate::Addin,
     Start: FnOnce(
         &crate::runtime::CallGuard<'_, A>,
-        crate::runtime::GenerationLease<A>,
+        crate::runtime::ExecutionLease<A>,
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,

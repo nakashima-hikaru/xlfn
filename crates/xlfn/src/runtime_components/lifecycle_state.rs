@@ -31,15 +31,15 @@ use super::services::GenerationServices;
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::ModuleEpochLease;
-use crate::runtime::{OpenGeneration, OpeningGeneration};
+use crate::runtime::{ExecutionGeneration, OpeningGeneration};
 
 /// A read-side publication of one coherent open generation.
 ///
 /// The root and its generation services are published together. A reader can
 /// therefore never observe a generation root from one open attempt with
 /// services from another attempt.
-pub(crate) struct GenerationPublication<A: crate::Addin> {
-    pub(crate) root: Arc<OpenGeneration<A>>,
+pub(crate) struct PublishedGeneration<A: crate::Addin> {
+    pub(crate) root: Arc<ExecutionGeneration<A>>,
     pub(crate) services: Arc<GenerationServices>,
 }
 
@@ -50,15 +50,15 @@ pub(crate) struct GenerationPublication<A: crate::Addin> {
 /// publication load: this capability is the single boundary that turns the
 /// two projections into an admitted call.
 pub(crate) struct GenerationAdmission<A: crate::Addin> {
-    publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>,
+    publication: arc_swap::Guard<Option<Arc<PublishedGeneration<A>>>>,
 }
 
 impl<A: crate::Addin> GenerationAdmission<A> {
-    fn new(publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>) -> Self {
+    fn new(publication: arc_swap::Guard<Option<Arc<PublishedGeneration<A>>>>) -> Self {
         Self { publication }
     }
 
-    pub(crate) fn generation(&self) -> &OpenGeneration<A> {
+    pub(crate) fn generation(&self) -> &ExecutionGeneration<A> {
         &self
             .publication
             .as_ref()
@@ -67,7 +67,7 @@ impl<A: crate::Addin> GenerationAdmission<A> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn generation_arc(&self) -> &Arc<OpenGeneration<A>> {
+    pub(crate) fn generation_arc(&self) -> &Arc<ExecutionGeneration<A>> {
         &self
             .publication
             .as_ref()
@@ -85,8 +85,8 @@ impl<A: crate::Addin> GenerationAdmission<A> {
 }
 
 /// The complete ownership bundle for a published generation.
-pub(crate) struct OpenBundle<A: crate::Addin> {
-    generation: Arc<OpenGeneration<A>>,
+pub(crate) struct OpenGeneration<A: crate::Addin> {
+    generation: Arc<ExecutionGeneration<A>>,
     services: Arc<GenerationServices>,
     module_epoch: ModuleEpochLease,
 }
@@ -107,7 +107,7 @@ pub(crate) struct OpenRetirement {
 pub(crate) enum OpeningPayload<A: crate::Addin> {
     Empty,
     Staged(OpeningGeneration<A>),
-    Published(OpenBundle<A>),
+    Published(OpenGeneration<A>),
 }
 
 impl<A: crate::Addin> OpeningPayload<A> {
@@ -130,7 +130,7 @@ impl<A: crate::Addin> OpeningPayload<A> {
         }
     }
 
-    fn take_published(&mut self) -> Option<OpenBundle<A>> {
+    fn take_published(&mut self) -> Option<OpenGeneration<A>> {
         let payload = mem::replace(self, Self::Empty);
         match payload {
             Self::Published(bundle) => Some(bundle),
@@ -148,7 +148,7 @@ impl<A: crate::Addin> OpeningPayload<A> {
 pub(crate) enum ClosingPayload<A: crate::Addin> {
     Empty,
     Staged(OpeningGeneration<A>),
-    Published(OpenBundle<A>),
+    Published(OpenGeneration<A>),
     Retiring(OpenRetirement),
 }
 
@@ -186,7 +186,7 @@ impl<A: crate::Addin> ClosingPayload<A> {
         }
     }
 
-    fn take_published(&mut self) -> Option<OpenBundle<A>> {
+    fn take_published(&mut self) -> Option<OpenGeneration<A>> {
         let payload = mem::replace(self, Self::Empty);
         match payload {
             Self::Published(bundle) => Some(bundle),
@@ -221,7 +221,7 @@ pub(crate) enum LifecycleState<A: crate::Addin> {
         payload: OpeningPayload<A>,
     },
     Open {
-        bundle: OpenBundle<A>,
+        bundle: OpenGeneration<A>,
     },
     Closing {
         open_attempt: Option<OpenAttemptId>,
@@ -348,7 +348,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    fn take_open_bundle(&mut self) -> Option<OpenBundle<A>> {
+    fn take_open_bundle(&mut self) -> Option<OpenGeneration<A>> {
         let state = mem::replace(self, Self::Closed);
         match state {
             Self::Open { bundle } => Some(bundle),
@@ -561,7 +561,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
 /// access; lifecycle writers mutate `core` first and then update projections.
 pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
-    publication: ArcSwapOption<GenerationPublication<A>>,
+    publication: ArcSwapOption<PublishedGeneration<A>>,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
     #[cfg(any(test, feature = "refinement"))]
@@ -682,8 +682,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.publication.store(None);
     }
 
-    fn publish_publication(&self, bundle: &OpenBundle<A>) {
-        self.publication.store(Some(Arc::new(GenerationPublication {
+    fn publish_publication(&self, bundle: &OpenGeneration<A>) {
+        self.publication.store(Some(Arc::new(PublishedGeneration {
             root: Arc::clone(&bundle.generation),
             services: Arc::clone(&bundle.services),
         })));
@@ -972,12 +972,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             layers,
             init_config: _,
         } = opening;
-        let published = Arc::new(OpenGeneration {
+        let published = Arc::new(ExecutionGeneration {
             id: generation,
             shared_state,
             layers,
         });
-        let bundle = OpenBundle {
+        let bundle = OpenGeneration {
             generation: Arc::clone(&published),
             services,
             module_epoch,
@@ -1048,9 +1048,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.lock().state.take_opening()
     }
 
-    fn take_current_bundle(&self, core: &mut LifecycleCore<A>) -> Option<Arc<OpenGeneration<A>>> {
+    fn take_current_bundle(
+        &self,
+        core: &mut LifecycleCore<A>,
+    ) -> Option<Arc<ExecutionGeneration<A>>> {
         let bundle = core.state.take_open_bundle()?;
-        let OpenBundle {
+        let OpenGeneration {
             generation,
             services,
             module_epoch,
@@ -1064,7 +1067,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn take_current_generation(&self) -> Option<Arc<OpenGeneration<A>>> {
+    pub(crate) fn take_current_generation(&self) -> Option<Arc<ExecutionGeneration<A>>> {
         let mut core = self.lock();
         self.take_current_bundle(&mut core)
     }

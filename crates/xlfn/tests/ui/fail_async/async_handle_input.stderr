@@ -42,14 +42,14 @@ note: the trait `xlfn::Addin` must be implemented
    | pub trait Addin: Send + Sync + 'static {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: value::input::ExcelParameter<'call, xlfn::value::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: value::input::ExcelParameter<'call, value::input::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
 27 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `ExcelParameter<'call, xlfn::value::PlainInputMode>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
-      but trait `ExcelParameter<'_, xlfn::value::PlainInputMode>` is implemented for it
+help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
+      but trait `ExcelParameter<'_, value::input::PlainInputMode>` is implemented for it
   --> src/value.rs
    |
    | / impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::Handle<'call, T>
