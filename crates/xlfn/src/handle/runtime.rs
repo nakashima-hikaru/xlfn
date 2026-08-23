@@ -25,6 +25,10 @@ pub(crate) enum PreparedHandleObject {
     Existing { object: SharedObject },
 }
 
+enum WarmPreparation {
+    Reused(String),
+}
+
 thread_local! {
     static ACTIVE_HANDLE_INITIALIZATION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
@@ -349,45 +353,9 @@ impl FormulaHandleService {
         let _active_initialization = HandleInitializationGuard::enter()?;
         let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         let _refinement_prepare = self.refinement.observe_prepare();
-        {
-            let published = self.topics.published().load(&key);
-            if let Some(publication) = published.get(&key) {
-                let warm_reader = publication.state() == PublishedTopicState::Live;
-                let warm_reader_id =
-                    warm_reader.then(|| self.refinement.observe_begin_warm_read(&key));
-
-                if warm_reader {
-                    let reader_id = warm_reader_id.expect("warm reader existence was checked");
-                    let observed = observe(&publication.rtd_key, &publication.token);
-                    if let Err(error) = observed {
-                        match publication.state() {
-                            PublishedTopicState::Live => {
-                                self.refinement.observe_fail_warm_read(reader_id);
-                            }
-                            PublishedTopicState::Stale | PublishedTopicState::Closing => {
-                                self.refinement.observe_abandon_warm_read(reader_id);
-                            }
-                            PublishedTopicState::Provisional => {}
-                        }
-                        return Err(error);
-                    }
-
-                    return match publication.state() {
-                        PublishedTopicState::Live => {
-                            self.refinement.observe_finish_warm_read(reader_id);
-                            Ok((publication.token.clone(), false))
-                        }
-                        PublishedTopicState::Closing => {
-                            self.refinement.observe_abandon_warm_read(reader_id);
-                            Err(XllError::Closing)
-                        }
-                        PublishedTopicState::Provisional | PublishedTopicState::Stale => {
-                            self.refinement.observe_abandon_warm_read(reader_id);
-                            Err(XllError::StaleHandle)
-                        }
-                    };
-                }
-            }
+        let mut observe = Some(observe);
+        if let Some(WarmPreparation::Reused(token)) = self.prepare_warm(key, &mut observe)? {
+            return Ok((token, false));
         }
 
         let owner = std::thread::current().id();
@@ -427,7 +395,15 @@ impl FormulaHandleService {
                 rtd_key,
                 generation,
             } => {
-                return self.observe_existing(key, rtd_key, token, generation, observe);
+                return self.observe_existing(
+                    key,
+                    rtd_key,
+                    token,
+                    generation,
+                    observe
+                        .take()
+                        .expect("the observation closure is still owned"),
+                );
             }
 
             PrepareDecision::Initialize {
@@ -486,13 +462,68 @@ impl FormulaHandleService {
             },
         )?;
         self.topics.is_current(key, generation, &token)?;
-        observe(&rtd_key, &token)?;
+        observe
+            .take()
+            .expect("the cold path owns the observation closure")(&rtd_key, &token)?;
 
         self.topics.is_current(key, generation, &token)?;
         self.commit_publication(key, generation, &initialization, &publication)?;
         provisional.commit();
         reservation.commit();
         Ok((token, true))
+    }
+
+    /// Attempts the warm publication path and leaves the observation closure
+    /// untouched when the topic is not live. The cold path then owns the same
+    /// closure and the same call-scoped preparation admission.
+    fn prepare_warm<F>(
+        &self,
+        key: HandleTopicKey,
+        observe: &mut Option<F>,
+    ) -> XllResult<Option<WarmPreparation>>
+    where
+        F: FnOnce(&str, &str) -> XllResult<()>,
+    {
+        let published = self.topics.published().load(&key);
+        let Some(publication) = published.get(&key) else {
+            return Ok(None);
+        };
+        if publication.state() != PublishedTopicState::Live {
+            return Ok(None);
+        }
+
+        let reader_id = self.refinement.observe_begin_warm_read(&key);
+        let observed = observe
+            .take()
+            .expect("a live warm publication consumes the observation closure")(
+            &publication.rtd_key,
+            &publication.token,
+        );
+        if let Err(error) = observed {
+            match publication.state() {
+                PublishedTopicState::Live => self.refinement.observe_fail_warm_read(reader_id),
+                PublishedTopicState::Stale | PublishedTopicState::Closing => {
+                    self.refinement.observe_abandon_warm_read(reader_id)
+                }
+                PublishedTopicState::Provisional => {}
+            }
+            return Err(error);
+        }
+
+        match publication.state() {
+            PublishedTopicState::Live => {
+                self.refinement.observe_finish_warm_read(reader_id);
+                Ok(Some(WarmPreparation::Reused(publication.token.clone())))
+            }
+            PublishedTopicState::Closing => {
+                self.refinement.observe_abandon_warm_read(reader_id);
+                Err(XllError::Closing)
+            }
+            PublishedTopicState::Provisional | PublishedTopicState::Stale => {
+                self.refinement.observe_abandon_warm_read(reader_id);
+                Err(XllError::StaleHandle)
+            }
+        }
     }
 
     #[cfg(any(target_os = "windows", test))]

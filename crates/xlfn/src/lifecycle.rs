@@ -13,11 +13,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 mod boundary;
 mod open;
 mod state;
+mod teardown;
 
 pub use boundary::{host_auto_close, host_auto_open, host_auto_remove};
 pub(super) use open::open_addin_boundary as open_addin;
 pub(crate) use state::HostLifecycleIntent;
 pub use state::LifecyclePhase;
+use teardown::drain_execution;
 
 macro_rules! lifecycle_token {
     ($name:ident) => {
@@ -280,30 +282,6 @@ struct OpenRollbackOutcome {
 
 fn active_runtime_generation<A: Addin>(runtime: &Runtime<A>) -> Option<RuntimeGeneration> {
     runtime.protocol_generation()
-}
-
-/// Shared execution-drain stage for rollback and final removal. The ghost
-/// event emission remains an explicit policy switch because rollback and
-/// terminal close occupy different abstract transitions.
-fn drain_execution<A: Addin>(
-    runtime: &Runtime<A>,
-    _record_ghost: bool,
-) -> crate::ingress::ExportsDrained {
-    let exports_drained = crate::module_runtime::global().seal_and_drain();
-
-    #[cfg(any(test, feature = "unstable"))]
-    if _record_ghost {
-        runtime.record_ghost_event_linearized(crate::shutdown_refinement::GhostEvent::CallsDrained);
-    }
-
-    runtime.wait_for_returns();
-
-    #[cfg(any(test, feature = "unstable"))]
-    if _record_ghost {
-        runtime.record_ghost_event(crate::shutdown_refinement::GhostEvent::ReturnsDrained);
-    }
-
-    exports_drained
 }
 
 impl OpenRollbackOutcome {

@@ -17,7 +17,7 @@ mod thread_affine;
 #[cfg(any(test, feature = "unstable"))]
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
-pub(crate) use lifecycle_state::{LifecycleCoordinator, LifecycleCore};
+pub(crate) use lifecycle_state::{GenerationPublication, LifecycleCoordinator, LifecycleCore};
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;

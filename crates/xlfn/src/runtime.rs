@@ -10,9 +10,9 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
-    GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore, ModuleResidency,
-    QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess, ThreadAffineError,
-    ThreadAffineInstallError,
+    GenerationPublication, GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore,
+    ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess,
+    ThreadAffineError, ThreadAffineInstallError,
 };
 use crate::runtime_refinement::RuntimeRefinementHooks;
 
@@ -633,8 +633,8 @@ impl<A: crate::Addin> Runtime<A> {
                 return Err(XllError::Closing);
             }
 
-            let generation = self.lifecycle.load_current_generation();
-            if generation.is_none() {
+            let publication = self.lifecycle.load_generation_publication();
+            if publication.is_none() {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::MISSING_STATE,
                 });
@@ -646,7 +646,7 @@ impl<A: crate::Addin> Runtime<A> {
                 runtime: self,
                 #[cfg(not(any(test, feature = "unstable")))]
                 _runtime: std::marker::PhantomData,
-                generation,
+                publication,
             })
         })
     }
@@ -1053,7 +1053,10 @@ impl<A: crate::Addin> Runtime<A> {
         proof: QuiescenceProof,
     ) -> XllResult<TerminalCertificate<K>> {
         let mut control = self.lifecycle.lock();
-        let services = self.lifecycle.load_generation_services();
+        let services = self
+            .lifecycle
+            .load_generation_services()
+            .or_else(|| control.retiring_services().map(Arc::clone));
         let services_stopped = services.as_ref().is_none_or(|services| services.is_none());
         #[cfg(feature = "async")]
         let async_stopped = self.executors.async_manager.is_stopped();
@@ -1245,21 +1248,23 @@ impl<A: crate::Addin> Runtime<A> {
             .get_owned()
     }
 
+    fn generation_services_snapshot(&self) -> Option<Arc<GenerationServices>> {
+        self.lifecycle.load_generation_services().or_else(|| {
+            let control = self.lifecycle.lock();
+            control.retiring_services().map(Arc::clone)
+        })
+    }
+
     pub(crate) fn generation_services(&self) -> XllResult<Arc<GenerationServices>> {
-        let services = self.lifecycle.load_generation_services();
-        services.as_ref().map(Arc::clone).ok_or(XllError::Closing)
+        let services = self.generation_services_snapshot();
+        services.ok_or(XllError::Closing)
     }
 
     pub(crate) fn seal_formula_handle_service(
         &self,
     ) -> XllResult<crate::handle::FormulaHandleServiceSealed> {
         let generation = self.protocol_generation();
-        let Some(services) = self
-            .lifecycle
-            .load_generation_services()
-            .as_ref()
-            .map(Arc::clone)
-        else {
+        let Some(services) = self.generation_services_snapshot() else {
             return Ok(crate::handle::FormulaHandleServiceSealed::empty(generation));
         };
         services.formula_handle_slot().seal(generation)
@@ -1278,12 +1283,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        let Some(services) = self
-            .lifecycle
-            .load_generation_services()
-            .as_ref()
-            .map(Arc::clone)
-        else {
+        let Some(services) = self.generation_services_snapshot() else {
             return Ok(crate::subscription::SubscriptionsStopped::new());
         };
         services.subscriptions_slot().seal()
@@ -1447,7 +1447,7 @@ pub struct CallGuard<'runtime, A: crate::Addin> {
     runtime: &'runtime Runtime<A>,
     #[cfg(not(any(test, feature = "unstable")))]
     _runtime: std::marker::PhantomData<&'runtime Runtime<A>>,
-    generation: arc_swap::Guard<Option<Arc<OpenGeneration<A>>>>,
+    publication: arc_swap::Guard<Option<Arc<GenerationPublication<A>>>>,
 }
 
 impl<A: crate::Addin> CallGuard<'_, A> {
@@ -1462,12 +1462,12 @@ impl<A: crate::Addin> CallGuard<'_, A> {
     }
 
     fn generation(&self) -> &OpenGeneration<A> {
-        let generation = self
-            .generation
+        let publication = self
+            .publication
             .as_ref()
             .expect("a live CallGuard always observes published runtime generation");
-        let _ = generation.id();
-        generation
+        let _ = publication.root.id();
+        &publication.root
     }
 
     #[cfg(feature = "async")]
@@ -1475,9 +1475,11 @@ impl<A: crate::Addin> CallGuard<'_, A> {
     pub(crate) fn lease(&self) -> GenerationLease<A> {
         GenerationLease {
             generation: Arc::clone(
-                self.generation
+                &self
+                    .publication
                     .as_ref()
-                    .expect("a live CallGuard always observes published runtime generation"),
+                    .expect("a live CallGuard always observes published runtime generation")
+                    .root,
             ),
         }
     }
