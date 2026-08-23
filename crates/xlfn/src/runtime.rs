@@ -3,6 +3,7 @@ use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::registration::RegistrationId;
 use crate::{XllError, XllResult};
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 #[cfg(not(feature = "async"))]
 use std::sync::atomic::Ordering;
@@ -301,7 +302,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn begin_open_if_epoch(
         &self,
         expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpeningTxn<'_, A>> {
+    ) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
         #[cfg(test)]
         let test_module_lease = crate::ingress::acquire_test_module_lease();
         let mut control = self.lifecycle.lock();
@@ -331,12 +332,12 @@ impl<A: crate::Addin> Runtime<A> {
             runtime: self,
             attempt_id,
             module_opening: Some(module_opening),
-            active: true,
+            _stage: PhantomData,
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A>> {
+    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
         self.begin_open_if_epoch(self.removal_epoch())
     }
 
@@ -515,9 +516,9 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn finish_open(
+    pub(crate) fn finish_open<Stage>(
         &self,
-        attempt: &mut OpeningTxn<'_, A>,
+        attempt: &mut OpeningTxn<'_, A, Stage>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
         let mut journal = crate::registration::HostMutationJournal {
@@ -527,17 +528,17 @@ impl<A: crate::Addin> Runtime<A> {
                 .collect(),
             ..Default::default()
         };
-        attempt.commit(&mut journal)
+        attempt.commit_in_place(&mut journal)
     }
 
     fn finish_open_for_attempt(
         &self,
-        attempt: &mut OpeningTxn<'_, A>,
+        attempt_id: OpenAttemptId,
+        module_opening: crate::module_runtime::ModuleOpening,
         journal: &mut crate::registration::HostMutationJournal,
     ) -> XllResult<()> {
         let mut control = self.lifecycle.lock();
-        if control.canonical_state().open_attempt() != Some(attempt.attempt_id) {
-            attempt.active = false;
+        if control.canonical_state().open_attempt() != Some(attempt_id) {
             return Err(XllError::Closing);
         }
 
@@ -557,17 +558,13 @@ impl<A: crate::Addin> Runtime<A> {
             let ingress = crate::module_runtime::ingress();
             ingress
                 .complete_open(|| {
-                    let module_epoch = attempt
-                        .module_opening
-                        .take()
-                        .expect("opening transaction owns the module epoch");
                     self.publish_opening_generation(
                         &mut control,
-                        attempt.attempt_id,
-                        module_epoch.commit(),
+                        attempt_id,
+                        module_opening.commit(),
                     )?;
-                    let generation = attempt.attempt_id.into_runtime_generation();
-                    self.refinement.commit_open(self, attempt.attempt_id, || {
+                    let generation = attempt_id.into_runtime_generation();
+                    self.refinement.commit_open(self, attempt_id, || {
                         self.lifecycle.commit_open(&mut control, generation)?;
                         if control.canonical_state().phase() != LifecyclePhase::Open
                             || control.last_committed_generation() != Some(generation)
@@ -580,7 +577,6 @@ impl<A: crate::Addin> Runtime<A> {
                                 },
                             );
                         }
-                        attempt.active = false;
                         Ok(())
                     })?;
                     Ok::<(), XllError>(())
@@ -589,10 +585,10 @@ impl<A: crate::Addin> Runtime<A> {
             self.lifecycle.notify_all();
             Ok(())
         } else {
-            self.reject_open_attempt(&mut control, attempt);
+            self.reject_open_attempt(&mut control, module_opening);
             self.lifecycle.notify_all();
             drop(control);
-            self.refinement.reject_open(self, attempt.attempt_id);
+            self.refinement.reject_open(self, attempt_id);
             Err(XllError::Closing)
         }
     }
@@ -605,10 +601,12 @@ impl<A: crate::Addin> Runtime<A> {
         self.host.registration_state_unknown()
     }
 
-    fn reject_open_attempt(&self, control: &mut LifecycleCore<A>, attempt: &mut OpeningTxn<'_, A>) {
+    fn reject_open_attempt(
+        &self,
+        control: &mut LifecycleCore<A>,
+        _module_opening: crate::module_runtime::ModuleOpening,
+    ) {
         self.lifecycle.reject_open_attempt(control);
-        let _ = attempt.module_opening.take();
-        attempt.active = false;
     }
 
     fn fail_and_record(
@@ -1396,61 +1394,96 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     }
 }
 
-pub(crate) struct OpeningTxn<'runtime, A: crate::Addin> {
+pub(crate) struct OpenAttemptBegun;
+
+pub(crate) struct OpenGenerationStaged;
+
+type OpeningStageFailure<'runtime, A> = (
+    XllError,
+    Box<OpeningTxn<'runtime, A, OpenAttemptBegun>>,
+    Box<OpeningGeneration<A>>,
+);
+
+pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage> {
     runtime: &'runtime Runtime<A>,
     attempt_id: OpenAttemptId,
     module_opening: Option<crate::module_runtime::ModuleOpening>,
-    active: bool,
+    _stage: PhantomData<fn() -> Stage>,
 }
 
-impl<A: crate::Addin> OpeningTxn<'_, A> {
-    pub(crate) const fn is_active(&self) -> bool {
-        self.active
-    }
-
+impl<A: crate::Addin, Stage> OpeningTxn<'_, A, Stage> {
     pub(crate) const fn attempt_id(&self) -> OpenAttemptId {
         self.attempt_id
     }
 
-    pub(crate) fn stage(
-        &mut self,
-        opening: OpeningGeneration<A>,
-    ) -> Result<(), (XllError, OpeningGeneration<A>)> {
-        if !self.active {
-            return Err((XllError::Closing, opening));
-        }
-        self.runtime
-            .stage_opening_generation_for_attempt(self.attempt_id, opening)
-    }
-
-    pub(crate) fn commit(
-        &mut self,
-        journal: &mut crate::registration::HostMutationJournal,
-    ) -> XllResult<()> {
-        let runtime = self.runtime;
-        runtime.finish_open_for_attempt(self, journal)
-    }
-
-    pub(crate) fn fail(&mut self) -> crate::runtime_components::OpenFailureDisposition {
-        if !self.active {
-            return crate::runtime_components::OpenFailureDisposition::ClosingOwnsCleanup;
-        }
+    pub(crate) fn fail(mut self) -> crate::runtime_components::OpenFailureDisposition {
         let disposition = self.runtime.fail_and_record(self.attempt_id);
         let _ = self.module_opening.take();
-        self.active = false;
         disposition
     }
 }
 
-impl<A: crate::Addin> Drop for OpeningTxn<'_, A> {
-    fn drop(&mut self) {
-        if self.active {
-            // Lifecycle rollback is owned by OpeningTxn and must be
-            // explicit. A leaked attempt can only enter the fail-safe state;
-            // Drop never invokes host callbacks or resource cleanup.
-            self.runtime.quarantine();
-            self.active = false;
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenAttemptBegun> {
+    pub(crate) fn stage(
+        mut self,
+        opening: OpeningGeneration<A>,
+    ) -> Result<OpeningTxn<'runtime, A, OpenGenerationStaged>, OpeningStageFailure<'runtime, A>>
+    {
+        let result = self
+            .runtime
+            .stage_opening_generation_for_attempt(self.attempt_id, opening);
+        match result {
+            Ok(()) => {
+                let module_opening = self
+                    .module_opening
+                    .take()
+                    .expect("an open attempt owns the module token before staging");
+                Ok(OpeningTxn {
+                    runtime: self.runtime,
+                    attempt_id: self.attempt_id,
+                    module_opening: Some(module_opening),
+                    _stage: PhantomData,
+                })
+            }
+            Err((error, opening)) => Err((error, Box::new(self), Box::new(opening))),
         }
+    }
+}
+
+impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage> {
+    pub(crate) fn commit(
+        mut self,
+        journal: &mut crate::registration::HostMutationJournal,
+    ) -> XllResult<()> {
+        let Some(module_opening) = self.module_opening.take() else {
+            return Err(XllError::Closing);
+        };
+        self.runtime
+            .finish_open_for_attempt(self.attempt_id, module_opening, journal)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn commit_in_place(
+        &mut self,
+        journal: &mut crate::registration::HostMutationJournal,
+    ) -> XllResult<()> {
+        let Some(module_opening) = self.module_opening.take() else {
+            return Err(XllError::Closing);
+        };
+        self.runtime
+            .finish_open_for_attempt(self.attempt_id, module_opening, journal)
+    }
+}
+
+impl<A: crate::Addin, Stage> Drop for OpeningTxn<'_, A, Stage> {
+    fn drop(&mut self) {
+        if self.module_opening.is_none() {
+            return;
+        }
+        // Lifecycle rollback is owned by OpeningTxn and must be explicit.
+        // Dropping any unfinished stage can only enter the fail-safe state;
+        // Drop never invokes host callbacks or resource cleanup.
+        self.runtime.quarantine();
     }
 }
 
@@ -1758,7 +1791,6 @@ pub(crate) mod tests {
             Err(XllError::Closing)
         ));
         assert_eq!(runtime.open_attempt(), None);
-        assert!(!opening.is_active());
 
         closing_entered_rx.recv().unwrap();
         closing_release_tx.send(()).unwrap();
@@ -1843,7 +1875,7 @@ pub(crate) mod tests {
     fn close_waiter_is_not_lost_when_open_rollback_finishes() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.begin_open().unwrap();
+        let opening = runtime.begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
         let rollback = runtime.acquire_open_rollback().unwrap();
 

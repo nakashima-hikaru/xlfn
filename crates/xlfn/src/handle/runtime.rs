@@ -178,6 +178,147 @@ impl Drop for ProvisionalPublication<'_> {
     }
 }
 
+/// The cold publication protocol owns both storage reservations.  The
+/// underlying handle store and topic table remain separate, but callers can
+/// no longer commit one side without carrying the other side through the
+/// same linear transaction.
+struct PublicationReservation<'runtime> {
+    runtime: &'runtime FormulaHandleService,
+    key: HandleTopicKey,
+    generation: TopicGeneration,
+    reservation: TopicReservation<'runtime>,
+}
+
+struct ProvisionalPublicationTxn<'runtime> {
+    runtime: &'runtime FormulaHandleService,
+    key: HandleTopicKey,
+    generation: TopicGeneration,
+    reservation: TopicReservation<'runtime>,
+    provisional: ProvisionalPublication<'runtime>,
+}
+
+struct ObservedPublicationTxn<'runtime> {
+    runtime: &'runtime FormulaHandleService,
+    key: HandleTopicKey,
+    generation: TopicGeneration,
+    reservation: TopicReservation<'runtime>,
+    provisional: ProvisionalPublication<'runtime>,
+}
+
+impl<'runtime> PublicationReservation<'runtime> {
+    fn new(
+        runtime: &'runtime FormulaHandleService,
+        key: HandleTopicKey,
+        generation: TopicGeneration,
+        initialization: Arc<Initialization>,
+    ) -> Self {
+        Self {
+            runtime,
+            key,
+            generation,
+            reservation: TopicReservation::new(runtime, key, initialization),
+        }
+    }
+
+    fn insert_object<T: ExcelHandleObject>(
+        self,
+        prepared: PreparedHandleObject,
+    ) -> XllResult<(
+        ProvisionalPublicationTxn<'runtime>,
+        String,
+        super::HandleId,
+        super::ObjectId,
+        bool,
+    )> {
+        let (token, binding_id, object_id, reused) = match prepared {
+            PreparedHandleObject::New { value } => self.runtime.store.insert_pending::<T>(value)?,
+            PreparedHandleObject::Existing { object } => {
+                self.runtime.store.insert_existing::<T>(object)?
+            }
+        };
+        let provisional = ProvisionalPublication::new(
+            self.runtime,
+            self.key,
+            token.clone(),
+            self.reservation.initialization.refinement_id,
+        );
+        let Self {
+            runtime,
+            key,
+            generation,
+            reservation,
+        } = self;
+        Ok((
+            ProvisionalPublicationTxn {
+                runtime,
+                key,
+                generation,
+                reservation,
+                provisional,
+            },
+            token,
+            binding_id,
+            object_id,
+            reused,
+        ))
+    }
+}
+
+impl<'runtime> ProvisionalPublicationTxn<'runtime> {
+    fn publish_and_observe(
+        self,
+        publication: triomphe::Arc<PublishedTopic>,
+        rtd_key: Arc<str>,
+        observe: impl FnOnce(&str, &str) -> XllResult<()>,
+        on_linearized: impl FnOnce(),
+    ) -> XllResult<ObservedPublicationTxn<'runtime>> {
+        let token = &self.provisional.token;
+        self.runtime.topics.insert_provisional(
+            self.key,
+            self.generation,
+            triomphe::Arc::clone(&publication),
+            on_linearized,
+        )?;
+        self.runtime
+            .topics
+            .is_current(self.key, self.generation, token)?;
+        observe(&rtd_key, token)?;
+        self.runtime
+            .topics
+            .is_current(self.key, self.generation, token)?;
+        let Self {
+            runtime,
+            key,
+            generation,
+            reservation,
+            provisional,
+        } = self;
+        Ok(ObservedPublicationTxn {
+            runtime,
+            key,
+            generation,
+            reservation,
+            provisional,
+        })
+    }
+}
+
+impl ObservedPublicationTxn<'_> {
+    fn commit(self, publication: &triomphe::Arc<PublishedTopic>) -> XllResult<()> {
+        let Self {
+            runtime,
+            key,
+            generation,
+            reservation,
+            provisional,
+        } = self;
+        runtime.commit_publication(key, generation, &reservation.initialization, publication)?;
+        provisional.commit();
+        reservation.commit();
+        Ok(())
+    }
+}
+
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct FormulaHandleService {
@@ -395,15 +536,14 @@ impl FormulaHandleService {
             PrepareDecision::Wait { .. } => unreachable!("wait decisions never leave the loop"),
         };
 
-        let reservation = TopicReservation::new(self, key, Arc::clone(&initialization));
-
         //
         // Cold path: no existing topic, invoke the factory.
         //
-        let (token, binding_id, object_id, reused) = match create()? {
-            PreparedHandleObject::New { value } => self.store.insert_pending::<T>(value)?,
-            PreparedHandleObject::Existing { object } => self.store.insert_existing::<T>(object)?,
-        };
+        let publication_reservation =
+            PublicationReservation::new(self, key, generation, Arc::clone(&initialization));
+        let prepared = create()?;
+        let (publication_txn, token, binding_id, object_id, reused) =
+            publication_reservation.insert_object::<T>(prepared)?;
         let binding = FormulaBinding {
             id: binding_id,
             object_id,
@@ -420,19 +560,18 @@ impl FormulaHandleService {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization.refinement_id);
         }
-        let provisional =
-            ProvisionalPublication::new(self, key, token.clone(), initialization.refinement_id);
-
         let rtd_key: Arc<str> = key.format_rtd_key().into();
         let publication = triomphe::Arc::new(PublishedTopic::new(
             binding,
             token.clone(),
             Arc::clone(&rtd_key),
         ));
-        self.topics.insert_provisional(
-            key,
-            generation,
-            triomphe::Arc::clone(&publication),
+        let publication_txn = publication_txn.publish_and_observe(
+            publication.clone(),
+            Arc::clone(&rtd_key),
+            observe
+                .take()
+                .expect("the cold path owns the observation closure"),
             || {
                 self.refinement.observe_publish_and_install(
                     &key,
@@ -442,15 +581,7 @@ impl FormulaHandleService {
                 );
             },
         )?;
-        self.topics.is_current(key, generation, &token)?;
-        observe
-            .take()
-            .expect("the cold path owns the observation closure")(&rtd_key, &token)?;
-
-        self.topics.is_current(key, generation, &token)?;
-        self.commit_publication(key, generation, &initialization, &publication)?;
-        provisional.commit();
-        reservation.commit();
+        publication_txn.commit(&publication)?;
         Ok(HandlePreparation::Published { token })
     }
 
