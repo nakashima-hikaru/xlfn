@@ -58,6 +58,24 @@ impl RemovalEpoch {
     }
 }
 
+/// Identity of one owner of the terminal removal protocol.
+///
+/// A removal request may advance the close epoch more than once while callers
+/// wait for an earlier owner to leave. This identity is therefore separate
+/// from [`RemovalEpoch`]: it names the affine owner that is allowed to issue a
+/// terminal certificate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RemovalAttemptId(NonZeroU64);
+
+impl RemovalAttemptId {
+    pub(crate) const fn new(raw: u64) -> Option<Self> {
+        match NonZeroU64::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+}
+
 /// Identity of a binding slot incarnation.  A slot can be reused only with
 /// the next value, so zero is never a valid binding generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -1,12 +1,12 @@
-use std::time::Duration;
-
 use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn::benchmark_support::{BenchHandleObject, RawArgumentIngressBenchmark};
+use xlfn::benchmark_support::{
+    BENCHMARK_MEASUREMENT_TIME, BenchHandleObject, RawArgumentIngressBenchmark,
+};
 use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
 fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     // 1. Scalar f64
     let mut f64_bench = RawArgumentIngressBenchmark::number(42.0);

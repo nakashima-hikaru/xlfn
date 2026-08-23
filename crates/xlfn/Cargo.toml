@@ -47,6 +47,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "handle_lookup_arc_control"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "input_identity"
 harness = false
 required-features = ["bench-internals"]

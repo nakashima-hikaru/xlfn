@@ -1,11 +1,11 @@
-use std::time::Duration;
-
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use xlfn::benchmark_support::{FormulaCallerBenchCase, FormulaCallerBenchmark};
+use xlfn::benchmark_support::{
+    BENCHMARK_MEASUREMENT_TIME, FormulaCallerBenchCase, FormulaCallerBenchmark,
+};
 
 fn formula_caller_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("resolve_formula_caller");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     for case in [FormulaCallerBenchCase::Ref, FormulaCallerBenchCase::SRef] {
         let benchmark = FormulaCallerBenchmark::new(case);

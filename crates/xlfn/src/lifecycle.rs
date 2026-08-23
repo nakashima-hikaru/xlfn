@@ -359,10 +359,17 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    fn into_attempt(mut self) -> crate::runtime::RemovalOwner<'runtime, A> {
+    fn take_attempt(&mut self) -> crate::runtime::RemovalOwner<'runtime, A> {
         self.attempt
             .take()
             .expect("a removal transaction always owns its attempt")
+    }
+
+    fn restore_attempt(&mut self, attempt: crate::runtime::RemovalOwner<'runtime, A>) {
+        assert!(
+            self.attempt.replace(attempt).is_none(),
+            "a removal transaction cannot restore two removal owners"
+        );
     }
 }
 
@@ -433,7 +440,7 @@ where
 
     let execution_drained = drain_execution(runtime, true);
 
-    let producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+    let mut producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
         Ok(stage) => stage,
@@ -716,17 +723,18 @@ where
         ));
     }
 
-    let handles_sealed = match runtime.seal_formula_handle_service() {
-        Ok(token) => token,
-        Err(error) => {
-            return Err(handle_unload_hazard(
-                runtime,
-                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-                "xlAutoRemove handle table shutdown",
-                &error,
-            ));
-        }
-    };
+    let services_sealed =
+        match runtime.seal_generation_services(producers_stopped.take_subscriptions()) {
+            Ok(token) => token,
+            Err(error) => {
+                return Err(handle_unload_hazard(
+                    runtime,
+                    crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+                    "xlAutoRemove handle table shutdown",
+                    &error,
+                ));
+            }
+        };
 
     if let Some(shared_state) = addin_shared_state.take() {
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
@@ -821,17 +829,19 @@ where
         ));
     }
 
-    let handle_store_quiescent = match runtime.finish_formula_handle_quiescence(handles_sealed) {
-        Ok(certificate) => certificate,
-        Err(error) => {
-            return Err(handle_unload_hazard(
-                runtime,
-                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-                "xlAutoRemove handle pin quiescence",
-                &error,
-            ));
-        }
-    };
+    let (handle_store_quiescent, subscriptions_stopped) =
+        match runtime.finish_generation_services(services_sealed) {
+            Ok(certificates) => certificates,
+            Err(error) => {
+                return Err(handle_unload_hazard(
+                    runtime,
+                    crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+                    "xlAutoRemove handle pin quiescence",
+                    &error,
+                ));
+            }
+        };
+    producers_stopped.restore_subscriptions(subscriptions_stopped);
 
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().handles_drained(runtime);
@@ -890,20 +900,21 @@ where
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().rtd_drained(runtime);
 
-    let certificate = match runtime.certify::<crate::runtime::FinalRemoval>(
-        teardown::ResourcesReclaimed::new(
-            producers_stopped,
-            rtd_quiescent,
-            host_callbacks,
-            handle_store_quiescent,
-            diagnostics_stopped,
-            addin_quiesced,
-            generation_reclaimed,
-        )
-        .into_proof(),
-    ) {
+    let proof = teardown::ResourcesReclaimed::new(
+        producers_stopped,
+        rtd_quiescent,
+        host_callbacks,
+        handle_store_quiescent,
+        diagnostics_stopped,
+        addin_quiesced,
+        generation_reclaimed,
+    )
+    .into_proof();
+    let owner = transaction.take_attempt();
+    let certificate = match owner.certify::<crate::runtime::FinalRemoval>(proof) {
         Ok(certificate) => certificate,
-        Err(error) => {
+        Err((error, owner)) => {
+            transaction.restore_attempt(owner);
             return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,
@@ -912,9 +923,9 @@ where
             ));
         }
     };
-    let closed_witness = match runtime.finish_removal(certificate) {
-        Ok(witness) => witness,
-        Err(error) => {
+    let (closed_witness, removal_attempt) = match certificate.finish() {
+        Ok(result) => result,
+        Err((error, _certificate)) => {
             return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,
@@ -936,7 +947,7 @@ where
 
     Ok(RemovalSuccess::Closed {
         witness: closed_witness,
-        removal_attempt: transaction.into_attempt(),
+        removal_attempt,
     })
 }
 

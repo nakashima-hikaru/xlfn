@@ -59,6 +59,7 @@ semver:
     # compatible refactor.
     cargo semver-checks \
         --workspace \
+        --exclude xlfn-kernel \
         --baseline-rev 0.1.0 \
         --release-type major
 
@@ -71,29 +72,46 @@ check: fmt clippy features test bench-check deny semver
 
 # --- Benchmark recipes ---
 
-bench:
-    cargo bench --package xlfn --all-features --locked
+# Full production-path suite. Diagnostic microbenchmarks are intentionally
+# excluded; use `just bench-diagnostics` when investigating their results.
+bench: bench-full
 
-bench-async:
-    cargo bench --package xlfn --bench async_spawn --features "bench-internals async" --locked
+bench-full:
+    just bench-one async_spawn "bench-internals async"
+    just bench-one sync_boundary
+    just bench-one handle_prepare
+    just bench-one formula_revision
+    just bench-one handle_lookup
+    just bench-one formula_caller
+    just bench-one argument_ingress
+    just bench-one rtd_publish
+    just bench-one handle_call_resolution
 
-bench-sync:
-    cargo bench --package xlfn --bench sync_boundary --features bench-internals --locked
+# Representative PR suite. Scaling curves remain available through
+# `bench-full`, while this tier keeps every pull request focused on the
+# production paths most likely to regress.
+bench-pr:
+    just bench-one-filter async_spawn "^async_spawn/per_iteration/(1|32)\z" "bench-internals async"
+    just bench-one-filter sync_boundary "^(sync_boundary/ingress_udf_only|sync_boundary/admission|sync_boundary/scalar_return/no_subscriber|sync_boundary/return_tracker_only)/(1|32)\z"
+    just bench-one-filter handle_prepare "^handle_prepare/(cold_miss_batch_100|warm_hit_batch_100)\z"
+    just bench-one formula_revision
+    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
+    just bench-one formula_caller
+    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/with_identity|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
+    just bench-one rtd_publish
+    just bench-one-filter handle_call_resolution "^(handle_call_resolution/handles/(1|8)|handle_runtime_resolution/concurrent/(1|32))\z"
 
-bench-input-identity:
-    cargo bench --package xlfn --bench input_identity --features bench-internals --locked
+# Diagnostic microbenchmarks are useful for diagnosis, but are not part of
+# the Bencher regression contract.
+bench-diagnostics:
+    just bench-one input_identity
+    just bench-one handle_lookup_arc_control
 
-bench-formula-caller:
-    cargo bench --package xlfn --bench formula_caller --features bench-internals --locked
+bench-one name features="bench-internals":
+    cargo bench --package xlfn --bench {{name}} --features "{{features}}" --locked
 
-bench-handle-prepare:
-    cargo bench --package xlfn --bench handle_prepare --features bench-internals --locked
-
-bench-handle-lookup:
-    cargo bench --package xlfn --bench handle_lookup --features bench-internals --locked
-
-bench-formula-revision:
-    cargo bench --package xlfn --bench formula_revision --features bench-internals --locked
+bench-one-filter name filter features="bench-internals":
+    cargo bench --package xlfn --bench {{name}} --features "{{features}}" --locked -- "{{filter}}"
 
 bench-check:
     cargo clippy --package xlfn --benches --all-features --locked

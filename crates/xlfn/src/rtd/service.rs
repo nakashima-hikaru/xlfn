@@ -63,14 +63,17 @@ impl SubscriptionServiceSlot {
     }
 
     #[inline]
-    pub(crate) fn read(&self) -> crate::XllResult<SubscriptionRuntimeRead> {
+    pub(crate) fn read(
+        &self,
+        host: crate::rtd::RtdSubscriptionHost,
+    ) -> crate::XllResult<SubscriptionRuntimeRead> {
         self.service
             .read(
                 |config| {
                     Ok(Arc::new(SubscriptionRuntime::with_host(
                         config.generation,
                         config.limits,
-                        crate::rtd::RtdSubscriptionHost::production(),
+                        host,
                     )))
                 },
                 |_runtime| {
@@ -117,6 +120,7 @@ impl SubscriptionServiceSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtd::RtdSubscriptionHost;
     use std::sync::Barrier;
     use std::thread;
 
@@ -129,8 +133,8 @@ mod tests {
         let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
 
-        let first = slot.read().unwrap();
-        let second = slot.read().unwrap();
+        let first = slot.read(RtdSubscriptionHost::detached()).unwrap();
+        let second = slot.read(RtdSubscriptionHost::detached()).unwrap();
 
         assert!(Arc::ptr_eq(first.as_arc(), second.as_arc()));
     }
@@ -147,7 +151,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             handles.push(thread::spawn(move || {
                 barrier.wait();
-                let read = slot.read().unwrap();
+                let read = slot.read(RtdSubscriptionHost::detached()).unwrap();
                 Arc::as_ptr(read.as_arc()).addr()
             }));
         }
@@ -163,13 +167,16 @@ mod tests {
     fn subscription_service_slot_seal_unpublishes_runtime() {
         let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
-        let read = slot.read().unwrap();
+        let read = slot.read(RtdSubscriptionHost::detached()).unwrap();
         drop(read);
 
         assert!(!slot.is_none());
         slot.seal().unwrap();
         assert!(slot.is_none());
-        assert!(matches!(slot.read(), Err(crate::XllError::Closing)));
+        assert!(matches!(
+            slot.read(RtdSubscriptionHost::detached()),
+            Err(crate::XllError::Closing)
+        ));
     }
 
     #[test]
@@ -177,14 +184,14 @@ mod tests {
         let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
 
-        let first = slot.read().unwrap();
+        let first = slot.read(RtdSubscriptionHost::detached()).unwrap();
         let first_runtime = Arc::clone(first.as_arc());
         drop(first);
 
         slot.seal().unwrap();
 
         slot.arm(generation(), RtdLimits::standard()).unwrap();
-        let second = slot.read().unwrap();
+        let second = slot.read(RtdSubscriptionHost::detached()).unwrap();
 
         assert!(!Arc::ptr_eq(&first_runtime, second.as_arc()));
     }
@@ -192,10 +199,13 @@ mod tests {
     #[test]
     fn subscription_service_slot_seal_is_local_to_its_generation_bundle() {
         let slot = SubscriptionServiceSlot::new();
-        assert!(matches!(slot.read(), Err(crate::XllError::Closing)));
+        assert!(matches!(
+            slot.read(RtdSubscriptionHost::detached()),
+            Err(crate::XllError::Closing)
+        ));
 
         slot.arm(generation(), RtdLimits::standard()).unwrap();
-        assert!(slot.read().is_ok());
+        assert!(slot.read(RtdSubscriptionHost::detached()).is_ok());
 
         slot.seal().unwrap();
         assert!(slot.is_none());

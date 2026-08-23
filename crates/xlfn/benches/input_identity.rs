@@ -1,12 +1,10 @@
-use std::time::Duration;
-
 use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn::benchmark_support::SemanticIdentityBenchmark;
+use xlfn::benchmark_support::{BENCHMARK_MEASUREMENT_TIME, SemanticIdentityBenchmark};
 use xlfn::value::Matrix;
 
 fn input_identity_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("input_identity");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     let f64_value = SemanticIdentityBenchmark::new(42.0_f64);
     group.bench_function("f64", |b| {

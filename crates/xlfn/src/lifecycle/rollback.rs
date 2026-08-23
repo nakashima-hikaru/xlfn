@@ -55,7 +55,7 @@ where
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    let Some(_rollback_attempt) = runtime.acquire_open_rollback() else {
+    let Some(rollback_attempt) = runtime.acquire_open_rollback() else {
         let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
             && runtime.host_callbacks_detached()
             && !runtime.registration_state_unknown()
@@ -83,7 +83,7 @@ where
     // explicitly taken and dropped below.
     let execution_drained = drain_execution(runtime, false);
 
-    let producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
+    let mut producers_stopped = match execution_drained.stop_producers(runtime, |issue| {
         report_cleanup_issue(issue);
     }) {
         Ok(stage) => Some(stage),
@@ -197,8 +197,12 @@ where
         generation_reclaimed = Some(crate::shutdown::GenerationReclaimed::new());
     }
 
-    let mut handles_sealed = if local_quiescent {
-        match runtime.seal_formula_handle_service() {
+    let mut services_sealed = if local_quiescent {
+        let subscriptions_stopped = producers_stopped
+            .as_mut()
+            .expect("producer stage is present when rollback is local-quiescent")
+            .take_subscriptions();
+        match runtime.seal_generation_services(subscriptions_stopped) {
             Ok(token) => Some(token),
             Err(error) => {
                 report_boundary_error("xlAutoOpen handle rollback", &error);
@@ -302,22 +306,27 @@ where
         local_quiescent = false;
     }
 
-    let handle_store_quiescent = if local_quiescent {
-        match runtime.finish_formula_handle_quiescence(
-            handles_sealed
-                .take()
-                .expect("handle seal token is present when rollback is local-quiescent"),
-        ) {
-            Ok(certificate) => Some(certificate),
-            Err(error) => {
-                report_boundary_error("xlAutoOpen handle pin rollback", &error);
-                local_quiescent = false;
-                None
+    let handle_store_quiescent =
+        if local_quiescent {
+            match runtime.finish_generation_services(services_sealed.take().expect(
+                "generation service seal token is present when rollback is local-quiescent",
+            )) {
+                Ok((certificate, subscriptions_stopped)) => {
+                    producers_stopped
+                        .as_mut()
+                        .expect("producer stage is present when rollback is local-quiescent")
+                        .restore_subscriptions(subscriptions_stopped);
+                    Some(certificate)
+                }
+                Err(error) => {
+                    report_boundary_error("xlAutoOpen handle pin rollback", &error);
+                    local_quiescent = false;
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {
@@ -363,20 +372,22 @@ where
             ),
         )
         .into_proof();
-        match runtime
-            .certify::<crate::runtime::OpenRollback>(proof)
-            .and_then(|certificate| runtime.finish_open_rollback(certificate))
-        {
-            Ok(()) => match runtime.release_empty_addin_lifecycle(lifecycle) {
-                Ok(()) => finalized = true,
-                Err(error) => {
-                    report_boundary_error(
-                        "xlAutoOpen lifecycle binding release",
-                        &lifecycle_access_error(error),
-                    );
+        match rollback_attempt.certify::<crate::runtime::OpenRollback>(proof) {
+            Ok(certificate) => match certificate.finish() {
+                Ok(_rollback_attempt) => match runtime.release_empty_addin_lifecycle(lifecycle) {
+                    Ok(()) => finalized = true,
+                    Err(error) => {
+                        report_boundary_error(
+                            "xlAutoOpen lifecycle binding release",
+                            &lifecycle_access_error(error),
+                        );
+                    }
+                },
+                Err((error, _certificate)) => {
+                    report_boundary_error("xlAutoOpen rollback completion", &error);
                 }
             },
-            Err(error) => {
+            Err((error, _rollback_attempt)) => {
                 report_boundary_error("xlAutoOpen rollback certification", &error);
             }
         }

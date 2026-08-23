@@ -3,6 +3,7 @@ use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensur
 use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::handle::FormulaHandleService;
 use crate::host_callback::HostCallbackSession;
+use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::{ExcelValue, FromExcel};
 use crate::{ExcelCallbackStatus, XllError, XllResult};
@@ -13,11 +14,12 @@ use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 pub(crate) fn observe(
     handles: &Arc<FormulaHandleService>,
+    ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
-    let _rtd_operation = handles.begin_rtd_operation()?;
+    let _rtd_operation = crate::rtd::begin_operation(handles, ingress)?;
     let ensured = ensure_server(Some(handles), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;

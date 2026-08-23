@@ -21,9 +21,9 @@ pub(crate) use lifecycle_state::{
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
-pub(crate) use services::GenerationServices;
 #[cfg(feature = "async")]
 pub(crate) use services::RuntimeExecutors;
+pub(crate) use services::{GenerationServices, SealedGenerationServices};
 
 pub(crate) fn map_service_error(
     error: xlfn_kernel::service_slot::ServiceSlotError<crate::XllError>,

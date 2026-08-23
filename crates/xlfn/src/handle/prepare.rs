@@ -117,23 +117,6 @@ impl Drop for HandlePrepareGuard<'_> {
     }
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) struct RtdOperationGuard {
-    pub(crate) _ingress_guard: Option<crate::ingress::ExportCallGuard<'static>>,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Option<crate::shutdown_refinement::GhostHandle>,
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for RtdOperationGuard {
-    fn drop(&mut self) {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.as_ref() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

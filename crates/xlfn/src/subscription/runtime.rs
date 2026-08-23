@@ -50,16 +50,20 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
 }
 
 impl<H: SubscriptionHost> SubscriptionRuntime<H> {
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-    pub(crate) fn test() -> Self
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn new() -> Self
     where
         H: Default,
     {
-        Self::test_with_limits(RtdLimits::standard())
+        Self::with_host(
+            RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            RtdLimits::standard(),
+            H::default(),
+        )
     }
 
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-    pub(crate) fn test_with_limits(limits: RtdLimits) -> Self
+    #[cfg(test)]
+    pub(crate) fn with_limits(limits: RtdLimits) -> Self
     where
         H: Default,
     {
@@ -68,22 +72,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             limits,
             H::default(),
         )
-    }
-
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-    pub(crate) fn new() -> Self
-    where
-        H: Default,
-    {
-        Self::test()
-    }
-
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-    pub(crate) fn with_limits(limits: RtdLimits) -> Self
-    where
-        H: Default,
-    {
-        Self::test_with_limits(limits)
     }
 
     pub(crate) fn with_host(generation: RuntimeGeneration, limits: RtdLimits, host: H) -> Self {

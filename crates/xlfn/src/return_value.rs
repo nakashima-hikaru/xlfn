@@ -141,7 +141,13 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
             crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
         let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
-                crate::rtd::observe(arc_handles, key, token, access.callbacks)
+                crate::rtd::observe(
+                    arc_handles,
+                    crate::module_runtime::ingress(),
+                    key,
+                    token,
+                    access.callbacks,
+                )
             })?;
         Ok(preparation.into_token())
     }
@@ -156,7 +162,13 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let key =
             crate::handle::formula_revision_key(access.callbacks, access.udf_id, access.inputs)?;
         let preparation = handles.prepare_observed(key, operation, |key, token| {
-            crate::rtd::observe(arc_handles, key, token, access.callbacks)
+            crate::rtd::observe(
+                arc_handles,
+                crate::module_runtime::ingress(),
+                key,
+                token,
+                access.callbacks,
+            )
         })?;
         Ok(preparation.into_token())
     }

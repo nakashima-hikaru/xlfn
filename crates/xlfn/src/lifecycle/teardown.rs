@@ -26,7 +26,7 @@ pub(super) struct ExecutionDrained {
 pub(super) struct ProducersStopped {
     execution: ExecutionDrained,
     async_stopped: crate::shutdown::AsyncStopped,
-    subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
+    subscriptions_stopped: Option<crate::shutdown::SubscriptionsStopped>,
 }
 
 /// Owns every resource certificate after producers have stopped. The only
@@ -88,12 +88,30 @@ impl ExecutionDrained {
         Ok(ProducersStopped {
             execution: self,
             async_stopped,
-            subscriptions_stopped,
+            subscriptions_stopped: Some(subscriptions_stopped),
         })
     }
 }
 
 impl ProducersStopped {
+    pub(super) fn take_subscriptions(&mut self) -> crate::shutdown::SubscriptionsStopped {
+        self.subscriptions_stopped
+            .take()
+            .expect("producer stage owns one subscription shutdown certificate")
+    }
+
+    pub(super) fn restore_subscriptions(
+        &mut self,
+        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
+    ) {
+        assert!(
+            self.subscriptions_stopped
+                .replace(subscriptions_stopped)
+                .is_none(),
+            "producer stage cannot restore two subscription shutdown certificates"
+        );
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -104,7 +122,8 @@ impl ProducersStopped {
         (
             self.execution.exports,
             self.async_stopped,
-            self.subscriptions_stopped,
+            self.subscriptions_stopped
+                .expect("producer stage must retain its subscription certificate"),
         )
     }
 }

@@ -9,9 +9,14 @@ pub(crate) struct RtdSubscriptionHost {
 }
 
 impl RtdSubscriptionHost {
-    pub(crate) fn production() -> Self {
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) const fn detached() -> Self {
+        Self { ingress: None }
+    }
+
+    pub(crate) const fn production(ingress: &'static ExportIngress) -> Self {
         Self {
-            ingress: Some(crate::module_runtime::ingress()),
+            ingress: Some(ingress),
         }
     }
 }

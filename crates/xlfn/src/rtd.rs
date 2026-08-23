@@ -3,6 +3,7 @@ use crate::XllError;
 use crate::XllResult;
 use crate::handle::FormulaHandleService;
 use crate::host_callback::HostCallbackSession;
+use crate::ingress::ExportIngress;
 pub use crate::subscription::{
     IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
     RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
@@ -84,6 +85,52 @@ impl RtdModuleState {
     }
 }
 
+/// Admission guard for one RTD Excel operation.
+///
+/// This belongs to the RTD adapter rather than the formula-handle service:
+/// module ingress is an RTD/COM concern, while the handle service owns only
+/// handle and topic state.
+#[cfg(target_os = "windows")]
+pub(crate) struct RtdOperationGuard {
+    ingress_guard: crate::ingress::ExportCallGuard<'static>,
+    #[cfg(any(test, feature = "refinement"))]
+    ghost: Option<crate::shutdown_refinement::GhostHandle>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for RtdOperationGuard {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(ghost) = self.ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        }
+        let _ = &self.ingress_guard;
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn begin_operation(
+    handles: &FormulaHandleService,
+    ingress: &'static ExportIngress,
+) -> XllResult<RtdOperationGuard> {
+    #[cfg(any(test, feature = "refinement"))]
+    let ghost = handles.rtd_ghost();
+    let (ingress_guard, accepted) = ingress.enter_with(|| {
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(ghost) = ghost.as_ref() {
+            ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+        }
+    });
+    if !accepted {
+        return Err(XllError::Closing);
+    }
+    Ok(RtdOperationGuard {
+        ingress_guard,
+        #[cfg(any(test, feature = "refinement"))]
+        ghost,
+    })
+}
+
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
     #[cfg(target_os = "windows")]
@@ -110,17 +157,18 @@ pub(crate) struct RtdQuiescenceError {
 
 pub(crate) fn observe(
     handles: &Arc<FormulaHandleService>,
+    ingress: &'static ExportIngress,
     key: &str,
     token: &str,
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
-        windows::observe(handles, key, token, callbacks)
+        windows::observe(handles, ingress, key, token, callbacks)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (handles, key, token, callbacks);
+        let _ = (handles, ingress, key, token, callbacks);
         Err(XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(

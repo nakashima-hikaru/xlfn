@@ -1,7 +1,7 @@
-use std::time::Duration;
-
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
+use xlfn::benchmark_support::{
+    BENCHMARK_MEASUREMENT_TIME, ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark,
+};
 
 const HANDLE_COUNTS: [usize; 4] = [1, 2, 4, 8];
 const CONCURRENT_THREAD_COUNTS: [usize; 6] = [1, 2, 4, 8, 16, 32];
@@ -9,7 +9,7 @@ const ITERATIONS_PER_THREAD: usize = 1000;
 
 fn handle_call_resolution_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_call_resolution");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     for &count in &HANDLE_COUNTS {
         let mut benchmark = MultiHandleCallBenchmark::new(count);
@@ -22,7 +22,7 @@ fn handle_call_resolution_benchmarks(c: &mut Criterion) {
     group.finish();
 
     let mut group_concurrent = c.benchmark_group("handle_runtime_resolution/concurrent");
-    group_concurrent.measurement_time(Duration::from_secs(10));
+    group_concurrent.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     for &threads in &CONCURRENT_THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;

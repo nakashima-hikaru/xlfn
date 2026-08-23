@@ -1,14 +1,12 @@
-use std::time::Duration;
-
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::AsyncSpawnBenchmark;
+use xlfn::benchmark_support::{AsyncSpawnBenchmark, BENCHMARK_MEASUREMENT_TIME};
 
 const WORKERS: usize = 4;
 const ITERATIONS_PER_THREAD: usize = 128;
 
 fn concurrent_spawns(c: &mut Criterion) {
     let mut group = c.benchmark_group("async_spawn/per_iteration");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
 
     for threads in [1_usize, 4, 16, 32] {
         let attempts = threads * ITERATIONS_PER_THREAD;

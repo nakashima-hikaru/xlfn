@@ -1,13 +1,13 @@
-use std::time::Duration;
-
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{RtdPublishNumberBenchmark, RtdPublishStringBenchmark};
+use xlfn::benchmark_support::{
+    BENCHMARK_MEASUREMENT_TIME, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,
+};
 
 const ITERATIONS: usize = 10_000;
 
 fn rtd_publish_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("rtd_publish");
-    group.measurement_time(Duration::from_secs(10));
+    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
     group.throughput(Throughput::Elements(ITERATIONS as u64));
 
     group.bench_with_input(

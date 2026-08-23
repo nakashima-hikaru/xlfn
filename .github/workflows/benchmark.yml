@@ -107,10 +107,15 @@ jobs:
             --github-actions "$GITHUB_TOKEN" \
             --error-on-alert \
             --ci-only-on-alert \
-            "just bench"
+            "just bench-pr"
 
-      - name: Run benchmarks without publishing
-        if: steps.bencher-config.outputs.enabled != 'true'
+      - name: Run PR benchmarks without publishing
+        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name == 'pull_request'
+        shell: bash
+        run: just bench-pr
+
+      - name: Run full benchmarks without publishing
+        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name != 'pull_request'
         shell: bash
         run: just bench
 

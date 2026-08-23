@@ -2902,6 +2902,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     let services = crate::runtime_components::GenerationServices::arm_generation(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         crate::RuntimeConfig::new(),
+        crate::rtd::RtdSubscriptionHost::detached(),
     )
     .unwrap()
     .commit();

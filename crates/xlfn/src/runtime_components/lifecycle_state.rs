@@ -28,7 +28,7 @@ fn require_lifecycle_invariant(condition: bool, message: &'static str) {
 }
 
 use super::services::GenerationServices;
-use crate::generation::{OpenAttemptId, RuntimeGeneration};
+use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::ModuleEpochLease;
 use crate::runtime::{OpenGeneration, OpeningGeneration};
@@ -462,9 +462,10 @@ pub(crate) struct LifecycleCore<A: crate::Addin> {
     state: LifecycleState<A>,
     host_intent: HostLifecycleIntent,
     next_lifecycle_attempt: u64,
+    next_removal_attempt: u64,
     last_committed_generation: Option<RuntimeGeneration>,
     removal_epoch: u64,
-    removal_attempt_active: bool,
+    removal_attempt: Option<RemovalAttemptId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,9 +486,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
             state: LifecycleState::Closed,
             host_intent: HostLifecycleIntent::None,
             next_lifecycle_attempt: 1,
+            next_removal_attempt: 1,
             last_committed_generation: None,
             removal_epoch: 0,
-            removal_attempt_active: false,
+            removal_attempt: None,
         }
     }
 
@@ -514,8 +516,8 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.removal_epoch
     }
 
-    pub(crate) const fn removal_attempt_active(&self) -> bool {
-        self.removal_attempt_active
+    pub(crate) const fn removal_attempt(&self) -> Option<RemovalAttemptId> {
+        self.removal_attempt
     }
 
     #[cfg(test)]
@@ -631,8 +633,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.refresh_projection(&core);
     }
 
-    fn set_removal_attempt_active(&self, core: &mut LifecycleCore<A>, active: bool) {
-        core.removal_attempt_active = active;
+    fn set_removal_attempt(&self, core: &mut LifecycleCore<A>, attempt: Option<RemovalAttemptId>) {
+        core.removal_attempt = attempt;
         self.refresh_projection(core);
     }
 
@@ -657,6 +659,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         })?;
         core.next_lifecycle_attempt = next;
         Ok(attempt)
+    }
+
+    fn next_removal_attempt_id(&self, core: &mut LifecycleCore<A>) -> RemovalAttemptId {
+        let attempt_id = core.next_removal_attempt;
+        core.next_removal_attempt = attempt_id.checked_add(1).unwrap_or_else(|| {
+            tracing::error!("lifecycle removal-attempt identity exhausted; fail-stopping");
+            std::process::abort();
+        });
+        RemovalAttemptId::new(attempt_id).unwrap_or_else(|| {
+            tracing::error!("lifecycle removal-attempt identity reached zero; fail-stopping");
+            std::process::abort();
+        })
     }
 
     fn refresh_projection(&self, core: &LifecycleCore<A>) {
@@ -698,7 +712,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             "opening requires the closed lifecycle phase",
         );
         require_lifecycle_invariant(
-            !core.removal_attempt_active(),
+            core.removal_attempt().is_none(),
             "opening cannot begin while removal owns the lifecycle",
         );
         core.state = LifecycleState::Opening {
@@ -797,7 +811,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     /// Requests closing while moving the active generation payload under the
     /// closing phase. No payload remains in a separate core field.
     pub(crate) fn request_closing(&self, core: &mut LifecycleCore<A>) {
-        if core.canonical_state().phase() == LifecyclePhase::Closed && core.removal_attempt_active()
+        if core.canonical_state().phase() == LifecyclePhase::Closed
+            && core.removal_attempt().is_some()
         {
             return;
         }
@@ -835,21 +850,33 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.advance_removal_epoch(core);
     }
 
-    pub(crate) fn claim_removal_owner(&self, core: &mut LifecycleCore<A>) -> bool {
+    pub(crate) fn claim_removal_owner(
+        &self,
+        core: &mut LifecycleCore<A>,
+    ) -> Option<RemovalAttemptId> {
         if matches!(
             core.canonical_state().phase(),
             LifecyclePhase::Closed | LifecyclePhase::Quarantined
         ) || core.canonical_state().open_attempt().is_some()
-            || core.removal_attempt_active()
+            || core.removal_attempt().is_some()
         {
-            return false;
+            return None;
         }
-        self.set_removal_attempt_active(core, true);
-        true
+        let attempt = self.next_removal_attempt_id(core);
+        self.set_removal_attempt(core, Some(attempt));
+        Some(attempt)
     }
 
-    pub(crate) fn release_removal_owner(&self, core: &mut LifecycleCore<A>) {
-        self.set_removal_attempt_active(core, false);
+    pub(crate) fn release_removal_owner(
+        &self,
+        core: &mut LifecycleCore<A>,
+        attempt: RemovalAttemptId,
+    ) {
+        require_lifecycle_invariant(
+            core.removal_attempt() == Some(attempt),
+            "removal owner identity does not match the canonical lifecycle owner",
+        );
+        self.set_removal_attempt(core, None);
     }
 
     pub(crate) fn finish_closed(&self, core: &mut LifecycleCore<A>) {

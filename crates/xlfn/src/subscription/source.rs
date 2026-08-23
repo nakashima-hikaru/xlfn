@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(any(test, feature = "bench-internals"))]
 static NEXT_INTERNAL_SOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// A thread-safe cancellation capability detached from subscription ownership.
@@ -148,7 +148,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn for_internal(generation: RuntimeGeneration, source: S) -> XllResult<Self> {
         let sequence = NEXT_INTERNAL_SOURCE_SEQUENCE
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

@@ -771,7 +771,10 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     where
         Source: RtdSource,
     {
-        let subscriptions = self.services.subscriptions_slot().read()?;
+        let subscriptions = self
+            .services
+            .subscriptions_slot()
+            .read(self.services.subscription_host())?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
         match crate::rtd::observe_subscription(subscriptions, prepared.key(), self.callbacks) {

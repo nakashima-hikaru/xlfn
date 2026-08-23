@@ -1,5 +1,3 @@
-#[cfg(target_os = "windows")]
-use super::RtdOperationGuard;
 use super::{
     ExcelHandleObject, FormulaBinding, Handle, HandleAlias, HandlePrepareState,
     HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, PrepareDecision,
@@ -186,27 +184,17 @@ pub(crate) struct FormulaHandleService {
     pub(super) store: HandleStore,
     pub(super) topics: TopicTable,
     pub(super) prepares: HandlePrepareState,
-    pub(super) _module_ingress: Option<&'static crate::ingress::ExportIngress>,
     pub(super) refinement: HandleRefinementHooks,
 }
 
 impl FormulaHandleService {
-    #[cfg(test)]
-    pub fn try_new(maximum_bindings: usize) -> XllResult<Self> {
-        Self::try_new_with_ingress(maximum_bindings, None)
-    }
-
-    pub(crate) fn try_new_with_ingress(
-        maximum_bindings: usize,
-        module_ingress: Option<&'static crate::ingress::ExportIngress>,
-    ) -> XllResult<Self> {
+    pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
         let store = HandleStore::try_new(maximum_bindings)?;
         let registry_session = store.session();
         Ok(Self {
             store,
             topics: TopicTable::new(maximum_bindings),
             prepares: HandlePrepareState::new(),
-            _module_ingress: module_ingress,
             refinement: HandleRefinementHooks::new(registry_session),
         })
     }
@@ -225,31 +213,9 @@ impl FormulaHandleService {
         self.refinement.trace_json()
     }
 
-    #[cfg(target_os = "windows")]
-    pub(crate) fn begin_rtd_operation(&self) -> XllResult<RtdOperationGuard> {
-        #[cfg(any(test, feature = "refinement"))]
-        let ghost = self.store.ghost_handle();
-
-        let ingress_guard = if let Some(ingress) = self._module_ingress {
-            let (guard, accepted) = ingress.enter_with(|| {
-                #[cfg(any(test, feature = "refinement"))]
-                if let Some(ghost) = ghost.as_ref() {
-                    ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
-                }
-            });
-            if !accepted {
-                return Err(XllError::Closing);
-            }
-            Some(guard)
-        } else {
-            None
-        };
-
-        Ok(RtdOperationGuard {
-            _ingress_guard: ingress_guard,
-            #[cfg(any(test, feature = "refinement"))]
-            ghost,
-        })
+    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
+    pub(crate) fn rtd_ghost(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
+        self.store.ghost_handle()
     }
 
     #[cfg(test)]
@@ -876,10 +842,9 @@ impl FormulaHandleServiceSlot {
         self.service
             .read(
                 |config| {
-                    FormulaHandleService::try_new_with_ingress(
+                    FormulaHandleService::try_new(
                         usize::try_from(config.maximum_bindings())
                             .expect("handle capacity fits the platform usize"),
-                        Some(crate::module_runtime::ingress()),
                     )
                     .map(Arc::new)
                 },
@@ -891,6 +856,14 @@ impl FormulaHandleServiceSlot {
                 },
             )
             .map_err(crate::runtime_components::map_service_error)
+    }
+
+    /// Read an already-published service without initializing a cold slot.
+    ///
+    /// RTD shutdown uses this read-only probe from the generation service
+    /// bundle. The handle slot itself remains independent of the RTD adapter.
+    pub(crate) fn read_if_ready(&self) -> Option<FormulaHandleServiceRead> {
+        self.service.read_if_ready()
     }
 
     /// Owned `Arc` escape for test/benchmark code that needs to hold a
@@ -919,16 +892,6 @@ impl FormulaHandleServiceSlot {
                 },
             )
             .map_err(crate::runtime_components::map_service_error)
-    }
-
-    /// Stops the RTD/COM producer associated with the currently initialized
-    /// handle service. This is intentionally separate from formula-handle
-    /// sealing so lifecycle teardown owns the cross-subsystem ordering.
-    pub(crate) fn shutdown_rtd(&self) -> XllResult<()> {
-        let Some(handles) = self.service.read_if_ready() else {
-            return Ok(());
-        };
-        crate::rtd::shutdown(Arc::clone(handles.as_arc()))
     }
 }
 

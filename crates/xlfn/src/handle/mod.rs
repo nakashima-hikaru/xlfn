@@ -63,8 +63,6 @@ pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
 pub(crate) use object::SharedObject;
 pub(crate) use prepare::HandlePrepareState;
-#[cfg(target_os = "windows")]
-pub(crate) use prepare::RtdOperationGuard;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]
