@@ -89,17 +89,21 @@ pub mod v1 {
     pub use crate::__xlfn_private_async_only as __xlfn_async_only;
     #[doc(hidden)]
     pub use crate::utf16::utf16_eq_ignore_ascii_case;
+    pub use crate::value::ExcelOutput;
     #[doc(hidden)]
     pub use crate::value::input::CellPresence;
     #[doc(hidden)]
     pub use crate::value::input::assert_async_parameter;
     #[doc(hidden)]
     pub use crate::value::output::{
+        AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,
+        ThreadSafeReturn, VolatileReturn,
+    };
+    #[doc(hidden)]
+    pub use crate::value::output::{
         assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
         assert_thread_safe_return, assert_volatile_return,
     };
-    #[doc(hidden)]
-    pub use crate::value::{ExcelOutput, ExcelReturn, MainThreadReturn};
 
     /// Asserts at compile-time that `T` implements `ExcelParameter`.
     #[doc(hidden)]

@@ -3,6 +3,7 @@
 use crate::XllResult;
 #[cfg(not(target_os = "windows"))]
 use crate::error::{InputError, XllError};
+use crate::value::input::sealed::ExcelParameterSealed;
 use crate::value::{CallContext, ExcelParameter, InputMode, XlValueRef};
 use std::path::PathBuf;
 
@@ -10,6 +11,8 @@ pub(super) struct ModuleName {
     pub(super) path: PathBuf,
     pub(super) units: Vec<u16>,
 }
+
+impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     fn decode(

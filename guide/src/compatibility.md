@@ -8,11 +8,17 @@ For the source version documented by this guide:
 
 | Item | Value |
 |---|---|
-| workspace version | `0.2.0` |
+| supported `xlfn` facade version | `0.2.0` |
 | Rust edition | 2024 |
 | minimum/pinned Rust toolchain | `1.98.0` |
 | license | MIT OR Apache-2.0 |
 | Excel C API generation | Excel 12 / `XLOPER12` |
+
+The supported application contract is the `xlfn` facade. The implementation
+crates `xlfn-common`, `xlfn-kernel`, and `xlfn-macros` intentionally use an
+independent `0.x` versioning domain and are not direct application APIs.
+`xlfn-sys`, `xlfn-package`, and `cargo-xlfn` are evaluated separately because
+their ABI, packaging, and CLI contracts are distinct from the facade.
 
 The repository pins the toolchain and both Windows MSVC targets in `rust-toolchain.toml`. Downstream applications should record their actual compiler and `cargo-xlfn` version in release evidence.
 

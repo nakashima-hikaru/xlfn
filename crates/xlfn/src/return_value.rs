@@ -1330,6 +1330,8 @@ mod tests {
     fn panicking_return_conversion_does_not_cross_ffi() {
         struct PanickingReturn;
 
+        impl crate::value::output::ExcelReturnSealed for PanickingReturn {}
+
         impl ExcelReturn for PanickingReturn {
             type InputMode = crate::value::PlainInputMode;
 
@@ -1354,6 +1356,8 @@ mod tests {
             converting: mpsc::SyncSender<()>,
             release: mpsc::Receiver<()>,
         }
+
+        impl crate::value::output::ExcelReturnSealed for BlockingReturn {}
 
         impl ExcelReturn for BlockingReturn {
             type InputMode = crate::value::PlainInputMode;

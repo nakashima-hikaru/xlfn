@@ -154,6 +154,8 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
     }
 }
 
+impl<T: ExcelHandleObject> crate::value::output::ExcelReturnSealed for HandleAlias<'_, T> {}
+
 impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'call, T> {
     type InputMode = crate::value::FormulaInputMode;
 

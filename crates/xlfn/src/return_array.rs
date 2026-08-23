@@ -197,6 +197,8 @@ impl XlArrayBuilder {
     }
 }
 
+impl crate::value::output::ExcelReturnSealed for XlArrayOutput {}
+
 impl crate::value::ExcelReturn for XlArrayOutput {
     type InputMode = crate::value::PlainInputMode;
 

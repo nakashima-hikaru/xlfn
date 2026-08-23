@@ -7,9 +7,15 @@ use xlfn_sys::{XLOPER12, XLTYPE_MISSING, XLTYPE_NIL};
 
 use super::{ExcelReturn, XlValueRef};
 
+pub(crate) mod sealed {
+    pub trait InputModeSealed {}
+
+    pub trait ExcelParameterSealed<'call, M: super::InputMode> {}
+}
+
 /// Input conversion mode selected by the return type of the UDF.
 #[doc(hidden)]
-pub trait InputMode: Sized {
+pub trait InputMode: sealed::InputModeSealed + Sized {
     type Identity;
     type Fingerprint;
 
@@ -53,6 +59,9 @@ pub struct PlainInputMode;
 /// Formula-revision worksheet conversion with semantic identity recording.
 #[doc(hidden)]
 pub struct FormulaInputMode;
+
+impl sealed::InputModeSealed for PlainInputMode {}
+impl sealed::InputModeSealed for FormulaInputMode {}
 
 impl InputMode for PlainInputMode {
     type Identity = ();
@@ -152,7 +161,9 @@ pub trait ExcelInputIdentity {
 
 /// Framework-side argument dispatch used by generated ABI wrappers.
 #[doc(hidden)]
-pub trait ExcelParameter<'call, M: InputMode>: Sized {
+pub trait ExcelParameter<'call, M: InputMode>:
+    sealed::ExcelParameterSealed<'call, M> + Sized
+{
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -162,6 +173,8 @@ pub trait ExcelParameter<'call, M: InputMode>: Sized {
 
     fn encode_decoded(&self, identity: &mut M::Identity);
 }
+
+impl<'call, T: FromExcel<'call>> sealed::ExcelParameterSealed<'call, PlainInputMode> for T {}
 
 impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn decode(
@@ -174,6 +187,11 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     }
 
     fn encode_decoded(&self, _: &mut ()) {}
+}
+
+impl<'call, T> sealed::ExcelParameterSealed<'call, FormulaInputMode> for T where
+    T: FromExcel<'call> + ExcelInputIdentity
+{
 }
 
 impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T

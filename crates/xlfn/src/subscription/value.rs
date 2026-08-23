@@ -80,6 +80,8 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
     }
 }
 
+impl crate::value::output::ExcelReturnSealed for RtdValue {}
+
 impl crate::value::ExcelReturn for RtdValue {
     type InputMode = crate::value::PlainInputMode;
 

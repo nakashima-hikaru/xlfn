@@ -7,12 +7,11 @@ namespace XlFnFormal.Handle.Registry.Snapshot
 
 open XlFnFormal.Handle.Registry
 
-/-! The published-handle model is deliberately an RCU model. A snapshot owns
-    the publication root, while the object payload is protected by the separate
-    epoch/object model in `Registry.Object`. A successful borrow keeps the
-    publication root reachable until `releaseBorrow`; its object reference is
-    non-owning and remains valid because the active call epoch blocks payload
-    reclamation. There is no tentative ownership or admission phase: the Rust
+/-! The published-handle model is deliberately snapshot-owning. A snapshot
+    owns the publication root, and each binding transitively owns its object
+    payload. A successful borrow keeps the snapshot reachable until
+    `releaseBorrow`; no epoch, retired queue, or resurrection protocol is
+    needed. There is no tentative ownership or admission phase: the Rust
     lifetime of `Handle<'call, T>` is the admission protocol. -/
 
 inductive PublicationState where

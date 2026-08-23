@@ -30,7 +30,11 @@ pub trait IntoExcel {
 
 /// Framework-side return dispatch used by generated proc-macro code.
 #[doc(hidden)]
-pub trait ExcelReturn: Sized {
+pub trait ExcelReturnSealed {}
+
+/// Framework-side return dispatch used by generated proc-macro code.
+#[doc(hidden)]
+pub trait ExcelReturn: ExcelReturnSealed + Sized {
     /// Selects the input conversion contract for this return path.
     #[doc(hidden)]
     type InputMode: InputMode;
@@ -99,6 +103,8 @@ impl<T: IntoExcel> ExcelReturn for T {
     }
 }
 
+impl<T: IntoExcel> ExcelReturnSealed for T {}
+
 impl<T: IntoExcel> MainThreadReturn for T {}
 impl<T: IntoExcel> ThreadSafeReturn for T {}
 impl<T: IntoExcel> MacroSheetReturn for T {}
@@ -125,6 +131,13 @@ where
             operation()?.map_err(IntoXllError::into_xll_error)
         })
     }
+}
+
+impl<T, E> ExcelReturnSealed for Result<T, E>
+where
+    T: ExcelReturn,
+    E: IntoXllError,
+{
 }
 
 impl<T, E> MainThreadReturn for Result<T, E>

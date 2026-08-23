@@ -33,6 +33,10 @@ pub(crate) fn expand_excel_handle_object(
             for #ident #type_generics #where_clause
         {}
 
+        impl #impl_generics #krate::__private::v1::ExcelReturnSealed
+            for #ident #type_generics #where_clause
+        {}
+
         impl #impl_generics #krate::__private::v1::ExcelReturn
             for #ident #type_generics #where_clause
         {

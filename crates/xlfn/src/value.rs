@@ -31,12 +31,13 @@ pub use crate::input_identity::InputIdentityEncoder;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
 pub(crate) use input::{CallContext, ExcelParameter};
-pub use input::{ExcelInputIdentity, FormulaInputMode, FromExcel, InputMode, PlainInputMode};
+pub use input::{ExcelInputIdentity, FromExcel};
+pub(crate) use input::{FormulaInputMode, InputMode, PlainInputMode};
 #[cfg(test)]
 pub(crate) use input::{argument_from_raw, argument_from_raw_with_context};
-pub use output::{
-    AsyncReturn, ExcelReturn, IntoExcel, MacroSheetReturn, MainThreadReturn, ThreadSafeReturn,
-    VolatileReturn,
+pub use output::IntoExcel;
+pub(crate) use output::{
+    AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ThreadSafeReturn, VolatileReturn,
 };
 
 pub use date::{ExcelDateSystem, ExcelSerialDate};
@@ -244,6 +245,8 @@ impl ExcelInputIdentity for String {
     }
 }
 
+impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for &'call str {}
+
 impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     fn decode(
         value: XlValueRef<'call>,
@@ -449,6 +452,13 @@ where
     })
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for OptionalExcelValue<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for OptionalExcelValue<T>
 where
     M: InputMode,
@@ -488,6 +498,13 @@ where
     }
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for Option<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for Option<T>
 where
     M: InputMode,
@@ -522,6 +539,13 @@ where
     }
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for Matrix<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for Matrix<T>
 where
     M: InputMode,
@@ -550,6 +574,13 @@ where
     }
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for MatrixRef<'call, T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M> + Copy,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for MatrixRef<'call, T>
 where
     M: InputMode,
@@ -576,6 +607,13 @@ where
             T::encode_decoded(value, identity);
         }
     }
+}
+
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for Vec<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
 }
 
 impl<'call, T, M> ExcelParameter<'call, M> for Vec<T>
@@ -610,6 +648,14 @@ where
             T::encode_decoded(value, identity);
         }
     }
+}
+
+impl<'call, T, M, const MAX: usize> input::sealed::ExcelParameterSealed<'call, M>
+    for BoundedVarArgs<T, MAX>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
 }
 
 impl<'call, T, M, const MAX: usize> ExcelParameter<'call, M> for BoundedVarArgs<T, MAX>
@@ -663,6 +709,13 @@ where
     }
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for Row<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for Row<T>
 where
     M: InputMode,
@@ -692,6 +745,13 @@ where
             T::encode_decoded(value, identity);
         }
     }
+}
+
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for Column<T>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
 }
 
 impl<'call, T, M> ExcelParameter<'call, M> for Column<T>
@@ -765,6 +825,8 @@ impl ExcelInputIdentity for ExcelCellValue {
         }
     }
 }
+
+impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for ExcelCellRef<'call> {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
     fn decode(
@@ -973,6 +1035,13 @@ impl<'call> ExcelInputIdentity for XlArrayRef<'call> {
     }
 }
 
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::Handle<'call, T>
+where
+    M: InputMode,
+    T: crate::handle::ExcelHandleObject,
+{
+}
+
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::Handle<'call, T>
 where
     M: InputMode,
@@ -999,6 +1068,13 @@ where
         M::u64(identity, object_id.session());
         M::u64(identity, object_id.sequence());
     }
+}
+
+impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::HandleLease<T>
+where
+    M: InputMode,
+    T: crate::handle::ExcelHandleObject,
+{
 }
 
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::HandleLease<T>
@@ -1144,6 +1220,8 @@ impl IntoExcel for ExcelErrorValue {
     }
 }
 
+impl crate::value::output::ExcelReturnSealed for ExcelOutput {}
+
 impl ExcelReturn for ExcelOutput {
     type InputMode = PlainInputMode;
 
@@ -1157,6 +1235,8 @@ impl ThreadSafeReturn for ExcelOutput {}
 impl MacroSheetReturn for ExcelOutput {}
 impl AsyncReturn for ExcelOutput {}
 impl VolatileReturn for ExcelOutput {}
+
+impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Matrix<T> {}
 
 impl<T: IntoExcel> ExcelReturn for Matrix<T> {
     type InputMode = PlainInputMode;
@@ -1176,6 +1256,8 @@ impl<T: IntoExcel> MacroSheetReturn for Matrix<T> {}
 impl<T: IntoExcel> AsyncReturn for Matrix<T> {}
 impl<T: IntoExcel> VolatileReturn for Matrix<T> {}
 
+impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Row<T> {}
+
 impl<T: IntoExcel> ExcelReturn for Row<T> {
     type InputMode = PlainInputMode;
 
@@ -1193,6 +1275,8 @@ impl<T: IntoExcel> ThreadSafeReturn for Row<T> {}
 impl<T: IntoExcel> MacroSheetReturn for Row<T> {}
 impl<T: IntoExcel> AsyncReturn for Row<T> {}
 impl<T: IntoExcel> VolatileReturn for Row<T> {}
+
+impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Column<T> {}
 
 impl<T: IntoExcel> ExcelReturn for Column<T> {
     type InputMode = PlainInputMode;

@@ -252,25 +252,18 @@ refinement layer over the canonical topic state:
 ### Published-handle snapshots
 
 `XlFnFormal/Handle/Registry/Snapshot` formalizes the `BindingRecord`
-fast-lookup architecture as an RCU layer over canonical registry semantics.
-`XlFnFormal/Handle/Registry/Object` separately models the object store, its
-non-owning publication pointer, and epoch-retired queue:
+fast-lookup architecture as a snapshot-owning layer over canonical registry
+semantics:
 
-- **Object payload model** (`Object.lean`): A binding carries an object identity
-  and a non-owning publication pointer. The payload exists either in the live
-  object registry or in the epoch-retired queue; reclamation is permitted only
-  after every active call epoch has advanced beyond the retirement epoch and
-  the explicit pin count is zero. `PinHeld` models the long-lived ownership
-  edge used by `HandleLease`; close may move
-  a pinned payload to the retired queue without reclaiming it.
-  Retired-object resurrection preserves `ObjectId` while assigning a fresh
-  `ObjectKey`, and is permitted only for an unpinned retired payload, which is
-  the alias-publication and async-promotion contract implemented by Rust.
+- **Object payload model**: A published binding owns its `ObjectCell` payload
+  transitively through the immutable binding snapshot. A call-scoped
+  `Handle<'call, T>` therefore needs no epoch participant, retired queue, or
+  resurrection path. A long-lived `HandleLease<T>` is the only explicit
+  promotion and owns a shared object lease until it is dropped.
 - **Model & Invariants** (`Model.lean`): Tracks published objects, the current
   immutable snapshot, and active call-scoped `Borrow` records. A publication
   remains rooted after it becomes `stale` or `closing` until no borrow refers to
-  it; the payload lifetime is supplied by the call's object-read capability
-  and epoch model rather than by a second owning `Arc` chain.
+  it; the snapshot itself supplies the object lifetime.
 - **Transitions & Checker** (`Transition.lean`, `Checker.lean`):
   `observeBorrow` performs the snapshot lookup, generation/authentication and
   `Live` check at the borrow linearization point. `releaseBorrow` ends the call
