@@ -2702,7 +2702,10 @@ fn unwrap_dispatch_variant_enforces_single_level_indirection() {
 
     // SAFETY: `direct` is a readable VARIANT on the stack.
     let unwrapped = unsafe { unwrap_dispatch_variant(&mut direct) };
-    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&mut direct as *mut _));
+    assert_eq!(
+        unwrapped.map(|p| p.as_ptr()),
+        Some(&mut direct as *mut VARIANT)
+    );
 
     // 2. VT_BYREF | VT_VARIANT -> VT_I4 -> returns inner VARIANT pointer
     let mut inner = VARIANT::default();
@@ -2715,7 +2718,10 @@ fn unwrap_dispatch_variant_enforces_single_level_indirection() {
 
     // SAFETY: both VARIANTs are readable on the stack.
     let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_valid) };
-    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&mut inner as *mut _));
+    assert_eq!(
+        unwrapped.map(|p| p.as_ptr()),
+        Some(&mut inner as *mut VARIANT)
+    );
 
     // 3. VT_BYREF | VT_VARIANT -> null -> returns None
     let mut byref_null = VARIANT::default();

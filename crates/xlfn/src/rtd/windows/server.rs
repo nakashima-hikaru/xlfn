@@ -605,7 +605,7 @@ pub(super) fn ensure_server(
             // SAFETY: `server` was validated as non-null and COM keeps the server alive.
             let callback = unsafe { active_callback(&(*server).callbacks) };
             if let Some(callback) = callback {
-                let notifier = RtdNotifier::new(callback, operations.clone());
+                let notifier = RtdNotifier::new(callback, Arc::clone(operations));
                 handle.attach_update_notifier(notifier)?;
             }
         }
@@ -615,7 +615,7 @@ pub(super) fn ensure_server(
         unsafe { server_add_ref(server) };
 
         return Ok(EnsuredServer {
-            active: existing.clone(),
+            active: Arc::clone(existing),
             newly_created: false,
             subscription_server: subscription_handle,
         });

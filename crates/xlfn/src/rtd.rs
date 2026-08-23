@@ -108,11 +108,11 @@ impl Drop for RtdOperationGuard {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn begin_operation(
-    handles: &FormulaHandleService,
+    _handles: &FormulaHandleService,
     ingress: &'static ExportIngress,
 ) -> XllResult<RtdOperationGuard> {
     #[cfg(any(test, feature = "refinement"))]
-    let ghost = handles.rtd_ghost();
+    let ghost = _handles.rtd_ghost();
     let ingress_guard = match ingress
         .enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]

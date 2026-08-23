@@ -1,3 +1,8 @@
+#![allow(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "Windows COM/VARIANT FFI operations are audited as compound ABI operations"
+)]
+
 #[cfg(test)]
 use crate::XllError;
 #[cfg(test)]
