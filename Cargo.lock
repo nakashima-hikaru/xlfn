@@ -1882,6 +1882,7 @@ dependencies = [
  "trybuild",
  "windows-link",
  "xlfn-common",
+ "xlfn-kernel",
  "xlfn-macros",
  "xlfn-sys",
 ]
@@ -1889,6 +1890,16 @@ dependencies = [
 [[package]]
 name = "xlfn-common"
 version = "0.2.0"
+
+[[package]]
+name = "xlfn-kernel"
+version = "0.2.0"
+dependencies = [
+ "arc-swap",
+ "parking_lot",
+ "static_assertions",
+ "triomphe",
+]
 
 [[package]]
 name = "xlfn-macros"

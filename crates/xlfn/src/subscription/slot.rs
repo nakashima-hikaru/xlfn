@@ -3,9 +3,10 @@ use crate::generation::RuntimeGeneration;
 use std::sync::Arc;
 
 pub(crate) struct SubscriptionRuntimeSlot {
-    service: crate::runtime_components::GenerationServiceSlot<
+    service: xlfn_kernel::service_slot::GenerationServiceSlot<
         SubscriptionRuntimeConfig,
         SubscriptionRuntime,
+        crate::XllError,
     >,
     #[cfg(any(test, feature = "refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
@@ -28,7 +29,7 @@ impl SubscriptionsStopped {
 }
 
 pub(crate) type SubscriptionRuntimeRead =
-    crate::runtime_components::GenerationServiceRead<SubscriptionRuntime>;
+    xlfn_kernel::service_slot::GenerationServiceRead<SubscriptionRuntime>;
 
 #[derive(Clone, Copy)]
 struct SubscriptionRuntimeConfig {
@@ -39,7 +40,7 @@ struct SubscriptionRuntimeConfig {
 impl SubscriptionRuntimeSlot {
     pub(crate) const fn new() -> Self {
         Self {
-            service: crate::runtime_components::GenerationServiceSlot::new(),
+            service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
             #[cfg(any(test, feature = "refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
@@ -52,28 +53,33 @@ impl SubscriptionRuntimeSlot {
     ) -> crate::XllResult<()> {
         self.service
             .arm(SubscriptionRuntimeConfig { generation, limits })
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     pub(crate) fn disarm(&self) -> crate::XllResult<()> {
-        self.service.disarm()
+        self.service
+            .disarm()
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     #[inline]
     pub(crate) fn read(&self) -> crate::XllResult<SubscriptionRuntimeRead> {
-        self.service.read(
-            |config| {
-                Ok(Arc::new(SubscriptionRuntime::with_module_ingress(
-                    config.generation,
-                    config.limits,
-                )))
-            },
-            |_runtime| {
-                #[cfg(any(test, feature = "refinement"))]
-                if let Some(ghost) = self.ghost.get() {
-                    _runtime.set_ghost(ghost.clone());
-                }
-            },
-        )
+        self.service
+            .read(
+                |config| {
+                    Ok(Arc::new(SubscriptionRuntime::with_module_ingress(
+                        config.generation,
+                        config.limits,
+                    )))
+                },
+                |_runtime| {
+                    #[cfg(any(test, feature = "refinement"))]
+                    if let Some(ghost) = self.ghost.get() {
+                        _runtime.set_ghost(ghost.clone());
+                    }
+                },
+            )
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     #[inline]
@@ -82,14 +88,18 @@ impl SubscriptionRuntimeSlot {
     }
 
     pub(crate) fn seal(&self) -> crate::XllResult<SubscriptionsStopped> {
-        self.service.seal(
-            crate::error::DiagnosticId::RTD_SLOTS,
-            SubscriptionsStopped::new,
-            |runtime| {
-                crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))
-                    .map(|()| SubscriptionsStopped::new())
-            },
-        )
+        self.service
+            .seal(
+                crate::XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::RTD_SLOTS,
+                },
+                SubscriptionsStopped::new,
+                |runtime| {
+                    crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))
+                        .map(|()| SubscriptionsStopped::new())
+                },
+            )
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     #[cfg(any(test, feature = "refinement"))]

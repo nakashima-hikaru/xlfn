@@ -13,8 +13,6 @@
 mod catalog;
 mod delivery;
 mod identity;
-mod operation_gate;
-mod quota;
 mod runtime;
 mod server;
 pub(crate) mod slot;
@@ -58,11 +56,7 @@ pub(crate) use identity::{
     SubscriptionIdentityIndex, allocate_runtime_id,
 };
 #[cfg(test)]
-pub(crate) use operation_gate::{CLOSING_BIT, OperationGate, OperationGuard, TerminationWaitGuard};
-#[cfg(test)]
 use parking_lot::{Condvar, Mutex};
-#[cfg(test)]
-pub(crate) use quota::{Quota, QuotaPermit};
 #[cfg(target_os = "windows")]
 pub(crate) use runtime::SubscriptionConnection;
 pub(crate) use runtime::SubscriptionRuntime;

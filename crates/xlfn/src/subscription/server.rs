@@ -4,8 +4,6 @@ use super::delivery::{
     RefreshState, RtdUpdate, SERVER_LIFECYCLE_CLOSING, SERVER_LIFECYCLE_OPEN,
     SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
 };
-use super::operation_gate::{OperationGate, OperationGuard, TerminationWaitGuard};
-use super::quota::Quota;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::{ErasedRtdSource, RtdSubscription};
 use super::topic::{SubscriptionKey, TopicId};
@@ -17,6 +15,8 @@ use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use xlfn_kernel::operation_gate::{OperationGate, OperationGuard, TerminationWaitGuard};
+use xlfn_kernel::quota::Quota;
 
 #[derive(Clone)]
 pub(crate) struct RtdServerHandle {
@@ -153,7 +153,7 @@ pub(crate) struct OwnedServerOperation {
 
 impl Drop for OwnedServerOperation {
     fn drop(&mut self) {
-        self.server.publish.server_gate.leave();
+        self.server.publish.server_gate.release();
         #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.parent.upgrade() {
             parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
@@ -231,9 +231,9 @@ impl PublishCore {
             if !accepted {
                 return Err(XllError::Closing);
             }
-            if let Some(err) = gate_error {
+            if gate_error.is_some() {
                 drop(ingress_guard);
-                return Err(err);
+                return Err(XllError::Closing);
             }
             Ok(ScopedServerOperation {
                 _gate_guard: gate_guard.expect("gate guard is acquired"),
@@ -242,7 +242,7 @@ impl PublishCore {
                 parent: self.parent.clone(),
             })
         } else {
-            let gate_guard = self.server_gate.enter()?;
+            let gate_guard = self.server_gate.enter().map_err(|_| XllError::Closing)?;
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
@@ -284,9 +284,9 @@ impl PublishCore {
             if !accepted {
                 return Err(XllError::Closing);
             }
-            if let Some(err) = gate_error {
+            if gate_error.is_some() {
                 drop(ingress_guard);
-                return Err(err);
+                return Err(XllError::Closing);
             }
             assert!(acquired, "gate guard must be acquired");
             Ok(OwnedServerOperation {
@@ -296,7 +296,7 @@ impl PublishCore {
                 parent: self.parent.clone(),
             })
         } else {
-            self.server_gate.acquire()?;
+            self.server_gate.acquire().map_err(|_| XllError::Closing)?;
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
@@ -355,7 +355,8 @@ impl PublishCore {
                     existing.value = value.clone();
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let permit = Quota::try_acquire(&self.queued_update_quota)?;
+                    let permit = Quota::try_acquire(&self.queued_update_quota)
+                        .map_err(|_| XllError::Overloaded)?;
                     let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
                     entry.insert(QueuedUpdate {
                         connection_generation: conn_gen,

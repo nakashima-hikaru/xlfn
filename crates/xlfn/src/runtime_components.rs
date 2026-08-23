@@ -10,9 +10,7 @@ mod lifecycle_state;
 mod quarantine;
 mod residency;
 mod return_protocol;
-mod service_slot;
 mod services;
-mod thread_affine;
 
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use formal::FormalState;
@@ -23,10 +21,18 @@ pub(crate) use lifecycle_state::{
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
-pub(crate) use service_slot::{GenerationServiceRead, GenerationServiceSlot};
 pub(crate) use services::GenerationServices;
 #[cfg(feature = "async")]
 pub(crate) use services::RuntimeExecutors;
-pub(crate) use thread_affine::{
-    ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
-};
+
+pub(crate) fn map_service_error(
+    error: xlfn_kernel::service_slot::ServiceSlotError<crate::XllError>,
+) -> crate::XllError {
+    match error {
+        xlfn_kernel::service_slot::ServiceSlotError::Closed => crate::XllError::Closing,
+        xlfn_kernel::service_slot::ServiceSlotError::Fault(fault) => match fault {
+            xlfn_kernel::service_slot::ServiceFault::Error(error) => error,
+            xlfn_kernel::service_slot::ServiceFault::Panicked => crate::XllError::Panic,
+        },
+    }
+}

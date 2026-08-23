@@ -35,7 +35,7 @@ impl OpenAttemptId {
     }
 
     /// Promote the identity of a successful open transaction to the
-    /// published-generation identity.  This is the only conversion between
+    /// published-generation identity. This is the only conversion between
     /// the two lifecycle domains; callers must not pass either identity
     /// through an untyped integer at the promotion boundary.
     pub(crate) const fn into_runtime_generation(self) -> RuntimeGeneration {

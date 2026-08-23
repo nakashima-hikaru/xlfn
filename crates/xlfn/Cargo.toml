@@ -95,6 +95,7 @@ thiserror.workspace = true
 tracing.workspace = true
 triomphe.workspace = true
 xlfn-common.workspace = true
+xlfn-kernel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true

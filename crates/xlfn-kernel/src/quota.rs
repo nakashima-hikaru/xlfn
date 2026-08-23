@@ -1,35 +1,44 @@
-use crate::{XllError, XllResult};
+//! A generic bounded permit counter.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use triomphe::Arc;
 
-pub(crate) struct Quota {
-    pub(crate) used: AtomicUsize,
-    pub(crate) limit: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuotaExceeded;
+
+pub struct Quota {
+    used: AtomicUsize,
+    limit: usize,
 }
 
 impl Quota {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub const fn new(limit: usize) -> Self {
         Self {
             used: AtomicUsize::new(0),
             limit,
         }
     }
 
-    pub(crate) fn try_acquire(this: &Arc<Self>) -> XllResult<QuotaPermit> {
+    pub fn try_acquire(this: &Arc<Self>) -> Result<QuotaPermit, QuotaExceeded> {
         this.used
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 (used < this.limit).then_some(used + 1)
             })
-            .map_err(|_| XllError::Overloaded)?;
+            .map_err(|_| QuotaExceeded)?;
 
         Ok(QuotaPermit {
             quota: Arc::clone(this),
         })
     }
+
+    #[inline]
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
 }
 
-pub(crate) struct QuotaPermit {
-    pub(crate) quota: Arc<Quota>,
+pub struct QuotaPermit {
+    quota: Arc<Quota>,
 }
 
 impl Drop for QuotaPermit {

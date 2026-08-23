@@ -1713,15 +1713,15 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let sink = sink_slot.lock().clone().unwrap();
 
     sink.publish(42.0).unwrap();
-    assert_eq!(quota.used.load(Ordering::Acquire), 1);
+    assert_eq!(quota.used(), 1);
 
     drop(runtime);
-    assert_eq!(quota.used.load(Ordering::Acquire), 1);
+    assert_eq!(quota.used(), 1);
 
     drop(sink);
     drop(sink_slot);
     drop(server);
-    assert_eq!(quota.used.load(Ordering::Acquire), 0);
+    assert_eq!(quota.used(), 0);
 }
 
 pub(crate) struct SinkHoldingSubscription<T> {

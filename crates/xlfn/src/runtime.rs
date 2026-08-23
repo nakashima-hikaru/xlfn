@@ -11,10 +11,12 @@ use std::sync::atomic::Ordering;
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
     GenerationAdmission, GenerationServices, HostLedger, LifecycleCoordinator, LifecycleCore,
-    ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol, ThreadAffineAccess,
-    ThreadAffineError, ThreadAffineInstallError,
+    ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol,
 };
 use crate::runtime_refinement::RuntimeRefinementHooks;
+use xlfn_kernel::thread_affine::{
+    ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
+};
 
 #[cold]
 fn opening_publication_lost() -> ! {
@@ -88,7 +90,7 @@ impl<A: crate::Addin> GenerationLease<A> {
 
 pub struct Runtime<A: crate::Addin> {
     pub(crate) lifecycle: LifecycleCoordinator<A>,
-    pub(crate) addin_lifecycle: crate::runtime_components::ThreadAffineSlot<A::LifecycleState>,
+    pub(crate) addin_lifecycle: ThreadAffineSlot<A::LifecycleState>,
     pub(crate) host: HostLedger,
     pub(crate) return_protocol: ReturnProtocol,
     #[cfg(feature = "async")]
@@ -106,7 +108,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub const fn new() -> Self {
         Self {
             lifecycle: LifecycleCoordinator::new(),
-            addin_lifecycle: crate::runtime_components::ThreadAffineSlot::new(),
+            addin_lifecycle: ThreadAffineSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             #[cfg(feature = "async")]

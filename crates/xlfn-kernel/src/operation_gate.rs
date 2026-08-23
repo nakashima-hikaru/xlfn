@@ -1,14 +1,18 @@
-use crate::{XllError, XllResult};
+//! A generic admission gate for operations that must drain before shutdown.
+
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(crate) struct OperationGate {
-    pub(crate) state: AtomicUsize,
-    pub(crate) wait_lock: Mutex<()>,
-    pub(crate) idle: Condvar,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GateClosed;
+
+pub struct OperationGate {
+    state: AtomicUsize,
+    wait_lock: Mutex<()>,
+    idle: Condvar,
 }
 
-pub(crate) const CLOSING_BIT: usize = usize::MAX / 2 + 1;
+pub const CLOSING_BIT: usize = usize::MAX / 2 + 1;
 
 impl Default for OperationGate {
     fn default() -> Self {
@@ -17,7 +21,7 @@ impl Default for OperationGate {
 }
 
 impl OperationGate {
-    pub(crate) fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
@@ -26,17 +30,17 @@ impl OperationGate {
     }
 
     #[inline]
-    pub(crate) fn is_closing(&self) -> bool {
+    pub fn is_closing(&self) -> bool {
         (self.state.load(Ordering::Acquire) & CLOSING_BIT) != 0
     }
 
     #[inline]
-    pub(crate) fn begin_close(&self) {
+    pub fn begin_close(&self) {
         self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
     }
 
     #[inline]
-    pub(crate) fn acquire(&self) -> XllResult<()> {
+    pub fn acquire(&self) -> Result<(), GateClosed> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |val| {
                 if (val & CLOSING_BIT) != 0 {
@@ -46,22 +50,26 @@ impl OperationGate {
                 }
             })
             .map(|_| ())
-            .map_err(|_| XllError::Closing)
+            .map_err(|_| GateClosed)
     }
 
     #[inline]
-    pub(crate) fn enter(&self) -> XllResult<OperationGuard<'_>> {
+    pub fn enter(&self) -> Result<OperationGuard<'_>, GateClosed> {
         self.acquire()?;
         Ok(OperationGuard { gate: self })
     }
 
-    pub(crate) fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
+    pub fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
         self.begin_close();
         TerminationWaitGuard { gate: self }
     }
 
+    /// Releases a count acquired with [`OperationGate::acquire`].
+    ///
+    /// This is used when the acquired operation owns an `Arc` rather than a
+    /// borrow of the gate and therefore cannot store [`OperationGuard`].
     #[inline]
-    pub(crate) fn leave(&self) {
+    pub fn release(&self) {
         let prev = self.state.fetch_sub(1, Ordering::AcqRel);
         let active_count = (prev & !CLOSING_BIT) - 1;
         if active_count == 0 && (prev & CLOSING_BIT) != 0 {
@@ -71,23 +79,23 @@ impl OperationGate {
     }
 }
 
-pub(crate) struct OperationGuard<'a> {
-    pub(crate) gate: &'a OperationGate,
+pub struct OperationGuard<'a> {
+    gate: &'a OperationGate,
 }
 
 impl Drop for OperationGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        self.gate.leave();
+        self.gate.release();
     }
 }
 
-pub(crate) struct TerminationWaitGuard<'a> {
-    pub(crate) gate: &'a OperationGate,
+pub struct TerminationWaitGuard<'a> {
+    gate: &'a OperationGate,
 }
 
 impl TerminationWaitGuard<'_> {
-    pub(crate) fn wait(self) {
+    pub fn wait(self) {
         let mut guard = self.gate.wait_lock.lock();
         while (self.gate.state.load(Ordering::Acquire) & !CLOSING_BIT) > 0 {
             self.gate.idle.wait(&mut guard);

@@ -6,9 +6,9 @@ use crate::host_callback::HostCallbackSession;
 use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use crate::runtime_components::ThreadAffineError;
 use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use xlfn_kernel::thread_affine::ThreadAffineError;
 
 mod boundary;
 mod open;

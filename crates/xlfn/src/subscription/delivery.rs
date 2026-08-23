@@ -1,4 +1,3 @@
-use super::quota::QuotaPermit;
 use super::server::PublishCore;
 use super::topic::{SubscriptionKey, TopicId};
 #[cfg(test)]
@@ -7,6 +6,7 @@ use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
+use xlfn_kernel::quota::QuotaPermit;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ErasedSink {

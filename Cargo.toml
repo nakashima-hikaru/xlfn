@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/xlfn-common",
+    "crates/xlfn-kernel",
     "crates/xlfn-sys",
     "crates/xlfn-macros",
     "crates/xlfn-package",
@@ -24,6 +25,7 @@ publish = true
 [workspace.dependencies]
 # Member crates
 xlfn-common = { version = "=0.2.0", path = "crates/xlfn-common" }
+xlfn-kernel = { version = "=0.2.0", path = "crates/xlfn-kernel" }
 xlfn-macros = { version = "=0.2.0", path = "crates/xlfn-macros" }
 xlfn-package = { version = "=0.2.0", path = "crates/xlfn-package" }
 xlfn-sys = { version = "=0.2.0", path = "crates/xlfn-sys" }

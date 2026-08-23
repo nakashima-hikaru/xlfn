@@ -17,7 +17,7 @@ use std::thread::{self, ThreadId};
 use parking_lot::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ThreadAffineError {
+pub enum ThreadAffineError {
     WrongThread,
     Unbound,
     StaleAccess,
@@ -29,13 +29,13 @@ pub(crate) enum ThreadAffineError {
 }
 
 #[derive(Debug)]
-pub(crate) struct ThreadAffineInstallError<T> {
-    pub(crate) value: T,
-    pub(crate) reason: ThreadAffineError,
+pub struct ThreadAffineInstallError<T> {
+    pub value: T,
+    pub reason: ThreadAffineError,
 }
 
 impl<T> ThreadAffineInstallError<T> {
-    pub(crate) fn into_parts(self) -> (T, ThreadAffineError) {
+    pub fn into_parts(self) -> (T, ThreadAffineError) {
         (self.value, self.reason)
     }
 }
@@ -101,21 +101,21 @@ struct AffinityControl {
 }
 
 /// A cross-thread-safe root for one thread-affine payload type.
-pub(crate) struct ThreadAffineSlot<T: 'static> {
+pub struct ThreadAffineSlot<T: 'static> {
     id: OnceLock<ThreadAffineSlotId>,
     affinity: Mutex<AffinityControl>,
     _marker: PhantomData<fn() -> T>,
 }
 
 /// A non-copyable witness that the current thread owns one slot binding.
-pub(crate) struct ThreadAffineAccess<'slot, T: 'static> {
+pub struct ThreadAffineAccess<'slot, T: 'static> {
     slot: &'slot ThreadAffineSlot<T>,
     binding: u64,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl<T: 'static> ThreadAffineSlot<T> {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             id: OnceLock::new(),
             affinity: Mutex::new(AffinityControl {
@@ -130,7 +130,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         *self.id.get_or_init(allocate_slot_id)
     }
 
-    pub(crate) fn bind_current(&self) -> Result<ThreadAffineAccess<'_, T>, ThreadAffineError> {
+    pub fn bind_current(&self) -> Result<ThreadAffineAccess<'_, T>, ThreadAffineError> {
         let current = thread::current().id();
         let mut affinity = self.affinity.lock();
         match affinity.owner {
@@ -164,7 +164,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         }
     }
 
-    pub(crate) fn install(
+    pub fn install(
         &self,
         access: &ThreadAffineAccess<'_, T>,
         value: T,
@@ -199,7 +199,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         }
     }
 
-    pub(crate) fn with_mut<R>(
+    pub fn with_mut<R>(
         &self,
         access: &ThreadAffineAccess<'_, T>,
         operation: impl FnOnce(&mut T) -> R,
@@ -222,16 +222,13 @@ impl<T: 'static> ThreadAffineSlot<T> {
         })
     }
 
-    pub(crate) fn has_value(
-        &self,
-        access: &ThreadAffineAccess<'_, T>,
-    ) -> Result<bool, ThreadAffineError> {
+    pub fn has_value(&self, access: &ThreadAffineAccess<'_, T>) -> Result<bool, ThreadAffineError> {
         self.verify_access(access)?;
         let slot_id = self.id();
         with_values(|values| Ok(values.iter().any(|entry| entry.slot_id == slot_id)))
     }
 
-    pub(crate) fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
+    pub fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
         self.verify_access(access)?;
         let slot_id = self.id();
         with_values(|values| {
@@ -252,7 +249,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         })
     }
 
-    pub(crate) fn release_empty_binding(
+    pub fn release_empty_binding(
         &self,
         access: &ThreadAffineAccess<'_, T>,
     ) -> Result<(), ThreadAffineError> {
@@ -275,6 +272,12 @@ impl<T: 'static> ThreadAffineSlot<T> {
             Some(_) => Err(ThreadAffineError::StaleAccess),
             None => Err(ThreadAffineError::Unbound),
         }
+    }
+}
+
+impl<T: 'static> Default for ThreadAffineSlot<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

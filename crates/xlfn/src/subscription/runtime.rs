@@ -7,8 +7,6 @@ use super::delivery::{
     shard_index,
 };
 use super::identity::{SourceIdentityRegistry, SubscriptionIdentityIndex, allocate_runtime_id};
-use super::operation_gate::{OperationGate, OperationGuard};
-use super::quota::Quota;
 use super::server::{
     OwnedServerOperation, PublishCore, RtdServerHandle, ServerReservationFailure, ServerRuntime,
     ServerTerminationPhase, TerminationAdmission, TerminationCoordinator,
@@ -24,6 +22,8 @@ use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
+use xlfn_kernel::quota::Quota;
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -135,14 +135,14 @@ impl SubscriptionRuntime {
     }
 
     pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard<'_>> {
-        self.runtime_gate.enter()
+        self.runtime_gate.enter().map_err(|_| XllError::Closing)
     }
 
     pub(crate) fn register_server(
         self: &Arc<Self>,
         generation: ServerGeneration,
     ) -> XllResult<RtdServerHandle> {
-        let _operation = self.runtime_gate.enter()?;
+        let _operation = self.runtime_gate.enter().map_err(|_| XllError::Closing)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
@@ -191,7 +191,7 @@ impl SubscriptionRuntime {
     where
         S: RtdSource,
     {
-        let _operation = self.runtime_gate.enter()?;
+        let _operation = self.runtime_gate.enter().map_err(|_| XllError::Closing)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
@@ -464,7 +464,7 @@ impl SubscriptionRuntime {
                         );
                         Ok(())
                     }
-                    Err(error) => Err(ServerReservationFailure::Overloaded(error)),
+                    Err(_) => Err(ServerReservationFailure::Overloaded(XllError::Overloaded)),
                 }
             }
         };

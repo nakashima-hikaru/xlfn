@@ -816,8 +816,11 @@ impl FormulaHandleServiceSealed {
 }
 
 pub(crate) struct FormulaHandleServiceSlot {
-    service:
-        crate::runtime_components::GenerationServiceSlot<crate::HandleConfig, FormulaHandleService>,
+    service: xlfn_kernel::service_slot::GenerationServiceSlot<
+        crate::HandleConfig,
+        FormulaHandleService,
+        crate::XllError,
+    >,
     #[cfg(any(test, feature = "refinement"))]
     ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
 }
@@ -826,23 +829,27 @@ pub(crate) struct FormulaHandleServiceSlot {
 /// `FormulaHandleService`.  The warm path acquires this without any `Mutex` or
 /// `Arc::clone`.
 pub(crate) type FormulaHandleServiceRead =
-    crate::runtime_components::GenerationServiceRead<FormulaHandleService>;
+    xlfn_kernel::service_slot::GenerationServiceRead<FormulaHandleService>;
 
 impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
-            service: crate::runtime_components::GenerationServiceSlot::new(),
+            service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
             #[cfg(any(test, feature = "refinement"))]
             ghost: std::sync::OnceLock::new(),
         }
     }
 
     pub(crate) fn arm(&self, config: crate::HandleConfig) -> XllResult<()> {
-        self.service.arm(config)
+        self.service
+            .arm(config)
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     pub(crate) fn disarm(&self) -> XllResult<()> {
-        self.service.disarm()
+        self.service
+            .disarm()
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -866,22 +873,24 @@ impl FormulaHandleServiceSlot {
     /// `ArcSwap::load` with no `Mutex` and no `Arc::clone`.
     #[inline]
     pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead> {
-        self.service.read(
-            |config| {
-                FormulaHandleService::try_new_with_ingress(
-                    usize::try_from(config.maximum_bindings())
-                        .expect("handle capacity fits the platform usize"),
-                    Some(crate::module_runtime::ingress()),
-                )
-                .map(Arc::new)
-            },
-            |_runtime| {
-                #[cfg(any(test, feature = "refinement"))]
-                if let Some(ghost) = self.ghost.get() {
-                    _runtime.set_ghost(Arc::clone(ghost));
-                }
-            },
-        )
+        self.service
+            .read(
+                |config| {
+                    FormulaHandleService::try_new_with_ingress(
+                        usize::try_from(config.maximum_bindings())
+                            .expect("handle capacity fits the platform usize"),
+                        Some(crate::module_runtime::ingress()),
+                    )
+                    .map(Arc::new)
+                },
+                |_runtime| {
+                    #[cfg(any(test, feature = "refinement"))]
+                    if let Some(ghost) = self.ghost.get() {
+                        _runtime.set_ghost(Arc::clone(ghost));
+                    }
+                },
+            )
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     /// Owned `Arc` escape for test/benchmark code that needs to hold a
@@ -896,16 +905,20 @@ impl FormulaHandleServiceSlot {
         &self,
         generation: Option<RuntimeGeneration>,
     ) -> XllResult<FormulaHandleServiceSealed> {
-        self.service.seal(
-            crate::error::DiagnosticId::HANDLE_SLOT,
-            || FormulaHandleServiceSealed::empty(generation),
-            |handles| {
-                let handle_result = handles.seal();
-                handle_result.map(|registry| {
-                    FormulaHandleServiceSealed::from_service(generation, handles, registry)
-                })
-            },
-        )
+        self.service
+            .seal(
+                crate::XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::HANDLE_SLOT,
+                },
+                || FormulaHandleServiceSealed::empty(generation),
+                |handles| {
+                    let handle_result = handles.seal();
+                    handle_result.map(|registry| {
+                        FormulaHandleServiceSealed::from_service(generation, handles, registry)
+                    })
+                },
+            )
+            .map_err(crate::runtime_components::map_service_error)
     }
 
     /// Stops the RTD/COM producer associated with the currently initialized
