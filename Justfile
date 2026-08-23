@@ -47,7 +47,6 @@ features:
         --package xlfn \
         --feature-powerset \
         --depth 2 \
-        --exclude-features unstable \
         --no-dev-deps
 
 deny:
@@ -73,28 +72,28 @@ check: fmt clippy features test bench-check deny semver
 # --- Benchmark recipes ---
 
 bench:
-    cargo bench --package xlfn --features "unstable async" --locked
+    cargo bench --package xlfn --all-features --locked
 
 bench-async:
-    cargo bench --package xlfn --bench async_spawn --features "unstable async" --locked
+    cargo bench --package xlfn --bench async_spawn --features "bench-internals async" --locked
 
 bench-sync:
-    cargo bench --package xlfn --bench sync_boundary --features unstable --locked
+    cargo bench --package xlfn --bench sync_boundary --features bench-internals --locked
 
 bench-input-identity:
-    cargo bench --package xlfn --bench input_identity --features unstable --locked
+    cargo bench --package xlfn --bench input_identity --features bench-internals --locked
 
 bench-formula-caller:
-    cargo bench --package xlfn --bench formula_caller --features unstable --locked
+    cargo bench --package xlfn --bench formula_caller --features bench-internals --locked
 
 bench-handle-prepare:
-    cargo bench --package xlfn --bench handle_prepare --features unstable --locked
+    cargo bench --package xlfn --bench handle_prepare --features bench-internals --locked
 
 bench-handle-lookup:
-    cargo bench --package xlfn --bench handle_lookup --features unstable --locked
+    cargo bench --package xlfn --bench handle_lookup --features bench-internals --locked
 
 bench-formula-revision:
-    cargo bench --package xlfn --bench formula_revision --features unstable --locked
+    cargo bench --package xlfn --bench formula_revision --features bench-internals --locked
 
 bench-check:
-    cargo clippy --package xlfn --benches --features "unstable async" --locked
+    cargo clippy --package xlfn --benches --all-features --locked

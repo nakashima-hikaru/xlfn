@@ -4,7 +4,7 @@ use crate::rtd::RtdModuleState;
 use std::sync::LazyLock;
 
 #[cfg(target_os = "windows")]
-use crate::rtd::windows::ComModuleLifetime;
+use crate::rtd::ComModuleLifetime;
 
 /// The module-wide ownership root for protocols that must move together
 /// across an open/close epoch.

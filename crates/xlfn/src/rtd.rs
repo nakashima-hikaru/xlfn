@@ -17,7 +17,7 @@ pub(crate) mod test_support;
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub(crate) use windows::RtdNotifier;
+pub(crate) use windows::{ComModuleLifetime, RtdNotifier};
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[derive(Clone)]

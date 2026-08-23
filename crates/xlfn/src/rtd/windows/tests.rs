@@ -455,7 +455,7 @@ impl Drop for RtdTestGuard {
         clear_test_shutdown_ghost();
         cleanup_test_active_server();
         close_test_ingress();
-        crate::rtd::certify_logical_quiescence();
+        crate::module_runtime::global().certify_logical_quiescence();
     }
 }
 
@@ -484,7 +484,7 @@ impl RtdTestLock {
         let ingress = crate::module_runtime::ingress();
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-        crate::rtd::begin_module_open();
+        crate::module_runtime::global().rtd().begin_open();
 
         Ok(RtdTestGuard {
             _module_lease: module_lease,
@@ -501,7 +501,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     let ingress = crate::module_runtime::ingress();
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_logical_quiescence();
+    crate::module_runtime::global().certify_logical_quiescence();
     let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
     assert_eq!(dll_can_unload_now(), S_OK);
@@ -516,7 +516,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 
     ingress.begin_opening();
     ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-    crate::rtd::begin_module_open();
+    crate::module_runtime::global().rtd().begin_open();
 
     let factory = TestBoxedFactory(Box::into_raw(Box::new(ClassFactory {
         vtable: &CLASS_FACTORY_VTABLE,
@@ -541,7 +541,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     );
 
     ingress.begin_close_with(|| {});
-    crate::rtd::begin_module_close();
+    crate::module_runtime::global().rtd().begin_close();
     assert_eq!(dll_can_unload_now(), S_FALSE);
 
     // New locks are rejected after close admission stops, while releasing
@@ -568,7 +568,7 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 
     assert_eq!(module_lifetime().snapshot(), baseline);
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_logical_quiescence();
+    crate::module_runtime::global().certify_logical_quiescence();
     assert_eq!(dll_can_unload_now(), S_OK);
 
     let server = ComObjectLease::new(ComObjectKind::Server);
@@ -585,7 +585,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     let _ = ingress.seal_and_drain();
     ingress.begin_opening();
     ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-    crate::rtd::begin_module_open();
+    crate::module_runtime::global().rtd().begin_open();
 
     let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
     ghost
@@ -610,7 +610,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     *module_lifetime().ghost.lock() = None;
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
-    crate::rtd::certify_logical_quiescence();
+    crate::module_runtime::global().certify_logical_quiescence();
 
     for event in [
         "beginRtdOperation",
