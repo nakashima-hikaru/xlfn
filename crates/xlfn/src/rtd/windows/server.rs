@@ -78,7 +78,7 @@ pub(super) static PANIC_DEFERRED_TERMINATION_CLEANUP: AtomicBool = AtomicBool::n
 pub(super) struct EnsuredServer {
     pub(super) active: ActiveServer,
     pub(super) newly_created: bool,
-    pub(super) subscription_server: Option<crate::subscription::RtdServerHandle>,
+    pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
 
 impl Drop for EnsuredServer {
@@ -171,7 +171,7 @@ impl Drop for OwnedServerReference {
 pub(super) struct ServerBackends {
     pub(super) handles: Option<Arc<FormulaHandleService>>,
     pub(super) subscriptions: Option<Arc<SubscriptionRuntime>>,
-    pub(super) subscription_server: Option<crate::subscription::RtdServerHandle>,
+    pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
 
 pub(super) fn synchronize_callback_notification(

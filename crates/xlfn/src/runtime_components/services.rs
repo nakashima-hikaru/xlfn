@@ -7,7 +7,7 @@ use crate::generation::RuntimeGeneration;
 /// while these slots carry the service state owned by the open bundle.
 pub(crate) struct GenerationServices {
     formula_handles: crate::handle::FormulaHandleServiceSlot,
-    subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot,
+    subscriptions: crate::rtd::SubscriptionServiceSlot,
 }
 
 /// Runtime-owned executors whose lifecycle is independent from generation
@@ -54,7 +54,7 @@ impl GenerationServices {
     pub(crate) const fn new() -> Self {
         Self {
             formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
-            subscriptions: crate::subscription::slot::SubscriptionRuntimeSlot::new(),
+            subscriptions: crate::rtd::SubscriptionServiceSlot::new(),
         }
     }
 
@@ -78,7 +78,7 @@ impl GenerationServices {
         &self.formula_handles
     }
 
-    pub(crate) fn subscriptions_slot(&self) -> &crate::subscription::slot::SubscriptionRuntimeSlot {
+    pub(crate) fn subscriptions_slot(&self) -> &crate::rtd::SubscriptionServiceSlot {
         &self.subscriptions
     }
 

@@ -1,3 +1,4 @@
+use super::host::SubscriptionHost;
 use super::server::PublishCore;
 use super::topic::{SubscriptionKey, TopicId};
 #[cfg(test)]
@@ -8,17 +9,53 @@ use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use xlfn_kernel::quota::QuotaPermit;
 
-#[derive(Clone, Debug)]
+pub(crate) trait SinkPublisher: Send + Sync {
+    fn publish(
+        &self,
+        topic_id: TopicId,
+        connection_generation: ConnectionGeneration,
+        value: StoredRtdValue,
+    ) -> XllResult<()>;
+}
+
+struct PublishCoreSink<H: SubscriptionHost> {
+    publish: triomphe::Arc<PublishCore<H>>,
+}
+
+impl<H: SubscriptionHost> SinkPublisher for PublishCoreSink<H> {
+    fn publish(
+        &self,
+        topic_id: TopicId,
+        connection_generation: ConnectionGeneration,
+        value: StoredRtdValue,
+    ) -> XllResult<()> {
+        self.publish.publish(topic_id, connection_generation, value)
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ErasedSink {
-    pub(crate) publish: triomphe::Arc<PublishCore>,
+    publisher: std::sync::Arc<dyn SinkPublisher>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
 
 impl ErasedSink {
+    pub(crate) fn for_publish<H: SubscriptionHost>(
+        publish: triomphe::Arc<PublishCore<H>>,
+        topic_id: TopicId,
+        connection_generation: ConnectionGeneration,
+    ) -> Self {
+        Self {
+            publisher: std::sync::Arc::new(PublishCoreSink { publish }),
+            topic_id,
+            connection_generation,
+        }
+    }
+
     #[inline]
     pub(crate) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
-        self.publish
+        self.publisher
             .publish(self.topic_id, self.connection_generation, value)
     }
 }

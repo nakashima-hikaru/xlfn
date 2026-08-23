@@ -12,13 +12,18 @@
 
 mod catalog;
 mod delivery;
+mod host;
 mod identity;
 mod runtime;
 mod server;
-pub(crate) mod slot;
 mod source;
 mod topic;
 mod value;
+
+pub(crate) type ErasedSink = delivery::ErasedSink;
+pub(crate) type SubscriptionRuntime = runtime::SubscriptionRuntime<crate::rtd::RtdSubscriptionHost>;
+pub(crate) type SubscriptionServerHandle =
+    server::SubscriptionServerHandle<crate::rtd::RtdSubscriptionHost>;
 
 pub use source::{
     RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
@@ -45,11 +50,12 @@ pub(crate) use delivery::RefreshOutcome;
 pub(crate) use delivery::RtdUpdate;
 #[cfg(test)]
 pub(crate) use delivery::{
-    ActiveSubscription, DeliveryPhase, ErasedSink, NotificationAttempt, NotificationCompletion,
+    ActiveSubscription, DeliveryPhase, NotificationAttempt, NotificationCompletion,
     PreparedNotification, QueuedUpdate, RefreshState, SERVER_LIFECYCLE_CLOSING,
     SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TOPIC_SHARDS, TopicShard,
     shard_index,
 };
+pub(crate) use host::SubscriptionHost;
 #[cfg(test)]
 pub(crate) use identity::{
     NEXT_RTD_RUNTIME_ID, SourceIdentityRegistry, SourceIdentityReservation,
@@ -57,25 +63,19 @@ pub(crate) use identity::{
 };
 #[cfg(test)]
 use parking_lot::{Condvar, Mutex};
+#[cfg(test)]
+pub(crate) use runtime::OperationEnterHook;
 #[cfg(target_os = "windows")]
 pub(crate) use runtime::SubscriptionConnection;
-pub(crate) use runtime::SubscriptionRuntime;
-#[cfg(test)]
-pub(crate) use runtime::{OperationEnterHook, PreparedSubscription};
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
-pub(crate) use server::RtdServerHandle;
 #[cfg(test)]
 pub(crate) use server::{
     OwnedServerOperation, PANIC_AFTER_TERMINATION_GUARD, PublishCore, RtdRefreshBatch,
-    ScopedServerOperation, ServerReservationFailure, ServerRuntime, ServerTermination,
-    ServerTerminationPhase, ServerTerminationWaiter, TerminatedTopic, TerminationAdmission,
+    ScopedServerOperation, ServerReservationFailure, ServerTermination, ServerTerminationPhase,
+    ServerTerminationWaiter, SubscriptionServer, TerminatedTopic, TerminationAdmission,
     TerminationCompletionGuard, TerminationCoordinator, TerminationState,
     cleanup_catalog_binding_and_pending, disconnect_all_no_unwind, disconnect_one_no_unwind,
     drop_notifier_no_unwind,
 };
-#[cfg(test)]
-pub(crate) use slot::SubscriptionRuntimeRead;
-pub(crate) use slot::SubscriptionsStopped;
 pub(crate) use source::SourceHandleAllocator;
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};

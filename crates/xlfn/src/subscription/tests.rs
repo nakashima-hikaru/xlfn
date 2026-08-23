@@ -260,7 +260,7 @@ fn refresh_batch_does_not_retain_server_arc() {
     assert_eq!(
         Arc::strong_count(&server.inner),
         before,
-        "refresh batch must borrow ServerRuntime rather than retain an Arc",
+        "refresh batch must borrow SubscriptionServer rather than retain an Arc",
     );
 
     batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -1781,7 +1781,7 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
     // Terminate server, closing and dropping subscriptions
     server.terminate().unwrap();
 
-    // After termination, subscription sink is dropped, restoring unique ownership to ServerRuntime
+    // After termination, subscription sink is dropped, restoring unique ownership to SubscriptionServer
     assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
     assert!(triomphe::Arc::is_unique(&server.inner.publish));
 }

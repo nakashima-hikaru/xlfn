@@ -1681,7 +1681,7 @@ impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
 
 pub struct RtdPublishNumberBenchmark {
     _runtime: Arc<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::RtdServerHandle,
+    server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<f64>,
 }
 
@@ -1755,7 +1755,7 @@ impl RtdPublishNumberBenchmark {
 
 pub struct RtdPublishStringBenchmark {
     _runtime: Arc<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::RtdServerHandle,
+    server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<String>,
 }
 

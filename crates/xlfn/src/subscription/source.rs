@@ -1,4 +1,4 @@
-use super::delivery::ErasedSink;
+use super::ErasedSink;
 use super::topic::RtdTopic;
 use super::value::IntoRtdValue;
 use crate::generation::RuntimeGeneration;

@@ -1221,13 +1221,13 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[inline]
     #[cfg(test)]
-    pub(crate) fn subscriptions(&self) -> XllResult<crate::subscription::SubscriptionRuntimeRead> {
+    pub(crate) fn subscriptions(&self) -> XllResult<crate::rtd::service::SubscriptionRuntimeRead> {
         self.generation_services()?.subscriptions_slot().read()
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         let Some(services) = self.generation_services_snapshot() else {
-            return Ok(crate::subscription::SubscriptionsStopped::new());
+            return Ok(crate::rtd::SubscriptionsStopped::new());
         };
         services.subscriptions_slot().seal()
     }

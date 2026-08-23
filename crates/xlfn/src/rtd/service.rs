@@ -1,8 +1,8 @@
-use super::{RtdLimits, SubscriptionRuntime};
 use crate::generation::RuntimeGeneration;
+use crate::subscription::{RtdLimits, SubscriptionRuntime};
 use std::sync::Arc;
 
-pub(crate) struct SubscriptionRuntimeSlot {
+pub(crate) struct SubscriptionServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
         SubscriptionRuntimeConfig,
         SubscriptionRuntime,
@@ -37,7 +37,7 @@ struct SubscriptionRuntimeConfig {
     limits: RtdLimits,
 }
 
-impl SubscriptionRuntimeSlot {
+impl SubscriptionServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
@@ -67,9 +67,10 @@ impl SubscriptionRuntimeSlot {
         self.service
             .read(
                 |config| {
-                    Ok(Arc::new(SubscriptionRuntime::with_module_ingress(
+                    Ok(Arc::new(SubscriptionRuntime::with_host(
                         config.generation,
                         config.limits,
+                        crate::rtd::RtdSubscriptionHost::production(),
                     )))
                 },
                 |_runtime| {
@@ -124,8 +125,8 @@ mod tests {
     }
 
     #[test]
-    fn subscription_slot_reuses_published_runtime() {
-        let slot = SubscriptionRuntimeSlot::new();
+    fn subscription_service_slot_reuses_published_runtime() {
+        let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
 
         let first = slot.read().unwrap();
@@ -135,8 +136,8 @@ mod tests {
     }
 
     #[test]
-    fn subscription_slot_initializes_once_under_contention() {
-        let slot = Arc::new(SubscriptionRuntimeSlot::new());
+    fn subscription_service_slot_initializes_once_under_contention() {
+        let slot = Arc::new(SubscriptionServiceSlot::new());
         slot.arm(generation(), RtdLimits::standard()).unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let mut handles = Vec::new();
@@ -159,8 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn subscription_slot_seal_unpublishes_runtime() {
-        let slot = SubscriptionRuntimeSlot::new();
+    fn subscription_service_slot_seal_unpublishes_runtime() {
+        let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
         let read = slot.read().unwrap();
         drop(read);
@@ -172,8 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn subscription_slot_can_reopen_after_close() {
-        let slot = SubscriptionRuntimeSlot::new();
+    fn subscription_service_slot_can_reopen_after_close() {
+        let slot = SubscriptionServiceSlot::new();
         slot.arm(generation(), RtdLimits::standard()).unwrap();
 
         let first = slot.read().unwrap();
@@ -189,8 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn subscription_slot_seal_is_local_to_its_generation_bundle() {
-        let slot = SubscriptionRuntimeSlot::new();
+    fn subscription_service_slot_seal_is_local_to_its_generation_bundle() {
+        let slot = SubscriptionServiceSlot::new();
         assert!(matches!(slot.read(), Err(crate::XllError::Closing)));
 
         slot.arm(generation(), RtdLimits::standard()).unwrap();

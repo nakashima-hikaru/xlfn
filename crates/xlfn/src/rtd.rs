@@ -13,11 +13,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 pub(crate) mod test_support;
 
+mod host;
+pub(crate) mod service;
+
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{ComModuleLifetime, RtdNotifier};
+
+pub(crate) use host::RtdSubscriptionHost;
+pub(crate) use service::{SubscriptionServiceSlot, SubscriptionsStopped};
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[derive(Clone)]
