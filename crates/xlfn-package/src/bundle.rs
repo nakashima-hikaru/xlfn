@@ -147,7 +147,7 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
     configured: &[String],
     external_imports: &[String],
     strict_paths: bool,
-    observer: &dyn SnapshotObserver,
+    observer: &impl SnapshotObserver,
 ) -> PackageResult<ResolvedBundle> {
     Architecture::parse(target)?;
     let canonical_root = fs::canonicalize(manifest_directory).map_err(|error| {

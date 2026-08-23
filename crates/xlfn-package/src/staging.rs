@@ -790,7 +790,7 @@ pub(crate) fn read_stable_snapshot(
     target: &str,
     path: &Path,
     file: &mut std::fs::File,
-    observer: &dyn SnapshotObserver,
+    observer: &impl SnapshotObserver,
 ) -> PackageResult<Arc<[u8]>> {
     read_stable_snapshot_with_limit(target, path, file, observer, None)
 }
@@ -799,7 +799,7 @@ pub(crate) fn read_stable_snapshot_with_limit(
     target: &str,
     path: &Path,
     file: &mut std::fs::File,
-    observer: &dyn SnapshotObserver,
+    observer: &impl SnapshotObserver,
     maximum_len: Option<u64>,
 ) -> PackageResult<Arc<[u8]>> {
     let before = file_snapshot_state(file)?;
