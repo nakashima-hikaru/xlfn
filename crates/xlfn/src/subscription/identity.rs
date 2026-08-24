@@ -5,9 +5,21 @@ use rustc_hash::FxHashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) struct SourceIdentityReservation {
-    pub(crate) source_id: SourceHandleId,
+    source_id: SourceHandleId,
+}
+
+impl SourceIdentityReservation {
+    pub(crate) fn source_id(&self) -> SourceHandleId {
+        self.source_id
+    }
+
+    pub(crate) fn commit(self) {
+        // The registry keeps the committed identity reference. Consuming this
+        // token makes that ownership transfer explicit; rollback is performed
+        // by `SourceIdentityRegistry::release` before the identity is inserted.
+    }
 }
 
 // Source handles carry a generation-owned identity. The registry therefore

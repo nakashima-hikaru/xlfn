@@ -6,7 +6,9 @@ pub(crate) use crate::async_udf::AsyncStopped;
 pub(crate) use crate::handle::{HandleRegistrySealed, HandleStoreQuiescent};
 #[cfg(not(feature = "async"))]
 pub(crate) use crate::lifecycle::AsyncStopped;
-pub(crate) use crate::lifecycle::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
+pub(crate) use crate::lifecycle::{
+    AddinQuiesced, GenerationReclaimed, HostCallbacksDetached, ReturnsQuiescent,
+};
 pub(crate) use crate::rtd::SubscriptionsStopped;
 
 /// Classification for a best-effort failure observed after unload safety was

@@ -1,4 +1,4 @@
-use super::catalog::{SubscriptionCatalog, SubscriptionState};
+use super::catalog::{SubscriptionCatalog, SubscriptionEntry};
 use super::delivery::{
     DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
     RefreshState, RtdUpdate, SERVER_LIFECYCLE_CLOSING, SERVER_LIFECYCLE_OPEN,
@@ -962,8 +962,7 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
-                    entry.state != SubscriptionState::Active
-                        && entry.server_generation == Some(self.server.generation)
+                    !entry.is_active() && entry.server_generation() == Some(self.server.generation)
                 })
                 .map(|(k, _)| *k)
                 .collect();
@@ -971,18 +970,14 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
             let mut extra_sources = Vec::new();
             for key in unactive_pending_keys {
                 let Some(should_remove) = catalog.with_entry(&key, |entry| {
-                    entry.server_generation = None;
-                    entry.connection_generation = None;
-                    entry.state = SubscriptionState::Pending;
-                    entry.committed = false;
-                    entry.can_remove()
+                    entry.reset_for_server_termination(self.server.generation) && entry.can_remove()
                 }) else {
                     continue;
                 };
 
                 if should_remove
                     && let Some(removed) = catalog.remove_entry(&key)
-                    && let Some(source) = removed.source
+                    && let Some(source) = removed.into_source()
                 {
                     extra_sources.push(source);
                 }
@@ -1087,21 +1082,20 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
     conn_generation: ConnectionGeneration,
 ) -> Option<Arc<dyn ErasedRtdSource>> {
     let (_, should_remove) = catalog.with_entry(key, |entry| {
-        if entry.connection_generation != Some(conn_generation)
-            || entry.server_generation != Some(server_generation)
+        if entry.connection_generation() != Some(conn_generation)
+            || entry.server_generation() != Some(server_generation)
         {
             return (false, false);
         }
 
-        entry.state = SubscriptionState::Pending;
-        entry.connection_generation = None;
-        entry.server_generation = None;
-        entry.committed = false;
-        (true, entry.can_remove())
+        let (matched, should_remove) = entry.cleanup_connection(server_generation, conn_generation);
+        (matched, should_remove)
     })?;
 
     if should_remove {
-        return catalog.remove_entry(key).and_then(|entry| entry.source);
+        return catalog
+            .remove_entry(key)
+            .and_then(SubscriptionEntry::into_source);
     }
 
     None

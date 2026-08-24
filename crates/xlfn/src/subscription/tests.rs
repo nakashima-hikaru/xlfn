@@ -1240,7 +1240,7 @@ fn same_handle_reuses_active_subscription_identity() {
             .lock()
             .entries
             .get(&key)
-            .is_some_and(|entry| entry.state == SubscriptionState::Active)
+            .is_some_and(|entry| entry.is_active())
     );
 }
 
@@ -1307,7 +1307,7 @@ fn reserve_live_source_tracks_each_identity_reference() {
     let (source, _, _) = publishing_source::<f64>(None);
     let first = registry.reserve(source.id, 16).unwrap();
     let second = registry.reserve(source.id, 16).unwrap();
-    assert_eq!(first.source_id, second.source_id);
+    assert_eq!(first.source_id(), second.source_id());
     assert_eq!(
         registry.refs.get(&source.id).map(|refs| refs.get()),
         Some(2)
@@ -1866,7 +1866,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
         catalog
             .entries
             .get(&key)
-            .is_some_and(|entry| entry.state == SubscriptionState::Active)
+            .is_some_and(|entry| entry.is_active())
     );
     assert_eq!(catalog.pending_len(), 0);
 }

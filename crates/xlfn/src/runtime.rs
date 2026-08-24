@@ -1,6 +1,7 @@
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RemovalEpoch, RuntimeGeneration};
+use crate::host_callback::HostCallbackSession;
 use crate::ingress::AdmittedExport;
-use crate::registration::RegistrationId;
+use crate::registration::{HostMutationJournal, RegistrationId};
 use crate::{XllError, XllResult};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -333,6 +334,7 @@ impl<A: crate::Addin> Runtime<A> {
             runtime: self,
             attempt_id,
             module_opening: Some(module_opening),
+            host: Some(NoHost),
             _stage: PhantomData,
         })
     }
@@ -521,14 +523,7 @@ impl<A: crate::Addin> Runtime<A> {
         attempt: &mut OpeningTxn<'_, A, Stage>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
-        let mut journal = crate::registration::HostMutationJournal {
-            pending_registrations: registrations
-                .into_iter()
-                .map(crate::registration::PendingRegistration::from)
-                .collect(),
-            ..Default::default()
-        };
-        attempt.commit_in_place(&mut journal)
+        attempt.commit_in_place(registrations)
     }
 
     fn finish_open_for_attempt(
@@ -840,8 +835,22 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn wait_for_returns(&self) {
         self.return_protocol.wait_for_returns();
+    }
+
+    pub(crate) fn wait_for_return_quiescence(
+        &self,
+    ) -> XllResult<crate::shutdown::ReturnsQuiescent> {
+        self.return_protocol.wait_for_returns();
+        if self.returns_closed_and_quiescent() {
+            Ok(crate::shutdown::ReturnsQuiescent::new())
+        } else {
+            Err(XllError::Internal {
+                diagnostic_id: crate::error::DiagnosticId::CLOSE_CERTIFICATE,
+            })
+        }
     }
 
     #[inline]
@@ -890,6 +899,7 @@ impl<A: crate::Addin> Runtime<A> {
 )]
 pub(crate) struct QuiescenceProof {
     pub(crate) exports: crate::ingress::ExportsDrained,
+    pub(crate) returns: crate::shutdown::ReturnsQuiescent,
     pub(crate) rtd: crate::rtd::RtdQuiescent,
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
@@ -1004,10 +1014,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             .load_generation_services()
             .or_else(|| control.retiring_services().map(Arc::clone));
         let services_stopped = services.as_ref().is_none_or(|services| services.is_none());
-        #[cfg(feature = "async")]
-        let async_stopped = runtime.executors.async_manager.is_stopped();
-        #[cfg(not(feature = "async"))]
-        let async_stopped = true;
         let handles_match_generation = lifecycle_state
             .last_committed_generation
             .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
@@ -1018,8 +1024,14 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
         let certified = K::accepts_phase(lifecycle_state.phase)
             && lifecycle_state.open_attempt.is_none()
             && lifecycle_state.removal_attempt == Some(self.attempt)
-            && runtime.returns_closed_and_quiescent()
-            && async_stopped
+            // `QuiescenceProof::returns` is issued only after the return
+            // admission is closed and all return obligations have drained.
+            // The certificate therefore consumes the proof token instead of
+            // reopening the ambient return protocol here.
+            // The same rule applies to async producers: `async_stopped` is a
+            // linear proof token produced by the teardown stage, so checking
+            // the executor again here would reintroduce an ambient snapshot
+            // into certificate issuance.
             && services_stopped
             && !lifecycle_state.has_opening_generation()
             && !lifecycle_state.has_current_generation()
@@ -1403,37 +1415,68 @@ pub(crate) struct OpenAttemptBegun;
 
 pub(crate) struct OpenGenerationStaged;
 
-type OpeningStageFailure<'runtime, A> = (
+pub(crate) struct HostMutated;
+
+type OpeningStageFailure<'runtime, A, Host = NoHost> = (
     XllError,
-    Box<OpeningTxn<'runtime, A, OpenAttemptBegun>>,
+    Box<OpeningTxn<'runtime, A, OpenAttemptBegun, Host>>,
     Box<OpeningGeneration<A>>,
 );
 
-pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage> {
+pub(crate) struct NoHost;
+
+pub(crate) struct HostOpeningState {
+    callbacks: HostCallbackSession,
+    journal: HostMutationJournal,
+}
+
+pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage, Host = NoHost> {
     runtime: &'runtime Runtime<A>,
     attempt_id: OpenAttemptId,
     module_opening: Option<crate::module_runtime::ModuleOpening>,
+    host: Option<Host>,
     _stage: PhantomData<fn() -> Stage>,
 }
 
-impl<A: crate::Addin, Stage> OpeningTxn<'_, A, Stage> {
+impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host> {
     pub(crate) const fn attempt_id(&self) -> OpenAttemptId {
         self.attempt_id
     }
 
-    pub(crate) fn fail(mut self) -> crate::runtime_components::OpenFailureDisposition {
+    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
+        self.runtime
+    }
+
+    pub(crate) fn fail(&mut self) -> crate::runtime_components::OpenFailureDisposition {
         let disposition = self.runtime.fail_and_record(self.attempt_id);
         let _ = self.module_opening.take();
         disposition
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenAttemptBegun> {
+impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
+    pub(crate) fn attach_host(mut self) -> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
+        OpeningTxn {
+            runtime: self.runtime,
+            attempt_id: self.attempt_id,
+            module_opening: self.module_opening.take(),
+            host: Some(HostOpeningState {
+                callbacks: HostCallbackSession::new(),
+                journal: HostMutationJournal::default(),
+            }),
+            _stage: PhantomData,
+        }
+    }
+}
+
+impl<'runtime, A: crate::Addin, Host> OpeningTxn<'runtime, A, OpenAttemptBegun, Host> {
     pub(crate) fn stage(
         mut self,
         opening: OpeningGeneration<A>,
-    ) -> Result<OpeningTxn<'runtime, A, OpenGenerationStaged>, OpeningStageFailure<'runtime, A>>
-    {
+    ) -> Result<
+        OpeningTxn<'runtime, A, OpenGenerationStaged, Host>,
+        OpeningStageFailure<'runtime, A, Host>,
+    > {
         let result = self
             .runtime
             .stage_opening_generation_for_attempt(self.attempt_id, opening);
@@ -1447,6 +1490,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenAttemptBegun> {
                     runtime: self.runtime,
                     attempt_id: self.attempt_id,
                     module_opening: Some(module_opening),
+                    host: self.host.take(),
                     _stage: PhantomData,
                 })
             }
@@ -1455,32 +1499,110 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenAttemptBegun> {
     }
 }
 
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage> {
-    pub(crate) fn commit(
-        mut self,
-        journal: &mut crate::registration::HostMutationJournal,
-    ) -> XllResult<()> {
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        self.runtime
-            .finish_open_for_attempt(self.attempt_id, module_opening, journal)
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState> {
+    fn stage_registrations(&mut self, registrations: Vec<RegistrationId>) {
+        self.host
+            .as_mut()
+            .expect("a host transaction owns its opening state")
+            .journal
+            .pending_registrations = registrations
+            .into_iter()
+            .map(crate::registration::PendingRegistration::from)
+            .collect();
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn commit_in_place(
-        &mut self,
-        journal: &mut crate::registration::HostMutationJournal,
-    ) -> XllResult<()> {
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        self.runtime
-            .finish_open_for_attempt(self.attempt_id, module_opening, journal)
+    pub(crate) fn stage_host_mutations(
+        mut self,
+        registrations: Vec<RegistrationId>,
+    ) -> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
+        self.stage_registrations(registrations);
+        OpeningTxn {
+            runtime: self.runtime,
+            attempt_id: self.attempt_id,
+            module_opening: self.module_opening.take(),
+            host: self.host.take(),
+            _stage: PhantomData,
+        }
     }
 }
 
-impl<A: crate::Addin, Stage> Drop for OpeningTxn<'_, A, Stage> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
+    fn journal_mut(&mut self) -> &mut HostMutationJournal {
+        &mut self
+            .host
+            .as_mut()
+            .expect("a host transaction owns its opening state")
+            .journal
+    }
+
+    pub(crate) fn commit(mut self) -> XllResult<()> {
+        let Some(module_opening) = self.module_opening.take() else {
+            return Err(XllError::Closing);
+        };
+        self.runtime
+            .finish_open_for_attempt(self.attempt_id, module_opening, self.journal_mut())
+    }
+}
+
+impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn commit_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
+        let mut journal = HostMutationJournal {
+            pending_registrations: registrations
+                .into_iter()
+                .map(crate::registration::PendingRegistration::from)
+                .collect(),
+            ..Default::default()
+        };
+        let Some(module_opening) = self.module_opening.take() else {
+            return Err(XllError::Closing);
+        };
+        self.runtime
+            .finish_open_for_attempt(self.attempt_id, module_opening, &mut journal)
+    }
+}
+
+impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
+    pub(crate) fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
+        &mut self
+            .host
+            .as_mut()
+            .expect("a host transaction owns its opening state")
+            .callbacks
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn stage_events(
+        &mut self,
+        registrations: Vec<crate::registration::EventRegistration>,
+    ) {
+        self.host
+            .as_mut()
+            .expect("a host transaction owns its opening state")
+            .journal
+            .pending_events = registrations;
+    }
+
+    pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
+        self.host
+            .as_mut()
+            .expect("a host transaction owns its opening state")
+            .journal
+            .merge(journal);
+    }
+
+    pub(crate) fn take_journal(&mut self) -> HostMutationJournal {
+        std::mem::take(
+            &mut self
+                .host
+                .as_mut()
+                .expect("a host transaction owns its opening state")
+                .journal,
+        )
+    }
+}
+
+impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
     fn drop(&mut self) {
         if self.module_opening.is_none() {
             return;
@@ -1612,6 +1734,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
+                returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
@@ -1646,6 +1769,7 @@ pub(crate) mod tests {
         let certificate = rollback_attempt
             .certify::<OpenRollback>(QuiescenceProof {
                 exports,
+                returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd: crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
@@ -1855,6 +1979,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
+                returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
@@ -1899,7 +2024,7 @@ pub(crate) mod tests {
     fn close_waiter_is_not_lost_when_open_rollback_finishes() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
         let rollback = runtime.acquire_open_rollback().unwrap();
 
@@ -1980,6 +2105,7 @@ pub(crate) mod tests {
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(QuiescenceProof {
             exports,
+            returns: crate::shutdown::ReturnsQuiescent::for_test(),
             rtd,
             host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
             async_stopped: crate::shutdown::AsyncStopped::for_test(),

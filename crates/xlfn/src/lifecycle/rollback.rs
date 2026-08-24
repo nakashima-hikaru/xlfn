@@ -87,7 +87,13 @@ where
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let execution_drained = drain_execution(runtime, false);
+    let execution_drained = match drain_execution(runtime, false) {
+        Ok(stage) => stage,
+        Err(error) => {
+            report_boundary_error("xlAutoOpen return quiescence", &error);
+            return incomplete(runtime);
+        }
+    };
     let teardown: teardown::TeardownTxn<
         '_,
         A,

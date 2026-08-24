@@ -187,6 +187,7 @@ impl<A: Addin> Drop for QuiescedAddin<'_, A> {
 /// stages instead of immediately unwrapping it at the call site.
 pub(super) struct ExecutionDrained {
     exports: crate::ingress::ExportsDrained,
+    returns: crate::shutdown::ReturnsQuiescent,
 }
 
 /// The producer stage owns the execution-drain witness while async work and
@@ -225,6 +226,7 @@ pub(super) struct ServicesCleaned {
 /// a handle certificate belonging to a different producer stage.
 pub(super) struct ServicesQuiescent {
     exports: crate::ingress::ExportsDrained,
+    returns: crate::shutdown::ReturnsQuiescent,
     async_stopped: crate::shutdown::AsyncStopped,
     subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     handle_store: crate::shutdown::HandleStoreQuiescent,
@@ -243,7 +245,10 @@ pub(super) struct ResourcesReclaimed {
 }
 
 impl ExecutionDrained {
-    pub(super) fn begin<A: Addin>(runtime: &Runtime<A>, _record_ghost: bool) -> Self {
+    pub(super) fn begin<A: Addin>(
+        runtime: &Runtime<A>,
+        _record_ghost: bool,
+    ) -> crate::XllResult<Self> {
         let exports = crate::module_runtime::global().seal_and_drain();
 
         #[cfg(any(test, feature = "refinement"))]
@@ -251,14 +256,14 @@ impl ExecutionDrained {
             runtime.refinement_hooks().calls_drained(runtime);
         }
 
-        runtime.wait_for_returns();
+        let returns = runtime.wait_for_return_quiescence()?;
 
         #[cfg(any(test, feature = "refinement"))]
         if _record_ghost {
             runtime.refinement_hooks().returns_drained(runtime);
         }
 
-        Self { exports }
+        Ok(Self { exports, returns })
     }
 
     pub(super) fn stop_producers<A: Addin>(
@@ -347,6 +352,7 @@ impl ServicesCleaned {
         let (handle_store, subscriptions_stopped) = sealed.finish()?;
         Ok(ServicesQuiescent {
             exports: execution.exports,
+            returns: execution.returns,
             async_stopped,
             subscriptions_stopped,
             handle_store,
@@ -361,6 +367,7 @@ impl ServicesQuiescent {
         self,
     ) -> (
         crate::ingress::ExportsDrained,
+        crate::shutdown::ReturnsQuiescent,
         crate::shutdown::AsyncStopped,
         crate::shutdown::SubscriptionsStopped,
         crate::shutdown::HandleStoreQuiescent,
@@ -369,6 +376,7 @@ impl ServicesQuiescent {
     ) {
         (
             self.exports,
+            self.returns,
             self.async_stopped,
             self.subscriptions_stopped,
             self.handle_store,
@@ -394,10 +402,18 @@ impl ResourcesReclaimed {
     }
 
     pub(super) fn into_proof(self) -> crate::runtime::QuiescenceProof {
-        let (exports, async_stopped, subscriptions_stopped, handle_store, addin, generation) =
-            self.services.into_parts();
+        let (
+            exports,
+            returns,
+            async_stopped,
+            subscriptions_stopped,
+            handle_store,
+            addin,
+            generation,
+        ) = self.services.into_parts();
         crate::runtime::QuiescenceProof {
             exports,
+            returns,
             rtd: self.rtd,
             host_callbacks: self.host_callbacks,
             async_stopped,
@@ -574,6 +590,6 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
 pub(super) fn drain_execution<A: Addin>(
     runtime: &Runtime<A>,
     record_ghost: bool,
-) -> ExecutionDrained {
+) -> crate::XllResult<ExecutionDrained> {
     ExecutionDrained::begin(runtime, record_ghost)
 }

@@ -29,7 +29,7 @@ macro_rules! lifecycle_token {
         }
 
         impl $name {
-            fn new() -> Self {
+            pub(crate) fn new() -> Self {
                 Self { _private: () }
             }
 
@@ -42,6 +42,7 @@ macro_rules! lifecycle_token {
 }
 
 lifecycle_token!(HostCallbacksDetached);
+lifecycle_token!(ReturnsQuiescent);
 lifecycle_token!(AddinQuiesced);
 lifecycle_token!(GenerationReclaimed);
 
@@ -109,7 +110,12 @@ fn retry_metadata_debt<A: Addin>(
 
 type StagedOpenResult<'runtime, A> = Result<
     (
-        open::OpeningTransaction<'runtime, A, open::AddinStaged>,
+        crate::runtime::OpeningTxn<
+            'runtime,
+            A,
+            crate::runtime::OpenGenerationStaged,
+            crate::runtime::HostOpeningState,
+        >,
         Vec<crate::registration::RegistrationId>,
     ),
     open::OpenFailure<'runtime, A>,
@@ -117,7 +123,12 @@ type StagedOpenResult<'runtime, A> = Result<
 
 type InitializedOpenResult<'runtime, A> = Result<
     (
-        open::OpeningTransaction<'runtime, A, open::AddinStaged>,
+        crate::runtime::OpeningTxn<
+            'runtime,
+            A,
+            crate::runtime::OpenGenerationStaged,
+            crate::runtime::HostOpeningState,
+        >,
         RuntimeConfig,
     ),
     open::OpenFailure<'runtime, A>,
@@ -128,7 +139,12 @@ fn open_addin_inner<'runtime, A>(
     lifecycle: &AddinLifecycleAccess<'_, A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
-    mut transaction: open::OpeningTransaction<'runtime, A, open::OpenBegun>,
+    mut transaction: crate::runtime::OpeningTxn<
+        'runtime,
+        A,
+        crate::runtime::OpenAttemptBegun,
+        crate::runtime::HostOpeningState,
+    >,
 ) -> StagedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -196,23 +212,25 @@ where
 }
 
 fn rollback_active_open<'runtime, A, Stage>(
-    runtime: &'runtime Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
-    attempt: Option<crate::runtime::OpeningTxn<'runtime, A, Stage>>,
-    callbacks: &mut HostCallbackSession,
+    attempt: Option<
+        crate::runtime::OpeningTxn<'runtime, A, Stage, crate::runtime::HostOpeningState>,
+    >,
 ) where
     A: Addin,
 {
-    let Some(attempt) = attempt else {
+    let Some(mut attempt) = attempt else {
         return;
     };
+    let runtime = attempt.runtime();
+    runtime.retain_host_mutations(attempt.take_journal());
     let generation = Some(
         RuntimeGeneration::new(attempt.attempt_id().get())
             .expect("an active open attempt has a runtime generation"),
     );
     if attempt.fail().requires_rollback() {
         match catch_unwind(AssertUnwindSafe(|| {
-            rollback_open::<A>(runtime, lifecycle, callbacks, generation)
+            rollback_open::<A>(runtime, lifecycle, attempt.callbacks_mut(), generation)
         })) {
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
@@ -234,7 +252,12 @@ fn initialize_addin<'runtime, A>(
     runtime: &'runtime Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     context: &OpenContext,
-    transaction: open::OpeningTransaction<'runtime, A, open::OpenBegun>,
+    transaction: crate::runtime::OpeningTxn<
+        'runtime,
+        A,
+        crate::runtime::OpenAttemptBegun,
+        crate::runtime::HostOpeningState,
+    >,
 ) -> InitializedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -281,8 +304,8 @@ where
     Ok((transaction, runtime_config))
 }
 
-fn retain_transaction_error<A: Addin, Stage: open::OpenTransactionStage>(
-    transaction: &mut open::OpeningTransaction<'_, A, Stage>,
+fn retain_transaction_error<A: Addin, Stage>(
+    transaction: &mut crate::runtime::OpeningTxn<'_, A, Stage, crate::runtime::HostOpeningState>,
     error: crate::registration::RegistrationTransactionError,
 ) -> XllError {
     if error.journal.is_unknown() {
@@ -475,7 +498,17 @@ where
         }
     };
 
-    let execution_drained = drain_execution(runtime, true);
+    let execution_drained = match drain_execution(runtime, true) {
+        Ok(stage) => stage,
+        Err(error) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+                "xlAutoRemove return quiescence",
+                &error,
+            ));
+        }
+    };
     let owner = transaction.take_attempt();
     let teardown: teardown::TeardownTxn<
         'runtime,
@@ -1212,15 +1245,9 @@ mod tests {
     fn failed_concurrent_open_does_not_rollback_the_owner_attempt() {
         let runtime = Runtime::<LayersPanic>::new();
         let mut owner = runtime.begin_open().unwrap();
-        let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&runtime);
 
-        rollback_active_open::<LayersPanic, crate::runtime::OpenAttemptBegun>(
-            &runtime,
-            &lifecycle,
-            None,
-            &mut callbacks,
-        );
+        rollback_active_open::<LayersPanic, crate::runtime::OpenAttemptBegun>(&lifecycle, None);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         runtime.publish((), ());
@@ -1237,7 +1264,10 @@ mod tests {
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
         let removal_epoch = runtime.removal_epoch();
-        let transaction = open::OpeningTransaction::begin(&runtime, removal_epoch).unwrap();
+        let transaction = runtime
+            .begin_open_if_epoch(removal_epoch)
+            .unwrap()
+            .attach_host();
         let lifecycle = lifecycle_access(&runtime);
         let (transaction, _) = match initialize_addin::<LayersPanic>(
             &runtime,
@@ -1253,7 +1283,7 @@ mod tests {
         };
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
-        transaction.rollback(&lifecycle);
+        rollback_active_open(&lifecycle, Some(transaction));
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
@@ -1558,7 +1588,7 @@ mod tests {
     fn open_rollback_cleanup_issue_still_finalizes_without_reinstalling_state() {
         let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish_with_lifecycle(
             (),
             RetryState {
@@ -2127,7 +2157,7 @@ mod tests {
         );
 
         let rollback = Runtime::<CleanClose>::new();
-        let opening = rollback.begin_open().unwrap();
+        let mut opening = rollback.begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&rollback);
@@ -2205,7 +2235,7 @@ mod tests {
     #[test]
     fn failing_open_rollback_is_finalized_by_xl_auto_close() {
         let runtime = Runtime::<AlwaysFailClose>::new();
-        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.begin_open().unwrap();
         runtime.publish((), ());
 
         assert!(open_attempt.fail().requires_rollback());
@@ -2722,7 +2752,7 @@ mod tests {
         };
         let lifecycle = lifecycle_access(&runtime);
         assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
-        let open_attempt = open_attempt
+        let mut open_attempt = open_attempt
             .stage(crate::runtime::OpeningGeneration {
                 shared_state: (),
                 layers: (),
