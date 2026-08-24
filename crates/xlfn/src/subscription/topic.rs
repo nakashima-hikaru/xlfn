@@ -201,7 +201,7 @@ impl RtdTopic {
         let protocol_error = normalized
             .iter()
             .map(|part| part.encode_utf16().count())
-            .find(|&length| length > 32_767);
+            .find(|&length| length > crate::utf16::EXCEL_STRING_LIMIT);
         Ok(Self {
             parts: Arc::from(normalized),
             byte_len,
@@ -226,7 +226,7 @@ impl RtdTopic {
         Err(XllError::input(
             "RTD topic",
             crate::error::InputError::TooLarge {
-                limit: 32_767,
+                limit: crate::utf16::EXCEL_STRING_LIMIT,
                 actual,
             },
         ))

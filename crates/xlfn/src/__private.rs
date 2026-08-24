@@ -19,10 +19,7 @@ pub mod v1 {
     use crate::error::{InputError, XllError, XllResult};
     use crate::lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
     use crate::reference::{ExcelReference, reference_from_raw};
-    use crate::registration::{
-        FunctionVisibility, RegistrationDescriptor, RegistrationFlags, RegistrationSignature,
-        ResultAbi,
-    };
+    use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
     use crate::return_value::ffi_boundary_void;
     use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
@@ -108,6 +105,7 @@ pub mod v1 {
         assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
         assert_thread_safe_return, assert_volatile_return,
     };
+    pub use xlfn_common::{ExecutionKind, FunctionVisibility};
 
     /// Asserts at compile-time that `T` implements `ExcelParameter`.
     #[doc(hidden)]
@@ -196,11 +194,9 @@ pub mod v1 {
         arguments: &'static [ArgumentDescriptor],
         argument_abis: &'static [ArgumentAbi],
 
-        is_async: bool,
-        thread_safe: bool,
-        macro_sheet: bool,
+        execution: ExecutionKind,
         volatile: bool,
-        hidden: bool,
+        visibility: FunctionVisibility,
     }
 
     inventory::collect!(FunctionRegistration);
@@ -219,11 +215,9 @@ pub mod v1 {
             help_topic: &'static str,
             arguments: &'static [ArgumentDescriptor],
             argument_abis: &'static [ArgumentAbi],
-            is_async: bool,
-            thread_safe: bool,
-            macro_sheet: bool,
+            execution: ExecutionKind,
             volatile: bool,
-            hidden: bool,
+            visibility: FunctionVisibility,
         ) -> Self {
             Self {
                 export_name,
@@ -233,11 +227,9 @@ pub mod v1 {
                 help_topic,
                 arguments,
                 argument_abis,
-                is_async,
-                thread_safe,
-                macro_sheet,
+                execution,
                 volatile,
-                hidden,
+                visibility,
             }
         }
 
@@ -250,34 +242,18 @@ pub mod v1 {
             } else {
                 self.category
             };
-            let result_abi = if self.is_async {
-                ResultAbi::AsyncVoid
-            } else {
-                ResultAbi::Xloper
-            };
-            let visibility = if self.hidden {
-                FunctionVisibility::Hidden
-            } else {
-                FunctionVisibility::Public
-            };
-            let flags = RegistrationFlags {
-                thread_safe: self.thread_safe,
-                macro_sheet: self.macro_sheet,
-                volatile: self.volatile,
-            };
-
             Ok(RegistrationDescriptor {
                 export_name: self.export_name,
                 excel_name: self.excel_name,
                 signature: RegistrationSignature {
-                    result: result_abi,
+                    execution: self.execution,
                     arguments: self.argument_abis,
-                    flags,
+                    volatile: self.volatile,
                 },
                 category,
                 description: self.description,
                 help_topic: self.help_topic,
-                visibility,
+                visibility: self.visibility,
                 arguments: self.arguments,
             })
         }

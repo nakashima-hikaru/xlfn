@@ -484,7 +484,10 @@ impl RtdTestLock {
         let ingress = crate::module_runtime::ingress();
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-        crate::module_runtime::global().rtd().begin_open();
+        crate::module_runtime::global()
+            .rtd()
+            .expect("RTD test state")
+            .begin_open();
 
         Ok(RtdTestGuard {
             _module_lease: module_lease,
@@ -516,7 +519,10 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 
     ingress.begin_opening();
     ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-    crate::module_runtime::global().rtd().begin_open();
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_open();
 
     let factory = TestBoxedFactory(Box::into_raw(Box::new(ClassFactory {
         vtable: &CLASS_FACTORY_VTABLE,
@@ -541,7 +547,10 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
     );
 
     ingress.begin_close_with(|| {});
-    crate::module_runtime::global().rtd().begin_close();
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_close();
     assert_eq!(dll_can_unload_now(), S_FALSE);
 
     // New locks are rejected after close admission stops, while releasing
@@ -585,7 +594,10 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     let _ = ingress.seal_and_drain();
     ingress.begin_opening();
     ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
-    crate::module_runtime::global().rtd().begin_open();
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_open();
 
     let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
     ghost

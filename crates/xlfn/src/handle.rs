@@ -79,9 +79,12 @@ pub(crate) use registry::HandleRegistryPhase;
 pub(crate) use registry::HandleRegistrySealed;
 #[cfg(test)]
 pub(crate) use registry::{HandleRegistry, PendingHandleValue};
+pub(crate) use runtime::FormulaHandleServiceRead;
+#[cfg(any(feature = "handles", test))]
+pub(crate) use runtime::FormulaHandleServiceSlot;
 pub(crate) use runtime::{
     FormulaHandleService, FormulaHandleServiceResolver, FormulaHandleServiceSealed,
-    FormulaHandleServiceSlot, HandleStoreQuiescent,
+    HandleStoreQuiescent,
 };
 pub(crate) use store::HandleStore;
 pub(crate) use token::{HandleId, HandleToken, ObjectId};

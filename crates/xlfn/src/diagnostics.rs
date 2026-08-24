@@ -1,6 +1,6 @@
+pub(crate) mod catalog;
 /// Stable diagnostic identifier type.
 pub mod id;
-pub(crate) mod catalog;
 
 use id::DiagnosticId;
 

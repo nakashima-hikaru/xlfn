@@ -2,7 +2,7 @@ use crate::error::InputError;
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
 
-pub(crate) const EXCEL_STRING_LIMIT: usize = 32_767;
+pub(crate) use xlfn_common::EXCEL_STRING_LIMIT;
 const INLINE_UTF16_CAPACITY: usize = 64;
 
 pub(crate) fn checked_utf16_len(

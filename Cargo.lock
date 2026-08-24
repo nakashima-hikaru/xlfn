@@ -1842,6 +1842,7 @@ dependencies = [
  "quote",
  "syn 3.0.3",
  "trybuild",
+ "xlfn-common",
 ]
 
 [[package]]

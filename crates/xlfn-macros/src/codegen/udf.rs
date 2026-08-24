@@ -65,8 +65,6 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         | model::ExecutionSpec::MacroSheet { context_ty: None }
         | model::ExecutionSpec::Async { context_ty: None } => None,
     };
-    let macro_sheet = execution.is_macro_sheet();
-    let thread_safe = execution.is_thread_safe();
     let hidden = plan.hidden;
     let invocation = if generated_context_expression.is_some() {
         quote!(#function_ident(__context, #(#converted_names),*))
@@ -87,6 +85,25 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         }
     });
     let volatile = plan.volatile;
+    let execution_kind = match execution {
+        model::ExecutionSpec::MainThread { .. } => {
+            quote!(#krate::__private::v1::ExecutionKind::MainThread)
+        }
+        model::ExecutionSpec::ThreadSafe { .. } => {
+            quote!(#krate::__private::v1::ExecutionKind::ThreadSafe)
+        }
+        model::ExecutionSpec::MacroSheet { .. } => {
+            quote!(#krate::__private::v1::ExecutionKind::MacroSheet)
+        }
+        model::ExecutionSpec::Async { .. } => {
+            quote!(#krate::__private::v1::ExecutionKind::Async)
+        }
+    };
+    let visibility = if hidden {
+        quote!(#krate::__private::v1::FunctionVisibility::Hidden)
+    } else {
+        quote!(#krate::__private::v1::FunctionVisibility::Public)
+    };
     let mode_assertion = match execution {
         model::ExecutionSpec::Async { .. } => {
             quote!(#krate::__private::v1::assert_async_return::<#return_type>();)
@@ -320,11 +337,9 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 &[
                     #(#argument_abi_tokens),*
                 ],
-                #is_async,
-                #thread_safe,
-                #macro_sheet,
+                #execution_kind,
                 #volatile,
-                #hidden,
+                #visibility,
             );
 
         #(#gating)*

@@ -224,6 +224,7 @@ impl RuntimeRefinementHooks {
                 .generation_services()
                 .expect("committed open generation publishes its services");
             services.formula_handle_slot().set_ghost(Arc::clone(&ghost));
+            #[cfg(any(feature = "rtd", test))]
             services.subscriptions_slot().set_ghost(Arc::clone(&ghost));
             #[cfg(feature = "async")]
             runtime

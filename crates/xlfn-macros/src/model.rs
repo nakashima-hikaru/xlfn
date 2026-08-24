@@ -44,16 +44,21 @@ pub(super) enum ExecutionSpec {
 }
 
 impl ExecutionSpec {
+    pub(super) const fn kind(&self) -> xlfn_common::ExecutionKind {
+        match self {
+            Self::MainThread { .. } => xlfn_common::ExecutionKind::MainThread,
+            Self::ThreadSafe { .. } => xlfn_common::ExecutionKind::ThreadSafe,
+            Self::MacroSheet { .. } => xlfn_common::ExecutionKind::MacroSheet,
+            Self::Async { .. } => xlfn_common::ExecutionKind::Async,
+        }
+    }
+
     pub(super) const fn is_async(&self) -> bool {
         matches!(self, Self::Async { .. })
     }
 
     pub(super) const fn is_macro_sheet(&self) -> bool {
         matches!(self, Self::MacroSheet { .. })
-    }
-
-    pub(super) const fn is_thread_safe(&self) -> bool {
-        matches!(self, Self::ThreadSafe { .. } | Self::Async { .. })
     }
 
     pub(super) fn context_type(&self) -> Option<&Type> {
@@ -450,7 +455,7 @@ fn analyze_arguments(
     execution: &ExecutionSpec,
     function: &ItemFn,
 ) -> syn::Result<Vec<ArgumentSpec>> {
-    let maximum_visible = if execution.is_async() { 254 } else { 255 };
+    let maximum_visible = xlfn_common::max_excel_function_arguments(execution.kind());
     if arguments.len() > maximum_visible {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
@@ -465,11 +470,7 @@ fn analyze_arguments(
             .name
             .clone()
             .unwrap_or_else(|| argument.rust_name.to_string());
-        let utf16_len = excel_name.encode_utf16().count();
-        if excel_name.is_empty()
-            || excel_name.contains([',', '\0', '\r', '\n'])
-            || utf16_len > 32_767
-        {
+        if xlfn_common::validate_argument_name(&excel_name).is_err() {
             return Err(syn::Error::new_spanned(
                 &function.sig.inputs,
                 "Excel argument names must be non-empty counted strings without comma, NUL, CR, or LF",
@@ -541,12 +542,11 @@ fn analyze_arguments(
         ));
     }
 
-    let joined_argument_name_len = analyzed
+    let argument_names = analyzed
         .iter()
-        .map(|argument| argument.excel_name.encode_utf16().count())
-        .sum::<usize>()
-        .saturating_add(analyzed.len().saturating_sub(1));
-    if joined_argument_name_len > 32_767 {
+        .map(|argument| argument.excel_name.as_str())
+        .collect::<Vec<_>>();
+    if xlfn_common::validate_argument_names(&argument_names).is_err() {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
             "combined Excel argument names exceed the 32,767 UTF-16 unit counted-string limit",

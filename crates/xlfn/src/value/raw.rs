@@ -1,6 +1,6 @@
 //! Raw and borrowed ABI views over Excel's `XLOPER12` representation.
 
-use super::{FromExcel, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMENTS, MAX_UTF16_UNITS};
+use super::{FromExcel, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMENTS};
 use crate::error::InputError;
 use crate::input_identity::InputIdentityEncoder;
 use crate::{ExcelError, XllError, XllResult};
@@ -165,11 +165,11 @@ impl<'call> XlValueRef<'call> {
         }
         // SAFETY: Excel strings begin with one readable length code unit.
         let length = unsafe { *pointer } as usize;
-        if length > MAX_UTF16_UNITS {
+        if length > crate::utf16::EXCEL_STRING_LIMIT {
             return Err(XllError::input(
                 argument,
                 InputError::TooLarge {
-                    limit: MAX_UTF16_UNITS,
+                    limit: crate::utf16::EXCEL_STRING_LIMIT,
                     actual: length,
                 },
             ));

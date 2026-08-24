@@ -25,33 +25,35 @@ pub(crate) mod test_support;
 mod host;
 pub(crate) mod service;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 mod windows;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) use windows::{ComModuleLifetime, RtdNotifier};
 
 pub(crate) use host::RtdSubscriptionHost;
-pub(crate) use service::{SubscriptionServiceSlot, SubscriptionsStopped};
+#[cfg(any(feature = "rtd", test))]
+pub(crate) use service::SubscriptionServiceSlot;
+pub(crate) use service::SubscriptionsStopped;
 
-#[cfg(all(not(target_os = "windows"), not(test)))]
+#[cfg(all(not(test), any(not(feature = "rtd"), not(target_os = "windows"))))]
 #[derive(Clone)]
 pub(crate) enum RtdNotifier {}
 
-#[cfg(all(not(target_os = "windows"), not(test)))]
+#[cfg(all(not(test), any(not(feature = "rtd"), not(target_os = "windows"))))]
 impl RtdNotifier {
     pub(crate) fn notify(&self) -> XllResult<()> {
         match *self {}
     }
 }
 
-#[cfg(all(not(target_os = "windows"), test))]
+#[cfg(all(test, any(not(feature = "rtd"), not(target_os = "windows"))))]
 #[derive(Clone)]
 pub(crate) struct RtdNotifier {
     state: Arc<test_support::TestNotifierState>,
 }
 
-#[cfg(all(not(target_os = "windows"), test))]
+#[cfg(all(test, any(not(feature = "rtd"), not(target_os = "windows"))))]
 impl RtdNotifier {
     pub(crate) fn for_test(state: Arc<test_support::TestNotifierState>) -> Self {
         Self { state }
@@ -98,14 +100,14 @@ impl RtdModuleState {
 /// This belongs to the RTD adapter rather than the formula-handle service:
 /// module ingress is an RTD/COM concern, while the handle service owns only
 /// handle and topic state.
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) struct RtdOperationGuard {
     ingress_guard: crate::ingress::AdmittedExport<'static>,
     #[cfg(any(test, feature = "refinement"))]
     ghost: Option<crate::shutdown_refinement::GhostHandle>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 impl Drop for RtdOperationGuard {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "refinement"))]
@@ -116,7 +118,7 @@ impl Drop for RtdOperationGuard {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) fn begin_operation(
     _handles: &FormulaHandleService,
     ingress: &'static ExportIngress,
@@ -144,17 +146,18 @@ pub(crate) fn begin_operation(
 
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     windows::set_ghost(ghost);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     let _ = ghost;
 }
 
 pub(crate) fn logical_quiescence_certified() -> bool {
-    crate::module_runtime::global()
-        .rtd()
-        .is_logically_quiescent()
-        && crate::module_runtime::ingress().phase() == crate::ingress::PHASE_CLOSED
+    let module_quiescent = match crate::module_runtime::global().rtd() {
+        Some(rtd) => rtd.is_logically_quiescent(),
+        None => true,
+    };
+    module_quiescent && crate::module_runtime::ingress().phase() == crate::ingress::PHASE_CLOSED
 }
 
 #[derive(Debug)]
@@ -173,11 +176,11 @@ pub(crate) fn observe(
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::observe(handles, ingress, key, token, host)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     {
         let _ = (handles, ingress, key, token, host);
         Err(XllError::ExcelApi {
@@ -194,11 +197,11 @@ pub(crate) fn observe_subscription(
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::observe_subscription(subscriptions, key, host)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     {
         let _ = (subscriptions, key, host);
         Err(XllError::ExcelApi {
@@ -216,11 +219,11 @@ pub(crate) fn observe_subscription(
 /// shutdown is a separate operation below, and the RTD adapter must not make
 /// the handle service's ownership boundary look like a generic RTD shutdown.
 pub(crate) fn shutdown_handle_topics(handles: Arc<FormulaHandleService>) -> XllResult<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::shutdown(handles)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     {
         handles.terminate_all_topics();
         Ok(())
@@ -230,17 +233,17 @@ pub(crate) fn shutdown_handle_topics(handles: Arc<FormulaHandleService>) -> XllR
 pub(crate) fn shutdown_subscriptions(
     subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
 ) -> XllResult<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::shutdown_subscriptions(subscriptions)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     {
         subscriptions.close()
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 /// Returns the temporary RTD COM class factory.
 ///
 /// # Safety
@@ -254,7 +257,7 @@ pub(crate) unsafe fn dll_get_class_object(
     unsafe { windows::dll_get_class_object(class_id, interface_id, output) }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
 /// Reports that the RTD COM class is unavailable on non-Windows targets.
 ///
 /// # Safety
@@ -273,18 +276,18 @@ pub(crate) unsafe fn dll_get_class_object(
 
 #[must_use]
 pub(crate) fn dll_can_unload_now() -> i32 {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::dll_can_unload_now()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
     {
         1 // S_FALSE: the COM server is unavailable on non-Windows targets.
     }
 }
 
 pub(crate) fn wait_for_module_quiescence() -> Result<RtdQuiescent, RtdQuiescenceError> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::wait_for_module_quiescence()?;
     }

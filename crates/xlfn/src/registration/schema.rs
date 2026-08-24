@@ -6,7 +6,6 @@
 
 use crate::{XllError, XllResult};
 
-pub(crate) const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
 pub(crate) const MAX_REGISTER_ARGUMENT_HELP_ENTRIES: usize = 244;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,55 +20,30 @@ pub enum ArgumentAbi {
     RawReference,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResultAbi {
-    Xloper,
-    AsyncVoid,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct RegistrationFlags {
-    pub(crate) thread_safe: bool,
-    pub(crate) macro_sheet: bool,
-    pub(crate) volatile: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum FunctionVisibility {
-    #[default]
-    Public,
-    Hidden,
-}
-
-impl FunctionVisibility {
-    pub(crate) const fn macro_type(self) -> f64 {
-        match self {
-            Self::Public => 1.0,
-            Self::Hidden => 0.0,
-        }
-    }
-}
+pub(crate) use xlfn_common::{ExecutionKind, FunctionVisibility};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RegistrationSignature {
-    pub(crate) result: ResultAbi,
+    pub(crate) execution: ExecutionKind,
     pub(crate) arguments: &'static [ArgumentAbi],
-    pub(crate) flags: RegistrationFlags,
+    pub(crate) volatile: bool,
 }
 
 impl RegistrationSignature {
     pub(crate) fn encode(self) -> XllResult<String> {
-        if self.flags.thread_safe && self.flags.macro_sheet
-            || self.arguments.contains(&ArgumentAbi::RawReference) && !self.flags.macro_sheet
+        if self.arguments.contains(&ArgumentAbi::RawReference)
+            && !self.execution.allows_reference_arguments()
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
             });
         }
         let mut text = String::with_capacity(self.arguments.len() + 4);
-        text.push(match self.result {
-            ResultAbi::Xloper => 'Q',
-            ResultAbi::AsyncVoid => '>',
+        text.push(match self.execution {
+            ExecutionKind::Async => '>',
+            ExecutionKind::MainThread | ExecutionKind::ThreadSafe | ExecutionKind::MacroSheet => {
+                'Q'
+            }
         });
         for argument in self.arguments {
             text.push(match argument {
@@ -77,16 +51,16 @@ impl RegistrationSignature {
                 ArgumentAbi::RawReference => 'U',
             });
         }
-        if self.result == ResultAbi::AsyncVoid {
+        if self.execution.is_async() {
             text.push('X');
         }
-        if self.flags.macro_sheet {
+        if matches!(self.execution, ExecutionKind::MacroSheet) {
             text.push('#');
         }
-        if self.flags.thread_safe {
+        if self.execution.is_thread_safe() {
             text.push('$');
         }
-        if self.flags.volatile {
+        if self.volatile {
             text.push('!');
         }
         Ok(text)

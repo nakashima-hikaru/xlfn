@@ -1292,10 +1292,17 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        let Some(services) = self.generation_services_snapshot() else {
+        #[cfg(not(any(feature = "rtd", test)))]
+        {
             return Ok(crate::rtd::SubscriptionsStopped::new());
-        };
-        services.subscriptions_slot().seal()
+        }
+        #[cfg(any(feature = "rtd", test))]
+        {
+            let Some(services) = self.generation_services_snapshot() else {
+                return Ok(crate::rtd::SubscriptionsStopped::new());
+            };
+            services.subscriptions_slot().seal()
+        }
     }
 
     #[cfg(feature = "async")]

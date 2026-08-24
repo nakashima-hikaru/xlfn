@@ -1,9 +1,6 @@
 //! Pure registration validation and host-independent preparation.
 
-use super::{
-    ArgumentDescriptor, ExcelNameKey, MAX_EXCEL_FUNCTION_ARGUMENTS, RegistrationDescriptor,
-    RegistrationSignature, ResultAbi,
-};
+use super::{ArgumentDescriptor, ExcelNameKey, RegistrationDescriptor, RegistrationSignature};
 use crate::{XllError, XllResult};
 use std::collections::HashSet;
 
@@ -11,15 +8,17 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
     let mut exports = HashSet::with_capacity(descriptors.len());
     let mut excel_names = HashSet::with_capacity(descriptors.len());
     for descriptor in descriptors {
-        let max_arguments = if descriptor.signature.result == ResultAbi::AsyncVoid {
-            MAX_EXCEL_FUNCTION_ARGUMENTS - 1
-        } else {
-            MAX_EXCEL_FUNCTION_ARGUMENTS
-        };
+        let max_arguments =
+            xlfn_common::max_excel_function_arguments(descriptor.signature.execution);
+        let argument_names = descriptor
+            .arguments
+            .iter()
+            .map(|argument| argument.name)
+            .collect::<Vec<_>>();
         if descriptor.export_name.is_empty()
             || descriptor.excel_name.is_empty()
             || descriptor.arguments.len() > max_arguments
-            || !valid_argument_names(descriptor.arguments)
+            || xlfn_common::validate_argument_names(&argument_names).is_err()
             || !exports.insert(descriptor.export_name.to_ascii_lowercase())
             || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
             || descriptor.signature.arguments.len() != descriptor.arguments.len()
@@ -95,28 +94,7 @@ pub(crate) fn preflight_registration(
 }
 
 fn validate_excel_string(s: &str) -> XllResult<()> {
-    let utf16_len = s.encode_utf16().count();
-    if utf16_len > crate::utf16::EXCEL_STRING_LIMIT || s.contains('\0') {
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::STRING_LENGTH,
-        })
-    } else {
-        Ok(())
-    }
-}
-
-fn valid_argument_names(arguments: &[ArgumentDescriptor]) -> bool {
-    let mut joined_utf16_len = arguments.len().saturating_sub(1);
-    for argument in arguments {
-        let name = argument.name;
-        let utf16_len = name.encode_utf16().count();
-        if name.is_empty()
-            || name.contains([',', '\0', '\r', '\n'])
-            || utf16_len > crate::utf16::EXCEL_STRING_LIMIT
-        {
-            return false;
-        }
-        joined_utf16_len = joined_utf16_len.saturating_add(utf16_len);
-    }
-    joined_utf16_len <= crate::utf16::EXCEL_STRING_LIMIT
+    xlfn_common::validate_excel_string(s).map_err(|_| XllError::Internal {
+        diagnostic_id: crate::diagnostics::id::DiagnosticId::STRING_LENGTH,
+    })
 }

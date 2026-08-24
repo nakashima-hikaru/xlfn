@@ -1,9 +1,10 @@
 use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
 use crate::ingress::{ExportIngress, ExportsDrained};
+#[cfg(any(feature = "rtd", test))]
 use crate::rtd::RtdModuleState;
 use std::sync::LazyLock;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "rtd", target_os = "windows"))]
 use crate::rtd::ComModuleLifetime;
 
 /// The module-wide ownership root for protocols that must move together
@@ -16,8 +17,9 @@ use crate::rtd::ComModuleLifetime;
 pub(crate) struct ModuleRuntime {
     ingress: ExportIngress,
     callback_admission: ModuleCallbackAdmission,
+    #[cfg(any(feature = "rtd", test))]
     rtd: RtdModuleState,
-    #[cfg(target_os = "windows")]
+    #[cfg(all(feature = "rtd", target_os = "windows"))]
     com: ComModuleLifetime,
 }
 
@@ -66,8 +68,9 @@ impl ModuleRuntime {
         Self {
             ingress: ExportIngress::new(),
             callback_admission: ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Closed),
+            #[cfg(any(feature = "rtd", test))]
             rtd: RtdModuleState::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(all(feature = "rtd", target_os = "windows"))]
             com: ComModuleLifetime::new(),
         }
     }
@@ -84,11 +87,16 @@ impl ModuleRuntime {
         self.callback_admission.reset();
     }
 
-    pub(crate) fn rtd(&'static self) -> &'static RtdModuleState {
-        &self.rtd
+    pub(crate) fn rtd(&'static self) -> Option<&'static crate::rtd::RtdModuleState> {
+        #[cfg(any(feature = "rtd", test))]
+        {
+            Some(&self.rtd)
+        }
+        #[cfg(not(any(feature = "rtd", test)))]
+        None
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(feature = "rtd", target_os = "windows"))]
     pub(crate) fn com_module_lifetime(&'static self) -> &'static ComModuleLifetime {
         &self.com
     }
@@ -97,6 +105,7 @@ impl ModuleRuntime {
     /// order.  Runtime admission is reopened by `Runtime` immediately before
     /// this transition; this method owns the module-local portion.
     pub(crate) fn begin_open(&'static self) -> ModuleOpening {
+        #[cfg(any(feature = "rtd", test))]
         self.rtd.begin_open();
         self.reset_callbacks();
         self.ingress.begin_opening();
@@ -114,6 +123,7 @@ impl ModuleRuntime {
         F: FnOnce(),
     {
         self.ingress.begin_close_with(on_closed);
+        #[cfg(any(feature = "rtd", test))]
         self.rtd.begin_close();
     }
 
@@ -126,6 +136,7 @@ impl ModuleRuntime {
     }
 
     pub(crate) fn certify_logical_quiescence(&'static self) {
+        #[cfg(any(feature = "rtd", test))]
         self.rtd.certify_logical_quiescence();
     }
 }

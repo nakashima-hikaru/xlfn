@@ -46,7 +46,6 @@ pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub(crate) use raw::{GridView, encode_raw_value};
 pub use raw::{XlArrayRef, XlStrRef, XlValueRef};
 
-const MAX_UTF16_UNITS: usize = 32_767;
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;
 const MAX_ARRAY_ELEMENTS: usize = core::cfg_select! {
