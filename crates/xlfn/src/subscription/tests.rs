@@ -771,7 +771,7 @@ fn inflight_prepare_waits_for_close() {
     drop(prep);
 
     let catalog = runtime.catalog.lock();
-    assert!(catalog.pending.is_empty());
+    assert!(catalog.entries.is_empty());
     drop(catalog);
 
     assert!(source_dropped.load(Ordering::Acquire));
@@ -1187,7 +1187,7 @@ fn same_handle_and_same_topic_reuse_pending_identity() {
     second.rollback();
     first.rollback();
 
-    assert!(runtime.catalog.lock().pending.is_empty());
+    assert!(runtime.catalog.lock().entries.is_empty());
 }
 
 #[test]
@@ -1234,7 +1234,14 @@ fn same_handle_reuses_active_subscription_identity() {
     // ExistingActiveに対するrollbackは既存subscriptionを壊さない。
     second.rollback();
 
-    assert!(runtime.catalog.lock().active_keys.contains_key(&key));
+    assert!(
+        runtime
+            .catalog
+            .lock()
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.state == SubscriptionState::Active)
+    );
 }
 
 #[test]
@@ -1431,8 +1438,7 @@ fn identity_index_is_removed_after_final_unbind() {
     runtime.disconnect(&server, TopicId(1)).unwrap();
 
     let catalog = runtime.catalog.lock();
-    assert!(catalog.pending.is_empty());
-    assert!(catalog.active_keys.is_empty());
+    assert!(catalog.entries.is_empty());
     assert!(catalog.identities.key_by_identity.is_empty());
     assert!(catalog.identities.identity_by_key.is_empty());
     catalog.assert_identity_invariants();
@@ -1810,7 +1816,7 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     second_pending.rollback();
 
     // Commit and connect transaction to activate subscription.
-    // The PendingSubscription is consumed/removed, so the runtime no longer retains Arc<Source>.
+    // The pending catalog entry is consumed/removed, so the runtime no longer retains Arc<Source>.
     let key = *first.key();
     first.commit();
     let conn = runtime
@@ -1855,6 +1861,12 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     // Rollback is a no-op: catalog active keys and pending are untouched
     warm.rollback();
     assert_eq!(Arc::weak_count(&runtime), baseline_weak);
-    assert!(runtime.catalog.lock().active_keys.contains_key(&key));
-    assert!(runtime.catalog.lock().pending.is_empty());
+    let catalog = runtime.catalog.lock();
+    assert!(
+        catalog
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.state == SubscriptionState::Active)
+    );
+    assert_eq!(catalog.pending_len(), 0);
 }

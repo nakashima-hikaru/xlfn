@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::ValueEnum;
 use serde_json::{Value, json};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use usage::ValueEnum;
 use xlfn_package::{EffectiveCrtPolicy, PeInfo};
 
 const WRAPPER_MODE: &str = "XLFN_RUSTC_WRAPPER_MODE";
@@ -49,6 +49,19 @@ impl CrtPolicy {
 impl fmt::Display for CrtPolicy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for CrtPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "inherit" => Ok(Self::Inherit),
+            "static" => Ok(Self::Static),
+            "dynamic" => Ok(Self::Dynamic),
+            _ => bail!("unsupported CRT policy {s:?}, expected inherit, static, or dynamic"),
+        }
     }
 }
 

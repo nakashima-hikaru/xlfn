@@ -1,4 +1,4 @@
-use super::PublicationReservation;
+use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
 use super::{
     ExcelHandleObject, FormulaBinding, Handle, HandleAlias, HandlePrepareState,
     HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, PrepareDecision,
@@ -313,14 +313,19 @@ impl FormulaHandleService {
         let publication_reservation =
             PublicationReservation::new(self, key, generation, Arc::clone(&initialization));
         let prepared = create()?;
-        let (publication_txn, token, binding_id, object_id, reused) =
-            publication_reservation.insert_object::<T>(prepared)?;
+        let InsertedPublication {
+            transaction: publication_txn,
+            token,
+            binding_id,
+            object_id,
+            allocation,
+        } = publication_reservation.insert_object::<T>(prepared)?;
         let binding = FormulaBinding {
             id: binding_id,
             object_id,
         };
         let parsed = self.refinement_token(&token);
-        if reused {
+        if allocation == ObjectAllocation::Reused {
             self.refinement.observe_insert_pending_reuse(
                 &key,
                 initialization.refinement_id,
@@ -712,6 +717,18 @@ impl FormulaHandleServiceSlot {
         self.service
             .arm(config)
             .map_err(crate::runtime_components::map_service_error)
+    }
+
+    /// Construct and publish the handle service as part of generation open.
+    ///
+    /// Handle service construction is deterministic from `HandleConfig` and
+    /// does not depend on a first UDF call.  Keeping the initialization at the
+    /// open boundary makes a published generation a usable handle generation;
+    /// the generic slot remains lazy for services whose construction is truly
+    /// demand-driven.
+    pub(crate) fn initialize(&self) -> XllResult<()> {
+        let _read = self.read()?;
+        Ok(())
     }
 
     pub(crate) fn disarm(&self) -> XllResult<()> {

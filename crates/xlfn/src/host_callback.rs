@@ -1,4 +1,3 @@
-use crate::callback_gate::CallbackInvocationToken;
 use crate::callback_value::ExcelCallbackValue;
 use crate::return_value::ExcelCallbackStatus;
 use std::cell::Cell;
@@ -15,7 +14,6 @@ pub(crate) enum HostCallbackState {
 
 pub(crate) struct HostCallbackShared {
     pub(crate) state: Cell<HostCallbackState>,
-    pub(crate) invocation: CallbackInvocationToken,
 }
 
 impl HostCallbackShared {
@@ -52,7 +50,6 @@ impl HostCallbackSession {
         Self {
             shared: Rc::new(HostCallbackShared {
                 state: Cell::new(HostCallbackState::Available),
-                invocation: CallbackInvocationToken::new(),
             }),
         }
     }
@@ -126,7 +123,6 @@ impl HostCallbackSession {
 impl Drop for HostCallbackSession {
     fn drop(&mut self) {
         self.shared.state.set(HostCallbackState::Closed);
-        self.shared.invocation.finish();
     }
 }
 

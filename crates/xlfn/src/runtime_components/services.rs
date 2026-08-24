@@ -86,6 +86,10 @@ impl GenerationServices {
             services.disarm_or_abort();
             return Err(error);
         }
+        if let Err(error) = services.formula_handles.initialize() {
+            services.disarm_or_abort();
+            return Err(error);
+        }
         Ok(ArmedServices {
             services: Some(services),
             committed: false,
@@ -106,11 +110,11 @@ impl GenerationServices {
 
     /// Stop the RTD producer associated with this generation without making
     /// the formula-handle service depend on the RTD adapter.
-    pub(crate) fn shutdown_rtd(&self) -> crate::XllResult<()> {
+    pub(crate) fn shutdown_handle_topics(&self) -> crate::XllResult<()> {
         let Some(handles) = self.formula_handles.read_if_ready() else {
             return Ok(());
         };
-        crate::rtd::shutdown(std::sync::Arc::clone(handles.as_arc()))
+        crate::rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
     }
 
     pub(crate) fn seal(

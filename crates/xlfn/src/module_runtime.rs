@@ -1,4 +1,4 @@
-use crate::callback_gate::{CallbackGate, CallbackGateLifecycle};
+use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
 use crate::ingress::{ExportIngress, ExportsDrained};
 use crate::rtd::RtdModuleState;
 use std::sync::LazyLock;
@@ -15,7 +15,7 @@ use crate::rtd::ComModuleLifetime;
 /// accidentally introduce a second module epoch owner.
 pub(crate) struct ModuleRuntime {
     ingress: ExportIngress,
-    callback_gate: CallbackGate,
+    callback_admission: ModuleCallbackAdmission,
     rtd: RtdModuleState,
     #[cfg(target_os = "windows")]
     com: ComModuleLifetime,
@@ -65,7 +65,7 @@ impl ModuleRuntime {
     fn new() -> Self {
         Self {
             ingress: ExportIngress::new(),
-            callback_gate: CallbackGate::new(CallbackGateLifecycle::Closed),
+            callback_admission: ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Closed),
             rtd: RtdModuleState::new(),
             #[cfg(target_os = "windows")]
             com: ComModuleLifetime::new(),
@@ -76,12 +76,12 @@ impl ModuleRuntime {
         &self.ingress
     }
 
-    pub(crate) fn callback_gate(&'static self) -> &'static CallbackGate {
-        &self.callback_gate
+    pub(crate) fn callback_admission(&'static self) -> &'static ModuleCallbackAdmission {
+        &self.callback_admission
     }
 
     pub(crate) fn reset_callbacks(&'static self) {
-        self.callback_gate.reset();
+        self.callback_admission.reset();
     }
 
     pub(crate) fn rtd(&'static self) -> &'static RtdModuleState {
@@ -118,7 +118,7 @@ impl ModuleRuntime {
     }
 
     pub(crate) fn close_callbacks(&'static self) {
-        self.callback_gate.close();
+        self.callback_admission.close();
     }
 
     pub(crate) fn seal_and_drain(&'static self) -> ExportsDrained {

@@ -42,10 +42,7 @@ use crate::value::ExcelErrorValue;
 #[cfg(test)]
 use crate::{XllError, XllResult};
 #[cfg(test)]
-pub(crate) use catalog::{
-    ActiveKeyBinding, BindingStage, PendingSubscription, SubscriptionCatalog,
-    remove_identity_if_unbound,
-};
+pub(crate) use catalog::{SubscriptionCatalog, SubscriptionState};
 #[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(target_os = "windows")]

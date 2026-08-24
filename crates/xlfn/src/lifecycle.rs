@@ -13,14 +13,12 @@ use xlfn_kernel::thread_affine::ThreadAffineError;
 mod boundary;
 mod open;
 mod rollback;
-mod state;
 mod teardown;
 
+pub(crate) use crate::runtime_components::{HostLifecycleIntent, LifecyclePhase};
 pub(crate) use boundary::{host_auto_close, host_auto_open, host_auto_remove};
 pub(super) use open::open_addin_boundary as open_addin;
 use rollback::{active_runtime_generation, rollback_open};
-pub(crate) use state::HostLifecycleIntent;
-pub(crate) use state::LifecyclePhase;
 use teardown::drain_execution;
 
 macro_rules! lifecycle_token {
@@ -643,7 +641,9 @@ where
     crate::module_runtime::global().close_callbacks();
 
     #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().callback_gate_closed(runtime);
+    runtime
+        .refinement_hooks()
+        .callback_admission_closed(runtime);
 
     if let Some((hazard, boundary, error)) = unload_failure.take() {
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
@@ -772,7 +772,7 @@ where
         runtime.refinement_hooks().generation_reclaimed(runtime);
     }
 
-    if let Err(error) = runtime.shutdown_rtd() {
+    if let Err(error) = runtime.shutdown_handle_topics() {
         return Err(handle_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,

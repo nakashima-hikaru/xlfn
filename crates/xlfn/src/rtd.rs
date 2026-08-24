@@ -200,7 +200,12 @@ pub(crate) fn observe_subscription(
     }
 }
 
-pub(crate) fn shutdown(handles: Arc<FormulaHandleService>) -> XllResult<()> {
+/// Stops the RTD topic server owned by the formula-handle generation.
+///
+/// This is deliberately named after the handle-side bridge: subscription
+/// shutdown is a separate operation below, and the RTD adapter must not make
+/// the handle service's ownership boundary look like a generic RTD shutdown.
+pub(crate) fn shutdown_handle_topics(handles: Arc<FormulaHandleService>) -> XllResult<()> {
     #[cfg(target_os = "windows")]
     {
         windows::shutdown(handles)

@@ -253,7 +253,7 @@ where
         report_cleanup_issue(issue);
     }
 
-    if let Err(error) = runtime.shutdown_rtd() {
+    if let Err(error) = runtime.shutdown_handle_topics() {
         report_boundary_error("xlAutoOpen RTD rollback", &error);
         return incomplete(runtime);
     }

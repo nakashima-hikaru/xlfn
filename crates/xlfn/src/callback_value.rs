@@ -67,7 +67,7 @@ pub(crate) struct ExcelCallbackValue {
     release_callback: ReleaseCallback,
     state: CallbackValueReleaseState,
     session: Option<Rc<HostCallbackShared>>,
-    module_gate: bool,
+    module_admission: bool,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -81,7 +81,7 @@ impl ExcelCallbackValue {
             release_callback: excel_free,
             state: CallbackValueReleaseState::Live,
             session: None,
-            module_gate: false,
+            module_admission: false,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -109,7 +109,7 @@ impl ExcelCallbackValue {
             release_callback,
             state: state_after_call(true, status),
             session,
-            module_gate: false,
+            module_admission: false,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -118,14 +118,13 @@ impl ExcelCallbackValue {
         function: i32,
         arguments: &[NonNull<XLOPER12>],
         session: Rc<HostCallbackShared>,
-    ) -> Result<(i32, Self), crate::callback_gate::CallbackGateSuppressed> {
-        let callback_gate = crate::callback_gate::enter_callback(&session.invocation)?;
+    ) -> Result<(i32, Self), crate::callback_gate::CallbackAdmissionSuppressed> {
+        let callback_admission = crate::callback_gate::enter_callback()?;
         // SAFETY: The caller supplies live callback arguments.
         let (status, raw, callback_invoked) =
             unsafe { excel12_with_invocation(function, arguments) };
         let callback_status = ExcelCallbackStatus::from_raw(status);
-        callback_gate.observe(callback_status);
-        drop(callback_gate);
+        drop(callback_admission);
         observe_shared(&session.state, callback_status);
         let state = state_after_call(callback_invoked, callback_status);
         Ok((
@@ -137,7 +136,7 @@ impl ExcelCallbackValue {
                 release_callback: excel_free,
                 state,
                 session: Some(session),
-                module_gate: true,
+                module_admission: true,
                 _not_send_or_sync: PhantomData,
             },
         ))
@@ -224,10 +223,9 @@ impl ExcelCallbackValue {
             status: ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
         };
 
-        let raw_status = if self.module_gate {
-            let invocation = self.session.as_ref().map(|s| &s.invocation);
-            let callback_gate = match crate::callback_gate::enter_cleanup(invocation) {
-                Ok(callback_gate) => callback_gate,
+        let raw_status = if self.module_admission {
+            let callback_admission = match crate::callback_gate::enter_cleanup() {
+                Ok(callback_admission) => callback_admission,
                 Err(suppressed) => {
                     self.state = CallbackValueReleaseState::TerminalSuppressed {
                         status: suppressed.status,
@@ -238,9 +236,7 @@ impl ExcelCallbackValue {
             // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
             // was supplied as result storage to one completed callback.
             let raw_status = unsafe { (self.release_callback)(&mut self.raw) };
-            let status = ExcelCallbackStatus::from_raw(raw_status);
-            callback_gate.observe(status);
-            drop(callback_gate);
+            drop(callback_admission);
             raw_status
         } else {
             // SAFETY: test-created values use a non-host release callback and

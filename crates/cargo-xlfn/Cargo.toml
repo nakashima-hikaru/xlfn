@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
+usage.workspace = true
 cargo_metadata.workspace = true
 xlfn-package.workspace = true
 fs-err.workspace = true

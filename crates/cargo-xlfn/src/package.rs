@@ -1,6 +1,8 @@
 use super::*;
 
 pub(crate) fn package(args: &PackageArgs) -> Result {
+    let project = args.project();
+    let build = args.build();
     let targets = if args.all {
         vec![WindowsTarget::X86, WindowsTarget::X64]
     } else {
@@ -9,7 +11,7 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
                 .context("package requires --target TARGET or --all")?,
         ]
     };
-    let metadata = project_metadata(&args.project, &args.build)?;
+    let metadata = project_metadata(&project, &build)?;
     metadata.crt.print();
     let target_parent = metadata.crt.target_directory(&metadata.target_directory);
     fs::create_dir_all(&target_parent)?;
@@ -170,7 +172,8 @@ pub(crate) fn stage_package_target(
     staging: &xlfn_package::PrivateStagingDirectory,
     target_directory: &Path,
 ) -> Result<xlfn_package::VerifiedPackage> {
-    let profile = args.build.profile.as_deref().unwrap_or("release");
+    let build = args.build();
+    let profile = build.profile.as_deref().unwrap_or("release");
     let mut command = cargo_command();
     command
         .args(["build", "--manifest-path"])
@@ -182,14 +185,14 @@ pub(crate) fn stage_package_target(
             target.triple(),
         ]);
     configure_build(&mut command, metadata, target.triple(), target_directory)?;
-    args.build.apply_to_command(&mut command, Some("release"));
+    build.apply_to_command(&mut command, Some("release"));
     if !command.status()?.success() {
         bail!("cargo build failed for {}", target.triple());
     }
     let source = built_library_path(
         metadata,
         target.triple(),
-        &args.build,
+        &build,
         Some("release"),
         target_directory,
     );
@@ -268,15 +271,15 @@ pub(crate) fn stage_package_target(
         "target": target.triple(),
         "profile": profile,
         "feature_selection": {
-            "explicit": &args.build.features,
-            "default_features": !args.build.no_default_features,
-            "all_features": args.build.all_features,
+            "explicit": &build.features,
+            "default_features": !build.no_default_features,
+            "all_features": build.all_features,
             "resolved": &metadata.resolved_features,
         },
         "cargo_constraints": {
-            "locked": args.build.locked,
-            "frozen": args.build.frozen,
-            "offline": args.build.offline,
+            "locked": build.locked,
+            "frozen": build.frozen,
+            "offline": build.offline,
             "lockfile_sha256": &metadata.lockfile_sha256,
         },
         "crt": observation.manifest(metadata.crt),

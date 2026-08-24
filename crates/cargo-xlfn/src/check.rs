@@ -1,7 +1,9 @@
 use super::*;
 
 pub(crate) fn check(args: &CheckArgs) -> Result {
-    let metadata = project_metadata(&args.project, &args.build)?;
+    let project = args.project();
+    let build = args.build();
+    let metadata = project_metadata(&project, &build)?;
     metadata.crt.print();
     let target_directory = metadata.crt.target_directory(&metadata.target_directory);
     let only_target = args.target.map(WindowsTarget::triple);
@@ -17,12 +19,12 @@ pub(crate) fn check(args: &CheckArgs) -> Result {
             .args(["--package", &metadata.package_name])
             .args(["--target", target]);
         configure_build(&mut command, &metadata, target, &target_directory)?;
-        args.build.apply_to_command(&mut command, None);
+        build.apply_to_command(&mut command, None);
         if !command.status()?.success() {
             bail!("XLL001 Rust build/link failed for {target}");
         }
 
-        let source = built_library_path(&metadata, target, &args.build, None, &target_directory);
+        let source = built_library_path(&metadata, target, &build, None, &target_directory);
         if !source.is_file() {
             bail!("built XLL DLL was not found at {}", source.display());
         }

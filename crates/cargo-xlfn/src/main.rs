@@ -6,7 +6,6 @@
 
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
-use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -18,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use usage::{Args, Cli, Subcommands, ValueEnum};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
 
 #[cfg(target_os = "windows")]

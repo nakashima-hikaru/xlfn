@@ -1,13 +1,10 @@
-use super::catalog::{
-    ActiveKeyBinding, BindingStage, PendingSubscription, SubscriptionCatalog,
-    remove_identity_if_unbound,
-};
+use super::catalog::{SubscriptionCatalog, SubscriptionEntry, SubscriptionState};
 use super::delivery::{
     ActiveSubscription, ErasedSink, RefreshState, SERVER_LIFECYCLE_OPEN, TOPIC_SHARDS, TopicShard,
     shard_index,
 };
 use super::host::SubscriptionHost;
-use super::identity::{SourceIdentityRegistry, SubscriptionIdentityIndex, allocate_runtime_id};
+use super::identity::allocate_runtime_id;
 use super::server::{
     OwnedServerOperation, PublishCore, ServerReservationFailure, ServerTerminationPhase,
     SubscriptionServer, SubscriptionServerHandle, TerminationAdmission, TerminationCoordinator,
@@ -40,7 +37,6 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) active_quota: triomphe::Arc<Quota>,
     pub(crate) queued_update_quota: triomphe::Arc<Quota>,
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
-    pub(crate) next_preparation_id: AtomicU64,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
     #[cfg(any(test, feature = "refinement"))]
@@ -83,18 +79,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             host,
             runtime_gate: Arc::new(OperationGate::new()),
             catalog: Mutex::new(SubscriptionCatalog {
-                pending: FxHashMap::default(),
+                entries: FxHashMap::default(),
                 pending_topic_bytes: 0,
-                sources: SourceIdentityRegistry::new(),
-                active_keys: FxHashMap::default(),
-                identities: SubscriptionIdentityIndex::default(),
+                sources: super::identity::SourceIdentityRegistry::new(),
+                identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
             servers: Mutex::new(FxHashMap::default()),
             active_quota: triomphe::Arc::new(Quota::new(limits.max_active)),
             queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates)),
             cleanup_failure: Mutex::new(None),
-            next_preparation_id: AtomicU64::new(1),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
             #[cfg(any(test, feature = "refinement"))]
@@ -211,29 +205,42 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         };
 
         if let Some(existing_key) = catalog.identities.get_key(&identity).copied() {
-            if catalog.active_keys.contains_key(&existing_key) {
+            let entry = catalog
+                .entries
+                .get(&existing_key)
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::RTD_INDEX_ORPHAN,
+                })?;
+
+            if entry.is_connected() {
                 return Ok(PreparedSubscription {
                     key: existing_key,
                     reservation: None,
                 });
             }
 
-            if let Some(pending) = catalog.pending.get_mut(&existing_key) {
-                let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
-
-                pending.live_reservations =
-                    pending
-                        .live_reservations
-                        .checked_add(1)
-                        .ok_or(XllError::Internal {
-                            diagnostic_id: crate::error::DiagnosticId::RESERVATION_OVERFLOW,
-                        })?;
+            if catalog.entries.contains_key(&existing_key) {
+                let Some(result) = catalog.with_entry(&existing_key, |entry| {
+                    let reservations =
+                        entry
+                            .live_reservations
+                            .checked_add(1)
+                            .ok_or(XllError::Internal {
+                                diagnostic_id: crate::error::DiagnosticId::RESERVATION_OVERFLOW,
+                            })?;
+                    entry.live_reservations = reservations;
+                    Ok::<(), XllError>(())
+                }) else {
+                    return Err(XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::RTD_INDEX_ORPHAN,
+                    });
+                };
+                result?;
 
                 return Ok(PreparedSubscription {
                     key: existing_key,
                     reservation: Some(PreparationReservation {
                         runtime: Arc::downgrade(self),
-                        id: reservation_id,
                     }),
                 });
             }
@@ -243,7 +250,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        if catalog.pending.len() >= self.limits.max_pending {
+        if catalog.pending_len() >= self.limits.max_pending {
             return Err(XllError::Overloaded);
         }
 
@@ -263,18 +270,18 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             return Err(error);
         }
 
-        let reservation_id = self.next_preparation_id.fetch_add(1, Ordering::Relaxed);
         catalog.pending_topic_bytes = new_total;
         let erased_source: Arc<dyn ErasedRtdSource> = Arc::clone(&source.source) as _;
-        catalog.pending.insert(
+        catalog.entries.insert(
             key,
-            PendingSubscription {
+            SubscriptionEntry {
                 live_reservations: 1,
                 committed: false,
-                source: erased_source,
+                source: Some(erased_source),
                 topic,
+                state: SubscriptionState::Pending,
                 server_generation: None,
-                connecting_generation: None,
+                connection_generation: None,
             },
         );
 
@@ -282,44 +289,36 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             key,
             reservation: Some(PreparationReservation {
                 runtime: Arc::downgrade(self),
-                id: reservation_id,
             }),
         })
     }
 
-    pub(crate) fn finish_preparation(
-        &self,
-        key: &SubscriptionKey,
-        _reservation_id: u64,
-        committed: bool,
-    ) {
-        let (removed_source, _removed_topic_bytes) = {
+    pub(crate) fn finish_preparation(&self, key: &SubscriptionKey, committed: bool) {
+        let removed_source = {
             let mut catalog = self.catalog.lock();
-            let Some(pending) = catalog.pending.get_mut(key) else {
+            let Some(committed_state) = catalog.with_entry(key, |entry| {
+                entry.live_reservations = entry.live_reservations.saturating_sub(1);
+                if committed {
+                    entry.committed = true;
+                }
+                !committed && entry.can_remove()
+            }) else {
                 return;
             };
 
-            pending.live_reservations = pending.live_reservations.saturating_sub(1);
-            if committed {
-                pending.committed = true;
-                return;
-            }
-
-            if pending.live_reservations == 0
-                && !pending.committed
-                && pending.connecting_generation.is_none()
-            {
-                let removed = catalog.pending.remove(key);
-                if let Some(removed) = removed {
-                    let bytes = removed.topic.byte_len();
-                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
-                    remove_identity_if_unbound(&mut catalog, key);
-                    (Some(removed.source), bytes)
-                } else {
-                    (None, 0)
-                }
+            if committed_state {
+                catalog.remove_entry(key).and_then(|entry| entry.source)
             } else {
-                (None, 0)
+                catalog
+                    .with_entry(key, |entry| {
+                        if entry.state == SubscriptionState::Active && entry.live_reservations == 0
+                        {
+                            entry.source.take()
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
             }
         };
 
@@ -339,16 +338,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         key: &SubscriptionKey,
     ) -> XllResult<()> {
         let mut catalog = self.catalog.lock();
-        let pending = catalog.pending.get_mut(key).ok_or(XllError::Closing)?;
+        let entry = catalog.entries.get(key).ok_or(XllError::Closing)?;
 
-        if let Some(existing_gen) = pending.server_generation {
+        if let Some(existing_gen) = entry.server_generation {
             if existing_gen != generation {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
                 });
             }
         } else {
-            pending.server_generation = Some(generation);
+            catalog.with_entry(key, |entry| entry.server_generation = Some(generation));
         }
         Ok(())
     }
@@ -357,26 +356,26 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         &self,
         key: &SubscriptionKey,
         generation: ConnectionGeneration,
-    ) {
+    ) -> Option<Arc<dyn ErasedRtdSource>> {
         let mut catalog = self.catalog.lock();
 
-        if let Some(pending) = catalog
-            .pending
-            .get_mut(key)
-            .filter(|p| p.connecting_generation == Some(generation))
-        {
-            pending.connecting_generation = None;
+        let should_remove = catalog
+            .with_entry(key, |entry| {
+                if entry.state == SubscriptionState::Connecting
+                    && entry.connection_generation == Some(generation)
+                {
+                    entry.state = SubscriptionState::Pending;
+                    entry.connection_generation = None;
+                }
+                entry.can_remove()
+            })
+            .unwrap_or(false);
+
+        if should_remove {
+            return catalog.remove_entry(key).and_then(|entry| entry.source);
         }
 
-        if catalog
-            .active_keys
-            .get(key)
-            .is_some_and(|binding| binding.connection_generation == generation)
-        {
-            catalog.active_keys.remove(key);
-        }
-
-        remove_identity_if_unbound(&mut catalog, key);
+        None
     }
 
     pub(crate) fn connect_transaction(
@@ -401,44 +400,40 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let (source, topic) = {
             let mut catalog = self.catalog.lock();
-
-            if catalog.active_keys.contains_key(key) {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::ACTIVE_KEY_DUPLICATE,
-                });
+            let entry = catalog.entries.get(key).ok_or(XllError::Closing)?;
+            match entry.state {
+                SubscriptionState::Active => {
+                    return Err(XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                    });
+                }
+                SubscriptionState::Connecting => {
+                    return Err(XllError::Internal {
+                        diagnostic_id: crate::error::DiagnosticId::CONNECTION_INFLIGHT,
+                    });
+                }
+                SubscriptionState::Pending => {}
             }
 
-            let (source, topic) = {
-                let pending = catalog.pending.get_mut(key).ok_or(XllError::Closing)?;
-
-                if let Some(existing_gen) = pending.server_generation {
+            let Some(result) = catalog.with_entry(key, |entry| -> XllResult<_> {
+                if let Some(existing_gen) = entry.server_generation {
                     if existing_gen != server_handle.inner.generation {
                         return Err(XllError::Internal {
                             diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
                         });
                     }
                 } else {
-                    pending.server_generation = Some(server_handle.inner.generation);
+                    entry.server_generation = Some(server_handle.inner.generation);
                 }
 
-                if pending.connecting_generation.is_some() {
-                    return Err(XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::CONNECTION_INFLIGHT,
-                    });
-                }
-                pending.connecting_generation = Some(conn_gen);
-                (Arc::clone(&pending.source), pending.topic.clone())
+                entry.state = SubscriptionState::Connecting;
+                entry.connection_generation = Some(conn_gen);
+                let source = entry.source.as_ref().ok_or(XllError::Closing)?;
+                Ok((Arc::clone(source), entry.topic.clone()))
+            }) else {
+                return Err(XllError::Closing);
             };
-
-            catalog.active_keys.insert(
-                *key,
-                ActiveKeyBinding {
-                    connection_generation: conn_gen,
-                    stage: BindingStage::Connecting,
-                },
-            );
-
-            (source, topic)
+            result?
         };
 
         let shard_index = shard_index(topic_id);
@@ -473,7 +468,13 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         };
 
         if let Err(failure) = reservation_result {
-            self.rollback_catalog_connection_reservation(key, conn_gen);
+            if let Some(source) = self.rollback_catalog_connection_reservation(key, conn_gen)
+                && catch_unwind(AssertUnwindSafe(|| drop(source))).is_err()
+            {
+                self.record_cleanup_result(Err(XllError::Internal {
+                    diagnostic_id: crate::error::DiagnosticId::PANIC_SOURCE,
+                }));
+            }
             return Err(failure.into_xll_error());
         }
 
@@ -631,38 +632,23 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
-            if let Some(binding) = catalog
-                .active_keys
-                .get_mut(key)
-                .filter(|b| b.connection_generation == generation)
-            {
-                binding.stage = BindingStage::Active;
-            }
-            if let Some(pending) = catalog
-                .pending
-                .get_mut(key)
-                .filter(|p| p.connecting_generation == Some(generation))
-            {
-                pending.connecting_generation = None;
-            }
-            let remove_pending = catalog
-                .pending
-                .get(key)
-                .is_some_and(|p| p.live_reservations == 0 && p.connecting_generation.is_none());
-
-            if remove_pending {
-                let removed = catalog.pending.remove(key);
-                if let Some(removed) = removed {
-                    let bytes = removed.topic.byte_len();
-                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
-                    remove_identity_if_unbound(&mut catalog, key);
-                    Some(removed.source)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            catalog
+                .with_entry(key, |entry| {
+                    if entry.state == SubscriptionState::Connecting
+                        && entry.connection_generation == Some(generation)
+                    {
+                        entry.state = SubscriptionState::Active;
+                        entry.committed = true;
+                        if entry.live_reservations == 0 {
+                            entry.source.take()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
         };
 
         if let Some(source) = removed_source {
@@ -729,36 +715,27 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
-            if catalog
-                .active_keys
-                .get(key)
-                .is_some_and(|b| b.connection_generation == generation)
+            let transitioned = catalog
+                .with_entry(key, |entry| {
+                    if entry.state == SubscriptionState::Connecting
+                        && entry.connection_generation == Some(generation)
+                    {
+                        entry.state = SubscriptionState::Pending;
+                        entry.connection_generation = None;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+
+            if transitioned
+                && catalog
+                    .entries
+                    .get(key)
+                    .is_some_and(SubscriptionEntry::can_remove)
             {
-                catalog.active_keys.remove(key);
-            }
-
-            if let Some(pending) = catalog
-                .pending
-                .get_mut(key)
-                .filter(|p| p.connecting_generation == Some(generation))
-            {
-                pending.connecting_generation = None;
-            }
-
-            let remove_pending = catalog.pending.get(key).is_some_and(|p| {
-                p.live_reservations == 0 && !p.committed && p.connecting_generation.is_none()
-            });
-
-            if remove_pending {
-                let removed = catalog.pending.remove(key);
-                if let Some(removed) = removed {
-                    let bytes = removed.topic.byte_len();
-                    catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
-                    remove_identity_if_unbound(&mut catalog, key);
-                    Some(removed.source)
-                } else {
-                    None
-                }
+                catalog.remove_entry(key).and_then(|entry| entry.source)
             } else {
                 None
             }
@@ -902,20 +879,24 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             let mut catalog = self.catalog.lock();
             #[cfg(any(test, feature = "refinement"))]
             {
-                for _ in 0..catalog.active_keys.len() {
+                for _ in 0..catalog
+                    .entries
+                    .values()
+                    .filter(|entry| entry.is_connected())
+                    .count()
+                {
                     self.record_ghost_event(
                         crate::shutdown_refinement::GhostEvent::RemoveSubscription,
                     );
                 }
             }
-            catalog.active_keys.clear();
             catalog.sources.clear();
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
             catalog
-                .pending
+                .entries
                 .drain()
-                .map(|(_, pending)| pending.source)
+                .filter_map(|(_, entry)| entry.source)
                 .collect::<Vec<_>>()
         };
 
@@ -941,7 +922,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 #[derive(Debug)]
 struct PreparationReservation<H: SubscriptionHost> {
     runtime: Weak<SubscriptionRuntime<H>>,
-    id: u64,
 }
 
 #[derive(Debug)]
@@ -969,7 +949,7 @@ impl<H: SubscriptionHost> PreparedSubscription<H> {
             return;
         };
         if let Some(runtime) = reservation.runtime.upgrade() {
-            runtime.finish_preparation(&self.key, reservation.id, committed);
+            runtime.finish_preparation(&self.key, committed);
         }
     }
 

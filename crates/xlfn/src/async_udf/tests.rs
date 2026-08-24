@@ -1127,7 +1127,7 @@ fn async_boundary_returns_error_on_cancellation() {
 }
 
 #[test]
-fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
+fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let mut open_attempt = runtime.begin_open().unwrap();
@@ -1172,22 +1172,13 @@ fn pending_async_cancellation_after_terminal_gate_never_calls_excel() {
         .recv_timeout(Duration::from_secs(1))
         .expect("terminal-gate task did not start");
 
-    let invocation = crate::callback_gate::CallbackInvocationToken::new();
-    let callback_gate = crate::callback_gate::enter_callback(&invocation).unwrap();
-    callback_gate.observe(crate::return_value::ExcelCallbackStatus::Abort);
-    drop(callback_gate);
     let callbacks_before_cancel = crate::test_callback::async_return_calls();
     cancel_async_calculation(runtime);
     assert!(runtime.close_async().issues.is_empty());
-    assert_eq!(
-        crate::test_callback::async_return_calls(),
-        callbacks_before_cancel,
-        "terminal callback gate must suppress async cancellation fallback while token is active"
+    assert!(
+        crate::test_callback::async_return_calls() > callbacks_before_cancel,
+        "async cancellation fallback must retain its independent module admission"
     );
-    drop(invocation);
-
-    let next_token = crate::callback_gate::CallbackInvocationToken::new();
-    assert!(crate::callback_gate::enter_callback(&next_token).is_ok());
 }
 
 #[test]

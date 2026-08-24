@@ -63,7 +63,7 @@ pub(crate) struct GhostResources {
     pub(crate) registrations: u64,
     pub(crate) event_registrations: u64,
     pub(crate) registration_state_known: bool,
-    pub(crate) callback_gate_open: bool,
+    pub(crate) callback_admission_open: bool,
     pub(crate) active_calls: u64,
     pub(crate) return_blocks: u64,
     pub(crate) return_blocks_in_free: u64,
@@ -95,7 +95,7 @@ impl GhostResources {
             registrations,
             event_registrations,
             registration_state_known: true,
-            callback_gate_open: true,
+            callback_admission_open: true,
             active_calls: 0,
             return_blocks: 0,
             return_blocks_in_free: 0,
@@ -132,7 +132,7 @@ impl GhostResources {
             registrations: 0,
             event_registrations: 0,
             registration_state_known: true,
-            callback_gate_open: false,
+            callback_admission_open: false,
             active_calls: 0,
             return_blocks: 0,
             return_blocks_in_free: 0,
@@ -162,7 +162,7 @@ impl GhostResources {
             && self.registrations == 0
             && self.event_registrations == 0
             && self.registration_state_known
-            && !self.callback_gate_open
+            && !self.callback_admission_open
     }
 
     fn calls_drained(&self) -> bool {
@@ -281,7 +281,7 @@ pub(crate) enum GhostEvent {
     ReturnsDrained,
     AsyncDrained,
     SubscriptionsDrained,
-    CloseCallbackGate,
+    CloseCallbackAdmission,
     HostDetached,
     ProveGenerationUnique,
     ProveAddinQuiesced,
@@ -766,18 +766,20 @@ fn transition(source: &GhostState, event: &GhostEvent) -> Result<GhostState, Gho
             }
             target.phase = GhostPhase::Closing(GhostStage::DetachHost);
         }
-        GhostEvent::CloseCallbackGate => {
-            if !phase_is(&source.phase, GhostStage::DetachHost) || !resources.callback_gate_open {
+        GhostEvent::CloseCallbackAdmission => {
+            if !phase_is(&source.phase, GhostStage::DetachHost)
+                || !resources.callback_admission_open
+            {
                 return Err(GhostViolation::Precondition(
-                    "callback gate must close exactly once during host detachment",
+                    "callback admission must close exactly once during host detachment",
                 ));
             }
-            resources.callback_gate_open = false;
+            resources.callback_admission_open = false;
         }
         GhostEvent::HostDetached => {
             if !phase_is(&source.phase, GhostStage::DetachHost) || !resources.host_detached() {
                 return Err(GhostViolation::Precondition(
-                    "host milestone requires known empty registrations and closed callback gate",
+                    "host milestone requires known empty registrations and closed callback admission",
                 ));
             }
             target.phase = GhostPhase::Closing(GhostStage::CloseState);
@@ -1152,7 +1154,7 @@ mod tests {
             GhostEvent::ReturnsDrained,
             GhostEvent::AsyncDrained,
             GhostEvent::SubscriptionsDrained,
-            GhostEvent::CloseCallbackGate,
+            GhostEvent::CloseCallbackAdmission,
             GhostEvent::HostDetached,
             GhostEvent::ProveGenerationUnique,
             GhostEvent::ProveAddinQuiesced,
@@ -1217,7 +1219,7 @@ mod tests {
         }
         machine
             .apply(GhostEvent::HostDetached)
-            .expect_err("registrations and callback gate are not detached");
+            .expect_err("registrations and callback admission are not detached");
     }
 
     #[test]
@@ -1269,7 +1271,7 @@ mod tests {
             GhostEvent::ReturnsDrained,
             GhostEvent::AsyncDrained,
             GhostEvent::SubscriptionsDrained,
-            GhostEvent::CloseCallbackGate,
+            GhostEvent::CloseCallbackAdmission,
             GhostEvent::HostDetached,
             GhostEvent::ProveGenerationUnique,
             GhostEvent::ProveAddinQuiesced,
@@ -1305,7 +1307,7 @@ mod tests {
             GhostEvent::ReturnsDrained,
             GhostEvent::AsyncDrained,
             GhostEvent::SubscriptionsDrained,
-            GhostEvent::CloseCallbackGate,
+            GhostEvent::CloseCallbackAdmission,
             GhostEvent::HostDetached,
             GhostEvent::ProveGenerationUnique,
             GhostEvent::ProveAddinQuiesced,

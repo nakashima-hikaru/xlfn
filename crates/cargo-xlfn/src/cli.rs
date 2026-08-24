@@ -1,60 +1,114 @@
 use super::*;
 
-#[derive(Parser)]
-#[command(name = "cargo xlfn", version, about)]
+#[derive(Cli)]
+#[usage(bin = "cargo xlfn", version, about)]
 pub(crate) struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub(crate) command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 pub(crate) enum Commands {
     Check(CheckArgs),
     Package(PackageArgs),
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Debug, Default)]
 pub(crate) struct CheckArgs {
-    #[command(flatten)]
-    pub(crate) project: ProjectArgs,
-    #[command(flatten)]
-    pub(crate) build: BuildSelectionArgs,
-    #[arg(long, value_enum)]
+    #[usage(long)]
+    pub(crate) manifest_path: Option<PathBuf>,
+    #[usage(long)]
+    pub(crate) package: Option<String>,
+    /// MSVC CRT policy for target Rust crates.
+    #[usage(long)]
+    pub(crate) crt: Option<CrtPolicy>,
+    /// Base Cargo target directory; the CRT policy is appended to this path.
+    #[usage(long)]
+    pub(crate) target_dir: Option<PathBuf>,
+    #[usage(long)]
+    pub(crate) profile: Option<String>,
+    #[usage(long)]
+    pub(crate) features: Vec<String>,
+    #[usage(long)]
+    pub(crate) no_default_features: bool,
+    #[usage(long)]
+    pub(crate) all_features: bool,
+    #[usage(long)]
+    pub(crate) locked: bool,
+    #[usage(long)]
+    pub(crate) frozen: bool,
+    #[usage(long)]
+    pub(crate) offline: bool,
+    #[usage(long)]
     pub(crate) target: Option<WindowsTarget>,
+}
+
+impl CheckArgs {
+    pub(crate) fn project(&self) -> ProjectArgs {
+        ProjectArgs {
+            manifest_path: self.manifest_path.clone(),
+            package: self.package.clone(),
+        }
+    }
+
+    pub(crate) fn build(&self) -> BuildSelectionArgs {
+        BuildSelectionArgs {
+            crt: self.crt,
+            target_dir: self.target_dir.clone(),
+            profile: self.profile.clone(),
+            features: self.features.clone(),
+            no_default_features: self.no_default_features,
+            all_features: self.all_features,
+            locked: self.locked,
+            frozen: self.frozen,
+            offline: self.offline,
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug, Default)]
 pub(crate) struct BuildSelectionArgs {
     /// MSVC CRT policy for target Rust crates.
-    #[arg(long, value_enum)]
+    #[usage(long)]
     pub(crate) crt: Option<CrtPolicy>,
     /// Base Cargo target directory; the CRT policy is appended to this path.
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) target_dir: Option<PathBuf>,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) profile: Option<String>,
-    #[arg(long, value_delimiter = ',')]
+    #[usage(long)]
     pub(crate) features: Vec<String>,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) no_default_features: bool,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) all_features: bool,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) locked: bool,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) frozen: bool,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) offline: bool,
 }
 
 impl BuildSelectionArgs {
+    pub(crate) fn normalized_features(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .flat_map(|f| f.split(','))
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub(crate) fn apply_to_command(&self, command: &mut Command, default_profile: Option<&str>) {
         let profile = self.profile.as_deref().or(default_profile);
         if let Some(profile) = profile {
             command.arg("--profile").arg(profile);
         }
-        if !self.features.is_empty() {
-            command.arg("--features").arg(self.features.join(","));
+        let features = self.normalized_features();
+        if !features.is_empty() {
+            command.arg("--features").arg(features.join(","));
         }
         if self.no_default_features {
             command.arg("--no-default-features");
@@ -74,8 +128,9 @@ impl BuildSelectionArgs {
     }
 
     pub(crate) fn apply_to_metadata(&self, command: &mut MetadataCommand) {
-        if !self.features.is_empty() {
-            command.features(CargoOpt::SomeFeatures(self.features.clone()));
+        let features = self.normalized_features();
+        if !features.is_empty() {
+            command.features(CargoOpt::SomeFeatures(features));
         }
         if self.no_default_features {
             command.features(CargoOpt::NoDefaultFeatures);
@@ -105,17 +160,17 @@ impl BuildSelectionArgs {
 
 #[derive(Args, Default)]
 pub(crate) struct ProjectArgs {
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) manifest_path: Option<PathBuf>,
-    #[arg(long)]
+    #[usage(long)]
     pub(crate) package: Option<String>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum WindowsTarget {
-    #[value(name = "i686-pc-windows-msvc")]
+    #[usage(name = "i686-pc-windows-msvc")]
     X86,
-    #[value(name = "x86_64-pc-windows-msvc")]
+    #[usage(name = "x86_64-pc-windows-msvc")]
     X64,
 }
 
@@ -135,18 +190,75 @@ impl WindowsTarget {
     }
 }
 
-#[derive(Args)]
+impl std::str::FromStr for WindowsTarget {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "i686-pc-windows-msvc" | "x86" => Ok(Self::X86),
+            "x86_64-pc-windows-msvc" | "x64" => Ok(Self::X64),
+            _ => bail!(
+                "unsupported target {s:?}, expected i686-pc-windows-msvc or x86_64-pc-windows-msvc"
+            ),
+        }
+    }
+}
+
+#[derive(Args, Clone, Debug, Default)]
 pub(crate) struct PackageArgs {
-    #[arg(long, value_enum, conflicts_with = "all")]
+    #[usage(long, conflicts = ["all"])]
     pub(crate) target: Option<WindowsTarget>,
-    #[arg(long, conflicts_with = "target")]
+    #[usage(long, conflicts = ["target"])]
     pub(crate) all: bool,
-    #[arg(long, default_value = "package")]
+    #[usage(long, default = "package")]
     pub(crate) out: PathBuf,
-    #[command(flatten)]
-    pub(crate) project: ProjectArgs,
-    #[command(flatten)]
-    pub(crate) build: BuildSelectionArgs,
+    #[usage(long)]
+    pub(crate) manifest_path: Option<PathBuf>,
+    #[usage(long)]
+    pub(crate) package: Option<String>,
+    /// MSVC CRT policy for target Rust crates.
+    #[usage(long)]
+    pub(crate) crt: Option<CrtPolicy>,
+    /// Base Cargo target directory; the CRT policy is appended to this path.
+    #[usage(long)]
+    pub(crate) target_dir: Option<PathBuf>,
+    #[usage(long)]
+    pub(crate) profile: Option<String>,
+    #[usage(long)]
+    pub(crate) features: Vec<String>,
+    #[usage(long)]
+    pub(crate) no_default_features: bool,
+    #[usage(long)]
+    pub(crate) all_features: bool,
+    #[usage(long)]
+    pub(crate) locked: bool,
+    #[usage(long)]
+    pub(crate) frozen: bool,
+    #[usage(long)]
+    pub(crate) offline: bool,
+}
+
+impl PackageArgs {
+    pub(crate) fn project(&self) -> ProjectArgs {
+        ProjectArgs {
+            manifest_path: self.manifest_path.clone(),
+            package: self.package.clone(),
+        }
+    }
+
+    pub(crate) fn build(&self) -> BuildSelectionArgs {
+        BuildSelectionArgs {
+            crt: self.crt,
+            target_dir: self.target_dir.clone(),
+            profile: self.profile.clone(),
+            features: self.features.clone(),
+            no_default_features: self.no_default_features,
+            all_features: self.all_features,
+            locked: self.locked,
+            frozen: self.frozen,
+            offline: self.offline,
+        }
+    }
 }
 
 pub(crate) fn normalize_cargo_subcommand_args(
@@ -160,7 +272,64 @@ pub(crate) fn normalize_cargo_subcommand_args(
 
 pub(crate) fn run() -> Result {
     let args = normalize_cargo_subcommand_args(std::env::args_os().collect());
-    match Cli::parse_from(args).command {
+    let argv: Vec<&std::ffi::OsStr> = args.iter().map(std::ops::Deref::deref).collect();
+    let cli = match Cli::parse_from_argv(&argv) {
+        Ok(cli) => cli,
+        Err(usage::Error::Help { cmd, long }) => {
+            let page = if long {
+                usage::help::Page::Long
+            } else {
+                usage::help::Page::Short
+            };
+            if let Some(rendered) = usage::help::page(
+                Cli::spec(),
+                Cli::command(),
+                &argv,
+                cmd,
+                page,
+                usage::help::Style::auto(),
+            ) {
+                print!("{rendered}");
+            }
+            std::process::exit(0);
+        }
+        Err(usage::Error::HelpAll { cmd }) => {
+            if let Some(rendered) = usage::help::page(
+                Cli::spec(),
+                Cli::command(),
+                &argv,
+                cmd,
+                usage::help::Page::All,
+                usage::help::Style::auto(),
+            ) {
+                print!("{rendered}");
+            }
+            std::process::exit(0);
+        }
+        Err(usage::Error::Version { .. }) => {
+            println!("cargo-xlfn {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        Err(usage::Error::MissingArgsHelp { cmd }) => {
+            if let Some(rendered) = usage::help::page(
+                Cli::spec(),
+                Cli::command(),
+                &argv,
+                cmd,
+                usage::help::Page::Short,
+                usage::help::Style::auto_stderr(),
+            ) {
+                eprint!("{rendered}");
+            }
+            std::process::exit(2);
+        }
+        Err(err) => {
+            let rendered = usage::render_failure(Cli::spec(), &argv, &err);
+            eprint!("{rendered}");
+            std::process::exit(1);
+        }
+    };
+    match cli.command {
         Commands::Check(args) => check(&args),
         Commands::Package(args) => package(&args),
     }

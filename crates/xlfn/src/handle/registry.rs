@@ -292,10 +292,9 @@ impl HandleRegistry {
         }
         let value = record
             .object
-            .typed_ptr::<T>()
+            .typed_projection::<T>()
             .ok_or(XllError::InvalidHandle)?;
-        // SAFETY: the read lease owns the object cell containing this value.
-        Ok(unsafe { value.as_ref().clone() })
+        Ok(value.as_ref().clone())
     }
 
     pub(crate) fn lookup_handle<'call, T>(
@@ -320,7 +319,7 @@ impl HandleRegistry {
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
-        let Some(value) = record.object.typed_ptr::<T>() else {
+        let Some(value) = record.object.typed_projection::<T>() else {
             let actual_type = record.object.type_name();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
@@ -343,7 +342,7 @@ impl HandleRegistry {
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
         let removal = self.bindings.begin_removal(verified.id)?;
-        if removal.object().typed_ptr::<T>().is_none() {
+        if removal.object().typed_projection::<T>().is_none() {
             return Err(XllError::InvalidHandle);
         }
         removal.commit();

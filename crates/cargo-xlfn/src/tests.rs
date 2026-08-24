@@ -153,8 +153,13 @@ fn write_stale_journal(
     .unwrap();
 }
 
+fn parse_cli_args<'a>(args: &'a [&'a str]) -> std::result::Result<Cli, usage::Error<'static, 'a>> {
+    let argv: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+    Cli::parse_from(&argv)
+}
+
 #[test]
-fn cargo_subcommand_name_is_removed_before_clap_parsing() {
+fn cargo_subcommand_name_is_removed_before_cli_parsing() {
     let args = normalize_cargo_subcommand_args(
         [
             "cargo-xlfn",
@@ -167,18 +172,16 @@ fn cargo_subcommand_name_is_removed_before_clap_parsing() {
         .map(std::ffi::OsString::from)
         .collect(),
     );
-    let parsed = Cli::try_parse_from(args).unwrap();
+    let argv: Vec<&std::ffi::OsStr> = args.iter().map(std::ops::Deref::deref).collect();
+    let parsed = Cli::parse_from_argv(&argv).unwrap();
     assert!(matches!(parsed.command, Commands::Check(_)));
 }
 
 #[test]
 fn removed_native_commands_and_unknown_targets_are_rejected() {
-    assert!(Cli::try_parse_from(["cargo-xlfn", "native", "inspect"]).is_err());
-    assert!(Cli::try_parse_from(["cargo-xlfn", "new", "my-xll"]).is_err());
-    assert!(
-        Cli::try_parse_from(["cargo-xlfn", "package", "--target", "x86_64-pc-window-msvc"])
-            .is_err()
-    );
+    assert!(parse_cli_args(&["native", "inspect"]).is_err());
+    assert!(parse_cli_args(&["new", "my-xll"]).is_err());
+    assert!(parse_cli_args(&["package", "--target", "x86_64-pc-window-msvc"]).is_err());
 }
 
 #[test]
@@ -821,8 +824,7 @@ fn bundle_metadata_path_tracking_preserves_valid_deserialization() {
 
 #[test]
 fn check_args_supports_build_selection_flags() {
-    let parsed = Cli::try_parse_from([
-        "cargo-xlfn",
+    let parsed = parse_cli_args(&[
         "check",
         "--profile",
         "release",
@@ -836,21 +838,22 @@ fn check_args_supports_build_selection_flags() {
     let Commands::Check(args) = parsed.command else {
         panic!("expected Check command");
     };
-    assert_eq!(args.build.profile.as_deref(), Some("release"));
-    assert_eq!(args.build.features, vec!["feat1", "feat2"]);
-    assert_eq!(args.build.crt, Some(CrtPolicy::Dynamic));
-    assert!(args.build.locked);
+    let build = args.build();
+    assert_eq!(build.profile.as_deref(), Some("release"));
+    assert_eq!(build.normalized_features(), vec!["feat1", "feat2"]);
+    assert_eq!(build.crt, Some(CrtPolicy::Dynamic));
+    assert!(build.locked);
 }
 
 #[test]
 fn cli_accepts_every_crt_policy() {
     for policy in ["inherit", "static", "dynamic"] {
         assert!(
-            Cli::try_parse_from(["cargo-xlfn", "check", "--crt", policy]).is_ok(),
+            parse_cli_args(&["check", "--crt", policy]).is_ok(),
             "policy {policy} should parse"
         );
     }
-    assert!(Cli::try_parse_from(["cargo-xlfn", "check", "--crt", "auto"]).is_err());
+    assert!(parse_cli_args(&["check", "--crt", "auto"]).is_err());
 }
 
 #[test]

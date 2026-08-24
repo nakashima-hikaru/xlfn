@@ -220,7 +220,7 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
     pub fn disarm(&self) -> Result<(), ServiceSlotError<E>> {
         let mut state = self.state.lock();
         match &*state {
-            GenerationServiceState::Cold { .. } => {
+            GenerationServiceState::Cold { .. } | GenerationServiceState::InitFaulted { .. } => {
                 *state = GenerationServiceState::Closed;
                 self.changed.notify_all();
                 Ok(())

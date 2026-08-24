@@ -19,7 +19,7 @@ async = [
 unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
-bench-internals = ["refinement", "xlfn-sys/abi-probe"]
+bench-internals = ["xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"

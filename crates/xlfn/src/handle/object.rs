@@ -17,6 +17,31 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// The sole shared owner of one erased handle payload.
 pub(crate) type SharedObject = triomphe::Arc<ObjectCell>;
 
+/// A type-checked, non-owning projection into an [`ObjectCell`].
+///
+/// The projection is created only by `ObjectCell::typed_projection`. Callers
+/// must retain the corresponding `SharedObject` or binding snapshot while
+/// using it; `Handle` and `HandleLease` encode that ownership around this
+/// value. Keeping the pointer construction and dereference proof here avoids
+/// duplicating raw-pointer casts in each public handle type.
+pub(crate) struct TypedObjectProjection<T: 'static> {
+    pointer: NonNull<T>,
+}
+
+impl<T: 'static> TypedObjectProjection<T> {
+    #[cfg(test)]
+    pub(crate) fn addr(&self) -> usize {
+        self.pointer.addr().get()
+    }
+
+    #[inline]
+    pub(crate) fn as_ref(&self) -> &T {
+        // SAFETY: this projection is constructed only after ObjectCell checks
+        // its TypeId, and its enclosing handle retains the ObjectCell owner.
+        unsafe { self.pointer.as_ref() }
+    }
+}
+
 /// Errors raised while a handle payload is being destroyed are retained until
 /// the handle subsystem presents its quiescence certificate.
 pub(crate) struct HandleCleanupState {
@@ -200,8 +225,10 @@ impl ObjectCell {
     }
 
     #[inline]
-    pub(crate) fn typed_ptr<T: 'static>(&self) -> Option<NonNull<T>> {
-        (self.type_id == TypeId::of::<T>()).then(|| self.ptr.cast())
+    pub(crate) fn typed_projection<T: 'static>(&self) -> Option<TypedObjectProjection<T>> {
+        (self.type_id == TypeId::of::<T>()).then(|| TypedObjectProjection {
+            pointer: self.ptr.cast(),
+        })
     }
 
     pub(crate) fn acquire_lease(&self) -> XllResult<ObjectLeaseGuard> {

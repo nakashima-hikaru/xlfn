@@ -1,4 +1,7 @@
-//! Passive lifecycle state vocabulary shared by the runtime and boundaries.
+//! Passive lifecycle vocabulary shared by the runtime and host boundaries.
+//!
+//! These values describe protocol state; they do not own Excel resources and
+//! therefore must not depend on the lifecycle adapter or on `Runtime<A>`.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

@@ -615,7 +615,7 @@ pub(super) fn ensure_server(
         unsafe { server_add_ref(server) };
 
         return Ok(EnsuredServer {
-            active: Arc::clone(existing),
+            active: existing.clone(),
             newly_created: false,
             subscription_server: subscription_handle,
         });

@@ -231,13 +231,10 @@ pub(crate) unsafe fn async_return(
     handle: NonNull<XLOPER12>,
     result: NonNull<XLOPER12>,
 ) -> XllResult<()> {
-    let invocation = crate::callback_gate::CallbackInvocationToken::new();
-    let callback_gate =
-        crate::callback_gate::enter_callback(&invocation).map_err(|suppressed| {
-            XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::AsyncReturn,
-                failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-            }
+    let callback_admission =
+        crate::callback_gate::enter_callback().map_err(|suppressed| XllError::ExcelApi {
+            function: crate::error::ExcelApiFunction::AsyncReturn,
+            failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
         })?;
     // SAFETY: both XLOPER12 pointers are live for this call. The specialized
     // raw wrapper intentionally does not expose the worker-thread-forbidden
@@ -245,8 +242,7 @@ pub(crate) unsafe fn async_return(
     let (raw_status, callback_result, invoked) =
         unsafe { xlfn_sys::excel12_async_return(handle, result) };
     let status = ExcelCallbackStatus::from_raw(raw_status);
-    callback_gate.observe(status);
-    drop(callback_gate);
+    drop(callback_admission);
     let accepted = invoked
         && status == ExcelCallbackStatus::Success
         && callback_result.base_type() == XLTYPE_BOOL

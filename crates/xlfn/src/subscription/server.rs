@@ -1,4 +1,4 @@
-use super::catalog::{SubscriptionCatalog, remove_identity_if_unbound};
+use super::catalog::{SubscriptionCatalog, SubscriptionState};
 use super::delivery::{
     DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
     RefreshState, RtdUpdate, SERVER_LIFECYCLE_CLOSING, SERVER_LIFECYCLE_OPEN,
@@ -959,29 +959,32 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
         if let Some(parent) = self.server.parent.upgrade() {
             let mut catalog = parent.catalog.lock();
             let unactive_pending_keys: Vec<_> = catalog
-                .pending
+                .entries
                 .iter()
-                .filter(|(_, p)| p.server_generation == Some(self.server.generation))
+                .filter(|(_, entry)| {
+                    entry.state != SubscriptionState::Active
+                        && entry.server_generation == Some(self.server.generation)
+                })
                 .map(|(k, _)| *k)
                 .collect();
 
             let mut extra_sources = Vec::new();
             for key in unactive_pending_keys {
-                let should_remove = catalog.pending.get_mut(&key).is_some_and(|pending| {
-                    pending.server_generation = None;
-                    pending.connecting_generation = None;
-                    pending.committed = false;
-                    pending.live_reservations == 0
-                });
+                let Some(should_remove) = catalog.with_entry(&key, |entry| {
+                    entry.server_generation = None;
+                    entry.connection_generation = None;
+                    entry.state = SubscriptionState::Pending;
+                    entry.committed = false;
+                    entry.can_remove()
+                }) else {
+                    continue;
+                };
 
-                if should_remove {
-                    let Some(removed) = catalog.pending.remove(&key) else {
-                        continue;
-                    };
-                    catalog.pending_topic_bytes = catalog
-                        .pending_topic_bytes
-                        .saturating_sub(removed.topic.byte_len());
-                    extra_sources.push(removed.source);
+                if should_remove
+                    && let Some(removed) = catalog.remove_entry(&key)
+                    && let Some(source) = removed.source
+                {
+                    extra_sources.push(source);
                 }
             }
             drop(catalog);
@@ -1083,45 +1086,25 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
     server_generation: ServerGeneration,
     conn_generation: ConnectionGeneration,
 ) -> Option<Arc<dyn ErasedRtdSource>> {
-    if catalog
-        .active_keys
-        .get(key)
-        .is_some_and(|binding| binding.connection_generation == conn_generation)
-    {
-        catalog.active_keys.remove(key);
+    let (_, should_remove) = catalog.with_entry(key, |entry| {
+        if entry.connection_generation != Some(conn_generation)
+            || entry.server_generation != Some(server_generation)
+        {
+            return (false, false);
+        }
+
+        entry.state = SubscriptionState::Pending;
+        entry.connection_generation = None;
+        entry.server_generation = None;
+        entry.committed = false;
+        (true, entry.can_remove())
+    })?;
+
+    if should_remove {
+        return catalog.remove_entry(key).and_then(|entry| entry.source);
     }
 
-    if let Some(pending) = catalog
-        .pending
-        .get_mut(key)
-        .filter(|p| p.server_generation == Some(server_generation))
-    {
-        if pending.connecting_generation == Some(conn_generation) {
-            pending.connecting_generation = None;
-        }
-        pending.server_generation = None;
-        pending.committed = false;
-    }
-
-    let res = if catalog.pending.get(key).is_some_and(|p| {
-        p.connecting_generation.is_none()
-            && p.server_generation.is_none()
-            && p.live_reservations == 0
-    }) {
-        let removed = catalog.pending.remove(key);
-        if let Some(removed) = removed {
-            let bytes = removed.topic.byte_len();
-            catalog.pending_topic_bytes = catalog.pending_topic_bytes.saturating_sub(bytes);
-            Some(removed.source)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    remove_identity_if_unbound(catalog, key);
-    res
+    None
 }
 
 pub(crate) enum ServerReservationFailure {

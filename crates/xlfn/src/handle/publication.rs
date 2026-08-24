@@ -128,6 +128,20 @@ pub(crate) struct PublicationReservation<'runtime> {
     reservation: TopicReservation<'runtime>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ObjectAllocation {
+    Fresh,
+    Reused,
+}
+
+pub(crate) struct InsertedPublication<'runtime> {
+    pub(super) transaction: ProvisionalPublicationTxn<'runtime>,
+    pub(super) token: String,
+    pub(super) binding_id: super::HandleId,
+    pub(super) object_id: super::ObjectId,
+    pub(super) allocation: ObjectAllocation,
+}
+
 pub(super) struct ProvisionalPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
@@ -162,13 +176,7 @@ impl<'runtime> PublicationReservation<'runtime> {
     pub(super) fn insert_object<T: ExcelHandleObject>(
         self,
         prepared: PreparedHandleObject,
-    ) -> XllResult<(
-        ProvisionalPublicationTxn<'runtime>,
-        String,
-        super::HandleId,
-        super::ObjectId,
-        bool,
-    )> {
+    ) -> XllResult<InsertedPublication<'runtime>> {
         let (token, binding_id, object_id, reused) = match prepared {
             PreparedHandleObject::New(value) => self
                 .runtime
@@ -191,8 +199,8 @@ impl<'runtime> PublicationReservation<'runtime> {
             generation,
             reservation,
         } = self;
-        Ok((
-            ProvisionalPublicationTxn {
+        Ok(InsertedPublication {
+            transaction: ProvisionalPublicationTxn {
                 runtime,
                 key,
                 generation,
@@ -202,8 +210,12 @@ impl<'runtime> PublicationReservation<'runtime> {
             token,
             binding_id,
             object_id,
-            reused,
-        ))
+            allocation: if reused {
+                ObjectAllocation::Reused
+            } else {
+                ObjectAllocation::Fresh
+            },
+        })
     }
 }
 

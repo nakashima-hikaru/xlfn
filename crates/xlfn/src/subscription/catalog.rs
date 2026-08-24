@@ -7,30 +7,46 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BindingStage {
+pub(crate) enum SubscriptionState {
+    Pending,
     Connecting,
     Active,
 }
 
-pub(crate) struct ActiveKeyBinding {
-    pub(crate) connection_generation: ConnectionGeneration,
-    pub(crate) stage: BindingStage,
-}
-
-pub(crate) struct PendingSubscription {
+pub(crate) struct SubscriptionEntry {
+    pub(crate) source: Option<Arc<dyn ErasedRtdSource>>,
+    pub(crate) topic: RtdTopic,
+    pub(crate) state: SubscriptionState,
     pub(crate) live_reservations: usize,
     pub(crate) committed: bool,
-    pub(crate) source: Arc<dyn ErasedRtdSource>,
-    pub(crate) topic: RtdTopic,
     pub(crate) server_generation: Option<ServerGeneration>,
-    pub(crate) connecting_generation: Option<ConnectionGeneration>,
+    pub(crate) connection_generation: Option<ConnectionGeneration>,
+}
+
+impl SubscriptionEntry {
+    pub(crate) fn is_connected(&self) -> bool {
+        matches!(
+            self.state,
+            SubscriptionState::Connecting | SubscriptionState::Active
+        )
+    }
+
+    pub(crate) fn tracks_pending_bytes(&self) -> bool {
+        self.state != SubscriptionState::Active || self.live_reservations != 0
+    }
+
+    pub(crate) fn can_remove(&self) -> bool {
+        self.state == SubscriptionState::Pending
+            && self.connection_generation.is_none()
+            && !self.committed
+            && self.live_reservations == 0
+    }
 }
 
 pub(crate) struct SubscriptionCatalog {
-    pub(crate) pending: FxHashMap<SubscriptionKey, PendingSubscription>,
+    pub(crate) entries: FxHashMap<SubscriptionKey, SubscriptionEntry>,
     pub(crate) pending_topic_bytes: usize,
     pub(crate) sources: SourceIdentityRegistry,
-    pub(crate) active_keys: FxHashMap<SubscriptionKey, ActiveKeyBinding>,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
 }
@@ -44,6 +60,60 @@ impl SubscriptionCatalog {
         Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
     }
 
+    pub(crate) fn pending_len(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.tracks_pending_bytes())
+            .count()
+    }
+
+    pub(crate) fn with_entry<R>(
+        &mut self,
+        key: &SubscriptionKey,
+        update: impl FnOnce(&mut SubscriptionEntry) -> R,
+    ) -> Option<R> {
+        let (was_pending, is_pending, topic_bytes, result) = {
+            let entry = self.entries.get_mut(key)?;
+            let was_pending = entry.tracks_pending_bytes();
+            let topic_bytes = entry.topic.byte_len();
+            let result = update(entry);
+            (
+                was_pending,
+                entry.tracks_pending_bytes(),
+                topic_bytes,
+                result,
+            )
+        };
+
+        match (was_pending, is_pending) {
+            (false, true) => {
+                self.pending_topic_bytes = self
+                    .pending_topic_bytes
+                    .checked_add(topic_bytes)
+                    .expect("pending topic byte accounting overflow");
+            }
+            (true, false) => {
+                self.pending_topic_bytes = self.pending_topic_bytes.saturating_sub(topic_bytes);
+            }
+            _ => {}
+        }
+
+        Some(result)
+    }
+
+    pub(crate) fn remove_entry(&mut self, key: &SubscriptionKey) -> Option<SubscriptionEntry> {
+        let removed = self.entries.remove(key)?;
+        if removed.tracks_pending_bytes() {
+            self.pending_topic_bytes = self
+                .pending_topic_bytes
+                .saturating_sub(removed.topic.byte_len());
+        }
+        if let Some(identity) = self.identities.remove_by_key(key) {
+            self.sources.release_source(identity.source_id.0);
+        }
+        Some(removed)
+    }
+
     #[cfg(test)]
     pub(crate) fn assert_identity_invariants(&self) {
         assert_eq!(
@@ -54,7 +124,7 @@ impl SubscriptionCatalog {
         for (identity, key) in &self.identities.key_by_identity {
             assert_eq!(self.identities.identity_by_key.get(key), Some(identity),);
 
-            assert!(self.pending.contains_key(key) || self.active_keys.contains_key(key),);
+            assert!(self.entries.contains_key(key));
         }
 
         let mut expected_source_refs = FxHashMap::default();
@@ -70,17 +140,31 @@ impl SubscriptionCatalog {
                 Some(refs),
             );
         }
-    }
-}
 
-pub(crate) fn remove_identity_if_unbound(catalog: &mut SubscriptionCatalog, key: &SubscriptionKey) {
-    let has_pending = catalog.pending.contains_key(key);
-    let has_active = catalog.active_keys.contains_key(key);
+        let expected_pending_bytes = self
+            .entries
+            .values()
+            .filter(|entry| entry.tracks_pending_bytes())
+            .map(|entry| entry.topic.byte_len())
+            .sum::<usize>();
+        assert_eq!(self.pending_topic_bytes, expected_pending_bytes);
 
-    if !has_pending
-        && !has_active
-        && let Some(identity) = catalog.identities.remove_by_key(key)
-    {
-        catalog.sources.release_source(identity.source_id.0);
+        for entry in self.entries.values() {
+            match entry.state {
+                SubscriptionState::Pending => {
+                    assert!(entry.source.is_some());
+                    assert!(entry.connection_generation.is_none());
+                }
+                SubscriptionState::Connecting => {
+                    assert!(entry.source.is_some());
+                    assert!(entry.connection_generation.is_some());
+                }
+                SubscriptionState::Active => {
+                    assert!(entry.connection_generation.is_some());
+                    assert_eq!(entry.source.is_some(), entry.live_reservations != 0);
+                    assert!(entry.committed);
+                }
+            }
+        }
     }
 }

@@ -359,7 +359,7 @@ runtime_ghost_events! {
     subscriptions_drained => SubscriptionsDrained,
     unregister_function => UnregisterFunction,
     unregister_event => UnregisterEvent,
-    callback_gate_closed => CloseCallbackGate,
+    callback_admission_closed => CloseCallbackAdmission,
     host_detached => HostDetached,
     generation_unique => ProveGenerationUnique,
     addin_quiesced => ProveAddinQuiesced,

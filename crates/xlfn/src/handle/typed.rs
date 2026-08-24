@@ -1,11 +1,10 @@
 use super::binding::BindingReadLease;
-use super::object::{ObjectLeaseGuard, SharedObject};
+use super::object::{ObjectLeaseGuard, SharedObject, TypedObjectProjection};
 use super::token::ObjectId;
 use crate::XllResult;
 use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::ptr::NonNull;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
@@ -43,12 +42,12 @@ impl HandleObjectId {
 /// the payload. A warm lookup therefore does not clone the object `Arc`.
 pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) binding: BindingReadLease,
-    pub(crate) value: NonNull<T>,
+    pub(crate) value: TypedObjectProjection<T>,
     pub(crate) _call: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(binding: BindingReadLease, value: NonNull<T>) -> Self {
+    pub(crate) fn new(binding: BindingReadLease, value: TypedObjectProjection<T>) -> Self {
         Self {
             binding,
             value,
@@ -70,7 +69,7 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         let object = triomphe::Arc::clone(self.binding.object());
         let lease = object.acquire_lease()?;
         let value = object
-            .typed_ptr::<T>()
+            .typed_projection::<T>()
             .expect("handle type was validated before promotion");
         Ok(HandleLease {
             object,
@@ -99,7 +98,7 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
         // SAFETY: `value` points into the `ObjectCell` transitively owned by
         // `binding`, and that cell cannot be dropped while this binding lease
         // is alive.
-        unsafe { self.value.as_ref() }
+        self.value.as_ref()
     }
 }
 
@@ -107,7 +106,7 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
 /// be moved into an asynchronous future.
 pub struct HandleLease<T: ExcelHandleObject> {
     pub(crate) object: SharedObject,
-    pub(crate) value: NonNull<T>,
+    pub(crate) value: TypedObjectProjection<T>,
     pub(crate) _lease: ObjectLeaseGuard,
 }
 
@@ -125,7 +124,7 @@ impl<T: ExcelHandleObject> Deref for HandleLease<T> {
     fn deref(&self) -> &Self::Target {
         // SAFETY: `object` owns the payload for the entire lifetime of this
         // lease, and `value` was created from that same object cell.
-        unsafe { self.value.as_ref() }
+        self.value.as_ref()
     }
 }
 
