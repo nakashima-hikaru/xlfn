@@ -107,20 +107,20 @@ impl RuntimeRefinementHooks {
             || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
             });
         }
         if self.ghost_handle().active() {
             self.ghost_handle()
                 .record_returned_success()
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
                 })?;
             if self.ghost_handle().active() {
                 crate::lifecycle::fail_stop_invariant(
                     "xlAutoRemove ghost shutdown postcondition",
                     &XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
                     },
                 );
             }
@@ -140,7 +140,7 @@ impl RuntimeRefinementHooks {
             self.ghost_handle()
                 .apply(crate::shutdown_refinement::GhostEvent::FinishClose)
                 .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_GHOST,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_GHOST,
                 })?;
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
@@ -211,7 +211,7 @@ impl RuntimeRefinementHooks {
                 ghost
                     .begin_generation(attempt.get(), resources.clone())
                     .map_err(|_| XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::GHOST_GENERATION,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::GHOST_GENERATION,
                     })?;
                 operation()
             })?;

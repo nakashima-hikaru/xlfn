@@ -1205,7 +1205,7 @@ impl DispatchTestSource {
             .lock()
             .as_ref()
             .ok_or(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_DISPATCH,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_DISPATCH,
             })?
             .publish(value)
     }

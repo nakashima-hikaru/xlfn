@@ -1,7 +1,7 @@
 //! Stable diagnostic event and sink surface.
 
 use crate::XllError;
-use crate::error::DiagnosticId;
+use crate::diagnostics::id::DiagnosticId;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;

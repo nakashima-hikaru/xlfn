@@ -115,7 +115,7 @@ impl SubscriptionEntry {
             | SubscriptionPhase::Connecting { reservations, .. } => reservations,
             SubscriptionPhase::Active { .. } => {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
         };
@@ -123,7 +123,7 @@ impl SubscriptionEntry {
             .map_or(0, NonZeroUsize::get)
             .checked_add(1)
             .ok_or(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RESERVATION_OVERFLOW,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RESERVATION_OVERFLOW,
             })?;
         *reservations = Some(NonZeroUsize::new(next).expect("reservation count is non-zero"));
         Ok(())
@@ -182,7 +182,8 @@ impl SubscriptionEntry {
             | SubscriptionPhase::Active { server, .. } => {
                 if *server != generation {
                     return Err(XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                        diagnostic_id:
+                            crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
                     });
                 }
                 return Ok(());
@@ -191,7 +192,7 @@ impl SubscriptionEntry {
         if let Some(existing) = *server {
             if existing != generation {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
                 });
             }
         } else {
@@ -214,12 +215,12 @@ impl SubscriptionEntry {
             } => (source, *reservations, *commitment, *server),
             SubscriptionPhase::Connecting { .. } => {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CONNECTION_INFLIGHT,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CONNECTION_INFLIGHT,
                 });
             }
             SubscriptionPhase::Active { .. } => {
                 return Err(XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
         };
@@ -227,7 +228,7 @@ impl SubscriptionEntry {
             && existing != server
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
             });
         }
         let source = Arc::clone(source);
@@ -379,7 +380,7 @@ impl SubscriptionCatalog {
     pub(crate) fn allocate_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
         let id = self.next_subscription_id;
         self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
         Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
     }

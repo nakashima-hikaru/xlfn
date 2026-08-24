@@ -159,12 +159,12 @@ impl ObjectLifetimeTracker {
         let _gate = self.admission_gate.lock();
         if self.active_leases.load(Ordering::Acquire) != 0 {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_PINS,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
             });
         }
         if self.live_objects.load(Ordering::Acquire) != 0 {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_OBJECTS,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
             });
         }
         self.cleanup.result()

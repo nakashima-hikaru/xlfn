@@ -73,6 +73,11 @@ error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
    = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
+note: required because it appears within the type `handle::object::TypedObjectProjection<Dataset>`
+  --> src/handle/object.rs
+   |
+   | pub(crate) struct TypedObjectProjection<T: 'static> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
   --> src/handle/typed.rs
    |

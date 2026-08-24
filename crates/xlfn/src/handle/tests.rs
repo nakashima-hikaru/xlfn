@@ -330,7 +330,7 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_TOPIC_COLLISION
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION
         })
     ));
 
@@ -637,7 +637,7 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_ENTROPY
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY
         }
     ));
 }
@@ -1622,7 +1622,7 @@ fn handle_lease_survives_terminal_runtime_close() {
     assert!(matches!(
         runtime.store.registry.finish_quiescence(&sealed),
         Err(XllError::Internal { diagnostic_id })
-            if diagnostic_id == crate::error::DiagnosticId::HANDLE_PINS
+            if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_PINS
     ));
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -1645,7 +1645,7 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
         assert!(matches!(
             runtime.store.registry.finish_quiescence(&sealed),
             Err(XllError::Internal { diagnostic_id })
-                if diagnostic_id == crate::error::DiagnosticId::HANDLE_OBJECTS
+                if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS
         ));
 
         drop(handle);
@@ -1784,14 +1784,14 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
 }
 
 #[test]
-fn different_key_factory_reentry_returns_an_error_without_waiting() {
+fn different_key_factory_reentry_is_allowed() {
     let runtime = FormulaHandleService::new(8);
     let outer_key = test_topic_key("outer-factory");
     let inner_key = test_topic_key("inner-factory");
     let preparation = runtime
         .prepare(outer_key, || {
             let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
-            assert!(matches!(nested, Err(XllError::ReentrantCall)));
+            assert!(nested.is_ok());
             Ok(DataRecord(1))
         })
         .unwrap();
@@ -1802,7 +1802,7 @@ fn different_key_factory_reentry_returns_an_error_without_waiting() {
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
         1
     );
-    assert_eq!(runtime.len(), 1);
+    assert_eq!(runtime.len(), 2);
 }
 
 #[test]
@@ -1830,7 +1830,7 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
 }
 
 #[test]
-fn different_key_observer_reentry_returns_an_error_without_waiting() {
+fn different_key_observer_reentry_is_allowed() {
     let runtime = FormulaHandleService::new(8);
     let outer_key = test_topic_key("outer-observer");
     let inner_key = test_topic_key("inner-observer");
@@ -1840,7 +1840,7 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
             || Ok(DataRecord(1)),
             |_, _| {
                 let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
-                assert!(matches!(nested, Err(XllError::ReentrantCall)));
+                assert!(nested.is_ok());
                 Ok(())
             },
         )
@@ -1852,7 +1852,29 @@ fn different_key_observer_reentry_returns_an_error_without_waiting() {
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
         1
     );
-    assert_eq!(runtime.len(), 1);
+    assert_eq!(runtime.len(), 2);
+}
+
+#[test]
+fn nested_initialization_rejects_only_a_cycle() {
+    let runtime = FormulaHandleService::new(8);
+    let outer_key = test_topic_key("cycle-outer");
+    let inner_key = test_topic_key("cycle-inner");
+
+    let preparation = runtime
+        .prepare(outer_key, || {
+            let nested = runtime.prepare(inner_key, || {
+                let cycle = runtime.prepare(outer_key, || Ok(DataRecord(3)));
+                assert!(matches!(cycle, Err(XllError::ReentrantCall)));
+                Ok(DataRecord(2))
+            });
+            assert!(nested.is_ok());
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+
+    assert!(preparation.is_published());
+    assert_eq!(runtime.len(), 2);
 }
 
 #[test]

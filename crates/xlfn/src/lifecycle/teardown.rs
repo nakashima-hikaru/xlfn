@@ -116,7 +116,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 crate::runtime_components::QuarantineReason::TeardownIncomplete,
             );
             return Err(crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             });
         }
         let shared_state_dropped = catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
@@ -129,7 +129,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
         if !lifecycle_dropped || !shared_state_dropped {
             return Err(crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             });
         }
         let (addin_quiesced, generation_reclaimed) = self.take_proofs();

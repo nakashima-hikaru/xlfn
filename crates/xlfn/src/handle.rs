@@ -5,6 +5,14 @@
         reason = "Test-only protocol fixtures are shared with the child test modules"
     )
 )]
+#![cfg_attr(
+    not(feature = "handles"),
+    allow(
+        dead_code,
+        unreachable_pub,
+        reason = "The handle implementation is private in core-only builds"
+    )
+)]
 
 mod binding;
 mod connection;
@@ -80,6 +88,9 @@ pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
+#[cfg(all(not(feature = "handles"), not(test)))]
+pub(crate) use typed::{ExcelHandleObject, Handle, HandleAlias};
+#[cfg(any(feature = "handles", test))]
 pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
 
 #[cfg(test)]

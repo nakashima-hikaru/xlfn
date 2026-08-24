@@ -52,9 +52,9 @@ lifecycle_token!(AsyncStopped);
 fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
     let diagnostic_id = match error {
         ThreadAffineError::WrongThread | ThreadAffineError::StaleAccess => {
-            crate::error::DiagnosticId::LIFECYCLE_THREAD
+            crate::diagnostics::id::DiagnosticId::LIFECYCLE_THREAD
         }
-        _ => crate::error::DiagnosticId::LIFECYCLE_SLOT,
+        _ => crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
     };
     XllError::Internal { diagnostic_id }
 }
@@ -166,7 +166,7 @@ where
         }
     };
     let generation = runtime.protocol_generation().ok_or(XllError::Internal {
-        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     });
     let generation = match generation {
         Ok(generation) => generation,
@@ -197,7 +197,7 @@ where
         #[cfg(not(feature = "async"))]
         {
             return Err(transaction.failure(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::ASYNC_FEATURE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_FEATURE,
             }));
         }
     }
@@ -235,7 +235,7 @@ fn rollback_active_open<'runtime, A, Stage>(
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
                 let error = XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_FAILURE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
                 };
                 report_boundary_error("xlAutoOpen rollback", &error);
                 quarantine_runtime(runtime);
@@ -290,7 +290,7 @@ where
             crate::runtime_components::QuarantineReason::OpenStateInvariant,
         );
         return Err(transaction.failure(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
         }));
     }
     // Stage the complete generation as one owned value.  The opening state
@@ -594,7 +594,7 @@ where
     }
     if runtime.registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoRemove registration state unknown", &error);
         unload_failure = Some((
@@ -725,7 +725,7 @@ where
                     }
                     Err(generation) => {
                         let error = XllError::Internal {
-                            diagnostic_id: crate::error::DiagnosticId::STATE_SCAN,
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::STATE_SCAN,
                         };
                         report_boundary_error("xlAutoRemove state escaped", &error);
                         runtime.quarantine_shared_generation(
@@ -786,7 +786,7 @@ where
     } else {
         if lifecycle_present {
             let error = XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             };
             return Err(handle_unload_hazard(
                 runtime,
@@ -911,7 +911,7 @@ where
                 hazard,
                 "xlAutoRemove RTD GIT quiescence",
                 &XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
                 },
             ));
         }
@@ -1331,7 +1331,7 @@ mod tests {
             Self::Error,
         > {
             Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
             })
         }
     }
@@ -1398,7 +1398,7 @@ mod tests {
                 "test cleanup",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::TEST_RETRY,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_RETRY,
                 },
             );
         }
@@ -1554,7 +1554,7 @@ mod tests {
             _: &mut Self::LifecycleState,
         ) -> Result<(), Self::Error> {
             Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::QUIESCENCE_FAILURE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::QUIESCENCE_FAILURE,
             })
         }
     }
@@ -1656,7 +1656,7 @@ mod tests {
                 "Lean checker cleanup trace",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::LEAN_TRACE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LEAN_TRACE,
                 },
             );
         }
@@ -2226,7 +2226,7 @@ mod tests {
                 "always fail cleanup",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::FAILURE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::FAILURE,
                 },
             );
         }

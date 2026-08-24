@@ -95,7 +95,7 @@ impl SubscriptionServiceSlot {
         self.service
             .seal(
                 crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::RTD_SLOTS,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SLOTS,
                 },
                 SubscriptionsStopped::new,
                 |runtime| {

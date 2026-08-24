@@ -123,11 +123,14 @@ fn expand_excel_addin(
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0".len()] =
-            *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0DllGetClassObject\0DllCanUnloadNow\0";
+        static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0".len()] =
+            *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0";
 
         #(#gating)*
         #krate::__private::v1::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
+
+        #(#gating)*
+        #krate::__private::v1::__xlfn_rtd_exports!(&crate::__XLFN_RUNTIME);
 
         #(#gating)*
         #[unsafe(no_mangle)]
@@ -187,29 +190,6 @@ fn expand_excel_addin(
             }
         }
 
-        #(#gating)*
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn DllGetClassObject(
-            __class_id: *const ::core::ffi::c_void,
-            __interface_id: *const ::core::ffi::c_void,
-            __output: *mut *mut ::core::ffi::c_void,
-        ) -> i32 {
-            // SAFETY: Excel/COM supplies the three live ABI pointers for this
-            // entry point, and the boundary validates their use.
-            unsafe {
-                #krate::__private::v1::dll_get_class_object(
-                    __class_id,
-                    __interface_id,
-                    __output,
-                )
-            }
-        }
-
-        #(#gating)*
-        #[unsafe(no_mangle)]
-        pub extern "system" fn DllCanUnloadNow() -> i32 {
-            #krate::__private::v1::dll_can_unload_now(&crate::__XLFN_RUNTIME)
-        }
     })
 }
 
@@ -752,10 +732,9 @@ mod tests {
         assert!(expanded.contains("free_generated_return"));
         assert!(expanded.contains("fn xlAddInManagerInfo12"));
         assert!(expanded.contains("addin_manager_info"));
-        assert!(expanded.contains("fn DllGetClassObject"));
-        assert!(expanded.contains("fn DllCanUnloadNow"));
         assert!(expanded.contains("__XLFN_FRAMEWORK_EXPORTS"));
         assert!(expanded.contains("__xlfn_async_exports"));
+        assert!(expanded.contains("__xlfn_rtd_exports"));
         assert!(!expanded.contains("fn __xlfn_calculation_canceled"));
     }
 

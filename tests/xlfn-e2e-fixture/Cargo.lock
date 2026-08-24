@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-common"
-version = "0.2.0"
+version = "0.1.0"
 
 [[package]]
 name = "xlfn-e2e-fixture"
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-kernel"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "parking_lot",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-macros"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

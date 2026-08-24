@@ -16,10 +16,15 @@ async = [
     "dep:async-task",
     "dep:futures-util",
 ]
+# Enables the RTD/COM subsystem and its add-in capability surface.
+rtd = []
+# Formula handles are generation-scoped RTD capabilities, so this feature
+# deliberately implies the RTD subsystem instead of creating a second graph.
+handles = ["rtd"]
 unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
-bench-internals = ["xlfn-sys/abi-probe"]
+bench-internals = ["handles", "xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"

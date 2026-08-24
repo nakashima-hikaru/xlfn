@@ -17,7 +17,7 @@ pub(crate) struct OwnedDiagnosticEvent {
     pub(crate) udf_id: &'static str,
     pub(crate) argument: Option<&'static str>,
     pub(crate) error: crate::XllError,
-    pub(crate) diagnostic_id: crate::error::DiagnosticId,
+    pub(crate) diagnostic_id: crate::diagnostics::id::DiagnosticId,
     pub(crate) timestamp: std::time::SystemTime,
 }
 

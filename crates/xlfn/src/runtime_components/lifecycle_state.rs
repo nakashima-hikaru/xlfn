@@ -797,10 +797,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     ) -> crate::XllResult<OpenAttemptId> {
         let attempt_id = access.core.next_lifecycle_attempt;
         let next = attempt_id.checked_add(1).ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::ATTEMPT_OVERFLOW,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
         })?;
         let attempt = OpenAttemptId::new(attempt_id).ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::ATTEMPT_ZERO,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
         })?;
         access.core.next_lifecycle_attempt = next;
         Ok(attempt)
@@ -891,7 +891,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                         payload: OpeningPayload::Published(bundle),
                     };
                     return Err(crate::XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                     });
                 }
                 core.core.last_committed_generation = Some(generation);
@@ -907,7 +907,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             other => {
                 core.core.state = other;
                 Err(crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                 })
             }
         }
@@ -1083,7 +1083,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 core.core.state = other;
                 Err((
                     crate::XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                     },
                     opening,
                 ))
@@ -1101,7 +1101,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if core.core.has_current_generation() {
             return Err(PublishOpeningError {
                 error: crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                 },
                 opening: core.core.state.take_opening(),
             });
@@ -1111,7 +1111,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             _ => {
                 return Err(PublishOpeningError {
                     error: crate::XllError::Internal {
-                        diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                     },
                     opening: core.core.state.take_opening(),
                 });
@@ -1119,7 +1119,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         };
         let opening = core.core.state.take_opening().ok_or(PublishOpeningError {
             error: crate::XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
             },
             opening: None,
         })?;

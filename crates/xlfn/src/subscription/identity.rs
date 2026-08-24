@@ -45,7 +45,7 @@ impl SourceIdentityRegistry {
     ) -> XllResult<SourceIdentityReservation> {
         if let Some(refs) = self.refs.get_mut(&source_id) {
             let next = refs.get().checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
             })?;
             *refs = NonZeroUsize::new(next).expect("the incremented source refcount is non-zero");
         } else {
@@ -91,7 +91,7 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
             current.checked_add(1)
         })
         .map_err(|_| XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::RTD_RT_ID_OVERFLOW,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_RT_ID_OVERFLOW,
         })
 }
 
@@ -113,7 +113,7 @@ impl SubscriptionIdentityIndex {
     ) -> XllResult<()> {
         if self.key_by_identity.contains_key(&identity) || self.identity_by_key.contains_key(&key) {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_INDEX_DUPLICATE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
         }
 

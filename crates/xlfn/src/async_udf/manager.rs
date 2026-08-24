@@ -3,7 +3,7 @@ use super::task::SpawnRejection;
 use super::worker::{cancel_source_no_unwind, cancel_tasks};
 use crate::cancellation::CancellationSource;
 #[cfg(test)]
-use crate::error::DiagnosticId;
+use crate::diagnostics::id::DiagnosticId;
 use crate::{XllError, XllResult};
 use arc_swap::ArcSwapOption;
 use futures_util::Future;
@@ -362,6 +362,7 @@ impl AsyncManager {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn is_stopped(&self) -> bool {
         matches!(*self.state.lock(), ExecutorState::Stopped)
     }

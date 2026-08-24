@@ -26,7 +26,7 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
             || descriptor.signature.encode().is_err()
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::REGISTRY,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
             });
         }
     }
@@ -98,7 +98,7 @@ fn validate_excel_string(s: &str) -> XllResult<()> {
     let utf16_len = s.encode_utf16().count();
     if utf16_len > crate::utf16::EXCEL_STRING_LIMIT || s.contains('\0') {
         Err(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::STRING_LENGTH,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::STRING_LENGTH,
         })
     } else {
         Ok(())

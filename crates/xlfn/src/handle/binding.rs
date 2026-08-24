@@ -229,7 +229,7 @@ impl BindingTable {
                     Err(_) => {
                         state.free.push(index);
                         return Err(XllError::Internal {
-                            diagnostic_id: crate::error::DiagnosticId::HANDLE_SLOT,
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
                         });
                     }
                 };

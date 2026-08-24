@@ -379,7 +379,7 @@ impl TopicTable {
         }
         if state.by_key.contains_key(&key) || state.by_rtd_key.contains_key(rtd_key.as_ref()) {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_TOPIC_COLLISION,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
             });
         }
         state.by_key.insert(

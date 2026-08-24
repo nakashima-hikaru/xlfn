@@ -105,7 +105,7 @@ where
             );
             if !outcome.unload_safe() {
                 let error = XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PENDING,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
                 };
                 report_boundary_error("xlAutoOpen pending rollback", &error);
                 super::quarantine_runtime(runtime);

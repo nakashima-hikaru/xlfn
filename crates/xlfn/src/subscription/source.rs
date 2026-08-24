@@ -133,7 +133,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(source, allocator.generation, sequence))
     }
@@ -155,7 +155,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(Arc::new(source), generation, sequence))
     }
@@ -170,7 +170,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
                 current.checked_add(1)
             })
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         Ok(Self::from_identity(source, generation, sequence))
     }

@@ -65,7 +65,7 @@ impl ActiveCacheGuard {
     fn enter() -> XllResult<Self> {
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::CACHE_REENTRANT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CACHE_REENTRANT,
             });
         }
         ACTIVE_CACHE_INITIALIZATION_DEPTH.set(1);
@@ -259,7 +259,7 @@ impl CacheRegistry {
         Arc::clone(&entry.cache)
             .downcast::<StoredCache<Marker, K, V>>()
             .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::CACHE_TYPE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CACHE_TYPE,
             })
     }
 

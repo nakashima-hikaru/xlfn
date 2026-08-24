@@ -64,6 +64,7 @@ pub mod v1 {
     #[doc(hidden)]
     pub use crate::return_value::ReturnContext;
     /// Forwards the generated COM export to the internal RTD implementation.
+    #[cfg(feature = "rtd")]
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
     pub unsafe fn dll_get_class_object(
@@ -75,6 +76,7 @@ pub mod v1 {
         unsafe { crate::rtd::dll_get_class_object(class_id, interface_id, output) }
     }
 
+    #[cfg(feature = "rtd")]
     #[doc(hidden)]
     pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         if runtime.runtime().module_residency_held() {
@@ -87,6 +89,8 @@ pub mod v1 {
     pub use crate::__xlfn_private_async_exports as __xlfn_async_exports;
     #[doc(hidden)]
     pub use crate::__xlfn_private_async_only as __xlfn_async_only;
+    #[doc(hidden)]
+    pub use crate::__xlfn_private_rtd_exports as __xlfn_rtd_exports;
     #[doc(hidden)]
     pub use crate::utf16::utf16_eq_ignore_ascii_case;
     pub use crate::value::ExcelOutput;

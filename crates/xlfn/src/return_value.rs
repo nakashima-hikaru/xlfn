@@ -77,7 +77,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
 
     fn publisher(&self) -> XllResult<&FormulaPublisher<'call, 'scope>> {
         self.publisher.as_ref().ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::HANDLE_CONTEXT,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_CONTEXT,
         })
     }
 }

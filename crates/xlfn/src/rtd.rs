@@ -1,6 +1,16 @@
+#![cfg_attr(
+    not(feature = "rtd"),
+    allow(
+        dead_code,
+        unreachable_pub,
+        reason = "The RTD implementation is private in core-only builds"
+    )
+)]
+
 use crate::handle::FormulaHandleService;
 use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
+#[cfg(any(feature = "rtd", test))]
 pub use crate::subscription::{
     IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdLimits, RtdSink, RtdSource,
     RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,

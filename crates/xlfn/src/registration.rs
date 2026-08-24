@@ -2084,7 +2084,7 @@ mod tests {
             &mut callbacks,
             registration,
             XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::from_u64(1),
             },
             |_callbacks, registrations| {
                 let mut outcome = UnregisterResult::new(registrations.len());

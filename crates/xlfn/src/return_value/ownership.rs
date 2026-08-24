@@ -149,7 +149,7 @@ impl ReturnTracker {
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
         if !self.admission_closed() || !self.is_quiescent() {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RETURN_REOPEN,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
             });
         }
         for stripe in &self.stripes {

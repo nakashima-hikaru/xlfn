@@ -1,3 +1,12 @@
+#![cfg_attr(
+    not(feature = "handles"),
+    allow(
+        dead_code,
+        unreachable_pub,
+        reason = "Optional RTD and handle configuration is hidden in core-only builds"
+    )
+)]
+
 use crate::call::CallScope;
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
@@ -8,7 +17,9 @@ use crate::host_api::ExcelHost;
 use crate::reference::ExcelReference;
 use crate::runtime_components::GenerationServices;
 use crate::shutdown::CleanupReporter;
-use crate::subscription::{RtdLimits, RtdSource, RtdSourceHandle, RtdTopic, RtdValue};
+use crate::subscription::RtdLimits;
+#[cfg(any(feature = "rtd", test))]
+use crate::subscription::{RtdSource, RtdSourceHandle, RtdTopic, RtdValue};
 use crate::value::{ExcelValue, FromExcel, Matrix};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
@@ -60,6 +71,7 @@ pub struct OpenContext {
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
+    #[cfg(any(feature = "rtd", test))]
     source_allocator: crate::subscription::SourceHandleAllocator,
 }
 
@@ -73,10 +85,13 @@ impl OpenContext {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
+        #[cfg(not(any(feature = "rtd", test)))]
+        let _ = generation;
         Self {
             module_path,
             module_directory,
             build_info,
+            #[cfg(any(feature = "rtd", test))]
             source_allocator: crate::subscription::SourceHandleAllocator::new(generation),
         }
     }
@@ -102,6 +117,7 @@ impl OpenContext {
     }
 
     /// Provides the RTD source-registration capability for this open.
+    #[cfg(any(feature = "rtd", test))]
     #[must_use]
     pub fn rtd(&self) -> RtdOpenContext<'_> {
         RtdOpenContext {
@@ -116,6 +132,7 @@ pub struct RtdOpenContext<'a> {
     allocator: &'a crate::subscription::SourceHandleAllocator,
 }
 
+#[cfg(any(feature = "rtd", test))]
 impl RtdOpenContext<'_> {
     /// Registers one source and returns the handle used by subscriptions.
     pub fn register_source<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
@@ -250,12 +267,14 @@ impl RuntimeConfig {
         }
     }
 
+    #[cfg(any(feature = "rtd", test))]
     #[must_use]
     pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
         self.rtd = self.rtd.with_limits(limits);
         self
     }
 
+    #[cfg(any(feature = "handles", test))]
     #[must_use]
     pub const fn with_handle_config(mut self, handles: HandleConfig) -> Self {
         self.handles = handles;
@@ -704,6 +723,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
         self.state
     }
 
+    #[cfg(any(feature = "rtd", test))]
     pub fn subscribe<Source>(
         &self,
         source: &RtdSourceHandle<Source>,

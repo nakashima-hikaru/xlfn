@@ -8,6 +8,10 @@ use crate::generation::RuntimeGeneration;
 pub(crate) struct GenerationServices {
     formula_handles: crate::handle::FormulaHandleServiceSlot,
     subscriptions: crate::rtd::SubscriptionServiceSlot,
+    #[cfg_attr(
+        not(feature = "rtd"),
+        allow(dead_code, reason = "RTD host is unused in core-only builds")
+    )]
     subscription_host: crate::rtd::RtdSubscriptionHost,
 }
 
@@ -104,6 +108,10 @@ impl GenerationServices {
         &self.subscriptions
     }
 
+    #[cfg_attr(
+        not(feature = "rtd"),
+        allow(dead_code, reason = "RTD host is unused in core-only builds")
+    )]
     pub(crate) fn subscription_host(&self) -> crate::rtd::RtdSubscriptionHost {
         self.subscription_host
     }

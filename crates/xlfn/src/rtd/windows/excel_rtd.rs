@@ -85,7 +85,7 @@ pub(crate) fn observe(
 
     if returned != token {
         return Err(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::RTD_HANDLE,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_HANDLE,
         });
     }
 

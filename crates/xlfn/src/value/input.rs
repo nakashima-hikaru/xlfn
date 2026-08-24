@@ -307,13 +307,14 @@ impl<'call> CallContext<'call> {
         }
     }
 
+    #[cfg(any(feature = "handles", test))]
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
         let CallAccess::Handles(access) = &self.access else {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::HANDLE_NO_CONTEXT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
             });
         };
         access.runtime.get()?.lookup(access.scope, token)
@@ -375,7 +376,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         T: ExcelParameter<'call, M>,
     {
         let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
         })?;
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
@@ -393,7 +394,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         T: ExcelParameter<'call, M>,
     {
         let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
         })?;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::encode_decoded(value, identity);

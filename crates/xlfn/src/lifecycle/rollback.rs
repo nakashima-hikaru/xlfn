@@ -167,14 +167,14 @@ where
 
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
         return incomplete(runtime);
     }
     if !runtime.host_callbacks_detached() {
         let error = XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::REGISTRATION_UNKNOWN,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen callbacks remain registered", &error);
         return incomplete(runtime);
@@ -217,7 +217,7 @@ where
     } else {
         if lifecycle_present {
             let error = XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::LIFECYCLE_SLOT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             };
             report_boundary_error("xlAutoOpen lifecycle rollback state", &error);
             return incomplete(runtime);
@@ -237,7 +237,7 @@ where
         Ok(certificate) => certificate,
         Err(_) => {
             let error = XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::RTD_GIT_QUIESCENCE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
             };
             report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
             return incomplete(runtime);

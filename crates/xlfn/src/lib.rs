@@ -14,7 +14,11 @@
 //!
 //! `xlfn` is the single supported Rust API for the framework. Raw ABI
 //! definitions remain in `xlfn-sys`, while this crate owns the runtime,
-//! lifecycle, value, handle, diagnostics, and RTD implementations.
+//! lifecycle, value, diagnostics, and optional handle/RTD implementations.
+//!
+//! The `rtd` feature enables RTD and COM capabilities; `handles` enables
+//! formula handles and therefore implies `rtd`. Core XLLs do not expose or
+//! generate either optional subsystem.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unsafe_code)]
@@ -57,8 +61,12 @@ pub mod error;
 /// Stable execution-layer contracts and per-call metadata.
 pub mod execution;
 mod generation;
+#[cfg(any(feature = "handles", test))]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod handle;
+#[cfg(all(not(feature = "handles"), not(test)))]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+mod handle;
 #[allow(
     unsafe_code,
     reason = "Typed Excel host operations decode raw ABI values"
@@ -88,8 +96,12 @@ mod return_storage;
     reason = "Return protocol types are consumed only at FFI boundaries"
 )]
 mod return_value;
+#[cfg(any(feature = "rtd", test))]
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod rtd;
+#[cfg(all(not(feature = "rtd"), not(test)))]
+#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+mod rtd;
 mod runtime;
 mod runtime_components;
 mod runtime_refinement;
@@ -103,12 +115,15 @@ mod utf16;
 pub mod value;
 
 pub use addin::{
-    Addin, BuildInfo, DiagnosticsSetup, HandleBindingLimit, HandleConfig, MacroSheetContext,
-    MainThreadContext, OpenContext, Opened, RtdConfig, RtdOpenContext, RuntimeConfig,
-    ThreadSafeContext,
+    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext, Opened,
+    RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
 pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
+#[cfg(any(feature = "handles", test))]
+pub use addin::{HandleBindingLimit, HandleConfig};
+#[cfg(any(feature = "rtd", test))]
+pub use addin::{RtdConfig, RtdOpenContext};
 #[cfg(feature = "async")]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
@@ -453,6 +468,46 @@ macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {};
 }
 
+#[cfg(feature = "rtd")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_private_rtd_exports {
+    ($runtime:expr) => {
+        #[used]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
+        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
+        static __XLFN_RTD_MANIFEST: [u8; b"DllGetClassObject\0DllCanUnloadNow\0".len()] =
+            *b"DllGetClassObject\0DllCanUnloadNow\0";
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "system" fn DllGetClassObject(
+            __class_id: *const ::core::ffi::c_void,
+            __interface_id: *const ::core::ffi::c_void,
+            __output: *mut *mut ::core::ffi::c_void,
+        ) -> i32 {
+            // SAFETY: Excel/COM supplies the three live ABI pointers for this
+            // entry point, and the boundary validates their use.
+            unsafe {
+                $crate::__private::v1::dll_get_class_object(__class_id, __interface_id, __output)
+            }
+        }
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "system" fn DllCanUnloadNow() -> i32 {
+            $crate::__private::v1::dll_can_unload_now($runtime)
+        }
+    };
+}
+
+#[cfg(not(feature = "rtd"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_private_rtd_exports {
+    ($runtime:expr) => {};
+}
+
 /// Experimental lower-level APIs.
 #[cfg(any(feature = "unstable-cache", feature = "unstable-output"))]
 pub mod unstable {
@@ -477,13 +532,17 @@ pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function}
 pub mod prelude {
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
-    pub use crate::addin::{
-        Addin, HandleBindingLimit, HandleConfig, OpenContext, Opened, RtdOpenContext, RuntimeConfig,
-    };
+    #[cfg(feature = "rtd")]
+    pub use crate::addin::RtdOpenContext;
+    pub use crate::addin::{Addin, OpenContext, Opened, RuntimeConfig};
+    #[cfg(feature = "handles")]
+    pub use crate::addin::{HandleBindingLimit, HandleConfig};
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
+    #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease, HandleObjectId};
     pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
+    #[cfg(feature = "rtd")]
     pub use crate::subscription::{RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,

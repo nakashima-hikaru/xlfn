@@ -284,7 +284,7 @@ impl InputFingerprintBuilder {
     ) -> XllResult<R> {
         if index != self.next_argument {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
             });
         }
         self.root.update(&[0xA0]);
@@ -301,7 +301,7 @@ impl InputFingerprintBuilder {
     pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
         if self.next_argument != self.expected_arguments {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::INPUT_FINGERPRINT,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
             });
         }
         Ok(InputFingerprint::from_bytes(

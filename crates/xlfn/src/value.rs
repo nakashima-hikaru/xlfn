@@ -1035,6 +1035,7 @@ impl<'call> ExcelInputIdentity for XlArrayRef<'call> {
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::Handle<'call, T>
 where
     M: InputMode,
@@ -1042,6 +1043,7 @@ where
 {
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::Handle<'call, T>
 where
     M: InputMode,
@@ -1070,6 +1072,7 @@ where
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::HandleLease<T>
 where
     M: InputMode,
@@ -1077,6 +1080,7 @@ where
 {
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::HandleLease<T>
 where
     M: InputMode,

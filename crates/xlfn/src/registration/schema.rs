@@ -63,7 +63,7 @@ impl RegistrationSignature {
             || self.arguments.contains(&ArgumentAbi::RawReference) && !self.flags.macro_sheet
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::REGISTRATION_SIGNATURE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
             });
         }
         let mut text = String::with_capacity(self.arguments.len() + 4);

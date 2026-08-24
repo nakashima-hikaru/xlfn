@@ -9,7 +9,9 @@
 
 use crate::XllResult;
 #[cfg(target_os = "windows")]
-use crate::error::{DiagnosticId, XllError};
+use crate::diagnostics::id::DiagnosticId;
+#[cfg(target_os = "windows")]
+use crate::error::XllError;
 
 #[derive(Debug)]
 pub(crate) struct ModuleResidencyLease {

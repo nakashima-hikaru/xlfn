@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = { version = "0.2.0", path = "../../crates/xlfn", features = ["async"] }
+xlfn = { version = "0.2.0", path = "../../crates/xlfn", features = ["async", "handles"] }
 
 [package.metadata.xlfn]
 artifact-name = "FrameworkFixture"

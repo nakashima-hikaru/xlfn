@@ -14,8 +14,8 @@ use crate::runtime_components::GenerationServices;
 use crate::shutdown::HandleRegistrySealed;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
-use std::cell::Cell;
 use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -68,25 +68,35 @@ impl HandlePreparation {
 }
 
 thread_local! {
-    static ACTIVE_HANDLE_INITIALIZATION_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static ACTIVE_HANDLE_INITIALIZATION_KEYS: RefCell<Vec<HandleTopicKey>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) struct HandleInitializationGuard;
+pub(crate) struct HandleInitializationGuard {
+    key: HandleTopicKey,
+}
 
 impl HandleInitializationGuard {
-    pub(crate) fn enter() -> XllResult<Self> {
-        if ACTIVE_HANDLE_INITIALIZATION_DEPTH.get() != 0 {
-            return Err(XllError::ReentrantCall);
-        }
-        ACTIVE_HANDLE_INITIALIZATION_DEPTH.set(1);
-        Ok(Self)
+    pub(crate) fn enter(key: HandleTopicKey) -> XllResult<Self> {
+        ACTIVE_HANDLE_INITIALIZATION_KEYS.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&key) {
+                return Err(XllError::ReentrantCall);
+            }
+            active.push(key);
+            Ok(Self { key })
+        })
     }
 }
 
 impl Drop for HandleInitializationGuard {
     fn drop(&mut self) {
-        debug_assert_eq!(ACTIVE_HANDLE_INITIALIZATION_DEPTH.get(), 1);
-        ACTIVE_HANDLE_INITIALIZATION_DEPTH.set(0);
+        ACTIVE_HANDLE_INITIALIZATION_KEYS.with(|active| {
+            let popped = active
+                .borrow_mut()
+                .pop()
+                .expect("handle initialization stack remains balanced");
+            debug_assert_eq!(popped, self.key);
+        });
     }
 }
 
@@ -243,7 +253,7 @@ impl FormulaHandleService {
         K: Into<HandleTopicKey>,
     {
         let key = key.into();
-        let _active_initialization = HandleInitializationGuard::enter()?;
+        let _active_initialization = HandleInitializationGuard::enter(key)?;
         let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         let _refinement_prepare = self.refinement.observe_prepare();
         let mut observe = Some(observe);
@@ -690,7 +700,7 @@ impl FormulaHandleServiceSealed {
 
 pub(crate) struct FormulaHandleServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
-        crate::HandleConfig,
+        crate::addin::HandleConfig,
         FormulaHandleService,
         crate::XllError,
     >,
@@ -713,7 +723,7 @@ impl FormulaHandleServiceSlot {
         }
     }
 
-    pub(crate) fn arm(&self, config: crate::HandleConfig) -> XllResult<()> {
+    pub(crate) fn arm(&self, config: crate::addin::HandleConfig) -> XllResult<()> {
         self.service
             .arm(config)
             .map_err(crate::runtime_components::map_service_error)
@@ -800,7 +810,7 @@ impl FormulaHandleServiceSlot {
         self.service
             .seal(
                 crate::XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::HANDLE_SLOT,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
                 },
                 || FormulaHandleServiceSealed::empty(generation),
                 |handles| {

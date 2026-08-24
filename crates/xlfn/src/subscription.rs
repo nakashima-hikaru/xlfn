@@ -9,6 +9,14 @@
     not(target_os = "windows"),
     allow(dead_code, reason = "Internal helpers for Windows COM integration")
 )]
+#![cfg_attr(
+    not(feature = "rtd"),
+    allow(
+        dead_code,
+        unreachable_pub,
+        reason = "The subscription implementation is private in core-only builds"
+    )
+)]
 
 mod catalog;
 mod delivery;
@@ -27,11 +35,22 @@ pub(crate) type SubscriptionConnection =
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::rtd::RtdSubscriptionHost>;
 
+#[cfg(any(feature = "rtd", test))]
 pub use source::{
     RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
 };
-pub use topic::{RtdLimits, RtdTopic};
-pub use value::{IntoRtdValue, RtdValue};
+#[cfg(any(feature = "rtd", test))]
+pub use topic::RtdLimits;
+#[cfg(all(not(feature = "rtd"), not(test)))]
+pub(crate) use topic::RtdLimits;
+#[cfg(any(feature = "rtd", test))]
+pub use topic::RtdTopic;
+#[cfg(any(feature = "rtd", test))]
+pub use value::IntoRtdValue;
+#[cfg(any(feature = "rtd", test))]
+pub use value::RtdValue;
+#[cfg(all(not(feature = "rtd"), not(test)))]
+pub(crate) use value::RtdValue;
 
 #[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
 pub(crate) use crate::generation::ServerGeneration;

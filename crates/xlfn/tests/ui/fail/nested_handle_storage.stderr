@@ -5,6 +5,11 @@ error[E0277]: `NonNull<Inner>` cannot be shared between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be shared between threads safely
   |
   = help: within `Nested<'call>`, the trait `Sync` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `handle::object::TypedObjectProjection<Inner>`
+ --> src/handle/object.rs
+  |
+  | pub(crate) struct TypedObjectProjection<T: 'static> {
+  |                   ^^^^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |
@@ -28,6 +33,11 @@ error[E0277]: `NonNull<Inner>` cannot be sent between threads safely
   |        ^^^^^^^^^^^^^ `NonNull<Inner>` cannot be sent between threads safely
   |
   = help: within `Nested<'call>`, the trait `Send` is not implemented for `NonNull<Inner>`
+note: required because it appears within the type `handle::object::TypedObjectProjection<Inner>`
+ --> src/handle/object.rs
+  |
+  | pub(crate) struct TypedObjectProjection<T: 'static> {
+  |                   ^^^^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::handle::Handle<'call, Inner>`
  --> src/handle/typed.rs
   |

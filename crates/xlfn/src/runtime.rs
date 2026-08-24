@@ -204,6 +204,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.residency.release()
     }
 
+    #[cfg(any(feature = "rtd", test))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
@@ -314,7 +315,7 @@ impl<A: crate::Addin> Runtime<A> {
             || control.removal_attempt().is_some()
         {
             return Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::OPEN_PHASE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
             });
         }
 
@@ -453,7 +454,7 @@ impl<A: crate::Addin> Runtime<A> {
     ) -> XllResult<()> {
         let generation = attempt_id.into_runtime_generation();
         let config = control.opening_config().ok_or(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
         })?;
         let armed_services = GenerationServices::arm_generation(
             generation,
@@ -568,7 +569,7 @@ impl<A: crate::Addin> Runtime<A> {
                             crate::lifecycle::fail_stop_invariant(
                                 "xlAutoOpen commit postcondition",
                                 &XllError::Internal {
-                                    diagnostic_id: crate::error::DiagnosticId::OPEN_STATE,
+                                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
                                 },
                             );
                         }
@@ -703,7 +704,7 @@ impl<A: crate::Addin> Runtime<A> {
                         crate::lifecycle::fail_stop_invariant(
                             "xlAutoRemove close-request postcondition",
                             &XllError::Internal {
-                                diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
                             },
                         );
                     }
@@ -848,7 +849,7 @@ impl<A: crate::Addin> Runtime<A> {
             Ok(crate::shutdown::ReturnsQuiescent::new())
         } else {
             Err(XllError::Internal {
-                diagnostic_id: crate::error::DiagnosticId::CLOSE_CERTIFICATE,
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
             })
         }
     }
@@ -930,7 +931,7 @@ impl TerminalCertificateKind for FinalRemoval {
 
     fn error() -> XllError {
         XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::CLOSE_CERTIFICATE,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
         }
     }
 }
@@ -949,7 +950,7 @@ impl TerminalCertificateKind for OpenRollback {
 
     fn error() -> XllError {
         XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
         }
     }
 }
@@ -1079,7 +1080,7 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, OpenRollback> {
         {
             return Err((
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PHASE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
                 },
                 Box::new(self),
             ));
@@ -1106,7 +1107,7 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, OpenRollback> {
             crate::lifecycle::fail_stop_invariant(
                 "xlAutoOpen rollback close postcondition",
                 &XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::OPEN_ROLLBACK_PHASE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
                 },
             );
         }
@@ -1128,7 +1129,7 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
         if self.generation != runtime.last_committed_generation() {
             return Err((
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_LEASE_GATE,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,
                 },
                 Box::new(self),
             ));
@@ -1143,7 +1144,7 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
         if control.removal_attempt() != Some(self.owner.attempt) {
             return Err((
                 XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_RUNTIME,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
                 },
                 Box::new(self),
             ));
@@ -1165,7 +1166,7 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
             crate::lifecycle::fail_stop_invariant(
                 "xlAutoRemove close postcondition",
                 &XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
                 },
             );
         }
@@ -1396,7 +1397,7 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
             crate::lifecycle::fail_stop_invariant(
                 "xlAutoRemove removal-owner release",
                 &XllError::Internal {
-                    diagnostic_id: crate::error::DiagnosticId::CLOSE_WAIT,
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
                 },
             );
         }

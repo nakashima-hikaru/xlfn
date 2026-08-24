@@ -1910,7 +1910,7 @@ fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::error::DiagnosticId::ASYNC_SPAWN
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN
         })
     ));
 }
