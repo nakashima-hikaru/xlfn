@@ -28,12 +28,6 @@ pub(crate) fn guid_eq(left: GUID, right: GUID) -> bool {
         && left.data4 == right.data4
 }
 
-impl Default for GUID {
-    fn default() -> Self {
-        Self::from_u128(0)
-    }
-}
-
 #[repr(C)]
 #[allow(non_snake_case, reason = "COM IUnknown vtable ABI method names")]
 pub(super) struct IUnknown_Vtbl {

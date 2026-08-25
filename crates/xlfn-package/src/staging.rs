@@ -300,9 +300,11 @@ pub(crate) fn current_windows_user_sid_string() -> PackageResult<String> {
     use std::mem::{MaybeUninit, align_of, size_of};
 
     let mut token = std::ptr::null_mut();
-    // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle and
-    // `token` points to writable storage for the returned token handle.
-    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `process` is the current-process pseudo-handle and `token` points
+    // to writable storage for the returned token handle.
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
     if opened == 0 {
         return Err(io::Error::last_os_error().into());
     }
@@ -522,9 +524,11 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
             return Err(io::Error::from_raw_os_error(status as i32).into());
         }
 
-        // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle
-        // and `token` points to writable storage for the returned handle.
-        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle.
+        let process = unsafe { GetCurrentProcess() };
+        // SAFETY: `process` is the current-process pseudo-handle and `token`
+        // points to writable storage for the returned handle.
+        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
         if opened == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -579,12 +583,14 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
                 .as_ref()
                 .ok_or_else(|| "token information buffer is null".to_owned())?
         };
-        if owner.is_null()
-            || token_user.User.Sid.is_null()
-            // SAFETY: both SID pointers come from successful Windows security
-            // APIs and are non-null before they are validated here.
-            || unsafe { IsValidSid(owner) == 0 || IsValidSid(token_user.User.Sid) == 0 }
-        {
+        if owner.is_null() || token_user.User.Sid.is_null() {
+            return Err("private staging directory has an invalid owner SID".into());
+        }
+        // SAFETY: `owner` is non-null and comes from `GetNamedSecurityInfoW`.
+        let owner_valid = unsafe { IsValidSid(owner) != 0 };
+        // SAFETY: the token SID is non-null and comes from `GetTokenInformation`.
+        let token_user_valid = unsafe { IsValidSid(token_user.User.Sid) != 0 };
+        if !owner_valid || !token_user_valid {
             return Err("private staging directory has an invalid owner SID".into());
         }
         // SAFETY: the two SIDs were checked for non-null and validity above.
@@ -721,18 +727,18 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         Ok(())
     })();
 
-    // SAFETY: each pointer is either null or owned by the corresponding
-    // Windows API call above, and each resource is released at most once.
-    unsafe {
-        if !token.is_null() {
-            let _ = CloseHandle(token);
-        }
-        if !system_sid.is_null() {
-            let _ = LocalFree(system_sid as HLOCAL);
-        }
-        if !security_descriptor.is_null() {
-            let _ = LocalFree(security_descriptor as HLOCAL);
-        }
+    if !token.is_null() {
+        // SAFETY: `token` is an owned token handle and is released exactly once.
+        let _ = unsafe { CloseHandle(token) };
+    }
+    if !system_sid.is_null() {
+        // SAFETY: `system_sid` was allocated by `ConvertStringSidToSidW`.
+        let _ = unsafe { LocalFree(system_sid as HLOCAL) };
+    }
+    if !security_descriptor.is_null() {
+        // SAFETY: `security_descriptor` was allocated by
+        // `GetNamedSecurityInfoW`.
+        let _ = unsafe { LocalFree(security_descriptor as HLOCAL) };
     }
     result
 }

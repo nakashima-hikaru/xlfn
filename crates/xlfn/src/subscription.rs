@@ -52,7 +52,11 @@ pub use value::RtdValue;
 #[cfg(all(not(feature = "rtd"), not(test)))]
 pub(crate) use value::RtdValue;
 
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(
+    all(target_os = "windows", feature = "rtd"),
+    test,
+    feature = "bench-internals"
+))]
 pub(crate) use crate::generation::ServerGeneration;
 #[cfg(test)]
 pub(crate) use crate::generation::{ConnectionGeneration, RuntimeGeneration};
@@ -62,9 +66,13 @@ use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
 #[cfg(test)]
 pub(crate) use catalog::SubscriptionCatalog;
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(
+    all(target_os = "windows", feature = "rtd"),
+    test,
+    feature = "bench-internals"
+))]
 pub(crate) use delivery::RefreshOutcome;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) use delivery::RtdUpdate;
 #[cfg(test)]
 pub(crate) use delivery::{
@@ -106,7 +114,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
 pub(crate) use topic::SubscriptionKey;
-#[cfg(any(target_os = "windows", test, feature = "bench-internals"))]
+#[cfg(any(
+    all(target_os = "windows", feature = "rtd"),
+    test,
+    feature = "bench-internals"
+))]
 pub(crate) use topic::TopicId;
 #[cfg(test)]
 pub(crate) use topic::{
@@ -114,7 +126,7 @@ pub(crate) use topic::{
     DEFAULT_MAX_RTD_SOURCE_IDS, DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES, MAX_RTD_TOPIC_BYTES,
     MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionIdentity,
 };
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(all(target_os = "windows", feature = "rtd"), test))]
 pub(crate) use value::StoredRtdValue;
 #[cfg(test)]
 pub(crate) mod tests;

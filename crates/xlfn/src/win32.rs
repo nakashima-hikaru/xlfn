@@ -251,7 +251,7 @@ pub type FUNCFLAGS = u16;
 pub type FUNCKIND = i32;
 pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 4u32;
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct GUID {
     pub data1: u32,
     pub data2: u16,
