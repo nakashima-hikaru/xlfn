@@ -26,6 +26,10 @@ mod host;
 pub(crate) mod service;
 
 #[cfg(all(target_os = "windows", feature = "rtd"))]
+#[allow(
+    unsafe_code,
+    reason = "Windows RTD COM implementation is an intentional raw FFI boundary"
+)]
 mod windows;
 
 #[cfg(all(target_os = "windows", feature = "rtd"))]

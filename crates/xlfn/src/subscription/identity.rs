@@ -11,10 +11,6 @@ pub(crate) struct SourceIdentityReservation {
 }
 
 impl SourceIdentityReservation {
-    pub(crate) fn source_id(&self) -> SourceHandleId {
-        self.source_id
-    }
-
     pub(crate) fn commit(self) {
         // The registry keeps the committed identity reference. Consuming this
         // token makes that ownership transfer explicit; rollback is performed

@@ -1307,7 +1307,6 @@ fn reserve_live_source_tracks_each_identity_reference() {
     let (source, _, _) = publishing_source::<f64>(None);
     let first = registry.reserve(source.id, 16).unwrap();
     let second = registry.reserve(source.id, 16).unwrap();
-    assert_eq!(first.source_id(), second.source_id());
     assert_eq!(
         registry.refs.get(&source.id).map(|refs| refs.get()),
         Some(2)
