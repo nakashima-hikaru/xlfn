@@ -904,58 +904,83 @@ pub(crate) struct FinalRemoval;
 pub(crate) struct OpenRollback;
 
 pub(crate) trait TerminalCertificateKind {
-    fn accepts_phase(phase: LifecyclePhase) -> bool;
-    fn requires_module_epoch() -> bool;
-    fn error() -> XllError;
+    type Certificate<'runtime, A: crate::Addin>
+    where
+        A: 'runtime;
+
+    fn certify<'runtime, A>(
+        owner: RemovalOwner<'runtime, A>,
+        proof: QuiescenceProof,
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    where
+        A: crate::Addin + 'runtime;
 }
 
 impl TerminalCertificateKind for FinalRemoval {
-    fn accepts_phase(phase: LifecyclePhase) -> bool {
-        phase == LifecyclePhase::Closing
-    }
+    type Certificate<'runtime, A: crate::Addin>
+        = FinalRemovalCertificate<'runtime, A>
+    where
+        A: 'runtime;
 
-    fn requires_module_epoch() -> bool {
-        true
-    }
-
-    fn error() -> XllError {
-        XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-        }
+    fn certify<'runtime, A>(
+        owner: RemovalOwner<'runtime, A>,
+        proof: QuiescenceProof,
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    where
+        A: crate::Addin + 'runtime,
+    {
+        owner.certify_final_removal(proof)
     }
 }
 
 impl TerminalCertificateKind for OpenRollback {
-    fn accepts_phase(phase: LifecyclePhase) -> bool {
-        matches!(
-            phase,
-            LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
-        )
-    }
+    type Certificate<'runtime, A: crate::Addin>
+        = OpenRollbackCertificate<'runtime, A>
+    where
+        A: 'runtime;
 
-    fn requires_module_epoch() -> bool {
-        false
-    }
-
-    fn error() -> XllError {
-        XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
-        }
+    fn certify<'runtime, A>(
+        owner: RemovalOwner<'runtime, A>,
+        proof: QuiescenceProof,
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    where
+        A: crate::Addin + 'runtime,
+    {
+        owner.certify_open_rollback(proof)
     }
 }
 
-pub(crate) struct TerminalCertificate<'runtime, A: crate::Addin, K> {
-    #[allow(
-        dead_code,
-        reason = "linear proof tokens are consumed by terminal transitions"
-    )]
-    pub(crate) proof: QuiescenceProof,
+/// The final-removal certificate has the same two shapes as the formal
+/// lifecycle model: a committed generation owns both its generation identity
+/// and module epoch, while an uncommitted close owns neither.
+#[allow(
+    dead_code,
+    reason = "certificate fields are linear proof ownership consumed at finish"
+)]
+pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
+    Committed {
+        proof: QuiescenceProof,
+        #[cfg(any(test, feature = "refinement"))]
+        composition_resources: crate::shutdown_refinement::GhostResources,
+        owner: RemovalOwner<'runtime, A>,
+        generation: RuntimeGeneration,
+        module_epoch: crate::module_runtime::ModuleEpochLease,
+    },
+    Uncommitted {
+        proof: QuiescenceProof,
+        #[cfg(any(test, feature = "refinement"))]
+        composition_resources: crate::shutdown_refinement::GhostResources,
+        owner: RemovalOwner<'runtime, A>,
+    },
+}
+
+/// Open rollback never owns a committed-generation/module-epoch certificate.
+/// Any temporary module epoch is consumed while issuing this value.
+pub(crate) struct OpenRollbackCertificate<'runtime, A: crate::Addin> {
+    proof: QuiescenceProof,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) composition_resources: crate::shutdown_refinement::GhostResources,
-    pub(crate) owner: RemovalOwner<'runtime, A>,
-    pub(crate) generation: Option<RuntimeGeneration>,
-    pub(crate) module_epoch: Option<crate::module_runtime::ModuleEpochLease>,
-    pub(crate) _kind: std::marker::PhantomData<K>,
+    composition_resources: crate::shutdown_refinement::GhostResources,
+    owner: RemovalOwner<'runtime, A>,
 }
 
 #[derive(Debug)]
@@ -989,15 +1014,13 @@ fn composition_resources_from_quiescence_proof(
 }
 
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
-    /// Consume the affine removal owner and issue a certificate only for the
-    /// runtime and attempt represented by that owner. On failure, return the
-    /// owner with the error so the caller can retain the quarantine guard.
-    pub(crate) fn certify<K: TerminalCertificateKind>(
-        self,
-        proof: QuiescenceProof,
-    ) -> Result<TerminalCertificate<'runtime, A, K>, (XllError, Self)> {
+    fn validate_certificate(
+        &self,
+        proof: &QuiescenceProof,
+        accepts_phase: impl FnOnce(LifecyclePhase) -> bool,
+    ) -> Option<LifecycleRemovalState> {
         let runtime = self.runtime;
-        let mut control = runtime.lifecycle.access();
+        let control = runtime.lifecycle.access();
         let lifecycle_state: LifecycleRemovalState = control.removal_state();
         let services = runtime
             .lifecycle
@@ -1008,55 +1031,134 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             .last_committed_generation
             .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
         let services_owned = services_stopped || lifecycle_state.has_retirement();
-        let module_epoch_required =
-            K::requires_module_epoch() && lifecycle_state.last_committed_generation.is_some();
 
-        let certified = K::accepts_phase(lifecycle_state.phase)
+        let certified = accepts_phase(lifecycle_state.phase)
             && lifecycle_state.open_attempt.is_none()
             && lifecycle_state.removal_attempt == Some(self.attempt)
             // `QuiescenceProof::returns` is issued only after the return
             // admission is closed and all return obligations have drained.
             // The certificate therefore consumes the proof token instead of
             // reopening the ambient return protocol here.
-            // The same rule applies to async producers: `async_stopped` is a
-            // linear proof token produced by the teardown stage, so checking
-            // the executor again here would reintroduce an ambient snapshot
-            // into certificate issuance.
             && services_stopped
             && !lifecycle_state.has_opening_generation()
             && !lifecycle_state.has_current_generation()
             && services_owned
-            && (!module_epoch_required
-                || (lifecycle_state.has_module_epoch()
-                    && lifecycle_state.module_epoch_is_current()))
             && runtime.host.is_quiescent();
-        let certified = certified && handles_match_generation;
 
-        if !certified {
-            return Err((K::error(), self));
-        }
+        certified
+            .then_some(lifecycle_state)
+            .filter(|_| handles_match_generation)
+    }
 
-        // The lease is the canonical owner of the cross-slot generation
-        // arming decision. Once every service slot is stopped and all other
-        // quiescence proofs hold, consuming it linearizes generation teardown.
-        let module_epoch = runtime.lifecycle.take_certified_module_epoch(&mut control);
+    fn certify_final_removal(
+        self,
+        proof: QuiescenceProof,
+    ) -> Result<FinalRemovalCertificate<'runtime, A>, (XllError, Self)> {
+        let lifecycle_state =
+            match self.validate_certificate(&proof, |phase| phase == LifecyclePhase::Closing) {
+                Some(state) => state,
+                None => {
+                    return Err((
+                        XllError::Internal {
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                        },
+                        self,
+                    ));
+                }
+            };
+        let runtime = self.runtime;
 
         #[cfg(any(test, feature = "refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
 
-        Ok(TerminalCertificate {
+        if let Some(generation) = lifecycle_state.last_committed_generation {
+            if !lifecycle_state.has_module_epoch() || !lifecycle_state.module_epoch_is_current() {
+                return Err((
+                    XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                    },
+                    self,
+                ));
+            }
+            let mut control = runtime.lifecycle.access();
+            let Some(module_epoch) = runtime.lifecycle.take_certified_module_epoch(&mut control)
+            else {
+                return Err((
+                    XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                    },
+                    self,
+                ));
+            };
+            Ok(FinalRemovalCertificate::Committed {
+                proof,
+                #[cfg(any(test, feature = "refinement"))]
+                composition_resources,
+                owner: self,
+                generation,
+                module_epoch,
+            })
+        } else {
+            Ok(FinalRemovalCertificate::Uncommitted {
+                proof,
+                #[cfg(any(test, feature = "refinement"))]
+                composition_resources,
+                owner: self,
+            })
+        }
+    }
+
+    fn certify_open_rollback(
+        self,
+        proof: QuiescenceProof,
+    ) -> Result<OpenRollbackCertificate<'runtime, A>, (XllError, Self)> {
+        if self
+            .validate_certificate(&proof, |phase| {
+                matches!(
+                    phase,
+                    LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
+                )
+            })
+            .is_none()
+        {
+            return Err((
+                XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
+                },
+                self,
+            ));
+        }
+
+        // Rollback does not retain a module epoch in its certificate shape,
+        // but any epoch attached to the failed opening must still be consumed
+        // before the owner can finish Closed.
+        let runtime = self.runtime;
+        let mut control = runtime.lifecycle.access();
+        let _ = runtime.lifecycle.take_certified_module_epoch(&mut control);
+
+        #[cfg(any(test, feature = "refinement"))]
+        let composition_resources = composition_resources_from_quiescence_proof(&proof);
+
+        Ok(OpenRollbackCertificate {
             proof,
             #[cfg(any(test, feature = "refinement"))]
             composition_resources,
             owner: self,
-            generation: lifecycle_state.last_committed_generation,
-            module_epoch,
-            _kind: std::marker::PhantomData,
         })
+    }
+
+    /// Consume the affine removal owner and issue the certificate shape
+    /// selected by `K`. On failure, return the owner so the caller can retain
+    /// the quarantine guard.
+    pub(crate) fn certify<K: TerminalCertificateKind>(
+        self,
+        proof: QuiescenceProof,
+    ) -> Result<K::Certificate<'runtime, A>, (XllError, Self)> {
+        K::certify(self, proof)
     }
 }
 
-impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, OpenRollback> {
+impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
     pub(crate) fn finish(self) -> Result<RemovalOwner<'runtime, A>, (XllError, Box<Self>)> {
         let runtime = self.owner.runtime;
         let mut control = runtime.lifecycle.access();
@@ -1074,14 +1176,11 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, OpenRollback> {
                 Box::new(self),
             ));
         }
-        let TerminalCertificate {
+        let OpenRollbackCertificate {
             proof: _proof,
             #[cfg(any(test, feature = "refinement"))]
             composition_resources,
             owner,
-            generation: _generation,
-            module_epoch: _module_epoch,
-            _kind: _,
         } = self;
         crate::module_runtime::global().close_callbacks();
         runtime.lifecycle.finish_closed(&mut control);
@@ -1110,12 +1209,21 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, OpenRollback> {
     }
 }
 
-impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
+impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
     pub(crate) fn finish(
         self,
     ) -> Result<(ClosedWitness, RemovalOwner<'runtime, A>), (XllError, Box<Self>)> {
-        let runtime = self.owner.runtime;
-        if self.generation != runtime.last_committed_generation() {
+        let runtime = match &self {
+            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.runtime,
+        };
+        let expected_generation = match &self {
+            Self::Committed { generation, .. } => Some(*generation),
+            Self::Uncommitted { .. } => None,
+        };
+        let removal_attempt = match &self {
+            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.attempt,
+        };
+        if expected_generation != runtime.last_committed_generation() {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,
@@ -1124,13 +1232,13 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
             ));
         }
         #[cfg(any(test, feature = "refinement"))]
-        let committed = runtime.refinement_hooks().generation_active(runtime);
+        let committed = matches!(self, Self::Committed { .. });
         #[cfg(any(test, feature = "refinement"))]
         if committed && let Err(error) = runtime.refinement_hooks().finish_close(runtime) {
             return Err((error, Box::new(self)));
         }
         let mut control = runtime.lifecycle.access();
-        if control.removal_attempt() != Some(self.owner.attempt) {
+        if control.removal_attempt() != Some(removal_attempt) {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
@@ -1138,16 +1246,25 @@ impl<'runtime, A: crate::Addin> TerminalCertificate<'runtime, A, FinalRemoval> {
                 Box::new(self),
             ));
         }
-        let TerminalCertificate {
-            proof: _proof,
-            #[cfg(any(test, feature = "refinement"))]
-            composition_resources,
-            owner,
-            #[cfg(any(test, feature = "refinement"))]
-            generation,
-            module_epoch: _module_epoch,
-            ..
-        } = self;
+        #[cfg(any(test, feature = "refinement"))]
+        let composition_resources = match &self {
+            Self::Committed {
+                composition_resources,
+                ..
+            }
+            | Self::Uncommitted {
+                composition_resources,
+                ..
+            } => composition_resources.clone(),
+        };
+        #[cfg(any(test, feature = "refinement"))]
+        let generation = match &self {
+            Self::Committed { generation, .. } => Some(*generation),
+            Self::Uncommitted { .. } => None,
+        };
+        let owner = match self {
+            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner,
+        };
         crate::module_runtime::global().close_callbacks();
         runtime.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "refinement"))]
@@ -1283,12 +1400,19 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(any(feature = "rtd", test)))]
         {
-            Ok(crate::rtd::SubscriptionsStopped::new())
+            Ok(crate::rtd::stopped_subscriptions())
         }
         #[cfg(any(feature = "rtd", test))]
         {
             let Some(services) = self.generation_services_snapshot() else {
-                return Ok(crate::rtd::SubscriptionsStopped::new());
+                #[cfg(test)]
+                {
+                    return Ok(crate::rtd::stopped_subscriptions());
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(XllError::Closing);
+                }
             };
             services.subscriptions_slot().seal()
         }

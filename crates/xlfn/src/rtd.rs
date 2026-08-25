@@ -40,6 +40,11 @@ pub(crate) use host::RtdSubscriptionHost;
 pub(crate) use service::SubscriptionServiceSlot;
 pub(crate) use service::SubscriptionsStopped;
 
+#[cfg(any(not(feature = "rtd"), test))]
+pub(crate) const fn stopped_subscriptions() -> SubscriptionsStopped {
+    service::SubscriptionsStopped::issue()
+}
+
 #[cfg(all(not(test), any(not(feature = "rtd"), not(target_os = "windows"))))]
 #[derive(Clone)]
 pub(crate) enum RtdNotifier {}

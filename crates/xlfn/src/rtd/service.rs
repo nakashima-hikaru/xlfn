@@ -18,7 +18,7 @@ pub(crate) struct SubscriptionsStopped {
 }
 
 impl SubscriptionsStopped {
-    pub(crate) fn new() -> Self {
+    pub(super) const fn issue() -> Self {
         Self { _private: () }
     }
 
@@ -97,10 +97,10 @@ impl SubscriptionServiceSlot {
                 crate::XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SLOTS,
                 },
-                SubscriptionsStopped::new,
+                SubscriptionsStopped::issue,
                 |runtime| {
                     crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))
-                        .map(|()| SubscriptionsStopped::new())
+                        .map(|()| SubscriptionsStopped::issue())
                 },
             )
             .map_err(crate::runtime_components::map_service_error)

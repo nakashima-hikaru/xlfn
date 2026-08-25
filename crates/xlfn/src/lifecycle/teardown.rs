@@ -548,7 +548,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     pub(super) fn certify(
         mut self,
-    ) -> crate::XllResult<crate::runtime::TerminalCertificate<'runtime, A, K>>
+    ) -> crate::XllResult<<K as crate::runtime::TerminalCertificateKind>::Certificate<'runtime, A>>
     where
         K: crate::runtime::TerminalCertificateKind,
     {
