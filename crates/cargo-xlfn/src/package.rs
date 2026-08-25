@@ -160,11 +160,6 @@ pub(crate) fn validate_transactional_output_root(destination: &Path) -> Result {
     Ok(())
 }
 
-pub(crate) fn validate_output_destination(destination: &Path) -> Result {
-    xlfn_package::validate_directory_path(destination)?;
-    Ok(())
-}
-
 pub(crate) fn stage_package_target(
     target: WindowsTarget,
     args: &PackageArgs,

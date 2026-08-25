@@ -7,17 +7,25 @@
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
 use fs_err as fs;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use usage::{Args, Cli, Subcommands, ValueEnum};
+#[cfg(test)]
+use xlfn_package::distribution::sync_directory;
+use xlfn_package::distribution::{
+    DistributionCommitGuard, DistributionFileOps, SystemDistributionFileOps, TRANSACTION_JOURNAL,
+    TransactionJournal, TransactionState, atomic_replace_file, ensure_destination_absent,
+    is_private_transaction, optional_directory_identity, read_transaction_journal,
+    remove_empty_transaction, rename_path, require_directory_identity, sync_rename_parents,
+    transaction_id, transaction_payloads, validate_output_destination,
+    validate_transaction_provenance, write_transaction_state,
+};
 use xlfn_package::{
     BundleMetadata, DirectoryIdentity, directory_identity, validate_windows_basename,
 };

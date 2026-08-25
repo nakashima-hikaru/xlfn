@@ -39,6 +39,7 @@ mod architecture;
 mod artifact;
 mod bundle;
 mod commit;
+pub mod distribution;
 mod error;
 mod fs_identity;
 mod manifest;

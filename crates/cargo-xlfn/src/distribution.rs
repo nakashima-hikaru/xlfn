@@ -1,27 +1,5 @@
 use super::*;
 
-pub(crate) trait DistributionFileOps {
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
-    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
-    fn sync_directory(&self, path: &Path) -> io::Result<()>;
-}
-
-pub(crate) struct SystemDistributionFileOps;
-
-impl DistributionFileOps for SystemDistributionFileOps {
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        rename_path(from, to)
-    }
-
-    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
-        fs::remove_dir_all(path)
-    }
-
-    fn sync_directory(&self, path: &Path) -> io::Result<()> {
-        sync_directory(path)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct DistributionRecoveryError {
     pub(crate) destination: PathBuf,
@@ -75,202 +53,6 @@ impl fmt::Display for DistributionRecoveryQuarantineError {
 }
 
 impl std::error::Error for DistributionRecoveryQuarantineError {}
-
-pub(crate) const TRANSACTION_JOURNAL: &str = "journal";
-pub(crate) const TRANSACTION_SCHEMA: u32 = 1;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum TransactionState {
-    Prepared,
-    NoPrevious,
-    PreviousSaved,
-    InstallPending,
-    InstallPendingNoPrevious,
-    Installed,
-    InstalledNoPrevious,
-    RollbackPending,
-    RollbackPendingNoPrevious,
-    RolledBack,
-    // The installed directory is authoritative. `previous`, when present,
-    // is cleanup payload only and is never a recovery source in this state.
-    Committed,
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LockFileIdentity {
-    pub(crate) dev: u64,
-    pub(crate) ino: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TransactionJournal {
-    pub(crate) schema: u32,
-    pub(crate) transaction_id: String,
-    pub(crate) destination_name: String,
-    pub(crate) parent_identity: DirectoryIdentity,
-    pub(crate) transaction_identity: DirectoryIdentity,
-    pub(crate) destination_identity: Option<DirectoryIdentity>,
-    pub(crate) state: TransactionState,
-    pub(crate) previous_identity: Option<DirectoryIdentity>,
-    pub(crate) installed_identity: Option<DirectoryIdentity>,
-    pub(crate) sequence: u64,
-    pub(crate) checksum: String,
-}
-
-impl TransactionJournal {
-    pub(crate) fn new(
-        transaction_id: String,
-        destination_name: String,
-        parent_identity: DirectoryIdentity,
-        transaction_identity: DirectoryIdentity,
-        destination_identity: Option<DirectoryIdentity>,
-    ) -> Result<Self> {
-        let mut journal = Self {
-            schema: TRANSACTION_SCHEMA,
-            transaction_id,
-            destination_name,
-            parent_identity,
-            transaction_identity,
-            destination_identity,
-            state: TransactionState::Prepared,
-            previous_identity: None,
-            installed_identity: None,
-            sequence: 0,
-            checksum: String::new(),
-        };
-        journal.refresh_checksum()?;
-        Ok(journal)
-    }
-
-    pub(crate) fn refresh_checksum(&mut self) -> Result<()> {
-        self.checksum = journal_checksum(self)?;
-        Ok(())
-    }
-}
-
-pub(crate) fn journal_checksum(journal: &TransactionJournal) -> Result<String> {
-    let mut unsigned = journal.clone();
-    unsigned.checksum.clear();
-    let encoded = serde_json::to_vec(&unsigned)?;
-    let digest = Sha256::digest(encoded);
-    use std::fmt::Write as _;
-    let mut checksum = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut checksum, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    Ok(checksum)
-}
-
-pub(crate) struct DistributionCommitGuard {
-    pub(crate) lock_file: std::fs::File,
-    pub(crate) lock_path: PathBuf,
-    #[cfg(unix)]
-    pub(crate) lock_identity: LockFileIdentity,
-    pub(crate) destination: PathBuf,
-}
-
-impl DistributionCommitGuard {
-    pub(crate) fn acquire(parent: &Path, destination_name: &str) -> Result<Self> {
-        let lock_path = parent.join(format!(".{destination_name}.lock"));
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use crate::win32::FILE_FLAG_OPEN_REPARSE_POINT;
-            use std::os::windows::fs::OpenOptionsExt;
-
-            options
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(0);
-        }
-
-        let lock_file = options.open(&lock_path).with_context(|| {
-            format!(
-                "failed to open distribution commit lock {}",
-                lock_path.display()
-            )
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-
-            // SAFETY: the file descriptor is valid for the lifetime of the
-            // lock file; LOCK_EX serializes operations that use this inode,
-            // while ensure_held detects pathname replacement.
-            let status = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if status != 0 {
-                return Err(io::Error::last_os_error()).with_context(|| {
-                    format!("failed to lock distribution commit {}", lock_path.display())
-                });
-            }
-        }
-
-        #[cfg(unix)]
-        let lock_identity = lock_file_identity(&lock_file)?;
-        let guard = Self {
-            lock_file,
-            lock_path,
-            #[cfg(unix)]
-            lock_identity,
-            destination: parent.join(destination_name),
-        };
-        guard.ensure_held()?;
-        Ok(guard)
-    }
-
-    pub(crate) fn ensure_held(&self) -> io::Result<()> {
-        let metadata = self.lock_file.metadata()?;
-        if !metadata.is_file() {
-            return Err(io::Error::other(
-                "distribution commit lock handle is not a file",
-            ));
-        }
-
-        #[cfg(unix)]
-        {
-            let path_metadata = fs::symlink_metadata(&self.lock_path)?;
-            if !path_metadata.is_file() {
-                return Err(io::Error::other(
-                    "distribution commit lock path is not a regular file",
-                ));
-            }
-            let path_identity = lock_file_identity_from_metadata(&path_metadata);
-            if path_identity != self.lock_identity {
-                return Err(io::Error::other(
-                    "distribution commit lock path was replaced while held",
-                ));
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            // share_mode(0) on the held handle prevents pathname deletion or
-            // replacement while the lock is held; the path check below also
-            // detects an externally forced replacement before a destructive
-            // phase.
-            let path_metadata = fs::symlink_metadata(&self.lock_path)?;
-            if !path_metadata.is_file() {
-                return Err(io::Error::other(
-                    "distribution commit lock path is not a regular file",
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
 
 pub(crate) static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -380,128 +162,6 @@ impl DistributionTransactionDirectory {
 
 impl Drop for DistributionTransactionDirectory {
     fn drop(&mut self) {}
-}
-
-#[cfg(unix)]
-pub(crate) fn lock_file_identity(file: &std::fs::File) -> io::Result<LockFileIdentity> {
-    Ok(lock_file_identity_from_metadata(&file.metadata()?))
-}
-
-#[cfg(unix)]
-pub(crate) fn lock_file_identity_from_metadata(metadata: &std::fs::Metadata) -> LockFileIdentity {
-    use std::os::unix::fs::MetadataExt;
-
-    LockFileIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    }
-}
-
-pub(crate) fn optional_directory_identity(path: &Path) -> Result<Option<DirectoryIdentity>> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => xlfn_package::directory_identity(path)
-            .map(Some)
-            .map_err(Into::into),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(crate) fn require_directory_identity(
-    path: &Path,
-    expected: DirectoryIdentity,
-    label: &str,
-) -> Result<()> {
-    let actual = xlfn_package::directory_identity(path)?;
-    if actual != expected {
-        bail!("{} identity changed: {}", label, path.display());
-    }
-    Ok(())
-}
-
-pub(crate) fn transaction_id(transaction: &Path, prefix: &str) -> Result<String> {
-    let name = transaction
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("transaction directory name is not valid UTF-8")?;
-    let suffix = name
-        .strip_prefix(prefix)
-        .filter(|id| !id.is_empty())
-        .context("transaction directory has an invalid name")?;
-    Ok(suffix.strip_prefix("private-").unwrap_or(suffix).to_owned())
-}
-
-pub(crate) fn is_private_transaction(transaction: &Path, prefix: &str) -> Result<bool> {
-    let name = transaction
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("transaction directory name is not valid UTF-8")?;
-    let suffix = name
-        .strip_prefix(prefix)
-        .filter(|id| !id.is_empty())
-        .context("transaction directory has an invalid name")?;
-    Ok(suffix.starts_with("private-"))
-}
-
-pub(crate) fn read_transaction_journal(path: &Path) -> Result<TransactionJournal> {
-    let bytes = fs::read(path)?;
-    let journal: TransactionJournal = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "distribution transaction journal is invalid: {}",
-            path.display()
-        )
-    })?;
-    if journal.schema != TRANSACTION_SCHEMA {
-        bail!(
-            "unsupported distribution transaction journal schema {} in {}",
-            journal.schema,
-            path.display()
-        );
-    }
-    if journal.sequence == 0 {
-        bail!(
-            "distribution transaction journal has no committed sequence: {}",
-            path.display()
-        );
-    }
-    if journal_checksum(&journal)? != journal.checksum {
-        bail!(
-            "distribution transaction journal checksum mismatch: {}",
-            path.display()
-        );
-    }
-    Ok(journal)
-}
-
-pub(crate) fn validate_transaction_provenance(
-    parent: &Path,
-    destination_name: &str,
-    prefix: &str,
-    transaction: &Path,
-    journal: &TransactionJournal,
-) -> Result<xlfn_package::PrivateStagingDirectory> {
-    let transaction_directory = xlfn_package::PrivateStagingDirectory::open(transaction)?;
-    transaction_directory.verify()?;
-    let expected_id = transaction_id(transaction, prefix)?;
-    if journal.transaction_id != expected_id {
-        bail!(
-            "distribution transaction ID does not match its directory: {}",
-            transaction.display()
-        );
-    }
-    if journal.destination_name != destination_name {
-        bail!(
-            "distribution transaction destination does not match its directory: {}",
-            transaction.display()
-        );
-    }
-    require_directory_identity(parent, journal.parent_identity, "transaction parent")?;
-    require_directory_identity(
-        transaction,
-        journal.transaction_identity,
-        "transaction directory",
-    )?;
-    Ok(transaction_directory)
 }
 
 pub(crate) fn validate_commit_location(parent: &Path, destination: &Path) -> Result {
@@ -696,8 +356,9 @@ pub(crate) fn commit_prepared_directory_with(
         file_ops,
     )?;
 
-    if let Err(verification_error) =
-        validate_output_destination(destination).and_then(|_| verify_destination(destination))
+    if let Err(verification_error) = validate_output_destination(destination)
+        .map_err(anyhow::Error::from)
+        .and_then(|_| verify_destination(destination))
     {
         let rollback_state = if had_previous {
             TransactionState::RollbackPending
@@ -851,36 +512,6 @@ where
     io::Error::other(IoErrorSource(error.into()))
 }
 
-pub(crate) fn ensure_destination_absent(destination: &Path) -> Result {
-    match fs::symlink_metadata(destination) {
-        Ok(_) => bail!("destination unexpectedly exists: {}", destination.display()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(crate) fn sync_rename_parents(
-    from: &Path,
-    to: &Path,
-    file_ops: &impl DistributionFileOps,
-) -> io::Result<()> {
-    // A rename changes both directory entries: persist the source removal and
-    // the destination insertion before advancing the transaction state.
-    let from_parent = from
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let to_parent = to
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    file_ops.sync_directory(from_parent)?;
-    if to_parent != from_parent {
-        file_ops.sync_directory(to_parent)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn distribution_recovery_error(
     transaction: DistributionTransactionDirectory,
     destination: &Path,
@@ -894,128 +525,6 @@ pub(crate) fn distribution_recovery_error(
         rollback_error,
         recovery_path: recovery_root.join("previous"),
     }
-}
-
-pub(crate) fn write_transaction_state(
-    journal: &Path,
-    parent: &Path,
-    transaction: &mut TransactionJournal,
-    state: TransactionState,
-    file_ops: &impl DistributionFileOps,
-) -> io::Result<()> {
-    // Journal durability protocol: write the next state, sync the file,
-    // atomically replace the journal, then sync both directory entries that
-    // make the replacement observable after a power loss.
-    transaction.state = state;
-    transaction.sequence = transaction
-        .sequence
-        .checked_add(1)
-        .ok_or_else(|| io::Error::other("distribution transaction journal sequence overflow"))?;
-    transaction
-        .refresh_checksum()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let encoded = serde_json::to_vec_pretty(transaction)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let next = journal.with_file_name(format!("{}.next", TRANSACTION_JOURNAL));
-    let mut next_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&next)?;
-    next_file.write_all(&encoded)?;
-    next_file.sync_all()?;
-    drop(next_file);
-    atomic_replace_file(&next, journal)?;
-    let transaction_directory = journal
-        .parent()
-        .ok_or_else(|| io::Error::other("transaction journal has no parent directory"))?;
-    file_ops.sync_directory(transaction_directory)?;
-    file_ops.sync_directory(parent)?;
-    Ok(())
-}
-
-pub(crate) fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-
-        move_file_ex_with_retry(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fs::rename(from, to)
-}
-
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let directory = std::fs::File::open(path)?;
-        directory.sync_all()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use crate::win32::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
-        };
-        use std::os::windows::fs::OpenOptionsExt;
-
-        // Windows does not expose a portable parent-directory fsync. File
-        // contents are flushed before this call, and every publishing rename
-        // uses MoveFileExW with MOVEFILE_WRITE_THROUGH. Reopen the directory
-        // to validate that it still resolves to a directory, but do not call
-        // File::sync_all: that maps to FlushFileBuffers on a read-only handle
-        // and deterministically returns ERROR_ACCESS_DENIED.
-        let mut options = std::fs::OpenOptions::new();
-        options
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        let directory = options.open(path)?;
-        if !directory.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                format!(
-                    "directory synchronization target is not a directory: {}",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(not(any(unix, target_os = "windows")))]
-    {
-        let _ = path;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "directory synchronization is unsupported on this platform",
-        ))
-    }
-}
-
-pub(crate) fn transaction_payloads(transaction: &Path) -> Result<Vec<PathBuf>> {
-    Ok(fs::read_dir(transaction)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|path| {
-            !matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some(TRANSACTION_JOURNAL) | Some("journal.next")
-            )
-        })
-        .collect())
-}
-
-pub(crate) fn remove_empty_transaction(
-    parent: &Path,
-    transaction: &Path,
-    file_ops: &impl DistributionFileOps,
-) -> Result {
-    let transaction_directory = xlfn_package::PrivateStagingDirectory::open(transaction)?;
-    transaction_directory.verify()?;
-    file_ops.remove_dir_all(transaction)?;
-    file_ops.sync_directory(parent)?;
-    Ok(())
 }
 
 pub(crate) fn quarantine_transaction(
@@ -1074,7 +583,7 @@ pub(crate) fn recover_stale_transactions(
     file_ops: &impl DistributionFileOps,
 ) -> Result {
     commit_guard.ensure_held()?;
-    if commit_guard.destination != parent.join(destination_name) {
+    if commit_guard.destination() != parent.join(destination_name) {
         bail!("distribution recovery lock does not match its destination");
     }
     xlfn_package::validate_directory_path(parent)?;
@@ -1422,7 +931,11 @@ pub(crate) fn require_original_destination(
     let expected = journal
         .destination_identity
         .context("transaction has no original destination identity")?;
-    require_directory_identity(destination, expected, "restored destination")
+    Ok(require_directory_identity(
+        destination,
+        expected,
+        "restored destination",
+    )?)
 }
 
 pub(crate) fn remove_installed_distribution_with(
