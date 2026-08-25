@@ -362,7 +362,7 @@ pub(crate) fn inspect_directory_identity(
         )
         .into());
     }
-    let identity = DirectoryIdentity(file_snapshot_state(&directory)?.identity);
+    let identity = DirectoryIdentity::from_file_identity(file_snapshot_state(&directory)?.identity);
     drop(directory);
     Ok((identity, read_directory_entries(path, max_entries)?))
 }
@@ -386,7 +386,7 @@ pub(crate) fn ensure_directory_identity(
         )
         .into());
     }
-    let identity = DirectoryIdentity(file_snapshot_state(&directory)?.identity);
+    let identity = DirectoryIdentity::from_file_identity(file_snapshot_state(&directory)?.identity);
     if identity != expected {
         return Err(format!("{label}: directory identity changed: {}", path.display()).into());
     }

@@ -52,7 +52,8 @@ impl PrivateStagingDirectory {
         })?;
         let metadata = handle.metadata()?;
         validate_private_directory(path, &metadata)?;
-        let identity = DirectoryIdentity(file_snapshot_state(&handle)?.identity);
+        let identity =
+            DirectoryIdentity::from_file_identity(file_snapshot_state(&handle)?.identity);
         Ok(Self {
             path: path.to_path_buf(),
             identity,
@@ -83,7 +84,8 @@ impl PrivateStagingDirectory {
                     path: self.path.clone(),
                 })?;
         if validate_private_directory(&self.path, &path_metadata).is_err()
-            || DirectoryIdentity(file_snapshot_state(&path_handle)?.identity) != self.identity
+            || DirectoryIdentity::from_file_identity(file_snapshot_state(&path_handle)?.identity)
+                != self.identity
         {
             return Err(PackageError::StagingDirectoryReplaced {
                 path: self.path.clone(),
@@ -92,7 +94,8 @@ impl PrivateStagingDirectory {
 
         let handle_metadata = self.handle.metadata()?;
         validate_private_directory(&self.path, &handle_metadata)?;
-        let handle_identity = DirectoryIdentity(file_snapshot_state(&self.handle)?.identity);
+        let handle_identity =
+            DirectoryIdentity::from_file_identity(file_snapshot_state(&self.handle)?.identity);
         if handle_identity != self.identity {
             return Err(PackageError::StagingDirectoryReplaced {
                 path: self.path.clone(),

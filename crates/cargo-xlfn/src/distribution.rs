@@ -98,24 +98,6 @@ pub(crate) enum TransactionState {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct DirectoryIdentity {
-    pub(crate) dev: u64,
-    pub(crate) ino: u64,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct DirectoryIdentity {
-    pub(crate) volume_serial_number: u64,
-    pub(crate) file_id: [u8; 16],
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct DirectoryIdentity;
-
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LockFileIdentity {
     pub(crate) dev: u64,
@@ -400,37 +382,6 @@ impl Drop for DistributionTransactionDirectory {
     fn drop(&mut self) {}
 }
 
-pub(crate) fn directory_identity(path: &Path) -> Result<DirectoryIdentity> {
-    xlfn_package::validate_path_components(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() {
-        bail!(
-            "expected a directory for identity check: {}",
-            path.display()
-        );
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        Ok(DirectoryIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        directory_identity_windows(path)
-    }
-
-    #[cfg(not(any(unix, target_os = "windows")))]
-    {
-        Ok(DirectoryIdentity)
-    }
-}
-
 #[cfg(unix)]
 pub(crate) fn lock_file_identity(file: &std::fs::File) -> io::Result<LockFileIdentity> {
     Ok(lock_file_identity_from_metadata(&file.metadata()?))
@@ -446,46 +397,11 @@ pub(crate) fn lock_file_identity_from_metadata(metadata: &std::fs::Metadata) -> 
     }
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn directory_identity_windows(path: &Path) -> Result<DirectoryIdentity> {
-    use crate::win32::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, HANDLE,
-    };
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
-
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-    let file = options.open(path)?;
-    let mut information = std::mem::MaybeUninit::<FILE_ID_INFO>::uninit();
-    // SAFETY: file remains open for the duration of the call and information
-    // points to writable storage of the documented size.
-    let status = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle() as HANDLE,
-            FileIdInfo,
-            information.as_mut_ptr().cast(),
-            std::mem::size_of::<FILE_ID_INFO>() as u32,
-        )
-    };
-    if status == 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    // SAFETY: a successful GetFileInformationByHandleEx initializes the output.
-    let information = unsafe { information.assume_init() };
-    Ok(DirectoryIdentity {
-        volume_serial_number: information.VolumeSerialNumber,
-        file_id: information.FileId.Identifier,
-    })
-}
-
 pub(crate) fn optional_directory_identity(path: &Path) -> Result<Option<DirectoryIdentity>> {
     match fs::symlink_metadata(path) {
-        Ok(_) => directory_identity(path).map(Some),
+        Ok(_) => xlfn_package::directory_identity(path)
+            .map(Some)
+            .map_err(Into::into),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -496,7 +412,7 @@ pub(crate) fn require_directory_identity(
     expected: DirectoryIdentity,
     label: &str,
 ) -> Result<()> {
-    let actual = directory_identity(path)?;
+    let actual = xlfn_package::directory_identity(path)?;
     if actual != expected {
         bail!("{} identity changed: {}", label, path.display());
     }

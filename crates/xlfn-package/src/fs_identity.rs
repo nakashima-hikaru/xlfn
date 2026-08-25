@@ -1,24 +1,80 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DirectoryIdentity(pub(crate) FileIdentity);
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg(target_os = "windows")]
+pub struct DirectoryIdentity {
+    pub(crate) volume_serial_number: u64,
+    pub(crate) file_id: [u8; 16],
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg(not(any(unix, target_os = "windows")))]
+pub struct DirectoryIdentity;
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FileIdentity {
     pub(crate) dev: u64,
     pub(crate) ino: u64,
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FileIdentity {
     pub(crate) volume_serial_number: u64,
     pub(crate) file_id: [u8; 16],
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FileIdentity;
+
+impl DirectoryIdentity {
+    pub(crate) fn from_file_identity(identity: FileIdentity) -> Self {
+        #[cfg(unix)]
+        {
+            Self {
+                dev: identity.dev,
+                ino: identity.ino,
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self {
+                volume_serial_number: identity.volume_serial_number,
+                file_id: identity.file_id,
+            }
+        }
+        #[cfg(not(any(unix, target_os = "windows")))]
+        {
+            let _ = identity;
+            Self
+        }
+    }
+}
+
+/// Returns the stable identity of a regular directory without following a
+/// symlink or reparse point.
+pub fn directory_identity(path: &Path) -> PackageResult<DirectoryIdentity> {
+    validate_path_components(path)?;
+    let directory = open_staged_directory_no_follow(path).map_err(|error| {
+        PackageError::Message(format!(
+            "failed to open directory without following links {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || is_reparse_point(&metadata) {
+        return Err(format!("expected a regular directory: {}", path.display()).into());
+    }
+    Ok(DirectoryIdentity::from_file_identity(
+        file_snapshot_state(&directory)?.identity,
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FileSnapshotState {

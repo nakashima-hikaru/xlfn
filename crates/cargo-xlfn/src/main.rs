@@ -18,7 +18,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use usage::{Args, Cli, Subcommands, ValueEnum};
-use xlfn_package::{BundleMetadata, validate_windows_basename};
+use xlfn_package::{
+    BundleMetadata, DirectoryIdentity, directory_identity, validate_windows_basename,
+};
 
 #[cfg(target_os = "windows")]
 #[allow(

@@ -67,7 +67,7 @@ pub use error::{
     EffectiveCrtPolicy, ImportTarget, PackageError, PackageResult, REQUIRED_XLL_EXPORTS,
     SYSTEM_IMPORT_POLICY_VERSION,
 };
-pub use fs_identity::DirectoryIdentity;
+pub use fs_identity::{DirectoryIdentity, directory_identity};
 pub use names::{validate_directory_path, validate_path_components, validate_windows_basename};
 pub use pe::{
     ExportSymbol, ForwardedExport, PeInfo, inspect_pe, parse_pe_bytes, sha256,
