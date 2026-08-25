@@ -9,26 +9,14 @@ use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
 use fs_err as fs;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::fmt;
+#[cfg(test)]
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use usage::{Args, Cli, Subcommands, ValueEnum};
+use xlfn_package::{BundleMetadata, validate_windows_basename};
 #[cfg(test)]
-use xlfn_package::distribution::sync_directory;
-use xlfn_package::distribution::{
-    DistributionCommitGuard, DistributionFileOps, SystemDistributionFileOps, TRANSACTION_JOURNAL,
-    TransactionJournal, TransactionState, atomic_replace_file, ensure_destination_absent,
-    is_private_transaction, optional_directory_identity, read_transaction_journal,
-    remove_empty_transaction, rename_path, require_directory_identity, sync_rename_parents,
-    transaction_id, transaction_payloads, validate_output_destination,
-    validate_transaction_provenance, write_transaction_state,
-};
-use xlfn_package::{
-    BundleMetadata, DirectoryIdentity, directory_identity, validate_windows_basename,
-};
+use xlfn_package::{DirectoryIdentity, directory_identity};
 
 #[cfg(target_os = "windows")]
 #[allow(
