@@ -433,7 +433,7 @@ impl<A: crate::Addin> Runtime<A> {
         let attempt_id = self.lifecycle.allocate_open_attempt(&mut control)?;
         self.return_protocol.reopen_admission()?;
 
-        let module_opening = crate::module_runtime::global().begin_open();
+        let module_opening = crate::module_runtime::begin_open();
         #[cfg(test)]
         {
             *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
@@ -757,7 +757,7 @@ impl<A: crate::Addin> Runtime<A> {
     #[cfg(test)]
     fn begin_close_internal(&self) -> bool {
         let mut control = self.lifecycle.access();
-        crate::module_runtime::ingress().with_linearization(|| {
+        let should_close = crate::module_runtime::ingress().with_linearization(|| {
             if matches!(
                 control.phase(),
                 LifecyclePhase::Opening | LifecyclePhase::Open
@@ -768,7 +768,14 @@ impl<A: crate::Addin> Runtime<A> {
             } else {
                 false
             }
-        })
+        });
+        if should_close {
+            let _module_closing = control
+                .module_epoch_lease()
+                .map(|lease| lease.begin_close(|| {}))
+                .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
+        }
+        should_close
     }
 
     fn begin_final_removal_internal(&self) -> Option<RemovalOwner<'_, A>> {
@@ -835,9 +842,14 @@ impl<A: crate::Addin> Runtime<A> {
             });
             match decision {
                 Some(Some(attempt)) => {
+                    let module_closing = wait_guard
+                        .module_epoch_lease()
+                        .map(|lease| lease.begin_close(|| {}))
+                        .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
                     return Some(RemovalOwner {
                         runtime: self,
                         attempt,
+                        module_closing: Some(module_closing),
                     });
                 }
                 Some(None) => return None,
@@ -861,9 +873,14 @@ impl<A: crate::Addin> Runtime<A> {
             }
             if let Some(attempt) = self.lifecycle.claim_removal_owner(&mut wait_guard) {
                 self.refinement.acquire_open_rollback_owner(self);
+                let module_closing = wait_guard
+                    .module_epoch_lease()
+                    .map(|lease| lease.begin_close(|| {}))
+                    .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
                 return Some(RemovalOwner {
                     runtime: self,
                     attempt,
+                    module_closing: Some(module_closing),
                 });
             }
             self.lifecycle.wait(&mut wait_guard);
@@ -999,6 +1016,7 @@ impl<A: crate::Addin> Runtime<A> {
 )]
 pub(crate) struct QuiescenceProof {
     pub(crate) exports: crate::ingress::ExportsDrained,
+    pub(crate) module_quiescent: crate::module_runtime::ModuleQuiescent,
     pub(crate) returns: crate::shutdown::ReturnsQuiescent,
     pub(crate) rtd: crate::rtd::RtdQuiescent,
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
@@ -1287,12 +1305,12 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
             ));
         }
         let OpenRollbackCertificate {
-            proof: _proof,
+            proof,
             #[cfg(any(test, feature = "refinement"))]
             composition_resources,
             owner,
         } = self;
-        crate::module_runtime::global().close_callbacks();
+        let _module_quiescent = proof.module_quiescent;
         runtime.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "refinement"))]
         runtime.record_composition_event(
@@ -1312,7 +1330,6 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
         #[cfg(any(test, feature = "refinement"))]
         runtime.mark_composition_terminal_pending();
         runtime.lifecycle.notify_all();
-        crate::module_runtime::global().certify_logical_quiescence();
         #[cfg(test)]
         drop(runtime.lifecycle.test_module_lease.lock().take());
         Ok(owner)
@@ -1373,9 +1390,11 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
             Self::Uncommitted { .. } => None,
         };
         let owner = match self {
-            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner,
+            Self::Committed { owner, proof, .. } | Self::Uncommitted { owner, proof, .. } => {
+                let _module_quiescent = proof.module_quiescent;
+                owner
+            }
         };
-        crate::module_runtime::global().close_callbacks();
         runtime.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "refinement"))]
         if runtime.phase() != LifecyclePhase::Closed {
@@ -1401,7 +1420,6 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
             );
         }
         runtime.lifecycle.notify_all();
-        crate::module_runtime::global().certify_logical_quiescence();
         #[cfg(test)]
         drop(runtime.lifecycle.test_module_lease.lock().take());
         Ok((
@@ -1615,6 +1633,7 @@ impl<A: crate::Addin> Drop for StaticTestRuntime<A> {
 pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
     runtime: &'runtime Runtime<A>,
     attempt: RemovalAttemptId,
+    module_closing: Option<crate::module_runtime::ModuleClosing>,
 }
 
 impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
@@ -1639,6 +1658,12 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
         self.runtime
+    }
+
+    pub(crate) fn take_module_closing(&mut self) -> crate::module_runtime::ModuleClosing {
+        self.module_closing
+            .take()
+            .expect("removal owner carries module close capability")
     }
 }
 
@@ -1980,21 +2005,11 @@ pub(crate) mod tests {
 
     fn finish_test_close<A: crate::Addin>(
         runtime: &Runtime<A>,
-        removal_attempt: RemovalOwner<'_, A>,
+        mut removal_attempt: RemovalOwner<'_, A>,
     ) {
-        let ingress = crate::module_runtime::ingress();
-        if matches!(
-            ingress.phase(),
-            crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
-        ) {
-            ingress.begin_close_with(|| {
-                #[cfg(any(test, feature = "refinement"))]
-                if runtime.refinement_hooks().generation_active(runtime) {
-                    runtime.refinement_hooks().begin_close(runtime);
-                }
-            });
-        }
-        let exports = ingress.seal_and_drain();
+        let module_closing = removal_attempt.take_module_closing();
+        let drained = module_closing.seal_and_drain();
+        let (module_quiescent, exports) = drained.certify();
         let subscriptions_stopped = runtime
             .close_subscriptions()
             .expect("test subscriptions stop");
@@ -2012,6 +2027,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
+                module_quiescent,
                 returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
@@ -2034,19 +2050,15 @@ pub(crate) mod tests {
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
         runtime: &'a Runtime<A>,
-        rollback_attempt: RemovalOwner<'a, A>,
+        mut rollback_attempt: RemovalOwner<'a, A>,
     ) -> RemovalOwner<'a, A> {
-        let ingress = crate::module_runtime::ingress();
-        if matches!(
-            ingress.phase(),
-            crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
-        ) {
-            ingress.begin_close_with(|| {});
-        }
-        let exports = ingress.seal_and_drain();
+        let module_closing = rollback_attempt.take_module_closing();
+        let drained = module_closing.seal_and_drain();
+        let (module_quiescent, exports) = drained.certify();
         let certificate = rollback_attempt
             .certify::<OpenRollback>(QuiescenceProof {
                 exports,
+                module_quiescent,
                 returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd: crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
@@ -2268,6 +2280,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
+                module_quiescent: crate::module_runtime::ModuleQuiescent::for_test(),
                 returns: crate::shutdown::ReturnsQuiescent::for_test(),
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
@@ -2404,6 +2417,7 @@ pub(crate) mod tests {
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(QuiescenceProof {
             exports,
+            module_quiescent: crate::module_runtime::ModuleQuiescent::for_test(),
             returns: crate::shutdown::ReturnsQuiescent::for_test(),
             rtd,
             host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),

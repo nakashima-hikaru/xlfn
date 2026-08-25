@@ -372,12 +372,10 @@ where
     let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
         return Ok(RemovalSuccess::AlreadyClosed);
     };
-    crate::module_runtime::global().begin_close(|| {
-        #[cfg(any(test, feature = "refinement"))]
-        if runtime.refinement_hooks().generation_active(runtime) {
-            runtime.refinement_hooks().begin_close(runtime);
-        }
-    });
+    #[cfg(any(test, feature = "refinement"))]
+    if runtime.refinement_hooks().generation_active(runtime) {
+        runtime.refinement_hooks().begin_close(runtime);
+    }
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
@@ -394,7 +392,9 @@ where
         }
     };
 
-    let execution_drained = match drain_execution(runtime, true) {
+    let mut owner = transaction.take_attempt();
+    let module_closing = owner.take_module_closing();
+    let execution_drained = match drain_execution(runtime, module_closing, true) {
         Ok(stage) => stage,
         Err(error) => {
             return Err(handle_unload_hazard(
@@ -405,7 +405,6 @@ where
             ));
         }
     };
-    let owner = transaction.take_attempt();
     let teardown: teardown::TeardownTxn<
         'runtime,
         A,
@@ -567,7 +566,7 @@ where
     // lifecycle. A terminal result transitions the module gate immediately;
     // once unregistering is complete, close it unconditionally so all later
     // cleanup is provably callback-free.
-    crate::module_runtime::global().close_callbacks();
+    teardown.close_module_callbacks();
 
     #[cfg(any(test, feature = "refinement"))]
     runtime

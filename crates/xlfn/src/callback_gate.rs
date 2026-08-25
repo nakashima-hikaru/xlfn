@@ -156,9 +156,9 @@ mod tests {
     #[test]
     fn runtime_transitions_update_the_module_admission() {
         let _test_guard = crate::test_callback::lock();
-        crate::module_runtime::global().reset_callbacks();
+        crate::module_runtime::reset_callbacks_for_test();
         let permit = enter_callback().expect("open module admits callbacks");
-        crate::module_runtime::global().close_callbacks();
+        crate::module_runtime::close_callbacks_for_test();
         assert!(matches!(
             enter_callback(),
             Err(CallbackAdmissionSuppressed { .. })

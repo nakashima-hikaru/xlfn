@@ -75,7 +75,10 @@ where
             },
         };
     };
-    crate::module_runtime::global().begin_close(|| {});
+    #[cfg(any(test, feature = "refinement"))]
+    if runtime.refinement_hooks().generation_active(runtime) {
+        runtime.refinement_hooks().begin_close(runtime);
+    }
 
     let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
@@ -87,7 +90,9 @@ where
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let execution_drained = match drain_execution(runtime, false) {
+    let mut rollback_attempt = rollback_attempt;
+    let module_closing = rollback_attempt.take_module_closing();
+    let execution_drained = match drain_execution(runtime, module_closing, false) {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen return quiescence", &error);
@@ -163,7 +168,7 @@ where
         runtime.retain_failed_event_registrations(Vec::new());
     }
 
-    crate::module_runtime::global().close_callbacks();
+    teardown.close_module_callbacks();
 
     if runtime.registration_state_unknown() {
         let error = XllError::Internal {

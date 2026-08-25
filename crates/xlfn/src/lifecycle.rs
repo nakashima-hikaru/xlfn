@@ -185,18 +185,8 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
 
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        crate::module_runtime::global().begin_close(|| {});
-        let ingress = crate::module_runtime::ingress();
-        if matches!(
-            ingress.phase(),
-            crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
-        ) {
-            ingress.begin_close_with(|| {});
-        }
-        if ingress.phase() == crate::ingress::PHASE_CLOSING {
-            let _ = ingress.seal_and_drain();
-        }
-        crate::module_runtime::global().close_callbacks();
+        let module_closing = crate::module_runtime::begin_close_without_epoch(|| {});
+        let _ = module_closing.seal_and_drain();
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
             tracing::error!(

@@ -126,7 +126,7 @@ pub struct FormulaCallerBenchmark {
 impl FormulaCallerBenchmark {
     pub fn new(case: FormulaCallerBenchCase) -> Self {
         BENCH_CALLER_KIND.store(case.raw(), Ordering::Relaxed);
-        crate::module_runtime::global().reset_callbacks();
+        crate::module_runtime::reset_callbacks_for_test();
         // SAFETY: `benchmark_formula_callback` has Excel's exact callback ABI
         // and remains live for the duration of this benchmark process.
         unsafe {

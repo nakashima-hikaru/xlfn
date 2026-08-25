@@ -214,7 +214,7 @@ pub(crate) mod test_callback {
     }
 
     pub(crate) fn reset() {
-        crate::module_runtime::global().reset_callbacks();
+        crate::module_runtime::reset_callbacks_for_test();
         TOTAL_CALLS.store(0, Ordering::Relaxed);
         ASYNC_RETURN_CALLS.store(0, Ordering::Relaxed);
         FREE_CALLS.store(0, Ordering::Relaxed);

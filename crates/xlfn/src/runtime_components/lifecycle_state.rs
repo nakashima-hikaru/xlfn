@@ -140,6 +140,13 @@ impl<A: crate::Addin> OpeningPayload<A> {
             }
         }
     }
+
+    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+        match self {
+            Self::Published(bundle) => Some(&bundle.module_epoch),
+            Self::Empty | Self::Staged(_) => None,
+        }
+    }
 }
 
 /// Payload states that can survive into a closing, rollback, or quarantine
@@ -172,6 +179,14 @@ impl<A: crate::Addin> ClosingPayload<A> {
         match self {
             Self::Retiring(retirement) => Some(&retirement.services),
             Self::Published(bundle) => Some(&bundle.services),
+            Self::Empty | Self::Staged(_) => None,
+        }
+    }
+
+    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+        match self {
+            Self::Published(bundle) => Some(&bundle.module_epoch),
+            Self::Retiring(retirement) => Some(&retirement.module_epoch),
             Self::Empty | Self::Staged(_) => None,
         }
     }
@@ -376,6 +391,17 @@ impl<A: crate::Addin> LifecycleState<A> {
             | Self::OpenRollbackPending { payload }
             | Self::Quarantined { payload } => payload.module_epoch_is_current(),
             Self::Closed | Self::Open { .. } | Self::Opening { .. } => true,
+        }
+    }
+
+    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+        match self {
+            Self::Closed => None,
+            Self::Opening { payload, .. } => payload.module_epoch_lease(),
+            Self::Open { bundle } => Some(&bundle.module_epoch),
+            Self::Closing { payload, .. }
+            | Self::OpenRollbackPending { payload }
+            | Self::Quarantined { payload } => payload.module_epoch_lease(),
         }
     }
 
@@ -613,6 +639,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.removal_epoch
     }
 
+    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+        self.state.module_epoch_lease()
+    }
+
     const fn removal_attempt(&self) -> Option<RemovalAttemptId> {
         self.removal_attempt
     }
@@ -680,6 +710,10 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
 
     pub(crate) fn removal_attempt(&self) -> Option<RemovalAttemptId> {
         self.core.removal_attempt()
+    }
+
+    pub(crate) fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+        self.core.module_epoch_lease()
     }
 
     pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
