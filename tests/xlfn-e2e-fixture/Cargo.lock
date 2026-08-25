@@ -567,6 +567,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "xlfn-common",
 ]
 
 [[package]]

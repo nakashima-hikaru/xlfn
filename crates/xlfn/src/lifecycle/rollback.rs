@@ -45,7 +45,7 @@ impl OpenRollbackOutcome {
 }
 
 fn incomplete<A: Addin>(runtime: &Runtime<A>) -> OpenRollbackOutcome {
-    runtime.quarantine();
+    runtime.lifecycle_runtime().quarantine();
     OpenRollbackOutcome {
         status: OpenRollbackStatus::Incomplete,
     }
@@ -62,7 +62,7 @@ where
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    let Some(rollback_attempt) = runtime.acquire_open_rollback() else {
+    let Some(rollback_attempt) = runtime.lifecycle_runtime().acquire_open_rollback() else {
         let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
             && runtime.host_callbacks_detached()
             && !runtime.registration_state_unknown()
@@ -200,12 +200,12 @@ where
             report_boundary_error("xlAutoOpen rollback quiesce", &error);
             // A failed quiesce cannot prove that shared-state-owned execution
             // resources have stopped. Preserve both parts until quarantine.
-            runtime.quarantine_layers(
+            runtime.lifecycle_runtime().quarantine_layers(
                 generation,
                 layers,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
-            runtime.quarantine_shared_state(
+            runtime.lifecycle_runtime().quarantine_shared_state(
                 generation,
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,

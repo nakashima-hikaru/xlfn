@@ -277,6 +277,7 @@ impl<'call> CallContext<'call> {
         }
     }
 
+    #[cfg(any(feature = "rtd", test))]
     fn services(&self) -> &'call crate::runtime_components::GenerationServices {
         match &self.access {
             CallAccess::Handles(access) => access.runtime.services(),
@@ -352,6 +353,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         }
     }
 
+    #[cfg(any(feature = "rtd", test))]
     pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
         self.call.services()
     }

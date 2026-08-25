@@ -103,8 +103,118 @@ pub struct Runtime<A: crate::Addin> {
     pub(crate) refinement: RuntimeRefinementHooks,
 }
 
+/// Write-side lifecycle capability for one runtime aggregate.
+///
+/// Read-side admission remains available directly from [`Runtime`], while
+/// lifecycle mutations are issued through this narrow capability. Keeping the
+/// capability separate prevents call-facing code from treating lifecycle
+/// control operations as ordinary runtime services.
+pub(crate) struct LifecycleRuntime<'runtime, A: crate::Addin> {
+    runtime: &'runtime Runtime<A>,
+}
+
 pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
+
+impl<A: crate::Addin> Runtime<A> {
+    pub(crate) fn lifecycle_runtime(&self) -> LifecycleRuntime<'_, A> {
+        LifecycleRuntime { runtime: self }
+    }
+}
+
+impl<'runtime, A: crate::Addin> LifecycleRuntime<'runtime, A> {
+    pub(crate) fn request_explicit_removal(&self) {
+        self.runtime.request_explicit_removal_internal();
+    }
+
+    pub(crate) fn complete_explicit_removal(&self) {
+        self.runtime.complete_explicit_removal_internal();
+    }
+
+    pub(crate) fn clear_host_intent(&self) {
+        self.runtime.clear_host_intent_internal();
+    }
+
+    pub(crate) fn quarantine(&self) {
+        self.runtime.quarantine_internal();
+    }
+
+    pub(crate) fn quarantine_shared_state(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        shared_state: A::SharedState,
+        reason: QuarantineReason,
+    ) {
+        self.runtime
+            .quarantine_shared_state_internal(generation, shared_state, reason);
+    }
+
+    pub(crate) fn quarantine_layers(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        layers: A::Layers,
+        reason: QuarantineReason,
+    ) {
+        self.runtime
+            .quarantine_layers_internal(generation, layers, reason);
+    }
+
+    pub(crate) fn quarantine_generation(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        root: ExecutionGeneration<A>,
+        reason: QuarantineReason,
+    ) {
+        self.runtime
+            .quarantine_generation_internal(generation, root, reason);
+    }
+
+    pub(crate) fn quarantine_shared_generation(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        root: Arc<ExecutionGeneration<A>>,
+        reason: QuarantineReason,
+    ) {
+        self.runtime
+            .quarantine_shared_generation_internal(generation, root, reason);
+    }
+
+    pub(crate) fn quarantine_opening_generation(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        opening: OpeningGeneration<A>,
+        reason: QuarantineReason,
+    ) {
+        self.runtime
+            .quarantine_opening_generation_internal(generation, opening, reason);
+    }
+
+    pub(crate) fn begin_open_if_epoch(
+        &self,
+        expected_removal_epoch: RemovalEpoch,
+    ) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
+        self.runtime
+            .begin_open_if_epoch_internal(expected_removal_epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
+        self.runtime.begin_open_internal()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_close(&self) -> bool {
+        self.runtime.begin_close_internal()
+    }
+
+    pub(crate) fn begin_final_removal(&self) -> Option<RemovalOwner<'runtime, A>> {
+        self.runtime.begin_final_removal_internal()
+    }
+
+    pub(crate) fn acquire_open_rollback(&self) -> Option<RemovalOwner<'runtime, A>> {
+        self.runtime.acquire_open_rollback_internal()
+    }
+}
 
 impl<A: crate::Addin> Runtime<A> {
     #[must_use]
@@ -178,17 +288,17 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.access().host_intent()
     }
 
-    pub(crate) fn request_explicit_removal(&self) {
+    fn request_explicit_removal_internal(&self) {
         self.lifecycle
             .set_host_intent(HostLifecycleIntent::ExplicitRemovalRequested);
     }
 
-    pub(crate) fn complete_explicit_removal(&self) {
+    fn complete_explicit_removal_internal(&self) {
         self.lifecycle
             .set_host_intent(HostLifecycleIntent::ExplicitRemovalComplete);
     }
 
-    pub(crate) fn clear_host_intent(&self) {
+    fn clear_host_intent_internal(&self) {
         self.lifecycle.set_host_intent(HostLifecycleIntent::None);
     }
 
@@ -212,14 +322,14 @@ impl<A: crate::Addin> Runtime<A> {
     /// Publishes the fail-safe terminal state. A quarantined runtime rejects
     /// new opens and calls while retaining the module residency lease and any
     /// resources whose destruction was not proven safe.
-    pub(crate) fn quarantine(&self) {
+    fn quarantine_internal(&self) {
         let mut control = self.lifecycle.access();
         self.return_protocol.close_admission();
         self.lifecycle.quarantine_core(&mut control);
         self.lifecycle.notify_all();
     }
 
-    pub(crate) fn quarantine_shared_state(
+    fn quarantine_shared_state_internal(
         &self,
         generation: Option<RuntimeGeneration>,
         shared_state: A::SharedState,
@@ -229,7 +339,7 @@ impl<A: crate::Addin> Runtime<A> {
             .retain_shared_state(generation, shared_state, reason);
     }
 
-    pub(crate) fn quarantine_layers(
+    fn quarantine_layers_internal(
         &self,
         generation: Option<RuntimeGeneration>,
         layers: A::Layers,
@@ -238,7 +348,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.quarantine.retain_layers(generation, layers, reason);
     }
 
-    pub(crate) fn quarantine_generation(
+    fn quarantine_generation_internal(
         &self,
         generation: Option<RuntimeGeneration>,
         root: ExecutionGeneration<A>,
@@ -247,7 +357,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.quarantine.retain_generation(generation, root, reason);
     }
 
-    pub(crate) fn quarantine_shared_generation(
+    fn quarantine_shared_generation_internal(
         &self,
         generation: Option<RuntimeGeneration>,
         root: Arc<ExecutionGeneration<A>>,
@@ -257,7 +367,7 @@ impl<A: crate::Addin> Runtime<A> {
             .retain_shared_generation(generation, root, reason);
     }
 
-    pub(crate) fn quarantine_opening_generation(
+    fn quarantine_opening_generation_internal(
         &self,
         generation: Option<RuntimeGeneration>,
         opening: OpeningGeneration<A>,
@@ -302,7 +412,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.access().open_attempt()
     }
 
-    pub(crate) fn begin_open_if_epoch(
+    fn begin_open_if_epoch_internal(
         &self,
         expected_removal_epoch: RemovalEpoch,
     ) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
@@ -342,8 +452,8 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
-        self.begin_open_if_epoch(self.removal_epoch())
+    fn begin_open_internal(&self) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
+        self.begin_open_if_epoch_internal(self.removal_epoch())
     }
 
     pub(crate) fn removal_epoch(&self) -> RemovalEpoch {
@@ -471,7 +581,7 @@ impl<A: crate::Addin> Runtime<A> {
         ) {
             services.disarm_or_abort();
             if let Some(opening) = failure.opening {
-                self.quarantine_opening_generation(
+                self.quarantine_opening_generation_internal(
                     Some(generation),
                     opening,
                     QuarantineReason::OpenStateInvariant,
@@ -645,7 +755,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_close(&self) -> bool {
+    fn begin_close_internal(&self) -> bool {
         let mut control = self.lifecycle.access();
         crate::module_runtime::ingress().with_linearization(|| {
             if matches!(
@@ -661,7 +771,7 @@ impl<A: crate::Addin> Runtime<A> {
         })
     }
 
-    pub(crate) fn begin_final_removal(&self) -> Option<RemovalOwner<'_, A>> {
+    fn begin_final_removal_internal(&self) -> Option<RemovalOwner<'_, A>> {
         let mut wait_guard = self.lifecycle.access();
         // Every final-close invocation invalidates open operations that started
         // before it, including an operation that is between rollback recovery
@@ -736,7 +846,7 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    pub(crate) fn acquire_open_rollback(&self) -> Option<RemovalOwner<'_, A>> {
+    fn acquire_open_rollback_internal(&self) -> Option<RemovalOwner<'_, A>> {
         let mut wait_guard = self.lifecycle.access();
         loop {
             match wait_guard.phase() {
@@ -1771,7 +1881,7 @@ impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
         // Lifecycle rollback is owned by OpeningTxn and must be explicit.
         // Dropping any unfinished stage can only enter the fail-safe state;
         // Drop never invokes host callbacks or resource cleanup.
-        self.runtime.quarantine();
+        self.runtime.lifecycle_runtime().quarantine();
         if let Some(lifecycle_state) = self.lifecycle_state.take() {
             #[allow(
                 clippy::mem_forget,
@@ -1967,7 +2077,7 @@ pub(crate) mod tests {
         impl crate::handle::ExcelHandleObject for TestHandle {}
 
         let runtime = Runtime::<TestU32Addin>::new();
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish(1_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
@@ -1979,11 +2089,11 @@ pub(crate) mod tests {
             .into_token();
         drop(ingress);
 
-        let removal_attempt = runtime.begin_final_removal().unwrap();
+        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
         finish_test_close(&runtime, removal_attempt);
 
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish(2_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
@@ -2012,7 +2122,7 @@ pub(crate) mod tests {
         ));
         drop(ingress);
 
-        let removal_attempt = runtime.begin_final_removal().unwrap();
+        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 2);
         finish_test_close(&runtime, removal_attempt);
     }
@@ -2023,10 +2133,15 @@ pub(crate) mod tests {
         let runtime = Runtime::<()>::new();
         let stale_epoch = runtime.removal_epoch();
 
-        assert!(runtime.begin_final_removal().is_none());
-        assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
+        assert!(runtime.lifecycle_runtime().begin_final_removal().is_none());
+        assert!(
+            runtime
+                .lifecycle_runtime()
+                .begin_open_if_epoch(stale_epoch)
+                .is_err()
+        );
 
-        let mut current = runtime.begin_open().unwrap();
+        let mut current = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut current, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
@@ -2036,9 +2151,9 @@ pub(crate) mod tests {
     fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<TestU32Addin>::new();
-        let mut first = runtime.begin_open().unwrap();
+        let mut first = runtime.lifecycle_runtime().begin_open().unwrap();
 
-        assert!(runtime.begin_open().is_err());
+        assert!(runtime.lifecycle_runtime().begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
 
         runtime.publish(11_u32, ());
@@ -2047,7 +2162,7 @@ pub(crate) mod tests {
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
         drop(ingress);
-        let close = runtime.begin_final_removal().unwrap();
+        let close = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, close);
     }
@@ -2056,21 +2171,26 @@ pub(crate) mod tests {
     fn dropping_open_attempt_quarantines_without_implicit_rollback() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
-        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.lifecycle_runtime().begin_open().unwrap();
 
         drop(opening);
 
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         let trace = runtime.composition_trace_json();
         assert!(!trace.contains("\"failOpen\""));
-        assert!(runtime.acquire_open_rollback().is_none());
+        assert!(
+            runtime
+                .lifecycle_runtime()
+                .acquire_open_rollback()
+                .is_none()
+        );
     }
 
     #[test]
     fn final_close_cancels_an_in_flight_open_commit() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish(17_u32, ());
 
         let removal_epoch = runtime.removal_epoch();
@@ -2080,6 +2200,7 @@ pub(crate) mod tests {
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = thread::spawn(move || {
             let close = closing_runtime
+                .lifecycle_runtime()
                 .begin_final_removal()
                 .expect("the opening runtime requires final close");
             closing_entered_tx.send(()).unwrap();
@@ -2120,11 +2241,11 @@ pub(crate) mod tests {
     fn logical_quiescence_certificate_survives_a_concurrent_removal_epoch_bump() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let removal_attempt = runtime.begin_final_removal().unwrap();
+        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         runtime.wait_for_returns();
         let subscriptions_stopped = runtime.close_subscriptions().unwrap();
         runtime.shutdown_handle_topics().unwrap();
@@ -2170,7 +2291,12 @@ pub(crate) mod tests {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let waiter = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            assert!(concurrent_runtime.begin_final_removal().is_none());
+            assert!(
+                concurrent_runtime
+                    .lifecycle_runtime()
+                    .begin_final_removal()
+                    .is_none()
+            );
         });
         started_rx.recv().unwrap();
 
@@ -2192,14 +2318,19 @@ pub(crate) mod tests {
     fn close_waiter_is_not_lost_when_open_rollback_finishes() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
-        let rollback = runtime.acquire_open_rollback().unwrap();
+        let rollback = runtime.lifecycle_runtime().acquire_open_rollback().unwrap();
 
         let closing_runtime = Arc::clone(&runtime);
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = thread::spawn(move || {
-            assert!(closing_runtime.begin_final_removal().is_none());
+            assert!(
+                closing_runtime
+                    .lifecycle_runtime()
+                    .begin_final_removal()
+                    .is_none()
+            );
             closed_tx.send(()).unwrap();
         });
 
@@ -2221,14 +2352,14 @@ pub(crate) mod tests {
     fn abandoned_close_owner_notifies_and_allows_takeover() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let first = runtime.begin_final_removal().unwrap();
+        let first = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         drop(first);
 
-        let second = runtime.begin_final_removal().unwrap();
+        let second = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, second);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -2242,7 +2373,7 @@ pub(crate) mod tests {
             .lifecycle
             .access()
             .set_next_lifecycle_attempt_for_test(u64::MAX);
-        assert!(runtime.begin_open().is_err());
+        assert!(runtime.lifecycle_runtime().begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 
@@ -2250,11 +2381,11 @@ pub(crate) mod tests {
     fn logical_quiescence_certificate_refuses_to_publish_closed_before_state_is_released() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let removal_attempt = runtime.begin_final_removal().unwrap();
+        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         runtime.wait_for_returns();
         let subscriptions_stopped = runtime.close_subscriptions().unwrap();
         runtime.shutdown_handle_topics().unwrap();
@@ -2299,7 +2430,7 @@ pub(crate) mod tests {
     fn close_rejects_new_calls_and_waits_for_existing_call() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish(7_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
@@ -2308,7 +2439,7 @@ pub(crate) mod tests {
             .into_admitted()
             .expect("test call enters during OPEN");
         let guard = runtime.enter(&ingress).unwrap();
-        assert!(runtime.begin_close());
+        assert!(runtime.lifecycle_runtime().begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
         assert!(matches!(runtime.enter(&ingress), Err(XllError::Closing)));
 
@@ -2350,7 +2481,7 @@ pub(crate) mod tests {
         assert!(runtime.module_residency_held());
         assert!(!runtime.ensure_module_residency(std::ptr::null()).unwrap());
 
-        runtime.quarantine();
+        runtime.lifecycle_runtime().quarantine();
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.module_residency_held());
         runtime.release_module_residency().unwrap();

@@ -39,12 +39,12 @@ pub(crate) type SubscriptionServerHandle =
 pub use source::{
     RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
 };
-#[cfg(any(feature = "rtd", test))]
-pub use topic::RtdLimits;
 #[cfg(all(not(feature = "rtd"), not(test)))]
 pub(crate) use topic::RtdLimits;
 #[cfg(any(feature = "rtd", test))]
 pub use topic::RtdTopic;
+#[cfg(any(feature = "rtd", test))]
+pub use topic::{RtdCapacity, RtdLimits};
 #[cfg(any(feature = "rtd", test))]
 pub use value::IntoRtdValue;
 #[cfg(any(feature = "rtd", test))]

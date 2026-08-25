@@ -88,8 +88,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 next_subscription_id: 1,
             }),
             servers: Mutex::new(FxHashMap::default()),
-            active_quota: triomphe::Arc::new(Quota::new(limits.max_active)),
-            queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates)),
+            active_quota: triomphe::Arc::new(Quota::new(limits.max_active.get())),
+            queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates.get())),
             cleanup_failure: Mutex::new(None),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
@@ -243,12 +243,12 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        if catalog.pending_len() >= self.limits.max_pending {
+        if catalog.pending_len() >= self.limits.max_pending.get() {
             return Err(XllError::Overloaded);
         }
 
         let new_total = match catalog.pending_topic_bytes.checked_add(topic.byte_len()) {
-            Some(total) if total <= self.limits.max_total_topic_bytes => total,
+            Some(total) if total <= self.limits.max_total_topic_bytes.get() => total,
             _ => return Err(XllError::Overloaded),
         };
 
@@ -256,7 +256,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let source_reservation = catalog
             .sources
-            .reserve(source.id, self.limits.max_source_ids)?;
+            .reserve(source.id, self.limits.max_source_ids.get())?;
 
         if let Err(error) = catalog.identities.insert(identity, key) {
             catalog.sources.release(source_reservation);

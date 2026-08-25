@@ -165,7 +165,7 @@ fn commit_removal_control<A: Addin>(
 }
 
 fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
-    runtime.quarantine();
+    runtime.lifecycle_runtime().quarantine();
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().quarantine(
         runtime,
@@ -175,7 +175,7 @@ fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
 }
 
 fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdown::UnloadHazard) {
-    runtime.quarantine();
+    runtime.lifecycle_runtime().quarantine();
     #[cfg(any(test, feature = "refinement"))]
     runtime
         .refinement_hooks()
@@ -398,14 +398,19 @@ mod tests {
         let stale_epoch = runtime.removal_epoch();
 
         assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
-        assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
+        assert!(
+            runtime
+                .lifecycle_runtime()
+                .begin_open_if_epoch(stale_epoch)
+                .is_err()
+        );
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
     #[test]
     fn failed_concurrent_open_does_not_rollback_the_owner_attempt() {
         let runtime = Runtime::<LayersPanic>::new();
-        let mut owner = runtime.begin_open().unwrap();
+        let mut owner = runtime.lifecycle_runtime().begin_open().unwrap();
         let lifecycle = lifecycle_access(&runtime);
 
         rollback_active_open::<LayersPanic, crate::runtime::OpenAttemptBegun>(&lifecycle, None);
@@ -426,6 +431,7 @@ mod tests {
         let runtime = Runtime::<LayersPanic>::new();
         let removal_epoch = runtime.removal_epoch();
         let transaction = runtime
+            .lifecycle_runtime()
             .begin_open_if_epoch(removal_epoch)
             .unwrap()
             .attach_host();
@@ -453,7 +459,7 @@ mod tests {
         LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
         LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
         let runtime = Runtime::<LayersPanic>::new();
-        let mut first_open = runtime.begin_open().unwrap();
+        let mut first_open = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut first_open, Vec::new()).unwrap();
         let first_generation = runtime.last_committed_generation();
@@ -461,8 +467,8 @@ mod tests {
         let lifecycle = lifecycle_access(&runtime);
         assert_eq!(remove_addin::<LayersPanic>(&runtime, &lifecycle), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
-        runtime.clear_host_intent();
-        let mut second_open = runtime.begin_open().unwrap();
+        runtime.lifecycle_runtime().clear_host_intent();
+        let mut second_open = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut second_open, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
@@ -496,7 +502,7 @@ mod tests {
     #[test]
     fn failed_controlled_reload_quarantines_the_runtime() {
         let runtime = Runtime::<ReloadFailure>::new();
-        let mut first_open = runtime.begin_open().unwrap();
+        let mut first_open = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut first_open, Vec::new()).unwrap();
 
@@ -565,7 +571,7 @@ mod tests {
     fn addin_cleanup_issue_does_not_prevent_finalizing_runtime() {
         let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle(
             (),
             RetryState {
@@ -616,7 +622,7 @@ mod tests {
     fn cleanup_panic_retains_state_and_quarantines_runtime() {
         let runtime = Runtime::<CleanupPanic>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         let lifecycle = lifecycle_access(&runtime);
         assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
@@ -663,7 +669,7 @@ mod tests {
     fn wrong_thread_removal_quarantines_before_touching_lifecycle_state() {
         let runtime = std::sync::Arc::new(Runtime::<WrongThreadRemoval>::new());
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         assert!(
@@ -720,7 +726,7 @@ mod tests {
     fn quiesce_failure_enters_quarantine_without_dropping_state() {
         let runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         let lifecycle = lifecycle_access(&runtime);
         assert!(runtime.with_addin_lifecycle(&lifecycle, |_| ()).is_ok());
@@ -745,7 +751,7 @@ mod tests {
     fn open_rollback_cleanup_issue_still_finalizes_without_reinstalling_state() {
         let runtime = Runtime::<RetryClose>::new();
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle(
             (),
             RetryState {
@@ -895,7 +901,7 @@ mod tests {
 
         let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
         let runtime = static_fixture.runtime();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
@@ -1040,7 +1046,7 @@ mod tests {
 
         crate::diagnostics::reset_diagnostic_router().unwrap();
         let clean_runtime = Runtime::<CleanClose>::new();
-        let mut opening = clean_runtime.begin_open().unwrap();
+        let mut opening = clean_runtime.lifecycle_runtime().begin_open().unwrap();
         clean_runtime.publish((), ());
         clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
         assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
@@ -1048,7 +1054,7 @@ mod tests {
 
         let failure_runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut opening = failure_runtime.begin_open().unwrap();
+        let mut opening = failure_runtime.lifecycle_runtime().begin_open().unwrap();
         failure_runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
         failure_runtime
             .finish_open(&mut opening, Vec::new())
@@ -1075,7 +1081,7 @@ mod tests {
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
         let runtime = Runtime::<CleanClose>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
@@ -1119,7 +1125,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let runtime = Runtime::<CleanClose>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         runtime.refinement_hooks().call_entered(&runtime);
@@ -1160,7 +1166,7 @@ mod tests {
 
         for label in ["first", "second"] {
             crate::diagnostics::reset_diagnostic_router().unwrap();
-            let mut opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
             runtime.publish((), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
@@ -1190,16 +1196,16 @@ mod tests {
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
         let runtime = Runtime::<CleanClose>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
         crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
         crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::Panic);
 
-        let first = runtime.begin_final_removal().unwrap();
+        let first = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         drop(first);
-        let second = runtime.begin_final_removal().unwrap();
+        let second = runtime.lifecycle_runtime().begin_final_removal().unwrap();
         drop(second);
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
@@ -1280,12 +1286,13 @@ mod tests {
         };
 
         let uncommitted = std::sync::Arc::new(Runtime::<CleanClose>::new());
-        let mut opening = uncommitted.begin_open().unwrap();
+        let mut opening = uncommitted.lifecycle_runtime().begin_open().unwrap();
         let closing_runtime = std::sync::Arc::clone(&uncommitted);
         let (owner_tx, owner_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let close_waiter = std::thread::spawn(move || {
             let removal_attempt = closing_runtime
+                .lifecycle_runtime()
                 .begin_final_removal()
                 .expect("final close must acquire after open rejection");
             owner_tx.send(()).expect("final close owner signal");
@@ -1314,7 +1321,7 @@ mod tests {
         );
 
         let rollback = Runtime::<CleanClose>::new();
-        let mut opening = rollback.begin_open().unwrap();
+        let mut opening = rollback.lifecycle_runtime().begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
         let mut callbacks = HostCallbackSession::new();
         let lifecycle = lifecycle_access(&rollback);
@@ -1335,13 +1342,13 @@ mod tests {
     #[test]
     fn close_owner_is_held_until_the_success_boundary_finishes() {
         let runtime = Runtime::<CleanClose>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let lifecycle = lifecycle_access(&runtime);
         let success = remove_addin_inner::<CleanClose>(&runtime, &lifecycle);
-        assert!(runtime.begin_open().is_err());
+        assert!(runtime.lifecycle_runtime().begin_open().is_err());
         let RemovalSuccess::Closed {
             witness,
             removal_attempt,
@@ -1352,7 +1359,7 @@ mod tests {
         runtime.record_returned_success(witness).unwrap();
         drop(removal_attempt);
 
-        let mut reopened = runtime.begin_open().unwrap();
+        let mut reopened = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut reopened, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
@@ -1392,7 +1399,7 @@ mod tests {
     #[test]
     fn failing_open_rollback_is_finalized_by_xl_auto_close() {
         let runtime = Runtime::<AlwaysFailClose>::new();
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
 
         assert!(open_attempt.fail().requires_rollback());
@@ -1417,7 +1424,7 @@ mod tests {
     fn xl_auto_close_waits_for_active_call_and_returns_one_after_clean_close() {
         let fixture = crate::runtime::StaticTestRuntime::<CleanClose>::new();
         let runtime = fixture.runtime();
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -1452,7 +1459,7 @@ mod tests {
     #[test]
     fn xl_auto_close_is_a_hint_until_explicit_removal() {
         let runtime = Runtime::<CleanClose>::new();
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
@@ -1480,7 +1487,7 @@ mod tests {
                 .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
                 .is_ok()
         );
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
@@ -1500,7 +1507,7 @@ mod tests {
                 .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
                 .is_ok()
         );
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
@@ -1533,7 +1540,7 @@ mod tests {
         };
 
         let runtime = Box::leak(Box::new(Runtime::<CleanClose>::new()));
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         runtime.start_async(1).unwrap();
@@ -1686,7 +1693,7 @@ mod tests {
     fn runtime_owned_subscriptions_and_handles_drop_before_addin_state_closes() {
         let runtime = Runtime::<OrderedClose>::new();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish_with_lifecycle(
             (),
             OrderedState {
@@ -1799,7 +1806,7 @@ mod tests {
 
         let (quiesce_entered_tx, _quiesce_entered_rx) = std::sync::mpsc::channel();
         let (quiesce_release_tx, quiesce_release_rx) = std::sync::mpsc::channel();
-        let open_attempt = runtime.begin_open().unwrap();
+        let open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         let state = StagedRaceState {
             quiesced: std::sync::Arc::clone(&quiesced),
             cleaned: std::sync::Arc::clone(&cleaned),
@@ -1904,7 +1911,7 @@ mod tests {
         let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
         let dropped = std::sync::Arc::new(AtomicUsize::new(0));
 
-        let open_attempt = runtime.begin_open().unwrap();
+        let open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
         let state = PanicLayersState {
             quiesced: std::sync::Arc::clone(&quiesced),
             cleaned: std::sync::Arc::clone(&cleaned),

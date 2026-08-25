@@ -6,7 +6,7 @@ Real-Time Data (RTD) is the appropriate model for a formula that should update r
 
 ```text
 worksheet formula
-    -> MainThreadContext::subscribe(&source_handle, topic)
+    -> MainThreadContext::rtd().subscribe(&source_handle, topic)
     -> RtdSource::subscribe(topic, sink)
     -> background producer calls sink.publish(value)
     -> framework batches RefreshData
@@ -33,7 +33,7 @@ let topic = RtdTopic::single("service-health")?;
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 
-The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `RuntimeConfig::with_rtd_limits` can choose lower limits during `Addin::open`; exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
+The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `RuntimeConfig::with_rtd_limits` can choose lower limits during `Addin::open`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
 
 ## Implement a source
 

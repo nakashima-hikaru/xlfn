@@ -58,11 +58,14 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningSt
             Ok(transaction) => Ok(transaction),
             Err((error, transaction, opening)) => {
                 let transaction = *transaction;
-                transaction.runtime().quarantine_opening_generation(
-                    active_runtime_generation(transaction.runtime()),
-                    *opening,
-                    crate::runtime_components::QuarantineReason::OpenStateInvariant,
-                );
+                transaction
+                    .runtime()
+                    .lifecycle_runtime()
+                    .quarantine_opening_generation(
+                        active_runtime_generation(transaction.runtime()),
+                        *opening,
+                        crate::runtime_components::QuarantineReason::OpenStateInvariant,
+                    );
                 Err(OpenFailure::Begun {
                     transaction: Box::new(transaction),
                     error,
@@ -117,7 +120,10 @@ where
             return Err(XllError::Closing);
         }
 
-        let mut transaction = runtime.begin_open_if_epoch(removal_epoch)?.attach_host();
+        let mut transaction = runtime
+            .lifecycle_runtime()
+            .begin_open_if_epoch(removal_epoch)?
+            .attach_host();
         let transaction = match super::retry_metadata_debt(runtime, transaction.callbacks_mut()) {
             Ok(()) => transaction,
             Err(error) => {
@@ -157,7 +163,7 @@ where
             let error = XllError::Panic;
             super::write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
-            runtime.quarantine();
+            runtime.lifecycle_runtime().quarantine();
             0
         }
     }

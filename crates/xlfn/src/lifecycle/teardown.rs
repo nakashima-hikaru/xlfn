@@ -139,15 +139,18 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         shared_state: A::SharedState,
         reason: crate::runtime_components::QuarantineReason,
     ) {
-        self.runtime
-            .quarantine_shared_state(self.generation, shared_state, reason);
+        self.runtime.lifecycle_runtime().quarantine_shared_state(
+            self.generation,
+            shared_state,
+            reason,
+        );
     }
 }
 
 impl<A: Addin> Drop for QuiescedAddin<'_, A> {
     fn drop(&mut self) {
         if let Some(shared_state) = self.shared_state.take() {
-            self.runtime.quarantine_shared_state(
+            self.runtime.lifecycle_runtime().quarantine_shared_state(
                 self.generation,
                 shared_state,
                 crate::runtime_components::QuarantineReason::TeardownIncomplete,
@@ -438,7 +441,7 @@ impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
 impl<A: Addin> Drop for TeardownOwner<'_, A> {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.as_ref() {
-            owner.runtime().quarantine();
+            owner.runtime().lifecycle_runtime().quarantine();
         }
     }
 }

@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn forgetting_a_borrowed_context_does_not_keep_callbacks_open() {
         let runtime = crate::runtime::Runtime::<()>::new();
-        let mut opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let state = ();

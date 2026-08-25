@@ -311,7 +311,7 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
         Some(Self {
             runtime,
             callbacks: HostCallbackSession::new(),
-            attempt: Some(runtime.begin_final_removal()?),
+            attempt: Some(runtime.lifecycle_runtime().begin_final_removal()?),
         })
     }
 
@@ -336,7 +336,7 @@ impl<A: Addin> Drop for RemovalTransaction<'_, A> {
             // No callback or partial cleanup is legal from Drop. The runtime
             // remains terminally quarantined until an explicit boundary can
             // account for every outstanding resource.
-            self.runtime.quarantine();
+            self.runtime.lifecycle_runtime().quarantine();
         }
     }
 }
@@ -600,7 +600,7 @@ where
                         .and_then(|result| result);
                         if let Err(error) = quiesce {
                             report_boundary_error("xlAutoRemove quiesce", &error);
-                            runtime.quarantine_generation(
+                            runtime.lifecycle_runtime().quarantine_generation(
                                 active_runtime_generation(runtime),
                                 generation,
                                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
@@ -624,7 +624,7 @@ where
                             diagnostic_id: crate::diagnostics::id::DiagnosticId::STATE_SCAN,
                         };
                         report_boundary_error("xlAutoRemove state escaped", &error);
-                        runtime.quarantine_shared_generation(
+                        runtime.lifecycle_runtime().quarantine_shared_generation(
                             active_runtime_generation(runtime),
                             generation,
                             crate::runtime_components::QuarantineReason::AddinGenerationEscaped,
@@ -654,12 +654,12 @@ where
                 if let Err(error) = quiesce {
                     report_boundary_error("xlAutoRemove quiesce", &error);
                     let generation_id = active_runtime_generation(runtime);
-                    runtime.quarantine_layers(
+                    runtime.lifecycle_runtime().quarantine_layers(
                         generation_id,
                         layers,
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                     );
-                    runtime.quarantine_shared_state(
+                    runtime.lifecycle_runtime().quarantine_shared_state(
                         generation_id,
                         shared_state,
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,

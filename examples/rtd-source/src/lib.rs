@@ -50,5 +50,5 @@ pub fn last_metric(
     symbol: String,
 ) -> XllResult<RtdValue> {
     let topic = RtdTopic::new(["last", symbol.as_str()])?;
-    context.subscribe(&context.state().metrics, topic)
+    context.rtd().subscribe(&context.state().metrics, topic)
 }

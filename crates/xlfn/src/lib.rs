@@ -121,6 +121,8 @@ pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
     ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, XllError, XllResult,
 };
+#[cfg(feature = "rtd")]
+pub use rtd::RtdCallContext;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
 
 mod ingress;
@@ -533,9 +535,11 @@ pub mod prelude {
     pub use crate::error::{ExcelError, XllError, XllResult};
     #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease, HandleObjectId};
+    #[cfg(feature = "rtd")]
+    pub use crate::rtd::RtdCallContext;
     pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
     #[cfg(feature = "rtd")]
-    pub use crate::subscription::{RtdSourceHandle, RtdTopic};
+    pub use crate::subscription::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdTopic};
     pub use crate::value::{
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
         OptionalExcelValue, Row,

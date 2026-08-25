@@ -55,6 +55,7 @@ impl SyncBoundaryWorkerPool {
             Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
         let removal_epoch = runtime.removal_epoch();
         let mut open_attempt = runtime
+            .lifecycle_runtime()
             .begin_open_if_epoch(removal_epoch)
             .expect("begin_open");
         runtime.publish((), ());

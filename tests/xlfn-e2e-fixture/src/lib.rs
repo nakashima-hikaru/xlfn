@@ -162,7 +162,7 @@ pub fn rtd_fixture(
             xlfn::error::InputError::OutOfRange,
         ));
     }
-    context.subscribe(
+    context.rtd().subscribe(
         &context.state().rtd,
         RtdTopic::single(format!("topic-{topic_id}"))?,
     )

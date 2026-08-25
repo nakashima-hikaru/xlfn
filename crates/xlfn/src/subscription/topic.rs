@@ -2,6 +2,7 @@ use super::source::SourceHandleId;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
@@ -12,81 +13,124 @@ pub(crate) const DEFAULT_MAX_RTD_QUEUED_UPDATES: usize = 4096;
 pub(crate) const DEFAULT_MAX_RTD_SOURCE_IDS: usize = 4096;
 pub(crate) const DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES: usize = 64 * 1024 * 1024;
 
+/// Capacity for one RTD resource class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RtdCapacity {
+    /// Do not admit the corresponding RTD resource.
+    Disabled,
+    /// Admit at most this many live resources.
+    Bounded(NonZeroUsize),
+}
+
+impl RtdCapacity {
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    #[must_use]
+    pub const fn bounded(value: NonZeroUsize) -> Self {
+        Self::Bounded(value)
+    }
+
+    #[must_use]
+    pub const fn from_usize(value: usize) -> Self {
+        match NonZeroUsize::new(value) {
+            Some(value) => Self::Bounded(value),
+            None => Self::Disabled,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        match self {
+            Self::Disabled => 0,
+            Self::Bounded(value) => value.get(),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+}
+
 /// Resource limits for one add-in's RTD subscription runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct RtdLimits {
-    pub(crate) max_pending: usize,
-    pub(crate) max_active: usize,
-    pub(crate) max_queued_updates: usize,
-    pub(crate) max_source_ids: usize,
-    pub(crate) max_total_topic_bytes: usize,
+    pub(crate) max_pending: RtdCapacity,
+    pub(crate) max_active: RtdCapacity,
+    pub(crate) max_queued_updates: RtdCapacity,
+    pub(crate) max_source_ids: RtdCapacity,
+    pub(crate) max_total_topic_bytes: RtdCapacity,
 }
 
 impl RtdLimits {
     #[must_use]
     pub const fn standard() -> Self {
         Self {
-            max_pending: DEFAULT_MAX_RTD_PENDING,
-            max_active: DEFAULT_MAX_RTD_ACTIVE,
-            max_queued_updates: DEFAULT_MAX_RTD_QUEUED_UPDATES,
-            max_source_ids: DEFAULT_MAX_RTD_SOURCE_IDS,
-            max_total_topic_bytes: DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES,
+            max_pending: RtdCapacity::from_usize(DEFAULT_MAX_RTD_PENDING),
+            max_active: RtdCapacity::from_usize(DEFAULT_MAX_RTD_ACTIVE),
+            max_queued_updates: RtdCapacity::from_usize(DEFAULT_MAX_RTD_QUEUED_UPDATES),
+            max_source_ids: RtdCapacity::from_usize(DEFAULT_MAX_RTD_SOURCE_IDS),
+            max_total_topic_bytes: RtdCapacity::from_usize(DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES),
         }
     }
 
     #[must_use]
-    pub const fn with_max_pending(mut self, value: usize) -> Self {
+    pub const fn with_max_pending(mut self, value: RtdCapacity) -> Self {
         self.max_pending = value;
         self
     }
 
     #[must_use]
-    pub const fn with_max_active(mut self, value: usize) -> Self {
+    pub const fn with_max_active(mut self, value: RtdCapacity) -> Self {
         self.max_active = value;
         self
     }
 
     #[must_use]
-    pub const fn with_max_queued_updates(mut self, value: usize) -> Self {
+    pub const fn with_max_queued_updates(mut self, value: RtdCapacity) -> Self {
         self.max_queued_updates = value;
         self
     }
 
     #[must_use]
-    pub const fn with_max_source_ids(mut self, value: usize) -> Self {
+    pub const fn with_max_source_ids(mut self, value: RtdCapacity) -> Self {
         self.max_source_ids = value;
         self
     }
 
     #[must_use]
-    pub const fn with_max_total_topic_bytes(mut self, value: usize) -> Self {
+    pub const fn with_max_total_topic_bytes(mut self, value: RtdCapacity) -> Self {
         self.max_total_topic_bytes = value;
         self
     }
 
     #[must_use]
-    pub const fn max_pending(&self) -> usize {
+    pub const fn max_pending(&self) -> RtdCapacity {
         self.max_pending
     }
 
     #[must_use]
-    pub const fn max_active(&self) -> usize {
+    pub const fn max_active(&self) -> RtdCapacity {
         self.max_active
     }
 
     #[must_use]
-    pub const fn max_queued_updates(&self) -> usize {
+    pub const fn max_queued_updates(&self) -> RtdCapacity {
         self.max_queued_updates
     }
 
     #[must_use]
-    pub const fn max_source_ids(&self) -> usize {
+    pub const fn max_source_ids(&self) -> RtdCapacity {
         self.max_source_ids
     }
 
     #[must_use]
-    pub const fn max_total_topic_bytes(&self) -> usize {
+    pub const fn max_total_topic_bytes(&self) -> RtdCapacity {
         self.max_total_topic_bytes
     }
 }

@@ -127,10 +127,21 @@ pub mod v1 {
     /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
     #[doc(hidden)]
     pub fn main_thread_context<'call, A: Addin, M: InputMode>(
-        frame: &CallFrame<'call, M>,
+        _frame: &CallFrame<'call, M>,
         state: &'call A::SharedState,
     ) -> crate::addin::MainThreadContext<'call, A> {
-        crate::addin::MainThreadContext::new(state, frame.services(), frame.scope)
+        #[cfg(any(feature = "rtd", test))]
+        {
+            crate::addin::MainThreadContext::new(
+                state,
+                crate::rtd::RtdCallContext::new(
+                    _frame.services(),
+                    crate::host_api::ExcelHost::new(_frame.scope.callbacks()),
+                ),
+            )
+        }
+        #[cfg(all(not(feature = "rtd"), not(test)))]
+        crate::addin::MainThreadContext::new(state)
     }
 
     /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
@@ -270,7 +281,7 @@ pub mod v1 {
         }
         if let Err(error) = runtime.runtime().release_module_residency() {
             crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
-            runtime.runtime().quarantine();
+            runtime.runtime().lifecycle_runtime().quarantine();
         }
     }
 
@@ -380,6 +391,7 @@ pub mod v1 {
             }
         }
 
+        #[cfg(any(feature = "rtd", test))]
         pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
             self.arguments.services()
         }

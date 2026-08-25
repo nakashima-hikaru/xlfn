@@ -13,7 +13,7 @@ fn desk(
 }
 ```
 
-`MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps the open generation alive while exposing state and callback capability. It also provides `subscribe`, which establishes a streaming RTD dependency. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
+`MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps the open generation alive while exposing state and callback capability. With the `rtd` feature, `context.rtd()` returns the narrower RTD capability that establishes a streaming subscription. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
 
 Do not combine a main-thread context with `thread_safe`.
 

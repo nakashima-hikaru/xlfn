@@ -50,7 +50,7 @@ where
                 return 0;
             }
         };
-        runtime.clear_host_intent();
+        runtime.lifecycle_runtime().clear_host_intent();
     }
     let result = open_addin(runtime, &lifecycle, addin_id, version, target, descriptors);
     if controlled_reload
@@ -68,7 +68,7 @@ where
         // The old generation was already removed successfully, but Excel
         // attempted a new open before delivering its close hint. Preserve
         // the release marker so that the later hint can release the lease.
-        runtime.complete_explicit_removal();
+        runtime.lifecycle_runtime().complete_explicit_removal();
     }
     result
 }
@@ -85,7 +85,7 @@ where
             report_boundary_error("xlAutoClose module residency release", &error);
             quarantine_runtime(runtime);
         } else {
-            runtime.clear_host_intent();
+            runtime.lifecycle_runtime().clear_host_intent();
         }
     }
     1
@@ -108,10 +108,10 @@ where
             return 1;
         }
     };
-    runtime.request_explicit_removal();
+    runtime.lifecycle_runtime().request_explicit_removal();
     let result = remove_addin::<A>(runtime, &lifecycle);
     if result == 1 && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed {
-        runtime.complete_explicit_removal();
+        runtime.lifecycle_runtime().complete_explicit_removal();
     }
     1
 }

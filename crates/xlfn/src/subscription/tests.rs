@@ -2,6 +2,7 @@ use super::*;
 use crate::rtd::RtdNotifier;
 use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) struct TestSubscription {
@@ -81,6 +82,20 @@ pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>
     )
     .expect("test source handle allocation must succeed");
     (source, slot, disconnected)
+}
+
+#[test]
+fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
+    assert_eq!(RtdCapacity::from_usize(0), RtdCapacity::Disabled);
+    assert!(RtdCapacity::disabled().is_disabled());
+
+    let bounded = RtdCapacity::from_usize(4);
+    assert_eq!(
+        bounded,
+        RtdCapacity::Bounded(NonZeroUsize::new(4).expect("test limit is non-zero"))
+    );
+    assert_eq!(bounded.get(), 4);
+    assert!(!bounded.is_disabled());
 }
 
 #[test]
@@ -511,7 +526,7 @@ fn stale_sink_returns_closing() {
 #[test]
 fn global_quota_enforcement() {
     let limits = RtdLimits {
-        max_queued_updates: 10,
+        max_queued_updates: RtdCapacity::from_usize(10),
         ..RtdLimits::standard()
     };
     let runtime = Arc::new(SubscriptionRuntime::with_limits(limits));
@@ -1247,7 +1262,7 @@ fn same_handle_reuses_active_subscription_identity() {
 #[test]
 fn released_source_identity_returns_to_the_live_quota() {
     let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: 1,
+        max_source_ids: RtdCapacity::from_usize(1),
         ..RtdLimits::standard()
     }));
 
@@ -1286,8 +1301,8 @@ fn live_source_reuses_identity_after_pending_subscription_is_removed() {
 #[test]
 fn failed_pending_admission_rolls_back_new_source_identity() {
     let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_pending: 0,
-        max_source_ids: 1,
+        max_pending: RtdCapacity::disabled(),
+        max_source_ids: RtdCapacity::from_usize(1),
         ..RtdLimits::standard()
     }));
 
@@ -1319,7 +1334,7 @@ fn reserve_live_source_tracks_each_identity_reference() {
 #[test]
 fn source_limit_counts_distinct_live_sources_not_topics() {
     let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: 1,
+        max_source_ids: RtdCapacity::from_usize(1),
         ..RtdLimits::standard()
     }));
     let (source, _, _) = publishing_source::<f64>(None);
