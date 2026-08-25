@@ -6,9 +6,9 @@
 //! Durable state vocabulary for distribution commits.
 //!
 //! The package layer owns the complete transaction, including lock ownership,
-//! journal durability, stale recovery, rollback, and quarantine. CLI callers
-//! provide a prepared directory and verification closures but do not sequence
-//! destructive file-system transitions themselves.
+//! journal durability, stale recovery, rollback, and quarantine. Callers only
+//! provide prepared evidence; they do not sequence destructive file-system
+//! transitions or supply verification closures.
 
 use crate::{DirectoryIdentity, PackageResult, PrivateStagingDirectory};
 use fs_err as fs;
@@ -622,13 +622,210 @@ pub fn journal_checksum(journal: &TransactionJournal) -> PackageResult<String> {
 }
 
 use crate::directory_identity;
-use anyhow::{Context, anyhow, bail};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Result type for the distribution transaction engine.
-pub type DistributionResult<T = ()> = anyhow::Result<T>;
+/// Errors exposed by the package-owned distribution facade.
+#[derive(Debug, thiserror::Error)]
+pub enum DistributionError {
+    #[error(transparent)]
+    Recovery(#[from] DistributionRecoveryError),
+    #[error(transparent)]
+    Quarantined(#[from] DistributionRecoveryQuarantineError),
+    #[error(transparent)]
+    Package(#[from] crate::PackageError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("invalid distribution transaction: {0}")]
+    Invalid(String),
+    #[error("{phase}: {primary}; recording state failed: {state}")]
+    StateRecordingFailure {
+        phase: &'static str,
+        primary: Box<DistributionError>,
+        #[source]
+        state: Box<DistributionError>,
+    },
+}
+
+/// Result type returned by the package-owned distribution facade.
+pub type DistributionResult<T = ()> = Result<T, DistributionError>;
+
+/// Result of a completed distribution commit.
+#[derive(Debug)]
+pub struct CommitOutcome {
+    cleanup: CleanupOutcome,
+}
+
+impl CommitOutcome {
+    /// Returns the cleanup result after the installed distribution became
+    /// authoritative.
+    #[must_use]
+    pub fn cleanup(&self) -> &CleanupOutcome {
+        &self.cleanup
+    }
+
+    fn complete() -> Self {
+        Self {
+            cleanup: CleanupOutcome::Complete,
+        }
+    }
+
+    fn backup_retained(backup: PathBuf, transaction: PathBuf, error: io::Error) -> Self {
+        Self {
+            cleanup: CleanupOutcome::BackupRetained {
+                backup,
+                transaction,
+                error,
+            },
+        }
+    }
+}
+
+/// Cleanup status returned after a successful installation.
+#[derive(Debug)]
+pub enum CleanupOutcome {
+    /// The previous distribution and transaction directory were removed.
+    Complete,
+    /// The new distribution is installed, but the old backup remains for
+    /// recovery because cleanup failed. The transaction journal is retained.
+    BackupRetained {
+        backup: PathBuf,
+        transaction: PathBuf,
+        error: io::Error,
+    },
+}
+
+/// A closed-world distribution prepared for commit.
+///
+/// The root snapshot and every package-specific verification snapshot are
+/// owned by this value. This makes verification evidence data carried by the
+/// commit capability instead of callbacks supplied by the CLI.
+#[derive(Debug)]
+pub struct PreparedDistribution {
+    root: crate::PreparedDirectoryCommit,
+    packages: Vec<PreparedPackageVerification>,
+}
+
+#[derive(Debug)]
+struct PreparedPackageVerification {
+    relative_path: Option<PathBuf>,
+    package: crate::PreparedPackageCommit,
+}
+
+impl PreparedDistribution {
+    /// Creates a distribution from its closed-world root snapshot.
+    #[must_use]
+    pub fn new(root: crate::PreparedDirectoryCommit) -> Self {
+        Self {
+            root,
+            packages: Vec::new(),
+        }
+    }
+
+    /// Adds package evidence whose destination is the committed root itself.
+    pub fn with_package(
+        mut self,
+        package: crate::PreparedPackageCommit,
+    ) -> crate::PackageResult<Self> {
+        if self
+            .packages
+            .iter()
+            .any(|entry| entry.relative_path.is_none())
+        {
+            return Err("prepared distribution already has root package evidence".into());
+        }
+        self.packages.push(PreparedPackageVerification {
+            relative_path: None,
+            package,
+        });
+        Ok(self)
+    }
+
+    /// Adds package evidence at a validated path below the committed root.
+    pub fn with_nested_package(
+        mut self,
+        relative_path: impl Into<PathBuf>,
+        package: crate::PreparedPackageCommit,
+    ) -> crate::PackageResult<Self> {
+        let relative_path = relative_path.into();
+        validate_distribution_relative_path(&relative_path)?;
+        if self
+            .packages
+            .iter()
+            .any(|entry| entry.relative_path.as_ref() == Some(&relative_path))
+        {
+            return Err(format!(
+                "duplicate prepared distribution package path: {}",
+                relative_path.display()
+            )
+            .into());
+        }
+        self.packages.push(PreparedPackageVerification {
+            relative_path: Some(relative_path),
+            package,
+        });
+        Ok(self)
+    }
+
+    /// Commits the prepared distribution using the platform file system.
+    pub fn commit(self, destination: &Path) -> DistributionResult<CommitOutcome> {
+        self.commit_with(destination, &SystemDistributionFileOps)
+    }
+
+    /// Commits the prepared distribution with injected file operations.
+    ///
+    /// This is primarily useful for package-level failure-injection tests;
+    /// verification remains owned by the prepared evidence in all cases.
+    pub fn commit_with(
+        self,
+        destination: &Path,
+        file_ops: &impl DistributionFileOps,
+    ) -> DistributionResult<CommitOutcome> {
+        let root = &self.root;
+        let packages = &self.packages;
+        commit_prepared_directory_with(
+            root,
+            destination,
+            |_| {
+                for package in packages {
+                    package.package.verify_source_contents()?;
+                }
+                Ok(())
+            },
+            |committed_root| {
+                root.verify_committed_contents(committed_root)?;
+                for package in packages {
+                    let package_root = package.relative_path.as_deref().map_or_else(
+                        || committed_root.to_path_buf(),
+                        |path| committed_root.join(path),
+                    );
+                    package.package.verify_committed_contents(&package_root)?;
+                }
+                Ok(())
+            },
+            file_ops,
+        )
+    }
+}
+
+fn validate_distribution_relative_path(path: &Path) -> crate::PackageResult {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "prepared distribution package path must be a non-empty relative path: {}",
+            path.display()
+        )
+        .into());
+    }
+    crate::validate_path_components(path)
+}
 
 #[derive(Debug)]
 pub struct DistributionRecoveryError {
@@ -759,7 +956,9 @@ impl DistributionTransactionDirectory {
                 journal_state,
             ));
         }
-        bail!("failed to allocate a unique distribution transaction directory")
+        Err(DistributionError::Invalid(
+            "failed to allocate a unique distribution transaction directory".to_owned(),
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -769,7 +968,11 @@ impl DistributionTransactionDirectory {
     pub fn verify(&self) -> DistributionResult<()> {
         self.capability
             .as_ref()
-            .context("distribution transaction capability was released")?
+            .ok_or_else(|| {
+                DistributionError::Invalid(
+                    "distribution transaction capability was released".to_owned(),
+                )
+            })?
             .verify()?;
         Ok(())
     }
@@ -805,7 +1008,7 @@ pub fn commit_prepared_directory(
     destination: &Path,
     verify_source: impl Fn(&Path) -> DistributionResult,
     verify_destination: impl Fn(&Path) -> DistributionResult,
-) -> DistributionResult {
+) -> DistributionResult<CommitOutcome> {
     commit_prepared_directory_with(
         prepared,
         destination,
@@ -821,7 +1024,7 @@ pub fn commit_prepared_directory_with(
     verify_source: impl Fn(&Path) -> DistributionResult,
     verify_destination: impl Fn(&Path) -> DistributionResult,
     file_ops: &impl DistributionFileOps,
-) -> DistributionResult {
+) -> DistributionResult<CommitOutcome> {
     validate_output_destination(destination)?;
     let parent = destination
         .parent()
@@ -831,7 +1034,11 @@ pub fn commit_prepared_directory_with(
     let destination_name = destination
         .file_name()
         .and_then(|name| name.to_str())
-        .context("distribution destination name is not valid UTF-8")?;
+        .ok_or_else(|| {
+            DistributionError::Invalid(
+                "distribution destination name is not valid UTF-8".to_owned(),
+            )
+        })?;
     let commit_guard = DistributionCommitGuard::acquire(parent, destination_name)?;
     recover_stale_transactions(parent, destination_name, &commit_guard, file_ops)?;
     validate_commit_location(parent, destination)?;
@@ -917,14 +1124,20 @@ pub fn commit_prepared_directory_with(
             rollback_state,
             file_ops,
         ) {
-            return Err(anyhow!(
-                "distribution commit failed: {commit_error}; recording rollback state also failed: {state_error}"
-            ));
+            return Err(DistributionError::StateRecordingFailure {
+                phase: "distribution commit",
+                primary: Box::new(DistributionError::Io(commit_error)),
+                state: Box::new(state_error.into()),
+            });
         }
         if had_previous {
             let expected_previous = journal_state
                 .previous_identity
-                .context("transaction has no previous destination identity")
+                .ok_or_else(|| {
+                    DistributionError::Invalid(
+                        "transaction has no previous destination identity".to_owned(),
+                    )
+                })
                 .map_err(error_as_io);
             let rollback = validate_commit_location(parent, destination)
                 .map_err(error_as_io)
@@ -939,7 +1152,11 @@ pub fn commit_prepared_directory_with(
                 .and_then(|_| {
                     let expected = journal_state
                         .previous_identity
-                        .context("transaction has no previous destination identity")
+                        .ok_or_else(|| {
+                            DistributionError::Invalid(
+                                "transaction has no previous destination identity".to_owned(),
+                            )
+                        })
                         .map_err(error_as_io)?;
                     require_directory_identity(destination, expected, "restored destination")
                         .map_err(error_as_io)
@@ -961,14 +1178,16 @@ pub fn commit_prepared_directory_with(
                 file_ops,
             );
             if let Err(state_error) = state_result {
-                return Err(anyhow!(
-                    "distribution commit failed: {commit_error}; rollback succeeded but recording its state failed: {state_error}"
-                ));
+                return Err(DistributionError::StateRecordingFailure {
+                    phase: "distribution commit rollback",
+                    primary: Box::new(DistributionError::Io(commit_error)),
+                    state: Box::new(state_error.into()),
+                });
             }
             transaction.cleanup_now(parent, file_ops)?;
         }
         file_ops.sync_directory(parent)?;
-        return Err(commit_error.into());
+        return Err(DistributionError::Io(commit_error));
     }
     sync_rename_parents(prepared.staging_directory(), destination, file_ops)?;
     #[cfg(not(target_os = "windows"))]
@@ -987,7 +1206,7 @@ pub fn commit_prepared_directory_with(
     )?;
 
     if let Err(verification_error) = validate_output_destination(destination)
-        .map_err(anyhow::Error::from)
+        .map_err(DistributionError::from)
         .and_then(|_| verify_destination(destination))
     {
         let rollback_state = if had_previous {
@@ -1002,15 +1221,19 @@ pub fn commit_prepared_directory_with(
             rollback_state,
             file_ops,
         ) {
-            return Err(anyhow!(
-                "post-commit verification failed: {verification_error}; recording rollback state also failed: {state_error}"
-            ));
+            return Err(DistributionError::StateRecordingFailure {
+                phase: "post-commit verification",
+                primary: Box::new(verification_error),
+                state: Box::new(state_error.into()),
+            });
         }
         if had_previous {
             let failed = transaction.path().join("failed-install");
-            let expected_installed = journal_state
-                .installed_identity
-                .context("transaction has no installed destination identity")?;
+            let expected_installed = journal_state.installed_identity.ok_or_else(|| {
+                DistributionError::Invalid(
+                    "transaction has no installed destination identity".to_owned(),
+                )
+            })?;
             let failed_install = validate_commit_location(parent, destination)
                 .map_err(error_as_io)
                 .and_then(|_| {
@@ -1035,7 +1258,11 @@ pub fn commit_prepared_directory_with(
             let expected_previous = journal_state
                 .previous_identity
                 .or(journal_state.destination_identity)
-                .context("transaction has no previous destination identity")?;
+                .ok_or_else(|| {
+                    DistributionError::Invalid(
+                        "transaction has no previous destination identity".to_owned(),
+                    )
+                })?;
             let rollback = validate_commit_location(parent, destination)
                 .map_err(error_as_io)
                 .and_then(|_| ensure_destination_absent(destination).map_err(error_as_io))
@@ -1069,9 +1296,11 @@ pub fn commit_prepared_directory_with(
                 TransactionState::RolledBack,
                 file_ops,
             ) {
-                return Err(anyhow!(
-                    "post-commit verification failed: {verification_error}; rollback succeeded but recording its state failed: {state_error}"
-                ));
+                return Err(DistributionError::StateRecordingFailure {
+                    phase: "post-commit verification rollback",
+                    primary: Box::new(verification_error),
+                    state: Box::new(state_error.into()),
+                });
             }
             remove_installed_distribution_with(&failed, &journal_state, file_ops)?;
             transaction.cleanup_now(parent, file_ops)?;
@@ -1104,21 +1333,22 @@ pub fn commit_prepared_directory_with(
     )?;
     if had_previous {
         if let Err(error) = file_ops.remove_dir_all(&previous) {
-            eprintln!(
-                "xlfn-package: warning: committed {} but could not remove backup {}: {error}",
-                destination.display(),
-                previous.display()
-            );
-            return Ok(());
+            let transaction_path = transaction.path().to_path_buf();
+            let _ = transaction.keep();
+            return Ok(CommitOutcome::backup_retained(
+                previous,
+                transaction_path,
+                error,
+            ));
         }
         file_ops.sync_directory(transaction.path())?;
     }
     transaction.cleanup_now(parent, file_ops)?;
-    Ok(())
+    Ok(CommitOutcome::complete())
 }
 
 #[derive(Debug)]
-pub struct IoErrorSource(pub anyhow::Error);
+pub struct IoErrorSource(pub DistributionError);
 
 impl fmt::Display for IoErrorSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1128,16 +1358,15 @@ impl fmt::Display for IoErrorSource {
 
 impl std::error::Error for IoErrorSource {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        let error: &(dyn std::error::Error + 'static) = self.0.as_ref();
-        error.source()
+        Some(&self.0)
     }
 }
 
 pub fn error_as_io<E>(error: E) -> io::Error
 where
-    E: Into<anyhow::Error>,
+    E: Into<DistributionError>,
 {
-    // Keep the original anyhow chain behind the standard I/O error rather
+    // Keep the typed distribution error behind the standard I/O error rather
     // than flattening it to a display string.
     io::Error::other(IoErrorSource(error.into()))
 }
@@ -1214,7 +1443,9 @@ pub fn recover_stale_transactions(
 ) -> DistributionResult {
     commit_guard.ensure_held()?;
     if commit_guard.destination() != parent.join(destination_name) {
-        bail!("distribution recovery lock does not match its destination");
+        return Err(DistributionError::Invalid(
+            "distribution recovery lock does not match its destination".to_owned(),
+        ));
     }
     crate::validate_directory_path(parent)?;
     let prefix = format!(".{destination_name}.transaction-");
@@ -1394,13 +1625,17 @@ pub fn recover_stale_transactions(
                     let expected_previous = journal_state
                         .previous_identity
                         .or(journal_state.destination_identity)
-                        .context("prepared transaction has no previous identity")?;
+                        .ok_or_else(|| {
+                            DistributionError::Invalid(
+                                "prepared transaction has no previous identity".to_owned(),
+                            )
+                        })?;
                     require_directory_identity(&previous, expected_previous, "previous backup")?;
                     if optional_directory_identity(&destination)?.is_some() {
-                        bail!(
+                        return Err(DistributionError::Invalid(format!(
                             "distribution transaction journal is inconsistent: {}",
                             transaction.display()
-                        );
+                        )));
                     }
                     file_ops.rename(&previous, &destination)?;
                     sync_rename_parents(&previous, &destination, file_ops)?;
@@ -1415,18 +1650,18 @@ pub fn recover_stale_transactions(
             }
             TransactionState::NoPrevious => {
                 if optional_directory_identity(&previous)?.is_some() {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "distribution transaction journal is inconsistent: {}",
                         transaction.display()
-                    );
+                    )));
                 }
                 if optional_directory_identity(&destination)?.is_some()
                     && journal_state.destination_identity.is_none()
                 {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "no-previous transaction has an unexpected destination: {}",
                         transaction.display()
-                    );
+                    )));
                 }
                 if let Some(expected) = journal_state.destination_identity {
                     require_directory_identity(&destination, expected, "original destination")?;
@@ -1442,18 +1677,18 @@ pub fn recover_stale_transactions(
                         file_ops,
                     )?;
                 } else {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "install-pending transaction lost its backup: {}",
                         transaction.display()
-                    );
+                    )));
                 }
             }
             TransactionState::InstallPendingNoPrevious => {
                 if optional_directory_identity(&previous)?.is_some() {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "distribution transaction journal is inconsistent: {}",
                         transaction.display()
-                    );
+                    )));
                 }
                 remove_installed_distribution_with(&destination, &journal_state, file_ops)?;
                 remove_recovery_install(&transaction, &journal_state, file_ops)?;
@@ -1468,10 +1703,10 @@ pub fn recover_stale_transactions(
                         file_ops,
                     )?;
                 } else {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "previous-saved transaction lost its backup: {}",
                         transaction.display()
-                    );
+                    )));
                 }
             }
             TransactionState::Installed | TransactionState::RollbackPending => {
@@ -1487,18 +1722,18 @@ pub fn recover_stale_transactions(
                     require_original_destination(&destination, &journal_state)?;
                     remove_recovery_install(&transaction, &journal_state, file_ops)?;
                 } else {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "installed transaction lost its backup: {}",
                         transaction.display()
-                    );
+                    )));
                 }
             }
             TransactionState::InstalledNoPrevious | TransactionState::RollbackPendingNoPrevious => {
                 if optional_directory_identity(&previous)?.is_some() {
-                    bail!(
+                    return Err(DistributionError::Invalid(format!(
                         "distribution transaction journal is inconsistent: {}",
                         transaction.display()
-                    );
+                    )));
                 }
                 remove_installed_distribution_with(&destination, &journal_state, file_ops)?;
                 remove_recovery_install(&transaction, &journal_state, file_ops)?;
@@ -1518,9 +1753,11 @@ pub fn recover_stale_transactions(
                 remove_recovery_install(&transaction, &journal_state, file_ops)?;
             }
             TransactionState::Committed => {
-                let installed = journal_state
-                    .installed_identity
-                    .context("committed transaction has no installed identity")?;
+                let installed = journal_state.installed_identity.ok_or_else(|| {
+                    DistributionError::Invalid(
+                        "committed transaction has no installed identity".to_owned(),
+                    )
+                })?;
                 if optional_directory_identity(&destination)?.is_none() {
                     // Committed means the installed directory is authoritative.
                     // The old distribution is cleanup payload only and must
@@ -1536,9 +1773,11 @@ pub fn recover_stale_transactions(
                 }
                 require_directory_identity(&destination, installed, "installed destination")?;
                 if optional_directory_identity(&previous)?.is_some() {
-                    let expected = journal_state
-                        .previous_identity
-                        .context("committed transaction has no previous identity")?;
+                    let expected = journal_state.previous_identity.ok_or_else(|| {
+                        DistributionError::Invalid(
+                            "committed transaction has no previous identity".to_owned(),
+                        )
+                    })?;
                     require_directory_identity(&previous, expected, "committed backup")?;
                     file_ops.remove_dir_all(&previous)?;
                     file_ops.sync_directory(&transaction)?;
@@ -1558,9 +1797,9 @@ pub fn require_original_destination(
     destination: &Path,
     journal: &TransactionJournal,
 ) -> DistributionResult<()> {
-    let expected = journal
-        .destination_identity
-        .context("transaction has no original destination identity")?;
+    let expected = journal.destination_identity.ok_or_else(|| {
+        DistributionError::Invalid("transaction has no original destination identity".to_owned())
+    })?;
     Ok(require_directory_identity(
         destination,
         expected,
@@ -1576,9 +1815,9 @@ pub fn remove_installed_distribution_with(
     if optional_directory_identity(destination)?.is_none() {
         return Ok(());
     }
-    let expected = journal
-        .installed_identity
-        .context("transaction has no installed destination identity")?;
+    let expected = journal.installed_identity.ok_or_else(|| {
+        DistributionError::Invalid("transaction has no installed destination identity".to_owned())
+    })?;
     require_directory_identity(destination, expected, "installed destination")?;
     file_ops.remove_dir_all(destination)?;
     file_ops.sync_directory(
@@ -1601,14 +1840,20 @@ pub fn restore_previous_distribution(
     let expected_previous = journal
         .previous_identity
         .or(journal.destination_identity)
-        .context("transaction has no previous destination identity")?;
+        .ok_or_else(|| {
+            DistributionError::Invalid(
+                "transaction has no previous destination identity".to_owned(),
+            )
+        })?;
     require_directory_identity(previous, expected_previous, "previous backup")?;
     let recovery_install = transaction.join("recovery-install");
     crate::validate_path_components(&recovery_install)?;
     if optional_directory_identity(destination)?.is_some() {
-        let expected_installed = journal
-            .installed_identity
-            .context("transaction has no installed destination identity")?;
+        let expected_installed = journal.installed_identity.ok_or_else(|| {
+            DistributionError::Invalid(
+                "transaction has no installed destination identity".to_owned(),
+            )
+        })?;
         require_directory_identity(destination, expected_installed, "installed destination")?;
         if optional_directory_identity(&recovery_install)?.is_some() {
             require_directory_identity(
@@ -1629,9 +1874,9 @@ pub fn restore_previous_distribution(
         file_ops.sync_directory(transaction)?;
     } else {
         if optional_directory_identity(&recovery_install)?.is_some() {
-            let expected_installed = journal
-                .installed_identity
-                .context("transaction has no installed identity")?;
+            let expected_installed = journal.installed_identity.ok_or_else(|| {
+                DistributionError::Invalid("transaction has no installed identity".to_owned())
+            })?;
             require_directory_identity(
                 &recovery_install,
                 expected_installed,
@@ -1657,9 +1902,11 @@ pub fn remove_recovery_install(
     let recovery_install = transaction.join("recovery-install");
     crate::validate_path_components(&recovery_install)?;
     if optional_directory_identity(&recovery_install)?.is_some() {
-        let expected = journal
-            .installed_identity
-            .context("transaction has no installed identity for recovery installation")?;
+        let expected = journal.installed_identity.ok_or_else(|| {
+            DistributionError::Invalid(
+                "transaction has no installed identity for recovery installation".to_owned(),
+            )
+        })?;
         require_directory_identity(&recovery_install, expected, "recovery installation")?;
         file_ops.remove_dir_all(&recovery_install)?;
         file_ops.sync_directory(transaction)?;

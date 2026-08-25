@@ -198,7 +198,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         if source.id.generation != self.generation {
             return Err(XllError::StaleHandle);
         }
-        topic.validate_protocol()?;
         let mut catalog = self.catalog.lock();
 
         let identity = SubscriptionIdentity {

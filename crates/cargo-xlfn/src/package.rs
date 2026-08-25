@@ -71,23 +71,11 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
             ],
             &shared_artifacts,
         )?;
-        commit_prepared_directory(
-            &prepared_root,
-            &args.out,
-            |_root| {
-                for (_target, prepared) in &prepared_packages {
-                    prepared.verify_source_contents()?;
-                }
-                Ok(())
-            },
-            |root| {
-                prepared_root.verify_committed_contents(root)?;
-                for (target, prepared) in &prepared_packages {
-                    prepared.verify_committed_contents(&root.join(target.directory()))?;
-                }
-                Ok(())
-            },
-        )?;
+        let mut distribution = xlfn_package::PreparedDistribution::new(prepared_root);
+        for (target, prepared) in prepared_packages {
+            distribution = distribution.with_nested_package(target.directory(), prepared)?;
+        }
+        report_distribution_cleanup(distribution.commit(&args.out)?);
         println!("created {}", args.out.display());
     } else {
         validate_output_destination(&args.out)?;
@@ -121,19 +109,31 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
             &expected_names,
             &shared_artifacts,
         )?;
-        commit_prepared_directory(
-            &prepared_root,
-            &destination,
-            |_root| Ok(prepared.verify_source_contents()?),
-            |root| {
-                prepared_root.verify_committed_contents(root)?;
-                prepared.verify_committed_contents(root)?;
-                Ok(())
-            },
-        )?;
+        let distribution =
+            xlfn_package::PreparedDistribution::new(prepared_root).with_package(prepared)?;
+        report_distribution_cleanup(distribution.commit(&destination)?);
         println!("created {}", destination.display());
     }
     Ok(())
+}
+
+fn report_distribution_cleanup(outcome: xlfn_package::CommitOutcome) {
+    if let xlfn_package::CleanupOutcome::BackupRetained {
+        backup,
+        transaction,
+        error,
+    } = outcome.cleanup()
+    {
+        eprintln!(
+            concat!(
+                "cargo xlfn: committed distribution, but could not remove backup {}: {}; ",
+                "transaction retained at {}"
+            ),
+            backup.display(),
+            error,
+            transaction.display()
+        );
+    }
 }
 
 pub(crate) fn validate_transactional_output_root(destination: &Path) -> Result {

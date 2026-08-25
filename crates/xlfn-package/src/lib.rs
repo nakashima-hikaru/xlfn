@@ -39,6 +39,7 @@ mod architecture;
 mod artifact;
 mod bundle;
 mod commit;
+#[doc(hidden)]
 pub mod distribution;
 mod error;
 mod fs_identity;
@@ -64,6 +65,11 @@ pub use bundle::{
     stage_bundle, verify_bundle_files,
 };
 pub use commit::{CommitSourceLease, PreparedDirectoryCommit, PreparedPackageCommit};
+pub use distribution::{
+    CleanupOutcome, CommitOutcome, DistributionError, DistributionFileOps,
+    DistributionRecoveryError, DistributionRecoveryQuarantineError, DistributionResult,
+    PreparedDistribution,
+};
 pub use error::{
     EffectiveCrtPolicy, ImportTarget, PackageError, PackageResult, REQUIRED_XLL_EXPORTS,
     SYSTEM_IMPORT_POLICY_VERSION,

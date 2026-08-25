@@ -166,7 +166,6 @@ pub struct RtdTopic {
     parts: Arc<[String]>,
     byte_len: usize,
     hash: u64,
-    protocol_error: Option<usize>,
 }
 
 impl RtdTopic {
@@ -198,15 +197,22 @@ impl RtdTopic {
             ));
         }
         let (byte_len, hash) = measure_topic_parts(&normalized)?;
-        let protocol_error = normalized
-            .iter()
-            .map(|part| part.encode_utf16().count())
-            .find(|&length| length > crate::utf16::EXCEL_STRING_LIMIT);
+        for part in &normalized {
+            let length = part.encode_utf16().count();
+            if length > crate::utf16::EXCEL_STRING_LIMIT {
+                return Err(XllError::input(
+                    "RTD topic",
+                    crate::error::InputError::TooLarge {
+                        limit: crate::utf16::EXCEL_STRING_LIMIT,
+                        actual: length,
+                    },
+                ));
+            }
+        }
         Ok(Self {
             parts: Arc::from(normalized),
             byte_len,
             hash,
-            protocol_error,
         })
     }
 
@@ -217,19 +223,6 @@ impl RtdTopic {
     #[must_use]
     pub fn parts(&self) -> &[String] {
         &self.parts
-    }
-
-    pub(crate) fn validate_protocol(&self) -> XllResult<()> {
-        let Some(actual) = self.protocol_error else {
-            return Ok(());
-        };
-        Err(XllError::input(
-            "RTD topic",
-            crate::error::InputError::TooLarge {
-                limit: crate::utf16::EXCEL_STRING_LIMIT,
-                actual,
-            },
-        ))
     }
 
     pub(crate) fn byte_len(&self) -> usize {

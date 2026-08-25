@@ -1378,11 +1378,9 @@ fn structurally_equal_topics_share_transport_key() {
 }
 
 #[test]
-fn logical_topic_is_not_limited_by_excel_string_length() {
+fn topic_rejects_parts_larger_than_excel_string_limit() {
     let part = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1);
-    let topic = RtdTopic::single(part).unwrap();
-
-    assert_eq!(topic.parts()[0].len(), crate::utf16::EXCEL_STRING_LIMIT + 1,);
+    assert!(RtdTopic::single(part).is_err());
 }
 
 #[test]

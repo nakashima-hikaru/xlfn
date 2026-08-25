@@ -103,13 +103,14 @@ fn commit_test_directory_with(
     destination: &Path,
     file_ops: &impl DistributionFileOps,
 ) -> Result {
-    commit_prepared_directory_with(
+    let _ = commit_prepared_directory_with(
         prepared,
         destination,
         |_| Ok(()),
         |path| Ok(prepared.verify_committed_contents(path)?),
         file_ops,
-    )
+    )?;
+    Ok(())
 }
 
 fn transaction_directories(parent: &Path) -> Vec<PathBuf> {
@@ -198,13 +199,9 @@ fn distribution_commit_preserves_unrelated_previous_directory() {
     fs::write(staging.join("new.xll"), b"new").unwrap();
 
     let prepared = prepared_test_directory(&staging);
-    commit_prepared_directory(
-        &prepared,
-        &destination,
-        |_| Ok(()),
-        |path| Ok(prepared.verify_committed_contents(path)?),
-    )
-    .unwrap();
+    xlfn_package::PreparedDistribution::new(prepared)
+        .commit(&destination)
+        .unwrap();
 
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
     assert!(!destination.join("old.xll").exists());
@@ -217,7 +214,9 @@ fn distribution_commit_removes_backup_only_after_installing_staging() {
     let file_ops = InjectedFileOps::default();
     let prepared = prepared_test_directory(&staging);
 
-    commit_test_directory_with(&prepared, &destination, &file_ops).unwrap();
+    let _outcome = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(&destination, &file_ops)
+        .unwrap();
 
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
     assert!(!destination.join("old.xll").exists());
@@ -260,7 +259,13 @@ fn committed_cleanup_failure_never_restores_previous_distribution() {
     let file_ops = InjectedFileOps::failing_removes([1]);
     let prepared = prepared_test_directory(&staging);
 
-    commit_test_directory_with(&prepared, &destination, &file_ops).unwrap();
+    let outcome = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(&destination, &file_ops)
+        .unwrap();
+    assert!(matches!(
+        outcome.cleanup(),
+        xlfn_package::CleanupOutcome::BackupRetained { .. }
+    ));
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
 
     let transaction = transaction_directories(directory.path())
@@ -277,9 +282,12 @@ fn committed_cleanup_failure_never_restores_previous_distribution() {
         &SystemDistributionFileOps,
     )
     .unwrap_err();
+    let DistributionError::Quarantined(error) = error else {
+        panic!("a missing committed destination must be quarantined");
+    };
     let quarantine = error
-        .downcast_ref::<DistributionRecoveryQuarantineError>()
-        .and_then(|error| error.quarantine.as_ref())
+        .quarantine
+        .as_ref()
         .expect("a missing committed destination must be quarantined");
 
     assert!(!destination.exists());
@@ -328,7 +336,11 @@ fn post_commit_verification_failure_restores_previous_distribution() {
         &prepared,
         &destination,
         |_| Ok(()),
-        |_| Err(anyhow!("post-commit verification failed")),
+        |_| {
+            Err(DistributionError::Invalid(
+                "post-commit verification failed".to_owned(),
+            ))
+        },
         &file_ops,
     )
     .unwrap_err();
@@ -358,7 +370,11 @@ fn post_commit_verification_failure_without_previous_removes_install() {
         &prepared,
         &destination,
         |_| Ok(()),
-        |_| Err(anyhow!("post-commit verification failed")),
+        |_| {
+            Err(DistributionError::Invalid(
+                "post-commit verification failed".to_owned(),
+            ))
+        },
         &file_ops,
     )
     .unwrap_err();
@@ -536,9 +552,12 @@ fn journalless_transaction_with_payload_is_quarantined() {
         &SystemDistributionFileOps,
     )
     .unwrap_err();
+    let DistributionError::Quarantined(error) = error else {
+        panic!("journalless payload must be quarantined");
+    };
     let quarantine = error
-        .downcast_ref::<DistributionRecoveryQuarantineError>()
-        .and_then(|error| error.quarantine.as_ref())
+        .quarantine
+        .as_ref()
         .expect("journalless payload must be quarantined");
 
     assert!(!transaction.exists());
@@ -661,7 +680,11 @@ fn distribution_preserves_recovery_path_when_commit_and_rollback_fail() {
 
     let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
     let recovery = error
-        .downcast_ref::<DistributionRecoveryError>()
+        .downcast_ref::<DistributionError>()
+        .and_then(|error| match error {
+            DistributionError::Recovery(error) => Some(error),
+            _ => None,
+        })
         .expect("commit and rollback failure must expose the recovery path");
 
     assert!(error.to_string().contains("injected rename failure #2"));
@@ -958,15 +981,21 @@ fn configure_build_sets_target_dir_and_build_dir() {
 
 #[test]
 fn error_as_io_retains_the_original_error_object() {
-    let io_error = error_as_io(anyhow!("root cause").context("commit failed"));
+    let io_error = error_as_io(DistributionError::Invalid("commit failed".to_owned()));
 
-    assert_eq!(io_error.to_string(), "commit failed");
+    assert_eq!(
+        io_error.to_string(),
+        "invalid distribution transaction: commit failed"
+    );
     assert!(io_error.get_ref().is_some());
     let preserved = io_error
         .get_ref()
         .and_then(|error| error.downcast_ref::<IoErrorSource>())
-        .expect("the anyhow error should remain attached");
-    assert_eq!(preserved.0.chain().count(), 2);
+        .expect("the typed distribution error should remain attached");
+    assert!(matches!(
+        &preserved.0,
+        DistributionError::Invalid(message) if message == "commit failed"
+    ));
 }
 
 #[test]
