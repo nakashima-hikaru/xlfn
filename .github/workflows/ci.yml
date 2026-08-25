@@ -353,7 +353,7 @@ jobs:
                   cargo test
                   --package xlfn
                   --lib
-                  --features "async unstable"
+                  --features "async refinement"
                   rust_shutdown_resource_traces_are_accepted_by_lean_checker
                   --locked
                   --
@@ -369,7 +369,7 @@ jobs:
                   cargo test
                   --package xlfn
                   --lib
-                  --features "async unstable"
+                  --features "async refinement"
                   rust_composition
                   --locked
                   --

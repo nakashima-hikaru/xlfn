@@ -23,20 +23,54 @@ pub(crate) struct ModuleRuntime {
     com: ComModuleLifetime,
 }
 
+/// Stable identity for one module admission epoch.
+///
+/// The identity is copyable for diagnostics and validation, while the
+/// corresponding open/close authority remains affine in the token types
+/// below.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleEpochId {
+    module: &'static ModuleRuntime,
+    epoch: u64,
+}
+
+impl PartialEq for ModuleEpochId {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.module, other.module) && self.epoch == other.epoch
+    }
+}
+
+impl Eq for ModuleEpochId {}
+
+impl std::fmt::Debug for ModuleEpochId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleEpochId")
+            .field("epoch", &self.epoch)
+            .finish()
+    }
+}
+
+impl ModuleEpochId {
+    pub(crate) fn is_current(self) -> bool {
+        self.module.ingress().epoch() == self.epoch
+    }
+}
+
 /// The module epoch that is established while the framework is opening.
 ///
 /// It is deliberately not cloneable.  The opening transaction is the only
 /// owner until publication consumes it into a `ModuleEpochLease`.
 pub(crate) struct ModuleOpening {
     module: &'static ModuleRuntime,
-    epoch: u64,
+    id: ModuleEpochId,
 }
 
 /// Linear proof that the published runtime belongs to one module admission
 /// epoch.  The lease is consumed by terminal certification.
 pub(crate) struct ModuleEpochLease {
     module: &'static ModuleRuntime,
-    epoch: u64,
+    id: ModuleEpochId,
 }
 
 /// Affine module capability after the module close has been linearized.
@@ -46,27 +80,27 @@ pub(crate) struct ModuleEpochLease {
 /// quiescence.
 pub(crate) struct ModuleClosing {
     module: &'static ModuleRuntime,
-    epoch: u64,
+    id: ModuleEpochId,
 }
 
 /// Affine module capability after all exports have drained.
 pub(crate) struct ModuleExportsDrained {
     module: &'static ModuleRuntime,
-    epoch: u64,
+    id: ModuleEpochId,
     exports: ExportsDrained,
 }
 
 /// Terminal module capability.  Constructing this value is the only normal
 /// path that certifies module-wide logical quiescence.
 pub(crate) struct ModuleQuiescent {
-    epoch: u64,
+    id: ModuleEpochId,
 }
 
 impl std::fmt::Debug for ModuleEpochLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ModuleEpochLease")
-            .field("epoch", &self.epoch)
+            .field("epoch", &self.id.epoch)
             .finish()
     }
 }
@@ -75,7 +109,7 @@ impl std::fmt::Debug for ModuleQuiescent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ModuleQuiescent")
-            .field("epoch", &self.epoch)
+            .field("epoch", &self.id.epoch)
             .finish()
     }
 }
@@ -84,21 +118,34 @@ impl ModuleOpening {
     pub(crate) fn commit(self) -> ModuleEpochLease {
         ModuleEpochLease {
             module: self.module,
-            epoch: self.epoch,
+            id: self.id,
+        }
+    }
+
+    /// Rolls an uncommitted opening epoch into the same affine close chain
+    /// used by committed removal.
+    pub(crate) fn rollback(self, on_closed: impl FnOnce()) -> ModuleClosing {
+        self.module.begin_close_internal(on_closed);
+        ModuleClosing {
+            module: self.module,
+            id: self.id,
         }
     }
 }
 
 impl ModuleEpochLease {
-    pub(crate) fn is_current(&self) -> bool {
-        self.module.ingress().epoch() == self.epoch
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        self.id
     }
 
-    pub(crate) fn begin_close<F>(&self, on_closed: F) -> ModuleClosing
+    pub(crate) fn begin_close<F>(self, on_closed: F) -> ModuleClosing
     where
         F: FnOnce(),
     {
-        self.module.begin_close_internal(on_closed)
+        let module = self.module;
+        let id = self.id;
+        module.begin_close_internal(on_closed);
+        ModuleClosing { module, id }
     }
 }
 
@@ -107,7 +154,7 @@ impl ModuleClosing {
         let exports = self.module.seal_and_drain_internal();
         ModuleExportsDrained {
             module: self.module,
-            epoch: self.epoch,
+            id: self.id,
             exports,
         }
     }
@@ -124,16 +171,23 @@ impl ModuleExportsDrained {
     pub(crate) fn certify(self) -> (ModuleQuiescent, ExportsDrained) {
         self.close_callbacks();
         self.module.certify_logical_quiescence_internal();
-        (ModuleQuiescent { epoch: self.epoch }, self.exports)
+        (ModuleQuiescent { id: self.id }, self.exports)
     }
 }
 
 impl ModuleQuiescent {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        self.id
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         let module = global();
         Self {
-            epoch: module.ingress().epoch(),
+            id: ModuleEpochId {
+                module,
+                epoch: module.ingress().epoch(),
+            },
         }
     }
 }
@@ -186,7 +240,10 @@ impl ModuleRuntime {
         self.ingress.begin_opening();
         ModuleOpening {
             module: self,
-            epoch: self.ingress.epoch(),
+            id: ModuleEpochId {
+                module: self,
+                epoch: self.ingress.epoch(),
+            },
         }
     }
 
@@ -202,7 +259,10 @@ impl ModuleRuntime {
         self.rtd.begin_close();
         ModuleClosing {
             module: self,
-            epoch: self.ingress.epoch(),
+            id: ModuleEpochId {
+                module: self,
+                epoch: self.ingress.epoch(),
+            },
         }
     }
 
@@ -232,14 +292,18 @@ pub(crate) fn begin_open() -> ModuleOpening {
     MODULE_RUNTIME.begin_open_internal()
 }
 
-/// Starts module close when no committed module epoch is present.  This is
-/// used only for uncommitted rollback/quarantine paths; committed removal
-/// obtains its capability from `ModuleEpochLease::begin_close`.
-pub(crate) fn begin_close_without_epoch<F>(on_closed: F) -> ModuleClosing
+/// Emergency close for quarantine recovery. Normal committed and rollback
+/// removal obtains a close token from an affine opening/epoch token instead.
+pub(crate) fn begin_close_for_quarantine<F>(on_closed: F) -> ModuleClosing
 where
     F: FnOnce(),
 {
     MODULE_RUNTIME.begin_close_internal(on_closed)
+}
+
+#[cfg(test)]
+pub(crate) fn begin_close_for_test() -> ModuleClosing {
+    begin_open().rollback(|| {})
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -254,7 +318,7 @@ pub(crate) fn close_callbacks_for_test() {
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) fn certify_quiescence_for_test() {
-    let closing = begin_close_without_epoch(|| {});
+    let closing = begin_close_for_test();
     let drained = closing.seal_and_drain();
     let _ = drained.certify();
 }

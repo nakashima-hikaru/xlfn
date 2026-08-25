@@ -481,14 +481,15 @@ pub trait Addin: Send + Sync + 'static {
         context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>;
 
-    /// Stops every Add-in-owned callback, worker, native module owner, and
-    /// other source that could execute XLL code after unload.
+    /// Stops every framework-visible Add-in callback, worker, and other
+    /// execution source before lifecycle cleanup.
     ///
-    /// Returning `Ok(())` certifies that every such execution resource is
-    /// quiescent. A panic or `Err` leaves teardown incomplete, so the runtime
-    /// enters `Quarantined`, retains the module residency lease, and rejects
-    /// further opens or UDF calls. The hook is terminal for that generation
-    /// and is never retried.
+    /// Returning `Ok(())` establishes logical quiescence for the generation.
+    /// Safe `Addin` implementations retain the DLL residency lease after
+    /// terminal removal, because arbitrary user-created threads and native
+    /// callbacks cannot be verified by the framework from this safe trait.
+    /// Implement [`PhysicallyUnloadableAddin`] to opt into physical unload
+    /// after accepting that stronger contract explicitly.
     ///
     /// Handle values are call-scoped and cannot be stored in either state.
     /// Vendor operations must be canceled cooperatively; unload waits rather
@@ -507,6 +508,35 @@ pub trait Addin: Send + Sync + 'static {
     /// `SharedState` is already quiesced and is dropped by the framework
     /// separately after this hook returns.
     fn cleanup(_lifecycle: &mut Self::LifecycleState, _reporter: &mut CleanupReporter<'_>) {}
+}
+
+/// Explicit unsafe contract for Add-ins that permit physical DLL unload.
+///
+/// The framework can account for its own callbacks, executors, and service
+/// roots, but it cannot discover every executable source an Add-in may create
+/// through `std::thread`, vendor native callbacks, or other FFI. An
+/// implementation of this trait must synchronously stop *all* such sources
+/// before returning from [`Self::quiesce_for_physical_unload`]. Violating that
+/// contract can execute unmapped XLL code after `FreeLibrary`, so the opt-in
+/// is deliberately an `unsafe impl` rather than a safe configuration flag.
+///
+/// # Safety
+///
+/// Implementors must ensure that no thread, callback, future, native handle,
+/// or other executable source that can enter this XLL remains active after
+/// [`Self::quiesce_for_physical_unload`] returns successfully. They must also
+/// ensure that the hook itself synchronously establishes that condition before
+/// returning. The framework's own admission and executor accounting is not a
+/// substitute for this application-level guarantee.
+pub unsafe trait PhysicallyUnloadableAddin: Addin {
+    /// Performs the stronger quiescence required before releasing the DLL's
+    /// physical residency lease.
+    fn quiesce_for_physical_unload(
+        shared: &mut Self::SharedState,
+        lifecycle: &mut Self::LifecycleState,
+    ) -> Result<(), Self::Error> {
+        Self::quiesce(shared, lifecycle)
+    }
 }
 
 impl Addin for () {

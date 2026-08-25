@@ -185,7 +185,7 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
 
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        let module_closing = crate::module_runtime::begin_close_without_epoch(|| {});
+        let module_closing = runtime.take_module_closing_for_quarantine();
         let _ = module_closing.seal_and_drain();
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
@@ -784,6 +784,9 @@ mod tests {
         }
     }
 
+    // SAFETY: this test Addin has no application-owned executable sources.
+    unsafe impl crate::addin::PhysicallyUnloadableAddin for CleanClose {}
+
     struct TraceCleanup;
 
     impl Addin for TraceCleanup {
@@ -1070,7 +1073,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
-        let runtime = Runtime::<CleanClose>::new();
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
         let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
@@ -1114,7 +1117,7 @@ mod tests {
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let runtime = Runtime::<CleanClose>::new();
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
         let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
@@ -1471,7 +1474,7 @@ mod tests {
 
     #[test]
     fn residency_release_requires_removal_then_close_hint() {
-        let runtime = Runtime::<CleanClose>::new();
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
         assert!(
             runtime
                 .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
@@ -1491,7 +1494,7 @@ mod tests {
 
     #[test]
     fn failed_open_after_removal_preserves_the_later_release_marker() {
-        let runtime = Runtime::<CleanClose>::new();
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
         assert!(
             runtime
                 .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())

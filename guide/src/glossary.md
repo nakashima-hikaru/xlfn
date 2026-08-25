@@ -54,7 +54,7 @@
 
 **PE (Portable Executable)** — The Windows executable format used by XLLs and DLLs. `cargo xlfn` inspects PE architecture, exports, imports, and delay imports.
 
-**Quiescence** — The state in which no operation can still execute code or callbacks belonging to a subsystem. `xlAutoRemove` must establish logical quiescence before the module residency lease can eventually be released.
+**Quiescence** — The state in which no operation can still execute framework-managed code or callbacks belonging to a subsystem. `xlAutoRemove` establishes logical quiescence; the module residency lease remains held for a safe `Addin` and is released only after the explicit physical-unload contract is selected and satisfied.
 
 **RTD (Real-Time Data)** — Excel's streaming update mechanism. A source creates a subscription, publishes repeated scalar values through a sink, and synchronously disconnects during shutdown.
 

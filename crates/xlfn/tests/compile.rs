@@ -5,6 +5,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
     tests.pass("tests/ui/pass/excel_enum.rs");
+    tests.pass("tests/ui/pass/physical_unload.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/context_*.rs");
     tests.compile_fail("tests/ui/fail/lookalike_*.rs");

@@ -48,6 +48,7 @@ pub(super) struct ParsedAddinOptions {
     pub(super) name: Option<String>,
     pub(super) id: Option<String>,
     pub(super) category: Option<String>,
+    pub(super) physical_unload: bool,
     pub(super) krate: Option<syn::Path>,
 }
 
@@ -258,6 +259,12 @@ pub(super) fn parse_addin_options(tokens: TokenStream) -> syn::Result<ParsedAddi
                 }
                 options.category = Some(string_value(&value.value, "category")?);
             }
+            Meta::Path(path) if path.is_ident("physical_unload") => {
+                if options.physical_unload {
+                    return Err(syn::Error::new_spanned(path, "duplicate `physical_unload`"));
+                }
+                options.physical_unload = true;
+            }
             Meta::NameValue(value) if value.path.is_ident("crate") => {
                 if options.krate.is_some() {
                     return Err(syn::Error::new_spanned(value, "duplicate `crate`"));
@@ -267,7 +274,7 @@ pub(super) fn parse_addin_options(tokens: TokenStream) -> syn::Result<ParsedAddi
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `id`, `category`, or `crate`",
+                    "expected `name`, `id`, `category`, `physical_unload`, or `crate`",
                 ));
             }
         }

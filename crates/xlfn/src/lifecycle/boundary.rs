@@ -81,10 +81,17 @@ where
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
         && runtime.host_intent() == super::HostLifecycleIntent::ExplicitRemovalComplete
     {
-        if let Err(error) = runtime.release_module_residency() {
-            report_boundary_error("xlAutoClose module residency release", &error);
-            quarantine_runtime(runtime);
+        if runtime.physical_unload_enabled() {
+            if let Err(error) = runtime.release_module_residency() {
+                report_boundary_error("xlAutoClose module residency release", &error);
+                quarantine_runtime(runtime);
+            } else {
+                runtime.lifecycle_runtime().clear_host_intent();
+            }
         } else {
+            // A safe Addin may own executable sources outside framework
+            // accounting. Keep the DLL resident unless the Addin explicitly
+            // accepted the physical-unload contract.
             runtime.lifecycle_runtime().clear_host_intent();
         }
     }

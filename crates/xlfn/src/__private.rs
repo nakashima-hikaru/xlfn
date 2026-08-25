@@ -12,7 +12,7 @@ pub mod v1 {
     #[cfg(feature = "async")]
     use std::future::Future;
 
-    use crate::addin::Addin;
+    use crate::addin::{Addin, PhysicallyUnloadableAddin};
     pub use crate::call::{CallScope, with_excel_call_scope};
     #[cfg(feature = "async")]
     use crate::cancellation::CancellationToken;
@@ -181,6 +181,16 @@ pub mod v1 {
         }
 
         #[doc(hidden)]
+        pub const fn new_with_physical_unload() -> Self
+        where
+            A: PhysicallyUnloadableAddin,
+        {
+            Self {
+                runtime: Runtime::new_with_physical_unload(),
+            }
+        }
+
+        #[doc(hidden)]
         pub const fn runtime(&self) -> &Runtime<A> {
             &self.runtime
         }
@@ -276,7 +286,10 @@ pub mod v1 {
         runtime: &'static MacroRuntime<A>,
         newly_acquired: bool,
     ) {
-        if !newly_acquired {
+        // A safe Addin may have started an execution source before its open
+        // attempt failed. Keep the module resident unless the Addin made the
+        // explicit unsafe physical-unload commitment.
+        if !newly_acquired || !runtime.runtime().physical_unload_enabled() {
             return;
         }
         if let Err(error) = runtime.runtime().release_module_residency() {

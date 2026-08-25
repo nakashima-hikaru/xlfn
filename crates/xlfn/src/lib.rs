@@ -108,7 +108,7 @@ pub mod value;
 
 pub use addin::{
     Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext, Opened,
-    RuntimeConfig, ThreadSafeContext,
+    PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
 pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
@@ -528,7 +528,7 @@ pub mod prelude {
     pub use crate::addin::AsyncContext;
     #[cfg(feature = "rtd")]
     pub use crate::addin::RtdOpenContext;
-    pub use crate::addin::{Addin, OpenContext, Opened, RuntimeConfig};
+    pub use crate::addin::{Addin, OpenContext, Opened, PhysicallyUnloadableAddin, RuntimeConfig};
     #[cfg(feature = "handles")]
     pub use crate::addin::{HandleBindingLimit, HandleConfig};
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};

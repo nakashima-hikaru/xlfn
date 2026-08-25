@@ -50,6 +50,12 @@ impl Addin for ExampleAddin {
     }
 }
 
+// Physical DLL unload is an explicit unsafe opt-in. Add `physical_unload` to
+// the `excel_addin` attribute above and provide this implementation only when
+// every application-owned executable source is stopped before quiescence
+// returns. Otherwise xlfn retains module residency after terminal removal.
+// unsafe impl PhysicallyUnloadableAddin for ExampleAddin {}
+
 /// Adds two finite numbers.
 #[excel_function(name = "EXAMPLE.ADD", thread_safe)]
 pub fn add(

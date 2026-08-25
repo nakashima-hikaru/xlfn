@@ -1,8 +1,10 @@
+use crate::addin::PhysicallyUnloadableAddin;
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RemovalEpoch, RuntimeGeneration};
 use crate::host_callback::HostCallbackSession;
 use crate::ingress::AdmittedExport;
 use crate::registration::{HostMutationJournal, RegistrationId};
 use crate::{XllError, XllResult};
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -30,6 +32,25 @@ fn opening_publication_lost() -> ! {
     }
     #[cfg(test)]
     panic!("lifecycle opening publication lost its ingress linearization");
+}
+
+type QuiesceOperation<A> = fn(
+    &mut <A as crate::Addin>::SharedState,
+    &mut <A as crate::Addin>::LifecycleState,
+) -> Result<(), <A as crate::Addin>::Error>;
+
+fn logical_quiesce<A: crate::Addin>(
+    shared: &mut A::SharedState,
+    lifecycle: &mut A::LifecycleState,
+) -> Result<(), A::Error> {
+    A::quiesce(shared, lifecycle)
+}
+
+fn physical_quiesce<A: PhysicallyUnloadableAddin>(
+    shared: &mut A::SharedState,
+    lifecycle: &mut A::LifecycleState,
+) -> Result<(), A::Error> {
+    A::quiesce_for_physical_unload(shared, lifecycle)
 }
 
 /// The published root of an open Add-in generation.
@@ -99,6 +120,9 @@ pub struct Runtime<A: crate::Addin> {
     #[cfg(feature = "async")]
     pub(crate) executors: RuntimeExecutors,
     pub(crate) residency: ModuleResidency,
+    pending_module_closing: Mutex<Option<crate::module_runtime::ModuleClosing>>,
+    quiesce: QuiesceOperation<A>,
+    physical_unload: bool,
     pub(crate) quarantine: QuarantineVault<A>,
     pub(crate) refinement: RuntimeRefinementHooks,
 }
@@ -227,6 +251,33 @@ impl<A: crate::Addin> Runtime<A> {
             #[cfg(feature = "async")]
             executors: RuntimeExecutors::new(),
             residency: ModuleResidency::new(),
+            pending_module_closing: Mutex::new(None),
+            quiesce: logical_quiesce::<A>,
+            physical_unload: false,
+            quarantine: QuarantineVault::new(),
+            refinement: RuntimeRefinementHooks::new(),
+        }
+    }
+
+    /// Constructs a runtime whose terminal close may release the DLL's
+    /// physical residency lease. The unsafe contract is carried by the
+    /// `PhysicallyUnloadableAddin` implementation.
+    #[must_use]
+    pub const fn new_with_physical_unload() -> Self
+    where
+        A: PhysicallyUnloadableAddin,
+    {
+        Self {
+            lifecycle: LifecycleCoordinator::new(),
+            addin_lifecycle: ThreadAffineSlot::new(),
+            host: HostLedger::new(),
+            return_protocol: ReturnProtocol::new(),
+            #[cfg(feature = "async")]
+            executors: RuntimeExecutors::new(),
+            residency: ModuleResidency::new(),
+            pending_module_closing: Mutex::new(None),
+            quiesce: physical_quiesce::<A>,
+            physical_unload: true,
             quarantine: QuarantineVault::new(),
             refinement: RuntimeRefinementHooks::new(),
         }
@@ -312,6 +363,89 @@ impl<A: crate::Addin> Runtime<A> {
     /// completed. Ordinary host shutdown hints never call this method.
     pub(crate) fn release_module_residency(&self) -> XllResult<()> {
         self.residency.release()
+    }
+
+    fn install_pending_module_closing(&self, closing: crate::module_runtime::ModuleClosing) {
+        let mut pending = self.pending_module_closing.lock();
+        if pending.replace(closing).is_some() {
+            crate::lifecycle::fail_stop_invariant(
+                "duplicate pending module close capability",
+                &XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                },
+            );
+        }
+    }
+
+    fn take_pending_module_closing(&self) -> Option<crate::module_runtime::ModuleClosing> {
+        self.pending_module_closing.lock().take()
+    }
+
+    /// Takes the close capability retained by an abandoned owner, falling
+    /// back to the module's emergency quarantine path only when no affine
+    /// owner can be recovered. Quarantine is the sole production path that
+    /// may use that emergency fallback.
+    pub(crate) fn take_module_closing_for_quarantine(
+        &self,
+    ) -> crate::module_runtime::ModuleClosing {
+        self.take_pending_module_closing()
+            .unwrap_or_else(|| crate::module_runtime::begin_close_for_quarantine(|| {}))
+    }
+
+    fn take_module_closing_for_owner(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+    ) -> crate::module_runtime::ModuleClosing {
+        let lease = self.lifecycle.take_module_epoch_for_close(control);
+        let pending = self.take_pending_module_closing();
+        match (lease, pending) {
+            (Some(lease), None) => lease.begin_close(|| {}),
+            (None, Some(closing)) => closing,
+            (Some(_), Some(_)) => crate::lifecycle::fail_stop_invariant(
+                "module close has two competing authorities",
+                &XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                },
+            ),
+            (None, None) => crate::lifecycle::fail_stop_invariant(
+                "removal owner lacks module close authority",
+                &XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                },
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn take_module_closing_for_test(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+    ) -> crate::module_runtime::ModuleClosing {
+        let lease = self.lifecycle.take_module_epoch_for_close(control);
+        let pending = self.take_pending_module_closing();
+        match (lease, pending) {
+            (Some(lease), None) => lease.begin_close(|| {}),
+            (None, Some(closing)) => closing,
+            (Some(_), Some(_)) => crate::lifecycle::fail_stop_invariant(
+                "test module close has two competing authorities",
+                &XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                },
+            ),
+            (None, None) => crate::module_runtime::begin_close_for_test(),
+        }
+    }
+
+    pub(crate) fn physical_unload_enabled(&self) -> bool {
+        self.physical_unload
+    }
+
+    pub(crate) fn quiesce_addin(
+        &self,
+        shared: &mut A::SharedState,
+        lifecycle: &mut A::LifecycleState,
+    ) -> XllResult<()> {
+        (self.quiesce)(shared, lifecycle).map_err(crate::error::IntoXllError::into_xll_error)
     }
 
     #[cfg(any(feature = "rtd", test))]
@@ -711,9 +845,10 @@ impl<A: crate::Addin> Runtime<A> {
     fn reject_open_attempt(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-        _module_opening: crate::module_runtime::ModuleOpening,
+        module_opening: crate::module_runtime::ModuleOpening,
     ) {
         self.lifecycle.reject_open_attempt(control);
+        self.install_pending_module_closing(module_opening.rollback(|| {}));
     }
 
     fn fail_and_record(
@@ -770,10 +905,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
         });
         if should_close {
-            let _module_closing = control
-                .module_epoch_lease()
-                .map(|lease| lease.begin_close(|| {}))
-                .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
+            let _module_closing = self.take_module_closing_for_test(&mut control);
         }
         should_close
     }
@@ -842,10 +974,7 @@ impl<A: crate::Addin> Runtime<A> {
             });
             match decision {
                 Some(Some(attempt)) => {
-                    let module_closing = wait_guard
-                        .module_epoch_lease()
-                        .map(|lease| lease.begin_close(|| {}))
-                        .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
+                    let module_closing = self.take_module_closing_for_owner(&mut wait_guard);
                     return Some(RemovalOwner {
                         runtime: self,
                         attempt,
@@ -873,10 +1002,7 @@ impl<A: crate::Addin> Runtime<A> {
             }
             if let Some(attempt) = self.lifecycle.claim_removal_owner(&mut wait_guard) {
                 self.refinement.acquire_open_rollback_owner(self);
-                let module_closing = wait_guard
-                    .module_epoch_lease()
-                    .map(|lease| lease.begin_close(|| {}))
-                    .unwrap_or_else(|| crate::module_runtime::begin_close_without_epoch(|| {}));
+                let module_closing = self.take_module_closing_for_owner(&mut wait_guard);
                 return Some(RemovalOwner {
                     runtime: self,
                     attempt,
@@ -1092,7 +1218,6 @@ pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
         composition_resources: crate::shutdown_refinement::GhostResources,
         owner: RemovalOwner<'runtime, A>,
         generation: RuntimeGeneration,
-        module_epoch: crate::module_runtime::ModuleEpochLease,
     },
     Uncommitted {
         proof: QuiescenceProof,
@@ -1195,7 +1320,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 }
             };
         let runtime = self.runtime;
-
         #[cfg(any(test, feature = "refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
 
@@ -1208,23 +1332,34 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                     self,
                 ));
             }
-            let mut control = runtime.lifecycle.access();
-            let Some(module_epoch) = runtime.lifecycle.take_certified_module_epoch(&mut control)
-            else {
+            let module_epoch_matches = runtime
+                .lifecycle
+                .access()
+                .module_epoch_id()
+                .is_some_and(|epoch| epoch == proof.module_quiescent.id());
+            if !module_epoch_matches {
                 return Err((
                     XllError::Internal {
                         diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
                     },
                     self,
                 ));
-            };
+            }
+            let mut control = runtime.lifecycle.access();
+            if !runtime.lifecycle.clear_certified_retirement(&mut control) {
+                return Err((
+                    XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                    },
+                    self,
+                ));
+            }
             Ok(FinalRemovalCertificate::Committed {
                 proof,
                 #[cfg(any(test, feature = "refinement"))]
                 composition_resources,
                 owner: self,
                 generation,
-                module_epoch,
             })
         } else {
             Ok(FinalRemovalCertificate::Uncommitted {
@@ -1256,13 +1391,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 self,
             ));
         }
-
-        // Rollback does not retain a module epoch in its certificate shape,
-        // but any epoch attached to the failed opening must still be consumed
-        // before the owner can finish Closed.
-        let runtime = self.runtime;
-        let mut control = runtime.lifecycle.access();
-        let _ = runtime.lifecycle.take_certified_module_epoch(&mut control);
 
         #[cfg(any(test, feature = "refinement"))]
         let composition_resources = composition_resources_from_quiescence_proof(&proof);
@@ -1638,6 +1766,13 @@ pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
 
 impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
     fn drop(&mut self) {
+        // An owner may be abandoned before teardown consumes the module
+        // capability. Return that capability to the runtime so a waiting
+        // removal request can take it over without minting a second close
+        // authority.
+        if let Some(module_closing) = self.module_closing.take() {
+            self.runtime.install_pending_module_closing(module_closing);
+        }
         let mut control = self.runtime.lifecycle.access();
         self.runtime
             .lifecycle
@@ -1706,7 +1841,10 @@ impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host
 
     pub(crate) fn fail(&mut self) -> crate::runtime_components::OpenFailureDisposition {
         let disposition = self.runtime.fail_and_record(self.attempt_id);
-        let _ = self.module_opening.take();
+        if let Some(module_opening) = self.module_opening.take() {
+            self.runtime
+                .install_pending_module_closing(module_opening.rollback(|| {}));
+        }
         disposition
     }
 
@@ -1893,7 +2031,10 @@ impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, HostOpenin
 
 impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
     fn drop(&mut self) {
-        if self.module_opening.is_none() {
+        if let Some(module_opening) = self.module_opening.take() {
+            self.runtime
+                .install_pending_module_closing(module_opening.rollback(|| {}));
+        } else {
             if let Some(lifecycle_state) = self.lifecycle_state.take() {
                 #[allow(
                     clippy::mem_forget,

@@ -194,8 +194,7 @@ where
         let quiesce = catch_unwind(AssertUnwindSafe(|| {
             runtime
                 .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                    A::quiesce(&mut shared_state, lifecycle_state)
-                        .map_err(IntoXllError::into_xll_error)
+                    runtime.quiesce_addin(&mut shared_state, lifecycle_state)
                 })
                 .map_err(lifecycle_access_error)?
         }))

@@ -109,6 +109,11 @@ fn expand_excel_addin(
         .id
         .unwrap_or_else(|| ident.to_string().to_ascii_lowercase());
     let category = options.category.unwrap_or_else(|| display_name.clone());
+    let runtime_constructor = if options.physical_unload {
+        quote!(#krate::__private::v1::MacroRuntime::new_with_physical_unload())
+    } else {
+        quote!(#krate::__private::v1::MacroRuntime::new())
+    };
     validate_addin_metadata(&display_name, &id, &category, &item)?;
     Ok(quote! {
         #item
@@ -117,7 +122,7 @@ fn expand_excel_addin(
         #[doc(hidden)]
         static __XLFN_RUNTIME: #krate::__private::v1::MacroRuntime<
             #ident,
-        > = #krate::__private::v1::MacroRuntime::new();
+        > = #runtime_constructor;
 
         #(#gating)*
         #[used]
@@ -736,6 +741,19 @@ mod tests {
         assert!(expanded.contains("__xlfn_async_exports"));
         assert!(expanded.contains("__xlfn_rtd_exports"));
         assert!(!expanded.contains("fn __xlfn_calculation_canceled"));
+    }
+
+    #[test]
+    fn physical_unload_requires_the_explicit_runtime_constructor() {
+        let item: ItemStruct = syn::parse2(quote! {
+            pub struct UnloadableAddin;
+        })
+        .unwrap();
+        let expanded = expand_excel_addin(quote!(physical_unload), item)
+            .unwrap()
+            .to_string();
+        assert!(expanded.contains("new_with_physical_unload"));
+        assert!(!expanded.contains("MacroRuntime :: new ()"));
     }
 
     #[test]

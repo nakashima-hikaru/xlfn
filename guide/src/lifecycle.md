@@ -99,7 +99,7 @@ by the application.
 
 ## Quiescence, cleanup, and unload safety
 
-`Addin::quiesce` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. It must synchronously stop every application-owned thread, callback, task, queue, and producer that could execute XLL code or require add-in state after unload.
+`Addin::quiesce` runs on the same main lifecycle thread as `open`, after the framework has stopped accepting new calls and drained active framework calls and asynchronous tasks. It must synchronously stop every application-owned thread, callback, task, queue, and producer that could execute XLL code or require add-in state after logical teardown. An add-in that opts into physical DLL unload must additionally implement the unsafe `PhysicallyUnloadableAddin` contract and stop every executable source before the stronger hook returns.
 
 The formula-handle registry is closed after `quiesce` returns. Formula-owned Rust objects can therefore still exist while application quiescence is being established. If a handle object refers to an application-owned resource, `quiesce` must leave its later `Drop` safe after workers, connections, or owner threads have stopped. Prefer releasing or invalidating such resources while their owners are still available, then make the later wrapper drop local or idempotent. See [Formula-owned handles](handles.md).
 
@@ -123,9 +123,13 @@ still `Open`.
 `xlAutoRemove` is the explicit terminal-removal boundary. It is the only
 boundary that runs `quiesce`, unregisters Excel callbacks, stops framework
 producers, closes RTD/COM state, reclaims the generation, and publishes the
-logical `Closed` phase. After a successful removal, the following
-`xlAutoClose` releases the module residency lease. `DllCanUnloadNow` remains
-`S_FALSE` while that lease is held.
+logical `Closed` phase. A normal safe `Addin` retains the module residency
+lease after this transition, so the framework does not claim that arbitrary
+application-created executable sources have stopped. Only an add-in using the
+`physical_unload` attribute option and the unsafe
+`PhysicallyUnloadableAddin` contract permits the following `xlAutoClose` to
+release that lease. `DllCanUnloadNow` remains `S_FALSE` while the lease is
+held.
 
 If `quiesce` fails or panics, or any other teardown hazard prevents a complete
 certificate, the runtime enters `Quarantined`. It rejects new UDF calls and

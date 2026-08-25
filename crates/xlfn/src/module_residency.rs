@@ -1,11 +1,10 @@
 //! Physical DLL residency lease for generated Excel entry points.
 //!
 //! The logical lifecycle is allowed to reach `Closed` while this lease is
-//! still held. That distinction is what makes an ordinary `xlAutoClose` host
-//! hint harmless: Excel can return from the hint without unloading code that
-//! still owns the runtime. The lease is released only after an explicit
-//! `xlAutoRemove` teardown has completed and the following `xlAutoClose` is
-//! observed.
+//! still held. Safe Add-ins retain it after terminal removal because the
+//! framework cannot account for arbitrary user-created executable sources.
+//! Only an explicit `PhysicallyUnloadableAddin` opt-in releases it after the
+//! following `xlAutoClose` hint.
 
 use crate::XllResult;
 #[cfg(target_os = "windows")]

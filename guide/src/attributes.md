@@ -22,10 +22,17 @@ pub struct DeskTools;
 | `name = "..."` | Display name shown by Excel's Add-in Manager | Rust struct name |
 | `id = "..."` | Stable add-in identity used by runtime ownership and registration | lowercase Rust struct name |
 | `category = "..."` | Default Function Wizard category | display name |
+| `physical_unload` | Opt into physical DLL unload after an unsafe quiescence contract | disabled |
 
 `name` and `category` must contain 1 through 255 UTF-16 code units. `id` must be a non-reserved ASCII slug of at most 64 bytes, begin with a letter, and contain only letters, digits, `-`, or `_`.
 
 The macro emits the standard XLL lifecycle and COM exports. Implement [`Addin`](lifecycle.md) for the attributed type.
+
+The default keeps the module resident after terminal removal because a safe
+`Addin` cannot account for executable sources created through arbitrary Rust
+threads or native callbacks. `physical_unload` is an unsafe opt-in: use it
+only together with `unsafe impl PhysicallyUnloadableAddin for YourAddin {}` and
+stop every such source before the stronger quiescence hook returns.
 
 ## `#[excel_function(...)]`
 

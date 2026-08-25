@@ -29,7 +29,7 @@ fn require_lifecycle_invariant(condition: bool, message: &'static str) {
 
 use super::services::GenerationServices;
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
-use crate::module_runtime::ModuleEpochLease;
+use crate::module_runtime::{ModuleEpochId, ModuleEpochLease};
 use crate::runtime::{ExecutionGeneration, OpeningGeneration};
 use crate::runtime_components::{HostLifecycleIntent, LifecyclePhase};
 
@@ -88,15 +88,48 @@ impl<A: crate::Addin> GenerationAdmission<A> {
 pub(crate) struct OpenGeneration<A: crate::Addin> {
     generation: Arc<ExecutionGeneration<A>>,
     services: Arc<GenerationServices>,
-    module_epoch: ModuleEpochLease,
+    module_epoch: ModuleEpochOwnership,
 }
 
 /// Ownership retained after the generation root has been handed to the
-/// shutdown/quiesce pipeline. The service root and module lease remain
-/// coupled until the terminal certificate consumes them.
+/// shutdown/quiesce pipeline. The service root and module epoch identity
+/// remain coupled after the close authority moves to the removal owner.
 pub(crate) struct OpenRetirement {
     services: Arc<GenerationServices>,
-    module_epoch: ModuleEpochLease,
+    module_epoch: ModuleEpochOwnership,
+}
+
+/// Module epoch identity remains in the canonical lifecycle state after its
+/// affine close authority has moved into the removal owner. This preserves
+/// validation evidence without retaining a second close authority.
+pub(crate) enum ModuleEpochOwnership {
+    Lease(ModuleEpochLease),
+    Closing(ModuleEpochId),
+}
+
+impl ModuleEpochOwnership {
+    fn id(&self) -> ModuleEpochId {
+        match self {
+            Self::Lease(lease) => lease.id(),
+            Self::Closing(id) => *id,
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        self.id().is_current()
+    }
+
+    fn take_lease(&mut self) -> Option<ModuleEpochLease> {
+        let id = self.id();
+        let ownership = mem::replace(self, Self::Closing(id));
+        match ownership {
+            Self::Lease(lease) => Some(lease),
+            Self::Closing(id) => {
+                *self = Self::Closing(id);
+                None
+            }
+        }
+    }
 }
 
 /// Payload states that can exist while an open attempt is still active.
@@ -141,9 +174,16 @@ impl<A: crate::Addin> OpeningPayload<A> {
         }
     }
 
-    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+    fn take_module_epoch_for_close(&mut self) -> Option<ModuleEpochLease> {
         match self {
-            Self::Published(bundle) => Some(&bundle.module_epoch),
+            Self::Published(bundle) => bundle.module_epoch.take_lease(),
+            Self::Empty | Self::Staged(_) => None,
+        }
+    }
+
+    fn module_epoch_id(&self) -> Option<ModuleEpochId> {
+        match self {
+            Self::Published(bundle) => Some(bundle.module_epoch.id()),
             Self::Empty | Self::Staged(_) => None,
         }
     }
@@ -183,10 +223,18 @@ impl<A: crate::Addin> ClosingPayload<A> {
         }
     }
 
-    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+    fn take_module_epoch_for_close(&mut self) -> Option<ModuleEpochLease> {
         match self {
-            Self::Published(bundle) => Some(&bundle.module_epoch),
-            Self::Retiring(retirement) => Some(&retirement.module_epoch),
+            Self::Published(bundle) => bundle.module_epoch.take_lease(),
+            Self::Retiring(retirement) => retirement.module_epoch.take_lease(),
+            Self::Empty | Self::Staged(_) => None,
+        }
+    }
+
+    fn module_epoch_id(&self) -> Option<ModuleEpochId> {
+        match self {
+            Self::Published(bundle) => Some(bundle.module_epoch.id()),
+            Self::Retiring(retirement) => Some(retirement.module_epoch.id()),
             Self::Empty | Self::Staged(_) => None,
         }
     }
@@ -394,14 +442,25 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
+    fn module_epoch_id(&self) -> Option<ModuleEpochId> {
         match self {
-            Self::Closed => None,
-            Self::Opening { payload, .. } => payload.module_epoch_lease(),
-            Self::Open { bundle } => Some(&bundle.module_epoch),
+            Self::Opening { payload, .. } => payload.module_epoch_id(),
+            Self::Open { bundle } => Some(bundle.module_epoch.id()),
             Self::Closing { payload, .. }
             | Self::OpenRollbackPending { payload }
-            | Self::Quarantined { payload } => payload.module_epoch_lease(),
+            | Self::Quarantined { payload } => payload.module_epoch_id(),
+            Self::Closed => None,
+        }
+    }
+
+    fn take_module_epoch_for_close(&mut self) -> Option<ModuleEpochLease> {
+        match self {
+            Self::Opening { payload, .. } => payload.take_module_epoch_for_close(),
+            Self::Open { bundle } => bundle.module_epoch.take_lease(),
+            Self::Closing { payload, .. }
+            | Self::OpenRollbackPending { payload }
+            | Self::Quarantined { payload } => payload.take_module_epoch_for_close(),
+            Self::Closed => None,
         }
     }
 
@@ -503,6 +562,15 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
+    fn take_retirement(&mut self) -> Option<OpenRetirement> {
+        match self {
+            Self::Closing { payload, .. }
+            | Self::OpenRollbackPending { payload }
+            | Self::Quarantined { payload } => payload.take_retirement(),
+            Self::Closed | Self::Open { .. } | Self::Opening { .. } => None,
+        }
+    }
+
     fn install_retirement(&mut self, retirement: OpenRetirement) {
         let state = mem::replace(self, Self::Closed);
         *self = match state {
@@ -552,15 +620,6 @@ impl<A: crate::Addin> LifecycleState<A> {
                 }
             }
         };
-    }
-
-    fn take_retirement(&mut self) -> Option<OpenRetirement> {
-        match self {
-            Self::Closing { payload, .. }
-            | Self::OpenRollbackPending { payload }
-            | Self::Quarantined { payload } => payload.take_retirement(),
-            Self::Closed | Self::Open { .. } | Self::Opening { .. } => None,
-        }
     }
 
     fn into_payload(self) -> ClosingPayload<A> {
@@ -639,8 +698,8 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.removal_epoch
     }
 
-    fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
-        self.state.module_epoch_lease()
+    fn take_module_epoch_for_close(&mut self) -> Option<ModuleEpochLease> {
+        self.state.take_module_epoch_for_close()
     }
 
     const fn removal_attempt(&self) -> Option<RemovalAttemptId> {
@@ -700,6 +759,10 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.removal_state()
     }
 
+    pub(crate) fn module_epoch_id(&self) -> Option<ModuleEpochId> {
+        self.canonical_state().module_epoch_id()
+    }
+
     pub(crate) fn removal_epoch(&self) -> u64 {
         self.core.removal_epoch()
     }
@@ -710,10 +773,6 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
 
     pub(crate) fn removal_attempt(&self) -> Option<RemovalAttemptId> {
         self.core.removal_attempt()
-    }
-
-    pub(crate) fn module_epoch_lease(&self) -> Option<&ModuleEpochLease> {
-        self.core.module_epoch_lease()
     }
 
     pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
@@ -774,6 +833,22 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         LifecycleAccess {
             core: self.core.lock(),
         }
+    }
+
+    pub(crate) fn take_module_epoch_for_close(
+        &self,
+        access: &mut LifecycleAccess<'_, A>,
+    ) -> Option<ModuleEpochLease> {
+        access.core.take_module_epoch_for_close()
+    }
+
+    pub(crate) fn clear_certified_retirement(&self, access: &mut LifecycleAccess<'_, A>) -> bool {
+        let Some(retirement) = access.core.state.take_retirement() else {
+            return false;
+        };
+        drop(retirement.services);
+        self.clear_publication();
+        true
     }
 
     pub(crate) fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
@@ -1170,33 +1245,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         let bundle = OpenGeneration {
             generation: Arc::clone(&published),
             services,
-            module_epoch,
+            module_epoch: ModuleEpochOwnership::Lease(module_epoch),
         };
         core.core.state = LifecycleState::Opening {
             attempt,
             payload: OpeningPayload::Published(bundle),
         };
         Ok(())
-    }
-
-    /// Consumes the coupled shutdown ownership only after a terminal
-    /// certificate has validated it.
-    pub(crate) fn take_certified_module_epoch(
-        &self,
-        core: &mut LifecycleAccess<'_, A>,
-    ) -> Option<ModuleEpochLease> {
-        let retirement = core.core.state.take_retirement();
-        if retirement.is_some() {
-            self.clear_publication();
-        }
-        retirement.map(|retirement| {
-            let OpenRetirement {
-                services,
-                module_epoch,
-            } = retirement;
-            drop(services);
-            module_epoch
-        })
     }
 
     #[cfg(test)]
