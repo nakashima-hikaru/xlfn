@@ -248,6 +248,7 @@ pub(crate) fn shutdown_subscriptions(
 ///
 /// # Safety
 /// The three pointers must follow the COM `DllGetClassObject` contract.
+#[allow(unsafe_code, reason = "COM export is the raw RTD ABI leaf")]
 pub(crate) unsafe fn dll_get_class_object(
     class_id: *const core::ffi::c_void,
     interface_id: *const core::ffi::c_void,
@@ -262,6 +263,10 @@ pub(crate) unsafe fn dll_get_class_object(
 ///
 /// # Safety
 /// A non-null `output` must point to writable pointer storage.
+#[allow(
+    unsafe_code,
+    reason = "Unavailable COM export still implements the raw ABI contract"
+)]
 pub(crate) unsafe fn dll_get_class_object(
     _class_id: *const core::ffi::c_void,
     _interface_id: *const core::ffi::c_void,

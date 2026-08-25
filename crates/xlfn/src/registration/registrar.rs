@@ -14,14 +14,18 @@ use xlfn_sys::{
 #[cfg(any(feature = "async", test))]
 use xlfn_sys::{XLEVENT_CALCULATION_CANCELED, XLEVENT_CALCULATION_ENDED};
 
+#[cfg(test)]
+use super::ArgumentDescriptor;
 use super::host;
 #[cfg(test)]
 use super::ledger::CleanupSeverity;
+use super::preflight::{PreparedExcelString, PreparedRegistration, PreparedRegistrationSet};
+#[cfg(test)]
 use super::schema::MAX_REGISTER_ARGUMENT_HELP_ENTRIES;
 use super::{
-    ArgumentDescriptor, EventRegistration, ExcelNameKey, MetadataDebt, MetadataDebtRetryResult,
-    PendingRegistration, RegistrationCleanupState, RegistrationDescriptor, RegistrationId,
-    RegistrationTransactionError, UnknownRegistrationState, UnregisterResult,
+    EventRegistration, ExcelNameKey, MetadataDebt, MetadataDebtRetryResult, PendingRegistration,
+    RegistrationCleanupState, RegistrationDescriptor, RegistrationId, RegistrationTransactionError,
+    UnknownRegistrationState, UnregisterResult,
 };
 
 pub(crate) struct HostRegistrar {
@@ -79,12 +83,12 @@ impl HostRegistrar {
     pub(crate) fn register_all(
         &self,
         callbacks: &mut HostCallbackSession,
-        descriptors: &[RegistrationDescriptor],
+        prepared: &PreparedRegistrationSet,
     ) -> Result<Vec<RegistrationId>, RegistrationTransactionError> {
         register_all_transaction(
             callbacks,
-            descriptors,
-            |callbacks, descriptor| self.register_one(callbacks, descriptor),
+            prepared.as_slice(),
+            |callbacks, registration| self.register_one(callbacks, registration),
             Self::unregister_pending,
         )
     }
@@ -199,7 +203,7 @@ impl HostRegistrar {
     fn register_one(
         &self,
         callbacks: &mut HostCallbackSession,
-        descriptor: &RegistrationDescriptor,
+        descriptor: &PreparedRegistration,
     ) -> Result<RegistrationId, RegistrationTransactionError> {
         let exists = self.is_registered_name(callbacks, descriptor.excel_name)?;
         if exists {
@@ -209,36 +213,25 @@ impl HostRegistrar {
                 },
             ));
         }
-        let argument_names = descriptor
-            .arguments
-            .iter()
-            .map(|argument| argument.name)
-            .collect::<Vec<_>>()
-            .join(",");
-
         let mut module = TemporaryString::from_units(&self.module_units)
             .map_err(RegistrationTransactionError::new)?;
-        let mut procedure = TemporaryString::new(descriptor.export_name)
+        let mut procedure = TemporaryString::new(descriptor.export_name_text.as_str())
             .map_err(RegistrationTransactionError::new)?;
-        let encoded_type_text = descriptor
-            .signature
-            .encode()
+        let mut type_text = TemporaryString::new(descriptor.type_text.as_str())
             .map_err(RegistrationTransactionError::new)?;
-        let mut type_text =
-            TemporaryString::new(&encoded_type_text).map_err(RegistrationTransactionError::new)?;
-        let mut function_text = TemporaryString::new(descriptor.excel_name)
+        let mut function_text = TemporaryString::new(descriptor.excel_name_text.as_str())
             .map_err(RegistrationTransactionError::new)?;
-        let mut arguments =
-            TemporaryString::new(&argument_names).map_err(RegistrationTransactionError::new)?;
-        let mut macro_type = XLOPER12::number(descriptor.visibility.macro_type());
-        let mut category =
-            TemporaryString::new(descriptor.category).map_err(RegistrationTransactionError::new)?;
+        let mut arguments = TemporaryString::new(descriptor.argument_names.as_str())
+            .map_err(RegistrationTransactionError::new)?;
+        let mut macro_type = XLOPER12::number(macro_type(descriptor.visibility));
+        let mut category = TemporaryString::new(descriptor.category_text.as_str())
+            .map_err(RegistrationTransactionError::new)?;
         let mut shortcut = TemporaryString::new("").map_err(RegistrationTransactionError::new)?;
-        let mut help_topic = TemporaryString::new(descriptor.help_topic)
+        let mut help_topic = TemporaryString::new(descriptor.help_topic_text.as_str())
             .map_err(RegistrationTransactionError::new)?;
-        let mut function_help = TemporaryString::new(descriptor.description)
+        let mut function_help = TemporaryString::new(descriptor.description_text.as_str())
             .map_err(RegistrationTransactionError::new)?;
-        let mut argument_help = argument_help_strings(descriptor.arguments)
+        let mut argument_help = prepared_argument_help_strings(&descriptor.argument_help)
             .map_err(RegistrationTransactionError::new)?;
 
         let mut pointers = vec![
@@ -332,7 +325,7 @@ impl HostRegistrar {
     fn reconcile_malformed_registration_result(
         &self,
         callbacks: &mut HostCallbackSession,
-        descriptor: &RegistrationDescriptor,
+        descriptor: &PreparedRegistration,
         source: XllError,
     ) -> RegistrationTransactionError {
         reconcile_malformed_registration_result(
@@ -951,6 +944,7 @@ fn valid_registration_id(id: f64) -> bool {
     id.is_finite() && id > 0.0
 }
 
+#[cfg(test)]
 fn argument_help_strings(arguments: &[ArgumentDescriptor]) -> XllResult<Vec<TemporaryString>> {
     let mut help = arguments
         .iter()
@@ -961,6 +955,22 @@ fn argument_help_strings(arguments: &[ArgumentDescriptor]) -> XllResult<Vec<Temp
         help.push(TemporaryString::new("")?);
     }
     Ok(help)
+}
+
+fn prepared_argument_help_strings(
+    arguments: &[PreparedExcelString],
+) -> XllResult<Vec<TemporaryString>> {
+    arguments
+        .iter()
+        .map(|argument| TemporaryString::new(argument.as_str()))
+        .collect()
+}
+
+const fn macro_type(visibility: super::schema::FunctionVisibility) -> f64 {
+    match visibility {
+        super::schema::FunctionVisibility::Public => 1.0,
+        super::schema::FunctionVisibility::Hidden => 0.0,
+    }
 }
 
 fn validate_event_unregister_result(result: &ExcelCallbackValue) -> XllResult<()> {
@@ -1037,12 +1047,12 @@ fn unregister_events_with(
     outcome
 }
 
-fn register_all_transaction(
+fn register_all_transaction<T>(
     callbacks: &mut HostCallbackSession,
-    descriptors: &[RegistrationDescriptor],
+    descriptors: &[T],
     mut register: impl FnMut(
         &mut HostCallbackSession,
-        &RegistrationDescriptor,
+        &T,
     ) -> Result<RegistrationId, RegistrationTransactionError>,
     mut unregister: impl FnMut(
         &mut HostCallbackSession,
@@ -1078,9 +1088,34 @@ fn register_all_transaction(
     Ok(registered)
 }
 
-fn reconcile_malformed_registration_result(
+trait RegistrationIdentity {
+    fn export_name(&self) -> &'static str;
+    fn excel_name(&self) -> &'static str;
+}
+
+impl RegistrationIdentity for RegistrationDescriptor {
+    fn export_name(&self) -> &'static str {
+        self.export_name
+    }
+
+    fn excel_name(&self) -> &'static str {
+        self.excel_name
+    }
+}
+
+impl RegistrationIdentity for PreparedRegistration {
+    fn export_name(&self) -> &'static str {
+        self.export_name
+    }
+
+    fn excel_name(&self) -> &'static str {
+        self.excel_name
+    }
+}
+
+fn reconcile_malformed_registration_result<T: RegistrationIdentity>(
     callbacks: &mut HostCallbackSession,
-    descriptor: &RegistrationDescriptor,
+    descriptor: &T,
     source: XllError,
     recover: impl FnOnce(
         &mut HostCallbackSession,
@@ -1091,7 +1126,7 @@ fn reconcile_malformed_registration_result(
         &[PendingRegistration],
     ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
-    match recover(callbacks, descriptor.excel_name) {
+    match recover(callbacks, descriptor.excel_name()) {
         Ok(Some(registration)) => {
             registration_release_failure(callbacks, registration, source, unregister)
         }
@@ -1112,8 +1147,8 @@ fn reconcile_malformed_registration_result(
                 .pending_events
                 .append(&mut recovery_error.journal.pending_events);
             error.journal.mark_unknown(UnknownRegistrationState {
-                export_name: descriptor.export_name,
-                excel_name: descriptor.excel_name,
+                export_name: descriptor.export_name(),
+                excel_name: descriptor.excel_name(),
                 recovery_error: recovery_source,
             });
             error

@@ -6,10 +6,37 @@ pub(crate) use crate::async_udf::AsyncStopped;
 pub(crate) use crate::handle::{HandleRegistrySealed, HandleStoreQuiescent};
 #[cfg(not(feature = "async"))]
 pub(crate) use crate::lifecycle::AsyncStopped;
-pub(crate) use crate::lifecycle::{
-    AddinQuiesced, GenerationReclaimed, HostCallbacksDetached, ReturnsQuiescent,
-};
+pub(crate) use crate::lifecycle::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
 pub(crate) use crate::rtd::SubscriptionsStopped;
+
+#[derive(Debug)]
+pub(crate) struct ReturnsQuiescent {
+    _private: (),
+}
+
+impl ReturnsQuiescent {
+    fn issue() -> Self {
+        Self { _private: () }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+pub(crate) fn wait_for_return_quiescence(
+    protocol: &crate::runtime_components::ReturnProtocol,
+) -> crate::XllResult<ReturnsQuiescent> {
+    protocol.wait_for_returns();
+    if protocol.returns_closed_and_quiescent() {
+        Ok(ReturnsQuiescent::issue())
+    } else {
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+        })
+    }
+}
 
 /// Classification for a best-effort failure observed after unload safety was
 /// established.

@@ -17,6 +17,7 @@
 mod binding;
 mod connection;
 mod formula;
+#[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
 mod object;
 mod prepare;
 mod publication;
@@ -29,6 +30,10 @@ mod runtime;
 mod store;
 mod token;
 mod topic;
+#[allow(
+    unsafe_code,
+    reason = "Handle lease Send/Sync and pointer projection are audited here"
+)]
 mod typed;
 
 #[cfg(test)]
@@ -99,4 +104,8 @@ pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjec
 #[cfg(test)]
 mod refinement_tests;
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Unsafe handle fixtures exercise the audited pointer boundary"
+)]
 mod tests;

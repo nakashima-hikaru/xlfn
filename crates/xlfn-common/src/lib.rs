@@ -43,16 +43,6 @@ pub enum FunctionVisibility {
     Hidden,
 }
 
-impl FunctionVisibility {
-    #[must_use]
-    pub const fn macro_type(self) -> f64 {
-        match self {
-            Self::Public => 1.0,
-            Self::Hidden => 0.0,
-        }
-    }
-}
-
 /// Excel's maximum number of visible function arguments.
 pub const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
 

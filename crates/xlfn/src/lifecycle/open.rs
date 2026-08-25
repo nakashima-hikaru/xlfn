@@ -127,12 +127,19 @@ where
         };
         let (transaction, registrations) = open_addin_inner::<A>(
             runtime,
-            lifecycle,
             BuildInfo::new(addin_id.clone(), version, target),
             descriptors,
             transaction,
         )
         .map_err(|failure| failure.rollback(lifecycle))?;
+        let transaction = match transaction.install_lifecycle(lifecycle) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                return Err(transaction
+                    .failure(super::lifecycle_access_error(reason))
+                    .rollback(lifecycle));
+            }
+        };
         transaction.stage_host_mutations(registrations).commit()
     }));
 

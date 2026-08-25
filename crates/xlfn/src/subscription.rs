@@ -6,7 +6,7 @@
     )
 )]
 #![cfg_attr(
-    not(target_os = "windows"),
+    all(not(target_os = "windows"), feature = "rtd"),
     allow(dead_code, reason = "Internal helpers for Windows COM integration")
 )]
 #![cfg_attr(

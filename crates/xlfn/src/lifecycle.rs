@@ -20,7 +20,7 @@ pub(super) use open::open_addin_boundary as open_addin;
 use rollback::{active_runtime_generation, rollback_open};
 use teardown::drain_execution;
 
-macro_rules! lifecycle_token {
+macro_rules! private_lifecycle_token {
     ($name:ident) => {
         #[derive(Debug)]
         pub(crate) struct $name {
@@ -28,7 +28,8 @@ macro_rules! lifecycle_token {
         }
 
         impl $name {
-            pub(crate) fn new() -> Self {
+            // Only lifecycle descendants can issue this proof in production.
+            const fn issue() -> Self {
                 Self { _private: () }
             }
 
@@ -40,13 +41,12 @@ macro_rules! lifecycle_token {
     };
 }
 
-lifecycle_token!(HostCallbacksDetached);
-lifecycle_token!(ReturnsQuiescent);
-lifecycle_token!(AddinQuiesced);
-lifecycle_token!(GenerationReclaimed);
+private_lifecycle_token!(HostCallbacksDetached);
+private_lifecycle_token!(AddinQuiesced);
+private_lifecycle_token!(GenerationReclaimed);
 
 #[cfg(not(feature = "async"))]
-lifecycle_token!(AsyncStopped);
+private_lifecycle_token!(AsyncStopped);
 
 fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
     let diagnostic_id = match error {
@@ -209,6 +209,10 @@ fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     }));
 }
 
+#[allow(
+    unsafe_code,
+    reason = "Windows diagnostic output is the lifecycle FFI leaf"
+)]
 fn report_boundary_error(boundary: &'static str, error: &XllError) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         crate::diagnostics::report_no_unwind(boundary, error);
@@ -259,6 +263,10 @@ pub(crate) fn fail_stop_module_residency(error: &XllError) -> ! {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Lifecycle tests exercise the audited FFI return boundary"
+)]
 mod tests {
     use super::orchestration::{initialize_addin, remove_addin_inner};
     use super::*;
@@ -422,18 +430,14 @@ mod tests {
             .unwrap()
             .attach_host();
         let lifecycle = lifecycle_access(&runtime);
-        let (transaction, _) = match initialize_addin::<LayersPanic>(
-            &runtime,
-            &lifecycle,
-            &test_open_context(),
-            transaction,
-        ) {
-            Ok(result) => result,
-            Err(failure) => {
-                let error = failure.rollback(&lifecycle);
-                panic!("unexpected add-in initialization failure: {error}");
-            }
-        };
+        let (transaction, _) =
+            match initialize_addin::<LayersPanic>(&test_open_context(), transaction) {
+                Ok(result) => result,
+                Err(failure) => {
+                    let error = failure.rollback(&lifecycle);
+                    panic!("unexpected add-in initialization failure: {error}");
+                }
+            };
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
         rollback_active_open(&lifecycle, Some(transaction));

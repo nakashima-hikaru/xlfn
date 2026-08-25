@@ -336,6 +336,7 @@ impl<A: crate::Addin> Runtime<A> {
             attempt_id,
             module_opening: Some(module_opening),
             host: Some(NoHost),
+            lifecycle_state: None,
             _stage: PhantomData,
         })
     }
@@ -844,24 +845,12 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn wait_for_return_quiescence(
         &self,
     ) -> XllResult<crate::shutdown::ReturnsQuiescent> {
-        self.return_protocol.wait_for_returns();
-        if self.returns_closed_and_quiescent() {
-            Ok(crate::shutdown::ReturnsQuiescent::new())
-        } else {
-            Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-            })
-        }
+        crate::shutdown::wait_for_return_quiescence(&self.return_protocol)
     }
 
     #[inline]
     pub(crate) fn returns_are_quiescent(&self) -> bool {
         self.return_protocol.returns_are_quiescent()
-    }
-
-    #[inline]
-    fn returns_closed_and_quiescent(&self) -> bool {
-        self.return_protocol.returns_closed_and_quiescent()
     }
 
     #[cfg(test)]
@@ -1294,7 +1283,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(any(feature = "rtd", test)))]
         {
-            return Ok(crate::rtd::SubscriptionsStopped::new());
+            Ok(crate::rtd::SubscriptionsStopped::new())
         }
         #[cfg(any(feature = "rtd", test))]
         {
@@ -1443,6 +1432,7 @@ pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage, Host = NoHost> {
     attempt_id: OpenAttemptId,
     module_opening: Option<crate::module_runtime::ModuleOpening>,
     host: Option<Host>,
+    lifecycle_state: Option<A::LifecycleState>,
     _stage: PhantomData<fn() -> Stage>,
 }
 
@@ -1460,6 +1450,35 @@ impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host
         let _ = self.module_opening.take();
         disposition
     }
+
+    pub(crate) fn with_lifecycle_state(mut self, state: A::LifecycleState) -> Self {
+        debug_assert!(
+            self.lifecycle_state.is_none(),
+            "an opening transaction receives one lifecycle state"
+        );
+        self.lifecycle_state = Some(state);
+        self
+    }
+
+    pub(crate) fn take_lifecycle_state(&mut self) -> Option<A::LifecycleState> {
+        self.lifecycle_state.take()
+    }
+
+    pub(crate) fn install_lifecycle(
+        mut self,
+        access: &AddinLifecycleAccess<'_, A>,
+    ) -> Result<Self, (ThreadAffineError, Self)> {
+        let Some(state) = self.lifecycle_state.take() else {
+            return Ok(self);
+        };
+        match self.runtime.install_addin_lifecycle(access, state) {
+            Ok(()) => Ok(self),
+            Err(error) => {
+                self.lifecycle_state = Some(error.value);
+                Err((error.reason, self))
+            }
+        }
+    }
 }
 
 impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
@@ -1472,6 +1491,7 @@ impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
                 callbacks: HostCallbackSession::new(),
                 journal: HostMutationJournal::default(),
             }),
+            lifecycle_state: self.lifecycle_state.take(),
             _stage: PhantomData,
         }
     }
@@ -1499,6 +1519,7 @@ impl<'runtime, A: crate::Addin, Host> OpeningTxn<'runtime, A, OpenAttemptBegun, 
                     attempt_id: self.attempt_id,
                     module_opening: Some(module_opening),
                     host: self.host.take(),
+                    lifecycle_state: self.lifecycle_state.take(),
                     _stage: PhantomData,
                 })
             }
@@ -1529,6 +1550,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenGenerationStaged, Ho
             attempt_id: self.attempt_id,
             module_opening: self.module_opening.take(),
             host: self.host.take(),
+            lifecycle_state: self.lifecycle_state.take(),
             _stage: PhantomData,
         }
     }
@@ -1613,12 +1635,26 @@ impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, HostOpenin
 impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
     fn drop(&mut self) {
         if self.module_opening.is_none() {
+            if let Some(lifecycle_state) = self.lifecycle_state.take() {
+                #[allow(
+                    clippy::mem_forget,
+                    reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
+                )]
+                std::mem::forget(lifecycle_state);
+            }
             return;
         }
         // Lifecycle rollback is owned by OpeningTxn and must be explicit.
         // Dropping any unfinished stage can only enter the fail-safe state;
         // Drop never invokes host callbacks or resource cleanup.
         self.runtime.quarantine();
+        if let Some(lifecycle_state) = self.lifecycle_state.take() {
+            #[allow(
+                clippy::mem_forget,
+                reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
+            )]
+            std::mem::forget(lifecycle_state);
+        }
     }
 }
 

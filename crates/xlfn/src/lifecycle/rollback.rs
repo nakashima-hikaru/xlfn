@@ -179,7 +179,7 @@ where
         report_boundary_error("xlAutoOpen callbacks remain registered", &error);
         return incomplete(runtime);
     }
-    let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
+    let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
 
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values

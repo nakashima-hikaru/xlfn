@@ -17,12 +17,17 @@ pub mod date;
 #[doc(hidden)]
 pub mod identity;
 /// Input conversion traits and presence/default handling.
+#[allow(
+    unsafe_code,
+    reason = "Raw XLOPER12 input conversion is isolated in this leaf"
+)]
 pub(crate) mod input;
 /// Owned rectangular and bounded collection values.
 pub mod matrix;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
+#[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
 pub mod raw;
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -125,6 +130,10 @@ pub enum OptionalExcelValue<T> {
     Value(T),
 }
 
+#[allow(
+    unsafe_code,
+    reason = "XLOPER12 numeric union projection is audited here"
+)]
 impl<'call> FromExcel<'call> for f64 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let number = match value.base_type() {
@@ -147,6 +156,10 @@ impl ExcelInputIdentity for f64 {
     }
 }
 
+#[allow(
+    unsafe_code,
+    reason = "XLOPER12 boolean union projection is audited here"
+)]
 impl<'call> FromExcel<'call> for bool {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() != XLTYPE_BOOL {
@@ -182,6 +195,10 @@ fn number_to_integer<T>(
     Ok(convert(number))
 }
 
+#[allow(
+    unsafe_code,
+    reason = "XLOPER12 integer union projection is audited here"
+)]
 impl<'call> FromExcel<'call> for i32 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
@@ -206,6 +223,10 @@ impl ExcelInputIdentity for i32 {
     }
 }
 
+#[allow(
+    unsafe_code,
+    reason = "XLOPER12 integer union projection is audited here"
+)]
 impl<'call> FromExcel<'call> for i64 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.base_type() {
@@ -265,6 +286,10 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     }
 }
 
+#[allow(
+    unsafe_code,
+    reason = "XLOPER12 error union projection is audited here"
+)]
 impl<'call> FromExcel<'call> for ExcelErrorValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.base_type() != XLTYPE_ERR {
@@ -1300,6 +1325,10 @@ impl<T: IntoExcel> AsyncReturn for Column<T> {}
 impl<T: IntoExcel> VolatileReturn for Column<T> {}
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Value tests exercise the audited raw input boundary"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

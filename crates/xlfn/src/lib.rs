@@ -62,10 +62,8 @@ pub mod error;
 pub mod execution;
 mod generation;
 #[cfg(any(feature = "handles", test))]
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod handle;
 #[cfg(all(not(feature = "handles"), not(test)))]
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod handle;
 #[allow(
     unsafe_code,
@@ -75,7 +73,6 @@ mod host_api;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod host_callback;
 mod input_identity;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod lifecycle;
 #[allow(
     unsafe_code,
@@ -85,7 +82,6 @@ mod module_residency;
 mod module_runtime;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod registration;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod return_array;
@@ -97,10 +93,8 @@ mod return_storage;
 )]
 mod return_value;
 #[cfg(any(feature = "rtd", test))]
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod rtd;
 #[cfg(all(not(feature = "rtd"), not(test)))]
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod rtd;
 mod runtime;
 mod runtime_components;
@@ -108,10 +102,8 @@ mod runtime_refinement;
 mod shutdown;
 #[cfg(any(test, feature = "refinement"))]
 mod shutdown_refinement;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod subscription;
 mod utf16;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod value;
 
 pub use addin::{

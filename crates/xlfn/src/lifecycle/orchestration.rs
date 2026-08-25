@@ -44,7 +44,6 @@ type InitializedOpenResult<'runtime, A> = Result<
 
 pub(super) fn open_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A>,
-    lifecycle: &AddinLifecycleAccess<'_, A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     mut transaction: crate::runtime::OpeningTxn<
@@ -62,7 +61,7 @@ where
     if let Err(error) = crate::diagnostics::reset_diagnostic_router() {
         return Err(transaction.failure(error));
     }
-    let _prepared_set = match crate::registration::preflight_registration(descriptors) {
+    let prepared_set = match crate::registration::preflight_registration(descriptors) {
         Ok(prepared_set) => prepared_set,
         Err(error) => return Err(transaction.failure(error)),
     };
@@ -81,11 +80,10 @@ where
         Err(error) => return Err(transaction.failure(error)),
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let (mut transaction, runtime_config) =
-        initialize_addin::<A>(runtime, lifecycle, &context, transaction)?;
+    let (mut transaction, runtime_config) = initialize_addin::<A>(&context, transaction)?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
-    let has_async_functions = descriptors
+    let has_async_functions = prepared_set
         .iter()
         .any(|descriptor| descriptor.signature.execution.is_async());
     if has_async_functions {
@@ -109,7 +107,7 @@ where
             }));
         }
     }
-    let registrations = match registrar.register_all(transaction.callbacks_mut(), descriptors) {
+    let registrations = match registrar.register_all(transaction.callbacks_mut(), &prepared_set) {
         Ok(registrations) => registrations,
         Err(error) => {
             let error = retain_transaction_error(&mut transaction, error);
@@ -131,6 +129,20 @@ pub(super) fn rollback_active_open<'runtime, A, Stage>(
         return;
     };
     let runtime = attempt.runtime();
+    if let Some(lifecycle_state) = attempt.take_lifecycle_state()
+        && let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state)
+    {
+        let (lifecycle_state, reason) = error.into_parts();
+        #[allow(
+            clippy::mem_forget,
+            reason = "failed rollback installation; leaking untrusted lifecycle state is safer than running its destructor"
+        )]
+        std::mem::forget(lifecycle_state);
+        let error = lifecycle_access_error(reason);
+        report_boundary_error("xlAutoOpen rollback lifecycle installation", &error);
+        quarantine_runtime(runtime);
+        return;
+    }
     runtime.retain_host_mutations(attempt.take_journal());
     let generation = Some(
         RuntimeGeneration::new(attempt.attempt_id().get())
@@ -157,8 +169,6 @@ pub(super) fn rollback_active_open<'runtime, A, Stage>(
 }
 
 pub(super) fn initialize_addin<'runtime, A>(
-    runtime: &'runtime Runtime<A>,
-    lifecycle: &AddinLifecycleAccess<'_, A>,
     context: &OpenContext,
     transaction: crate::runtime::OpeningTxn<
         'runtime,
@@ -177,32 +187,10 @@ where
         }
     };
     let (shared_state, lifecycle_state, layers, runtime_config) = opened.into_parts();
-    // Lifecycle state is deliberately installed in the main-thread slot
-    // before the shared generation is staged. It may be non-Send and must not
+    // Keep the non-Send lifecycle state in the open transaction until the
+    // final pre-publication transfer into the thread-affine slot. It must not
     // become part of the cross-thread generation root.
-    if let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state) {
-        let (lifecycle_state, _) = error.into_parts();
-        #[allow(
-            clippy::mem_forget,
-            reason = "failed add-in lifecycle installation; intentionally leaked to prevent running untrusted destruction"
-        )]
-        std::mem::forget(lifecycle_state);
-        runtime.quarantine_shared_state(
-            active_runtime_generation(runtime),
-            shared_state,
-            crate::runtime_components::QuarantineReason::OpenStateInvariant,
-        );
-        runtime.quarantine_layers(
-            active_runtime_generation(runtime),
-            layers,
-            crate::runtime_components::QuarantineReason::OpenStateInvariant,
-        );
-        return Err(transaction.failure(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-        }));
-    }
-    // Stage the complete generation as one owned value.  The opening state
-    // cannot be observed in a partially assembled form.
+    let transaction = transaction.with_lifecycle_state(lifecycle_state);
     let opening = crate::runtime::OpeningGeneration {
         shared_state,
         layers,
@@ -590,7 +578,7 @@ where
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
 
-    let host_callbacks = crate::shutdown::HostCallbacksDetached::new();
+    let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().host_detached(runtime);
 

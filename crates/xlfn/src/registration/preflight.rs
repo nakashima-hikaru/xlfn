@@ -1,6 +1,7 @@
 //! Pure registration validation and host-independent preparation.
 
-use super::{ArgumentDescriptor, ExcelNameKey, RegistrationDescriptor, RegistrationSignature};
+use super::schema::MAX_REGISTER_ARGUMENT_HELP_ENTRIES;
+use super::{ExcelNameKey, RegistrationDescriptor, RegistrationSignature};
 use crate::{XllError, XllResult};
 use std::collections::HashSet;
 
@@ -33,20 +34,48 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedExcelString(String);
+
+impl PreparedExcelString {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedRegistration {
     pub descriptor_index: usize,
     pub export_name: &'static str,
     pub excel_name: &'static str,
-    pub category: &'static str,
-    pub help_topic: &'static str,
-    pub description: &'static str,
-    pub arguments: &'static [ArgumentDescriptor],
     pub signature: RegistrationSignature,
+    pub visibility: super::schema::FunctionVisibility,
+    pub export_name_text: PreparedExcelString,
+    pub excel_name_text: PreparedExcelString,
+    pub category_text: PreparedExcelString,
+    pub help_topic_text: PreparedExcelString,
+    pub description_text: PreparedExcelString,
+    pub argument_names: PreparedExcelString,
+    pub type_text: PreparedExcelString,
+    pub argument_help: Vec<PreparedExcelString>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedRegistrationSet {
-    pub(crate) prepared: Vec<PreparedRegistration>,
+    prepared: Vec<PreparedRegistration>,
+}
+
+impl PreparedRegistrationSet {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &PreparedRegistration> {
+        self.prepared.iter()
+    }
+
+    pub(crate) fn as_slice(&self) -> &[PreparedRegistration] {
+        &self.prepared
+    }
 }
 
 pub(crate) fn preflight_registration(
@@ -78,15 +107,31 @@ pub(crate) fn preflight_registration(
         let encoded_sig = descriptor.signature.encode()?;
         validate_excel_string(&encoded_sig)?;
 
+        let argument_help = descriptor
+            .arguments
+            .iter()
+            .take(MAX_REGISTER_ARGUMENT_HELP_ENTRIES)
+            .map(|argument| Ok(PreparedExcelString::new(argument.description.to_owned())))
+            .collect::<XllResult<Vec<_>>>()?;
+        let mut argument_help = argument_help;
+        if !argument_help.is_empty() {
+            argument_help.push(PreparedExcelString::new(String::new()));
+        }
+
         prepared.push(PreparedRegistration {
             descriptor_index: index,
             export_name: descriptor.export_name,
             excel_name: descriptor.excel_name,
-            category: descriptor.category,
-            help_topic: descriptor.help_topic,
-            description: descriptor.description,
-            arguments: descriptor.arguments,
             signature: descriptor.signature,
+            visibility: descriptor.visibility,
+            export_name_text: PreparedExcelString::new(descriptor.export_name.to_owned()),
+            excel_name_text: PreparedExcelString::new(descriptor.excel_name.to_owned()),
+            category_text: PreparedExcelString::new(descriptor.category.to_owned()),
+            help_topic_text: PreparedExcelString::new(descriptor.help_topic.to_owned()),
+            description_text: PreparedExcelString::new(descriptor.description.to_owned()),
+            argument_names: PreparedExcelString::new(argument_names),
+            type_text: PreparedExcelString::new(encoded_sig),
+            argument_help,
         });
     }
 

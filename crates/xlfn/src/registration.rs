@@ -1,6 +1,10 @@
 pub(crate) mod host;
 pub(crate) mod ledger;
 pub(crate) mod preflight;
+#[allow(
+    unsafe_code,
+    reason = "Excel registration ABI is isolated in this leaf module"
+)]
 pub(crate) mod registrar;
 pub(crate) mod schema;
 

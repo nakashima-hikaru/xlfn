@@ -17,13 +17,20 @@ pub(super) struct QuiescedAddin<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     generation: Option<crate::generation::RuntimeGeneration>,
     shared_state: Option<A::SharedState>,
-    addin_quiesced: crate::shutdown::AddinQuiesced,
-    generation_reclaimed: crate::shutdown::GenerationReclaimed,
 }
 
 pub(super) struct CleanedAddin {
     pub(super) addin_quiesced: crate::shutdown::AddinQuiesced,
     pub(super) generation_reclaimed: crate::shutdown::GenerationReclaimed,
+}
+
+impl CleanedAddin {
+    fn issued() -> Self {
+        Self {
+            addin_quiesced: crate::shutdown::AddinQuiesced::issue(),
+            generation_reclaimed: crate::shutdown::GenerationReclaimed::issue(),
+        }
+    }
 }
 
 impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
@@ -35,8 +42,6 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             runtime,
             generation,
             shared_state: None,
-            addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-            generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
         }
     }
 
@@ -49,8 +54,6 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             runtime,
             generation,
             shared_state: Some(shared_state),
-            addin_quiesced: crate::shutdown::AddinQuiesced::new(),
-            generation_reclaimed: crate::shutdown::GenerationReclaimed::new(),
         }
     }
 
@@ -60,11 +63,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         report: &mut crate::shutdown::CloseReport,
     ) -> Result<CleanedAddin, crate::XllError> {
         let Some(shared_state) = self.shared_state.take() else {
-            let (addin_quiesced, generation_reclaimed) = self.take_proofs();
-            return Ok(CleanedAddin {
-                addin_quiesced,
-                generation_reclaimed,
-            });
+            return Ok(CleanedAddin::issued());
         };
 
         let cleanup = catch_unwind(AssertUnwindSafe(|| {
@@ -132,29 +131,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             });
         }
-        let (addin_quiesced, generation_reclaimed) = self.take_proofs();
-        Ok(CleanedAddin {
-            addin_quiesced,
-            generation_reclaimed,
-        })
-    }
-
-    fn take_proofs(
-        &mut self,
-    ) -> (
-        crate::shutdown::AddinQuiesced,
-        crate::shutdown::GenerationReclaimed,
-    ) {
-        (
-            std::mem::replace(
-                &mut self.addin_quiesced,
-                crate::shutdown::AddinQuiesced::new(),
-            ),
-            std::mem::replace(
-                &mut self.generation_reclaimed,
-                crate::shutdown::GenerationReclaimed::new(),
-            ),
-        )
+        Ok(CleanedAddin::issued())
     }
 
     fn quarantine_shared_state(
@@ -286,7 +263,7 @@ impl ExecutionDrained {
             outcome.certificate
         };
         #[cfg(not(feature = "async"))]
-        let async_stopped = crate::shutdown::AsyncStopped::new();
+        let async_stopped = crate::shutdown::AsyncStopped::issue();
 
         let subscriptions_stopped = runtime.close_subscriptions()?;
 
