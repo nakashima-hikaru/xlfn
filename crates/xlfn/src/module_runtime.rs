@@ -73,6 +73,16 @@ pub(crate) struct ModuleEpochLease {
     id: ModuleEpochId,
 }
 
+/// The single owner-side module authority retained by the runtime lifecycle.
+///
+/// The epoch identity is copied into generation payloads for validation, but
+/// this value is the only place where the affine mutation authority lives
+/// while the runtime is not actively tearing down through a removal owner.
+pub(crate) enum ModuleAuthority {
+    Open(ModuleEpochLease),
+    Closing(ModuleClosing),
+}
+
 /// Affine module capability after the module close has been linearized.
 ///
 /// The capability owns the right to drain the module ingress.  Callers must
@@ -149,7 +159,27 @@ impl ModuleEpochLease {
     }
 }
 
+impl ModuleAuthority {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        match self {
+            Self::Open(lease) => lease.id(),
+            Self::Closing(closing) => closing.id(),
+        }
+    }
+
+    pub(crate) fn into_closing(self) -> ModuleClosing {
+        match self {
+            Self::Open(lease) => lease.begin_close(|| {}),
+            Self::Closing(closing) => closing,
+        }
+    }
+}
+
 impl ModuleClosing {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        self.id
+    }
+
     pub(crate) fn seal_and_drain(self) -> ModuleExportsDrained {
         let exports = self.module.seal_and_drain_internal();
         ModuleExportsDrained {
