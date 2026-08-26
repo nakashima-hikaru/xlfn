@@ -30,7 +30,9 @@ fn require_lifecycle_invariant(condition: bool, message: &'static str) {
 use crate::generation::{ExecutionGeneration, OpeningGeneration, ShutdownGeneration};
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
-use crate::module_runtime::{ModuleAuthority, ModuleEpochId, ModuleEpochLease};
+use crate::module_runtime::{
+    ModuleAuthority, ModuleCleanupAuthority, ModuleEpochId, ModuleEpochLease,
+};
 use crate::runtime_components::GenerationServices;
 
 /// A read-side publication of one coherent open generation.
@@ -621,6 +623,12 @@ impl<A: crate::Addin> GenerationControl<A> {
             .map(ModuleAuthority::into_closing)
     }
 
+    fn take_module_cleanup(&mut self) -> Option<ModuleCleanupAuthority> {
+        self.module_authority
+            .take()
+            .map(ModuleAuthority::into_cleanup)
+    }
+
     fn install_open_authority(&mut self, lease: ModuleEpochLease) {
         require_lifecycle_invariant(
             self.module_authority.is_none(),
@@ -635,6 +643,17 @@ impl<A: crate::Addin> GenerationControl<A> {
             "module close authority already exists",
         );
         self.module_authority = Some(ModuleAuthority::Closing(closing));
+    }
+
+    fn install_cleanup_authority(&mut self, authority: ModuleCleanupAuthority) {
+        require_lifecycle_invariant(
+            self.module_authority.is_none(),
+            "module cleanup authority already exists",
+        );
+        self.module_authority = Some(match authority {
+            ModuleCleanupAuthority::Closing(closing) => ModuleAuthority::Closing(closing),
+            ModuleCleanupAuthority::Drained(drained) => ModuleAuthority::Drained(drained),
+        });
     }
 }
 
@@ -708,6 +727,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.generation.take_module_closing()
     }
 
+    fn take_module_cleanup(&mut self) -> Option<ModuleCleanupAuthority> {
+        self.generation.take_module_cleanup()
+    }
+
     fn module_authority_id(&self) -> Option<ModuleEpochId> {
         self.generation
             .module_authority
@@ -721,6 +744,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
 
     fn install_closing_authority(&mut self, closing: crate::module_runtime::ModuleClosing) {
         self.generation.install_closing_authority(closing);
+    }
+
+    fn install_cleanup_authority(&mut self, authority: ModuleCleanupAuthority) {
+        self.generation.install_cleanup_authority(authority);
     }
 
     const fn removal_attempt(&self) -> Option<RemovalAttemptId> {
@@ -853,6 +880,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
 pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) error: crate::XllError,
     pub(crate) opening: Option<OpeningGeneration<A>>,
+    pub(crate) module_epoch: ModuleEpochLease,
 }
 
 /// The read-side effect produced by one canonical lifecycle transition.
@@ -895,11 +923,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         access.transition(|core| (core.take_module_closing(), TransitionEffect::Keep))
     }
 
-    pub(in crate::lifecycle) fn take_module_closing_for_quarantine(
+    pub(in crate::lifecycle) fn take_module_cleanup_for_quarantine(
         &self,
-    ) -> Option<crate::module_runtime::ModuleClosing> {
+    ) -> Option<ModuleCleanupAuthority> {
         let mut access = self.access();
-        access.transition(|core| (core.take_module_closing(), TransitionEffect::Keep))
+        access.transition(|core| (core.take_module_cleanup(), TransitionEffect::Keep))
     }
 
     pub(in crate::lifecycle) fn install_module_closing(
@@ -917,6 +945,22 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     ) {
         access.transition(|core| {
             core.install_closing_authority(closing);
+            ((), TransitionEffect::Keep)
+        });
+    }
+
+    pub(in crate::lifecycle) fn install_module_cleanup(&self, authority: ModuleCleanupAuthority) {
+        let mut access = self.access();
+        self.install_module_cleanup_locked(&mut access, authority);
+    }
+
+    pub(in crate::lifecycle) fn install_module_cleanup_locked(
+        &self,
+        access: &mut LifecycleAccess<'_, A>,
+        authority: ModuleCleanupAuthority,
+    ) {
+        access.transition(|core| {
+            core.install_cleanup_authority(authority);
             ((), TransitionEffect::Keep)
         });
     }
@@ -1348,17 +1392,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         generation: RuntimeGeneration,
         services: Arc<GenerationServices>,
         module_epoch: ModuleEpochLease,
-    ) -> Result<(), PublishOpeningError<A>> {
+    ) -> Result<(), Box<PublishOpeningError<A>>> {
         core.transition(|core| {
             let open_state_error = || crate::XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
             };
             if core.has_current_generation() {
                 return (
-                    Err(PublishOpeningError {
+                    Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: core.generation.state.take_opening(),
-                    }),
+                        module_epoch,
+                    })),
                     TransitionEffect::Keep,
                 );
             }
@@ -1367,19 +1412,21 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 _ => None,
             }) else {
                 return (
-                    Err(PublishOpeningError {
+                    Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: core.generation.state.take_opening(),
-                    }),
+                        module_epoch,
+                    })),
                     TransitionEffect::Keep,
                 );
             };
             let Some(opening) = core.generation.state.take_opening() else {
                 return (
-                    Err(PublishOpeningError {
+                    Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: None,
-                    }),
+                        module_epoch,
+                    })),
                     TransitionEffect::Keep,
                 );
             };

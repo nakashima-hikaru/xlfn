@@ -4,7 +4,7 @@ use crate::lifecycle::{
     HostLifecycleIntent, LifecycleAccess, OpenAttemptBegun, OpeningTxn, RemovalOwner,
 };
 use crate::runtime::Runtime;
-use crate::runtime_components::{GenerationServices, QuarantineReason};
+use crate::runtime_components::QuarantineReason;
 use crate::{XllError, XllResult};
 use std::sync::Arc;
 
@@ -18,6 +18,12 @@ pub(crate) struct LifecycleAuthority<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
 }
 
+pub(crate) type PublishGenerationFailure<A> = Box<(
+    XllError,
+    Option<OpeningGeneration<A>>,
+    crate::module_runtime::ModuleEpochLease,
+)>;
+
 impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
     pub(crate) const fn new(runtime: &'runtime Runtime<A>) -> Self {
         Self { runtime }
@@ -25,6 +31,13 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
 
     pub(crate) fn install_module_closing(&self, closing: crate::module_runtime::ModuleClosing) {
         self.runtime.lifecycle.install_module_closing(closing);
+    }
+
+    pub(crate) fn install_module_cleanup_authority(
+        &self,
+        authority: crate::module_runtime::ModuleCleanupAuthority,
+    ) {
+        self.runtime.lifecycle.install_module_cleanup(authority);
     }
 
     pub(crate) fn begin_open_if_epoch(
@@ -87,119 +100,54 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
             .stage_opening_generation_locked(&mut control, opening)
     }
 
-    pub(crate) fn publish_opening_generation(
+    pub(crate) fn validate_open_attempt(
         &self,
-        control: &mut LifecycleAccess<'_, A>,
+        control: &LifecycleAccess<'_, A>,
         attempt_id: OpenAttemptId,
-        module_epoch: crate::module_runtime::ModuleEpochLease,
     ) -> XllResult<()> {
-        let generation = attempt_id.into_runtime_generation();
-        let config = control.opening_config().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-        })?;
-        let armed_services = GenerationServices::arm_generation(
-            generation,
-            config,
-            crate::rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-        )?;
-        let services = armed_services.commit();
-        if let Err(failure) = self.runtime.lifecycle.publish_opening_generation_locked(
-            control,
-            generation,
-            Arc::clone(&services),
-            module_epoch,
-        ) {
-            services.disarm_or_abort();
-            if let Some(opening) = failure.opening {
-                self.quarantine_opening_generation(
-                    Some(generation),
-                    opening,
-                    QuarantineReason::OpenStateInvariant,
-                );
-            }
-            return Err(failure.error);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn commit_open(
-        &self,
-        attempt_id: OpenAttemptId,
-        module_opening: crate::module_runtime::ModuleOpening,
-        journal: &mut crate::registration::HostMutationJournal,
-    ) -> XllResult<()> {
-        let mut control = self.runtime.lifecycle.access();
-        if control.open_attempt() != Some(attempt_id) {
-            return Err(XllError::Closing);
-        }
-
-        let registration_ids = journal
-            .pending_registrations
-            .iter()
-            .map(|entry| entry.registration)
-            .collect::<Vec<_>>();
-        self.runtime
-            .clear_metadata_debt_for_registrations(&registration_ids);
-        self.runtime.host.merge(std::mem::take(journal));
-        let can_commit = control.phase() == crate::lifecycle::LifecyclePhase::Opening;
-        if can_commit {
-            let ingress = crate::module_runtime::ingress();
-            ingress
-                .complete_open(|| {
-                    self.publish_opening_generation(
-                        &mut control,
-                        attempt_id,
-                        module_opening.commit(),
-                    )?;
-                    let generation = attempt_id.into_runtime_generation();
-                    self.runtime
-                        .refinement
-                        .commit_open(self.runtime, attempt_id, || {
-                            self.runtime
-                                .lifecycle
-                                .commit_open(&mut control, generation)?;
-                            if control.phase() != crate::lifecycle::LifecyclePhase::Open
-                                || control.last_committed_generation() != Some(generation)
-                                || control.open_attempt().is_some()
-                            {
-                                crate::lifecycle::fail_stop_invariant(
-                                    "xlAutoOpen commit postcondition",
-                                    &XllError::Internal {
-                                        diagnostic_id:
-                                            crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                                    },
-                                );
-                            }
-                            Ok(())
-                        })?;
-                    Ok::<(), XllError>(())
-                })
-                .unwrap_or_else(|_| opening_publication_lost())?;
-            self.runtime.lifecycle.notify_all();
+        if control.open_attempt() == Some(attempt_id) {
             Ok(())
         } else {
-            self.reject_open_attempt(&mut control, module_opening);
-            self.runtime.lifecycle.notify_all();
-            drop(control);
-            self.runtime
-                .refinement
-                .reject_open(self.runtime, attempt_id);
             Err(XllError::Closing)
         }
     }
 
-    fn reject_open_attempt(
+    pub(crate) fn publish_generation_state(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-        module_opening: crate::module_runtime::ModuleOpening,
-    ) {
-        self.runtime.lifecycle.reject_open_attempt(control);
+        generation: crate::generation::RuntimeGeneration,
+        services: Arc<crate::runtime_components::GenerationServices>,
+        module_epoch: crate::module_runtime::ModuleEpochLease,
+    ) -> Result<(), PublishGenerationFailure<A>> {
         self.runtime
             .lifecycle
-            .install_module_closing_locked(control, module_opening.rollback(|| {}));
+            .publish_opening_generation_locked(control, generation, services, module_epoch)
+            .map_err(|failure| Box::new((failure.error, failure.opening, failure.module_epoch)))
     }
 
-    pub(crate) fn fail_open(
+    pub(crate) fn finish_open_state(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        generation: crate::generation::RuntimeGeneration,
+    ) -> XllResult<()> {
+        self.runtime.lifecycle.commit_open(control, generation)
+    }
+
+    pub(crate) fn reject_open_state(&self, control: &mut LifecycleAccess<'_, A>) {
+        self.runtime.lifecycle.reject_open_attempt(control);
+    }
+
+    pub(crate) fn install_module_closing_locked(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        closing: crate::module_runtime::ModuleClosing,
+    ) {
+        self.runtime
+            .lifecycle
+            .install_module_closing_locked(control, closing);
+    }
+
+    pub(crate) fn mark_open_failed(
         &self,
         attempt_id: OpenAttemptId,
     ) -> crate::lifecycle::OpenFailureDisposition {
@@ -340,7 +288,14 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
         self.runtime
             .lifecycle
             .take_module_closing_for_close(control)
-            .unwrap_or_else(crate::module_runtime::begin_close_for_test)
+            .unwrap_or_else(|| {
+                crate::lifecycle::fail_stop_invariant(
+                    "test removal owner lacks module close authority",
+                    &XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                    },
+                )
+            })
     }
 
     #[cfg(test)]
@@ -438,13 +393,22 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
         }
     }
 
-    pub(crate) fn take_module_closing_for_quarantine(
+    pub(crate) fn take_module_cleanup_authority_for_quarantine(
         &self,
-    ) -> crate::module_runtime::ModuleClosing {
-        self.runtime
-            .lifecycle
-            .take_module_closing_for_quarantine()
-            .unwrap_or_else(|| crate::module_runtime::begin_close_for_quarantine(|| {}))
+    ) -> Option<crate::module_runtime::ModuleCleanupAuthority> {
+        let authority = self.runtime.lifecycle.take_module_cleanup_for_quarantine();
+        if authority.is_none()
+            && (self.runtime.lifecycle.access().module_epoch_id().is_some()
+                || crate::module_runtime::ingress().phase() != crate::ingress::PHASE_CLOSED)
+        {
+            crate::lifecycle::fail_stop_invariant(
+                "active module epoch lacks affine close authority",
+                &XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+                },
+            );
+        }
+        authority
     }
 
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
@@ -472,15 +436,4 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
             self.runtime.lifecycle.wait(&mut wait_guard);
         }
     }
-}
-
-#[cold]
-fn opening_publication_lost() -> ! {
-    #[cfg(not(test))]
-    {
-        tracing::error!("lifecycle opening publication lost its ingress linearization");
-        std::process::abort();
-    }
-    #[cfg(test)]
-    panic!("lifecycle opening publication lost its ingress linearization");
 }

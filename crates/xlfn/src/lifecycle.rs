@@ -199,11 +199,16 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
 }
 
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
+    // Claiming the existing authority is itself an invariant boundary.  Keep
+    // it outside the best-effort cleanup catch so a missing authority cannot
+    // be swallowed as an ordinary quarantine cleanup failure.
+    let module_cleanup_authority = runtime
+        .lifecycle_runtime()
+        .take_module_cleanup_authority_for_quarantine();
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        let module_closing = runtime
-            .lifecycle_runtime()
-            .take_module_closing_for_quarantine();
-        let _ = module_closing.seal_and_drain();
+        if let Some(module_cleanup_authority) = module_cleanup_authority {
+            module_cleanup_authority.finish();
+        }
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
             tracing::error!(

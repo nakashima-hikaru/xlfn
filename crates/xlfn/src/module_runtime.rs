@@ -81,13 +81,25 @@ pub(crate) struct ModuleEpochLease {
 pub(crate) enum ModuleAuthority {
     Open(ModuleEpochLease),
     Closing(ModuleClosing),
+    Drained(ModuleExportsDrained),
+}
+
+/// The cleanup authority retained after a close transition has begun.
+///
+/// `Drained` is deliberately a distinct state from `Closing`: the ingress
+/// close operation has already consumed the latter and must never be
+/// reconstructed merely because a later teardown step failed.
+pub(crate) enum ModuleCleanupAuthority {
+    Closing(ModuleClosing),
+    Drained(ModuleExportsDrained),
 }
 
 /// Affine module capability after the module close has been linearized.
 ///
 /// The capability owns the right to drain the module ingress.  Callers must
 /// advance it to [`ModuleExportsDrained`] before they can certify module
-/// quiescence.
+/// quiescence.  It is constructed only by consuming the preceding
+/// [`ModuleOpening`] or [`ModuleEpochLease`] authority.
 pub(crate) struct ModuleClosing {
     module: &'static ModuleRuntime,
     id: ModuleEpochId,
@@ -135,11 +147,9 @@ impl ModuleOpening {
     /// Rolls an uncommitted opening epoch into the same affine close chain
     /// used by committed removal.
     pub(crate) fn rollback(self, on_closed: impl FnOnce()) -> ModuleClosing {
-        self.module.begin_close_internal(on_closed);
-        ModuleClosing {
-            module: self.module,
-            id: self.id,
-        }
+        let Self { module, id } = self;
+        module.begin_close_effects(id, on_closed);
+        ModuleClosing { module, id }
     }
 }
 
@@ -152,9 +162,8 @@ impl ModuleEpochLease {
     where
         F: FnOnce(),
     {
-        let module = self.module;
-        let id = self.id;
-        module.begin_close_internal(on_closed);
+        let Self { module, id } = self;
+        module.begin_close_effects(id, on_closed);
         ModuleClosing { module, id }
     }
 }
@@ -164,6 +173,7 @@ impl ModuleAuthority {
         match self {
             Self::Open(lease) => lease.id(),
             Self::Closing(closing) => closing.id(),
+            Self::Drained(drained) => drained.id(),
         }
     }
 
@@ -171,6 +181,30 @@ impl ModuleAuthority {
         match self {
             Self::Open(lease) => lease.begin_close(|| {}),
             Self::Closing(closing) => closing,
+            Self::Drained(_) => xlfn_kernel::invariant::fail_stop(),
+        }
+    }
+
+    pub(crate) fn into_cleanup(self) -> ModuleCleanupAuthority {
+        match self {
+            Self::Open(lease) => ModuleCleanupAuthority::Closing(lease.begin_close(|| {})),
+            Self::Closing(closing) => ModuleCleanupAuthority::Closing(closing),
+            Self::Drained(drained) => ModuleCleanupAuthority::Drained(drained),
+        }
+    }
+}
+
+impl ModuleCleanupAuthority {
+    /// Completes the module-side cleanup without minting a predecessor
+    /// capability. A progressed `Drained` authority can only close callback
+    /// admission; it cannot be converted back into `ModuleClosing`.
+    pub(crate) fn finish(self) {
+        match self {
+            Self::Closing(closing) => {
+                let drained = closing.seal_and_drain();
+                drained.close_callbacks();
+            }
+            Self::Drained(drained) => drained.close_callbacks(),
         }
     }
 }
@@ -191,6 +225,10 @@ impl ModuleClosing {
 }
 
 impl ModuleExportsDrained {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        self.id
+    }
+
     /// Closes callback admission after the final host callback has completed.
     /// The operation is intentionally available only through this affine
     /// module capability, rather than through `global()`.
@@ -277,23 +315,20 @@ impl ModuleRuntime {
         }
     }
 
-    /// Begins module close after the caller has claimed the runtime removal
-    /// owner.  RTD logical state changes only after ingress close has been
-    /// linearized, matching the module quiescence proof.
-    fn begin_close_internal<F>(&'static self, on_closed: F) -> ModuleClosing
+    /// Applies the operational side effects of module close after the caller
+    /// has consumed the unique predecessor authority.  This method never
+    /// constructs or returns a close capability; the predecessor transition
+    /// owns that construction.
+    fn begin_close_effects<F>(&'static self, id: ModuleEpochId, on_closed: F)
     where
         F: FnOnce(),
     {
+        if !std::ptr::eq(id.module, self) || self.ingress.epoch() != id.epoch {
+            xlfn_kernel::invariant::fail_stop();
+        }
         self.ingress.begin_close_with(on_closed);
         #[cfg(any(feature = "rtd", test))]
         self.rtd.begin_close();
-        ModuleClosing {
-            module: self,
-            id: ModuleEpochId {
-                module: self,
-                epoch: self.ingress.epoch(),
-            },
-        }
     }
 
     fn close_callbacks_internal(&'static self) {
@@ -322,20 +357,6 @@ pub(crate) fn begin_open() -> ModuleOpening {
     MODULE_RUNTIME.begin_open_internal()
 }
 
-/// Emergency close for quarantine recovery. Normal committed and rollback
-/// removal obtains a close token from an affine opening/epoch token instead.
-pub(crate) fn begin_close_for_quarantine<F>(on_closed: F) -> ModuleClosing
-where
-    F: FnOnce(),
-{
-    MODULE_RUNTIME.begin_close_internal(on_closed)
-}
-
-#[cfg(test)]
-pub(crate) fn begin_close_for_test() -> ModuleClosing {
-    begin_open().rollback(|| {})
-}
-
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) fn reset_callbacks_for_test() {
     MODULE_RUNTIME.reset_callbacks();
@@ -348,7 +369,7 @@ pub(crate) fn close_callbacks_for_test() {
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) fn certify_quiescence_for_test() {
-    let closing = begin_close_for_test();
+    let closing = begin_open().rollback(|| {});
     let drained = closing.seal_and_drain();
     let _ = drained.certify();
 }

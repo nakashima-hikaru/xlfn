@@ -270,7 +270,7 @@ impl ExecutionDrained {
         runtime: &Runtime<A>,
         module: crate::module_runtime::ModuleClosing,
         _record_trace: bool,
-    ) -> crate::XllResult<Self> {
+    ) -> Result<Self, (crate::XllError, crate::module_runtime::ModuleExportsDrained)> {
         let module = module.seal_and_drain();
 
         #[cfg(any(test, feature = "refinement"))]
@@ -278,7 +278,10 @@ impl ExecutionDrained {
             runtime.refinement_hooks().calls_drained(runtime);
         }
 
-        let returns = runtime.wait_for_return_quiescence()?;
+        let returns = match runtime.wait_for_return_quiescence() {
+            Ok(returns) => returns,
+            Err(error) => return Err((error, module)),
+        };
 
         #[cfg(any(test, feature = "refinement"))]
         if _record_trace {
@@ -296,7 +299,8 @@ impl ExecutionDrained {
         self,
         runtime: &Runtime<A>,
         report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
-    ) -> crate::XllResult<ProducersStopped> {
+    ) -> Result<ProducersStopped, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
+    {
         #[cfg(feature = "async")]
         let mut report_issue = report_issue;
         #[cfg(not(feature = "async"))]
@@ -320,7 +324,10 @@ impl ExecutionDrained {
         #[cfg(not(feature = "async"))]
         let async_stopped = crate::shutdown::AsyncStopped::issue();
 
-        let subscriptions_stopped = runtime.close_subscriptions()?;
+        let subscriptions_stopped = match runtime.close_subscriptions() {
+            Ok(subscriptions_stopped) => subscriptions_stopped,
+            Err(error) => return Err((error, self.module)),
+        };
 
         Ok(ProducersStopped {
             execution: self,
@@ -335,19 +342,24 @@ impl ProducersStopped {
         self,
         runtime: &'runtime Runtime<A>,
         addin: QuiescedAddin<'runtime, A>,
-    ) -> crate::XllResult<ServicesSealed<'runtime, A>> {
+    ) -> Result<
+        ServicesSealed<'runtime, A>,
+        (crate::XllError, crate::module_runtime::ModuleExportsDrained),
+    > {
         let Self {
             execution,
             async_stopped,
             subscriptions_stopped,
         } = self;
-        let sealed = runtime.seal_generation_services(subscriptions_stopped)?;
-        Ok(ServicesSealed {
-            execution,
-            async_stopped,
-            sealed,
-            addin,
-        })
+        match runtime.seal_generation_services(subscriptions_stopped) {
+            Ok(sealed) => Ok(ServicesSealed {
+                execution,
+                async_stopped,
+                sealed,
+                addin,
+            }),
+            Err(error) => Err((error, execution.module)),
+        }
     }
 }
 
@@ -356,41 +368,49 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
         self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
-    ) -> crate::XllResult<ServicesCleaned> {
+    ) -> Result<ServicesCleaned, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
+    {
         let Self {
             execution,
             async_stopped,
             sealed,
             addin,
         } = self;
-        let addin = addin.cleanup(lifecycle, report)?;
-        Ok(ServicesCleaned {
-            execution,
-            async_stopped,
-            sealed,
-            addin,
-        })
+        match addin.cleanup(lifecycle, report) {
+            Ok(addin) => Ok(ServicesCleaned {
+                execution,
+                async_stopped,
+                sealed,
+                addin,
+            }),
+            Err(error) => Err((error, execution.module)),
+        }
     }
 }
 
 impl ServicesCleaned {
-    pub(super) fn finish(self) -> crate::XllResult<ServicesQuiescent> {
+    pub(super) fn finish(
+        self,
+    ) -> Result<ServicesQuiescent, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
+    {
         let Self {
             execution,
             async_stopped,
             sealed,
             addin,
         } = self;
-        let (handles, subscriptions_stopped) = sealed.finish()?;
-        Ok(ServicesQuiescent {
-            module: execution.module,
-            returns: execution.returns,
-            async_stopped,
-            subscriptions_stopped,
-            handles,
-            addin: addin.addin_quiesced,
-            generation: addin.generation_reclaimed,
-        })
+        match sealed.finish() {
+            Ok((handles, subscriptions_stopped)) => Ok(ServicesQuiescent {
+                module: execution.module,
+                returns: execution.returns,
+                async_stopped,
+                subscriptions_stopped,
+                handles,
+                addin: addin.addin_quiesced,
+                generation: addin.generation_reclaimed,
+            }),
+            Err(error) => Err((error, execution.module)),
+        }
     }
 }
 
@@ -453,12 +473,70 @@ impl ResourcesReclaimed {
     }
 }
 
+/// Retains the already-progressed module authority when an incomplete
+/// teardown is abandoned. The recovery path is deliberately one-way:
+/// `ModuleExportsDrained` is stored as a drained cleanup authority and is
+/// never converted back into `ModuleClosing`.
+pub(super) trait ModuleAuthorityRecovery<A: Addin> {
+    fn recover_module_authority(self, runtime: &Runtime<A>);
+}
+
+fn retain_drained_module<A: Addin>(
+    runtime: &Runtime<A>,
+    module: crate::module_runtime::ModuleExportsDrained,
+) {
+    crate::lifecycle::LifecycleAuthority::new(runtime).install_module_cleanup_authority(
+        crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+    );
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ExecutionDrained {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        retain_drained_module(runtime, self.module);
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ProducersStopped {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        self.execution.recover_module_authority(runtime);
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesSealed<'_, A> {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        self.execution.recover_module_authority(runtime);
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesCleaned {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        self.execution.recover_module_authority(runtime);
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesQuiescent {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        retain_drained_module(runtime, self.module);
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery<A> for ResourcesReclaimed {
+    fn recover_module_authority(self, runtime: &Runtime<A>) {
+        self.services.recover_module_authority(runtime);
+    }
+}
+
+fn recover_stage<A: Addin, S: ModuleAuthorityRecovery<A>>(stage: S, runtime: &Runtime<A>) {
+    stage.recover_module_authority(runtime);
+}
+
 /// A linear teardown transaction parameterized by its terminal policy and
 /// current stage. Dropping an incomplete transaction quarantines the runtime;
 /// successful transitions consume the old stage and return the next one.
 pub(super) struct TeardownTxn<'runtime, A: Addin, K, S> {
     owner: TeardownOwner<'runtime, A>,
-    stage: S,
+    stage: Option<S>,
+    recover: fn(S, &Runtime<A>),
     _kind: PhantomData<K>,
 }
 
@@ -475,6 +553,10 @@ impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
         self.owner
             .take()
             .expect("teardown transaction owns one removal owner")
+    }
+
+    fn empty() -> Self {
+        Self { owner: None }
     }
 
     fn runtime(&self) -> &'runtime Runtime<A> {
@@ -494,24 +576,36 @@ impl<A: Addin> Drop for TeardownOwner<'_, A> {
 }
 
 impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
-    pub(super) fn new(owner: RemovalOwner<'runtime, A>, stage: S) -> Self {
+    pub(super) fn new(owner: RemovalOwner<'runtime, A>, stage: S) -> Self
+    where
+        S: ModuleAuthorityRecovery<A>,
+    {
         Self {
             owner: TeardownOwner::new(owner),
-            stage,
+            stage: Some(stage),
+            recover: recover_stage::<A, S>,
             _kind: PhantomData,
         }
     }
 
-    fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self {
+    fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self
+    where
+        S: ModuleAuthorityRecovery<A>,
+    {
         Self {
             owner,
-            stage,
+            stage: Some(stage),
+            recover: recover_stage::<A, S>,
             _kind: PhantomData,
         }
     }
 
-    fn split(self) -> (TeardownOwner<'runtime, A>, S) {
-        let Self { owner, stage, .. } = self;
+    fn split(mut self) -> (TeardownOwner<'runtime, A>, S) {
+        let owner = std::mem::replace(&mut self.owner, TeardownOwner::empty());
+        let stage = self
+            .stage
+            .take()
+            .expect("teardown transaction owns one current stage");
         (owner, stage)
     }
 
@@ -519,7 +613,20 @@ impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
     where
         S: ModuleCloseStage,
     {
-        self.stage.close_module_callbacks();
+        self.stage
+            .as_ref()
+            .expect("teardown transaction owns one current stage")
+            .close_module_callbacks();
+    }
+}
+
+impl<A: Addin, K, S> Drop for TeardownTxn<'_, A, K, S> {
+    fn drop(&mut self) {
+        let Some(stage) = self.stage.take() else {
+            return;
+        };
+        let runtime = self.owner.runtime();
+        (self.recover)(stage, runtime);
     }
 }
 
@@ -532,7 +639,8 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ExecutionDrained> {
         let runtime = owner.runtime();
         match stage.stop_producers(runtime, report_issue) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
-            Err(error) => {
+            Err((error, module)) => {
+                retain_drained_module(runtime, module);
                 drop(owner);
                 Err(error)
             }
@@ -549,7 +657,8 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ProducersStopped> {
         let runtime = owner.runtime();
         match stage.seal_services(runtime, addin) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
-            Err(error) => {
+            Err((error, module)) => {
+                retain_drained_module(runtime, module);
                 drop(owner);
                 Err(error)
             }
@@ -564,9 +673,11 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesSealed<'runtime,
         report: &mut crate::shutdown::CloseReport,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesCleaned>> {
         let (owner, stage) = self.split();
+        let runtime = owner.runtime();
         match stage.cleanup(lifecycle, report) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
-            Err(error) => {
+            Err((error, module)) => {
+                retain_drained_module(runtime, module);
                 drop(owner);
                 Err(error)
             }
@@ -579,9 +690,11 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesCleaned> {
         self,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesQuiescent>> {
         let (owner, stage) = self.split();
+        let runtime = owner.runtime();
         match stage.finish() {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
-            Err(error) => {
+            Err((error, module)) => {
+                retain_drained_module(runtime, module);
                 drop(owner);
                 Err(error)
             }
@@ -609,7 +722,11 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     where
         K: TerminalCertificateKind,
     {
-        let proof = self.stage.into_proof();
+        let proof = self
+            .stage
+            .take()
+            .expect("teardown transaction owns one current stage")
+            .into_proof();
         let owner = self.owner.take();
         match owner.certify::<K>(proof) {
             Ok(certificate) => Ok(certificate),
@@ -626,5 +743,11 @@ pub(super) fn drain_execution<A: Addin>(
     module: crate::module_runtime::ModuleClosing,
     record_trace: bool,
 ) -> crate::XllResult<ExecutionDrained> {
-    ExecutionDrained::begin(runtime, module, record_trace)
+    match ExecutionDrained::begin(runtime, module, record_trace) {
+        Ok(stage) => Ok(stage),
+        Err((error, module)) => {
+            retain_drained_module(runtime, module);
+            Err(error)
+        }
+    }
 }
