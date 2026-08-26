@@ -34,6 +34,7 @@ impl HandlesSealed {
         }
     }
 
+    #[cfg(any(feature = "handles", test))]
     pub(crate) fn from_teardown<T>(generation: Option<RuntimeGeneration>, teardown: T) -> Self
     where
         T: HandleStoreTeardown + 'static,

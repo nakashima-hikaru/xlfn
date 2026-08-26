@@ -50,7 +50,7 @@ impl SubscriptionServiceSlot {
     #[inline]
     pub(crate) fn read(
         &self,
-        host: crate::rtd::RtdSubscriptionHost,
+        host: crate::excel_rtd::RtdSubscriptionHost,
     ) -> crate::XllResult<SubscriptionRuntimeRead> {
         self.service
             .read(
@@ -92,7 +92,7 @@ impl SubscriptionServiceSlot {
                 },
                 move || SubscriptionsStopped::issue(generation),
                 |runtime| {
-                    crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))
+                    crate::excel_rtd::shutdown_subscriptions(Arc::clone(&runtime))
                         .map(|()| SubscriptionsStopped::issue(Some(runtime.generation)))
                 },
             )
@@ -113,7 +113,7 @@ impl SubscriptionServiceSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtd::RtdSubscriptionHost;
+    use crate::excel_rtd::RtdSubscriptionHost;
     use std::sync::Barrier;
     use std::thread;
 

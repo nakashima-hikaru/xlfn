@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
-    crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
+fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
+    crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
 }
 
 struct TraceValue;
@@ -50,9 +50,9 @@ fn warm_disconnect_trace() {
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
         .expect("initial publication succeeds");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 41, &rtd_key)
+        .connect(lifetime_generation(1), 41, &lifetime_key)
         .expect("Excel connection commits");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -66,7 +66,7 @@ fn warm_disconnect_trace() {
         })
     });
     entered_rx.recv().expect("warm reader did not enter");
-    runtime.disconnect(server_generation(1), 41);
+    runtime.disconnect(lifetime_generation(1), 41);
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
@@ -82,9 +82,9 @@ fn warm_generation_termination_trace() {
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
         .expect("initial publication succeeds");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime
-        .claim_server(&rtd_key, server_generation(1))
+        .claim_lifetime(&lifetime_key, lifetime_generation(1))
         .expect("server claims topic");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -98,7 +98,7 @@ fn warm_generation_termination_trace() {
         })
     });
     entered_rx.recv().expect("warm reader did not enter");
-    runtime.terminate_topics(server_generation(1));
+    runtime.terminate_topics(lifetime_generation(1));
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
@@ -117,9 +117,9 @@ fn same_key_aba_trace() {
     runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))
         .expect("initial publication succeeds");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 77, &rtd_key)
+        .connect(lifetime_generation(1), 77, &lifetime_key)
         .expect("Excel connection commits");
 
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -133,7 +133,7 @@ fn same_key_aba_trace() {
         })
     });
     entered_rx.recv().expect("old warm reader did not enter");
-    runtime.disconnect(server_generation(1), 77);
+    runtime.disconnect(lifetime_generation(1), 77);
 
     let preparation = runtime
         .prepare_observed(key, create_value, |_, _| Ok(()))

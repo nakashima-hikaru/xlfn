@@ -17,6 +17,7 @@
 mod binding;
 mod connection;
 mod formula;
+mod lifetime;
 #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
 mod object;
 mod prepare;
@@ -65,7 +66,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
-pub(crate) use connection::{FormulaBinding, HandleTopicOwner, Topic};
+pub(crate) use connection::{FormulaBinding, FormulaObserverId, Topic};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
@@ -75,6 +76,9 @@ pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
 pub(crate) use formula::{HandleTopicKey, formula_revision_key};
+#[cfg(target_os = "windows")]
+pub(crate) use lifetime::FormulaLifetimeConnection;
+pub(crate) use lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 pub(crate) use object::SharedObject;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;

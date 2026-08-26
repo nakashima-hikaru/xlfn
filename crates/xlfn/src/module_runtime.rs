@@ -1,11 +1,11 @@
 use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
+#[cfg(any(feature = "rtd", feature = "handles", test))]
+use crate::excel_rtd::RtdModuleState;
 use crate::ingress::{ExportIngress, ExportsDrained};
-#[cfg(any(feature = "rtd", test))]
-use crate::rtd::RtdModuleState;
 use std::sync::LazyLock;
 
-#[cfg(all(feature = "rtd", target_os = "windows"))]
-use crate::rtd::ComModuleLifetime;
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+use crate::excel_rtd::ComModuleLifetime;
 
 /// The module-wide ownership root for protocols that must move together
 /// across an open/close epoch.
@@ -17,9 +17,9 @@ use crate::rtd::ComModuleLifetime;
 pub(crate) struct ModuleRuntime {
     ingress: ExportIngress,
     callback_admission: ModuleCallbackAdmission,
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(any(feature = "rtd", feature = "handles", test))]
     rtd: RtdModuleState,
-    #[cfg(all(feature = "rtd", target_os = "windows"))]
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     com: ComModuleLifetime,
 }
 
@@ -265,9 +265,9 @@ impl ModuleRuntime {
         Self {
             ingress: ExportIngress::new(),
             callback_admission: ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Closed),
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(any(feature = "rtd", feature = "handles", test))]
             rtd: RtdModuleState::new(),
-            #[cfg(all(feature = "rtd", target_os = "windows"))]
+            #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
             com: ComModuleLifetime::new(),
         }
     }
@@ -284,16 +284,16 @@ impl ModuleRuntime {
         self.callback_admission.reset();
     }
 
-    pub(crate) fn rtd(&'static self) -> Option<&'static crate::rtd::RtdModuleState> {
-        #[cfg(any(feature = "rtd", test))]
+    pub(crate) fn rtd(&'static self) -> Option<&'static crate::excel_rtd::RtdModuleState> {
+        #[cfg(any(feature = "rtd", feature = "handles", test))]
         {
             Some(&self.rtd)
         }
-        #[cfg(not(any(feature = "rtd", test)))]
+        #[cfg(not(any(feature = "rtd", feature = "handles", test)))]
         None
     }
 
-    #[cfg(all(feature = "rtd", target_os = "windows"))]
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     pub(crate) fn com_module_lifetime(&'static self) -> &'static ComModuleLifetime {
         &self.com
     }
@@ -302,7 +302,7 @@ impl ModuleRuntime {
     /// order.  Runtime admission is reopened by `Runtime` immediately before
     /// this transition; this method owns the module-local portion.
     fn begin_open_internal(&'static self) -> ModuleOpening {
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(any(feature = "rtd", feature = "handles", test))]
         self.rtd.begin_open();
         self.reset_callbacks();
         self.ingress.begin_opening();
@@ -327,7 +327,7 @@ impl ModuleRuntime {
             xlfn_kernel::invariant::fail_stop();
         }
         self.ingress.begin_close_with(on_closed);
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(any(feature = "rtd", feature = "handles", test))]
         self.rtd.begin_close();
     }
 
@@ -340,7 +340,7 @@ impl ModuleRuntime {
     }
 
     fn certify_logical_quiescence_internal(&'static self) {
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(any(feature = "rtd", feature = "handles", test))]
         self.rtd.certify_logical_quiescence();
     }
 }

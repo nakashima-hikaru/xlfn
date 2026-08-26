@@ -234,7 +234,7 @@ impl RuntimeRefinementHooks {
                     })?;
                 operation()
             })?;
-            crate::rtd::set_trace_sink(Arc::clone(&trace));
+            crate::excel_rtd::set_trace_sink(Arc::clone(&trace));
             runtime
                 .return_protocol
                 .returns

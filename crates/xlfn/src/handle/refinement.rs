@@ -4,8 +4,7 @@
 )]
 
 use super::refinement_wire::TokenWire;
-use super::{FormulaRevisionKey, HandleTopicKey, HandleTopicOwner};
-use crate::generation::ServerGeneration;
+use super::{FormulaLifetimeGeneration, FormulaObserverId, FormulaRevisionKey, HandleTopicKey};
 use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -26,7 +25,8 @@ pub(crate) struct FormulaRevisionKeyWire {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnerWire {
-    pub(crate) server_generation: u64,
+    #[serde(rename = "serverGeneration")]
+    pub(crate) generation: u64,
     pub(crate) topic_id: i32,
 }
 
@@ -63,7 +63,7 @@ pub(crate) enum Event {
         runtime_id: u64,
         token: TokenWire,
         #[serde(rename = "rtdKey")]
-        rtd_key: String,
+        lifetime_key: String,
     },
     CommitAndActivate {
         key: FormulaRevisionKeyWire,
@@ -289,14 +289,14 @@ impl Linearization<'_> {
         });
     }
 
-    pub(crate) fn disconnect(&mut self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn disconnect(&mut self, key: &HandleTopicKey, owner: FormulaObserverId) {
         self.machine.push(Event::Disconnect {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn detach_generation(&mut self, generation: ServerGeneration) {
+    pub(crate) fn detach_generation(&mut self, generation: FormulaLifetimeGeneration) {
         self.machine.push(Event::DetachGeneration {
             generation: generation.get(),
         });
@@ -395,13 +395,13 @@ impl HandleRefinementTrace {
         key: &HandleTopicKey,
         runtime_id: u64,
         token: TokenWire,
-        rtd_key: &str,
+        lifetime_key: &str,
     ) {
         self.inner.lock().push(Event::PublishAndInstallProvisional {
             key: topic_key(key),
             runtime_id,
             token,
-            rtd_key: rtd_key.to_owned(),
+            lifetime_key: lifetime_key.to_owned(),
         });
     }
 
@@ -465,46 +465,54 @@ impl HandleRefinementTrace {
         self.linearize().abandon_warm_read(reader_id);
     }
 
-    pub(crate) fn claim_server(&self, key: &HandleTopicKey, generation: ServerGeneration) {
+    pub(crate) fn claim_lifetime(
+        &self,
+        key: &HandleTopicKey,
+        generation: FormulaLifetimeGeneration,
+    ) {
         self.inner.lock().push(Event::ClaimServer {
             key: topic_key(key),
             generation: generation.get(),
         });
     }
 
-    pub(crate) fn begin_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn begin_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::BeginConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn reuse_committed_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn reuse_committed_connection(
+        &self,
+        key: &HandleTopicKey,
+        owner: FormulaObserverId,
+    ) {
         self.inner.lock().push(Event::ReuseCommittedConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn commit_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn commit_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::CommitConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn rollback_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn rollback_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::RollbackConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn disconnect(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn disconnect(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         self.linearize().disconnect(key, owner);
     }
 
-    pub(crate) fn detach_generation(&self, generation: ServerGeneration) {
+    pub(crate) fn detach_generation(&self, generation: FormulaLifetimeGeneration) {
         self.linearize().detach_generation(generation);
     }
 
@@ -594,9 +602,9 @@ fn encode_digest(digest: &[u8; 32]) -> String {
     encoded
 }
 
-fn owner_wire(owner: HandleTopicOwner) -> OwnerWire {
+fn owner_wire(owner: FormulaObserverId) -> OwnerWire {
     OwnerWire {
-        server_generation: owner.server_generation.get(),
+        generation: owner.generation.get(),
         topic_id: owner.topic_id,
     }
 }

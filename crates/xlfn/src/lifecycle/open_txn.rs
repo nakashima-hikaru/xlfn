@@ -288,12 +288,14 @@ fn publish_generation<A: crate::Addin>(
     let config = control.opening_config().ok_or(XllError::Internal {
         diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     })?;
-    let services = GenerationServices::arm_generation(
-        generation,
-        config,
-        crate::rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-    )?
-    .commit();
+    #[cfg(any(feature = "rtd", test))]
+    let subscription_host = Some(crate::excel_rtd::RtdSubscriptionHost::production(
+        crate::module_runtime::ingress(),
+    ));
+    #[cfg(not(any(feature = "rtd", test)))]
+    let subscription_host = None;
+    let services =
+        GenerationServices::arm_generation(generation, config, subscription_host)?.commit();
     let module_epoch = module_opening
         .take()
         .expect("open transaction owns its module opening authority")

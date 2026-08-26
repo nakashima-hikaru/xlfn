@@ -36,7 +36,7 @@ impl ModuleResidency {
         Ok(())
     }
 
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(any(feature = "rtd", feature = "handles", test))]
     pub(crate) fn is_held(&self) -> bool {
         self.lease.lock().is_some()
     }

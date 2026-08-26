@@ -18,12 +18,14 @@ use crate::reference::ExcelReference;
 #[cfg(any(feature = "rtd", test))]
 use crate::rtd::RtdCallContext;
 use crate::shutdown::CleanupReporter;
+#[cfg(any(feature = "rtd", test))]
 use crate::subscription::RtdLimits;
 #[cfg(any(feature = "rtd", test))]
 use crate::subscription::{RtdSource, RtdSourceHandle};
 use crate::value::{ExcelValue, FromExcel, Matrix};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
+#[cfg(any(feature = "handles", test))]
 use std::num::NonZeroU32;
 #[cfg(feature = "async")]
 use std::num::NonZeroUsize;
@@ -128,6 +130,7 @@ impl OpenContext {
 }
 
 /// Capability for registering opaque RTD source identities during open.
+#[cfg(any(feature = "rtd", test))]
 #[derive(Clone, Copy, Debug)]
 pub struct RtdOpenContext<'a> {
     allocator: &'a crate::subscription::SourceHandleAllocator,
@@ -179,9 +182,11 @@ impl DiagnosticsSetup<'_> {
 }
 
 /// Handle-registry policy selected during one add-in open.
+#[cfg(any(feature = "handles", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleBindingLimit(NonZeroU32);
 
+#[cfg(any(feature = "handles", test))]
 impl HandleBindingLimit {
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {
@@ -199,6 +204,7 @@ impl HandleBindingLimit {
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 impl TryFrom<u32> for HandleBindingLimit {
     type Error = crate::XllError;
 
@@ -209,11 +215,13 @@ impl TryFrom<u32> for HandleBindingLimit {
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleConfig {
     maximum_bindings: HandleBindingLimit,
 }
 
+#[cfg(any(feature = "handles", test))]
 impl HandleConfig {
     pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
     /// Upper bound for the dense immutable publication table.
@@ -242,6 +250,7 @@ impl HandleConfig {
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 impl Default for HandleConfig {
     fn default() -> Self {
         Self::new()
@@ -251,7 +260,9 @@ impl Default for HandleConfig {
 /// RTD, handle, and asynchronous runtime policy selected during one add-in open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
+    #[cfg(any(feature = "rtd", test))]
     rtd: RtdConfig,
+    #[cfg(any(feature = "handles", test))]
     handles: HandleConfig,
     #[cfg(feature = "async")]
     async_runtime: AsyncRuntimeConfig,
@@ -261,7 +272,9 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            #[cfg(any(feature = "rtd", test))]
             rtd: RtdConfig::new(),
+            #[cfg(any(feature = "handles", test))]
             handles: HandleConfig::new(),
             #[cfg(feature = "async")]
             async_runtime: AsyncRuntimeConfig::new(),
@@ -289,10 +302,12 @@ impl RuntimeConfig {
         self
     }
 
+    #[cfg(any(feature = "rtd", test))]
     pub(crate) const fn rtd_limits(self) -> RtdLimits {
         self.rtd.limits()
     }
 
+    #[cfg(any(feature = "handles", test))]
     pub(crate) const fn handle_config(self) -> HandleConfig {
         self.handles
     }
@@ -310,11 +325,13 @@ impl Default for RuntimeConfig {
 }
 
 /// RTD-specific portion of [`RuntimeConfig`].
+#[cfg(any(feature = "rtd", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtdConfig {
     limits: RtdLimits,
 }
 
+#[cfg(any(feature = "rtd", test))]
 impl RtdConfig {
     #[must_use]
     pub const fn new() -> Self {
@@ -334,6 +351,7 @@ impl RtdConfig {
     }
 }
 
+#[cfg(any(feature = "rtd", test))]
 impl Default for RtdConfig {
     fn default() -> Self {
         Self::new()

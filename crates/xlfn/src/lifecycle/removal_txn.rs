@@ -13,7 +13,7 @@ pub(crate) struct QuiescenceProof {
     pub(crate) exports: crate::ingress::ExportsDrained,
     pub(crate) module_quiescent: crate::module_runtime::ModuleQuiescent,
     pub(crate) returns: crate::shutdown::ReturnsQuiescent,
-    pub(crate) rtd: crate::rtd::RtdQuiescent,
+    pub(crate) rtd: crate::excel_rtd::RtdQuiescent,
     pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
     pub(crate) async_stopped: crate::shutdown::AsyncStopped,
     pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,

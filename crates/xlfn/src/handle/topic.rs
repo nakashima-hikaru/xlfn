@@ -8,9 +8,9 @@
 //! update is paired with a mutation of the canonical table while its lock is
 //! held.
 
-use super::{FormulaBinding, HandleTopicKey, HandleTopicOwner, Topic};
 #[cfg(any(target_os = "windows", test))]
-use crate::generation::ServerGeneration;
+use super::FormulaLifetimeGeneration;
+use super::{FormulaBinding, FormulaObserverId, HandleTopicKey, Topic};
 use crate::generation::TopicGeneration;
 use crate::{XllError, XllResult};
 use arc_swap::ArcSwapAny;
@@ -51,16 +51,16 @@ impl PublishedTopicState {
 pub(crate) struct PublishedTopic {
     pub(crate) binding: FormulaBinding,
     pub(crate) token: String,
-    pub(crate) rtd_key: Arc<str>,
+    pub(crate) lifetime_key: Arc<str>,
     pub(crate) state: AtomicU8,
 }
 
 impl PublishedTopic {
-    pub(crate) fn new(binding: FormulaBinding, token: String, rtd_key: Arc<str>) -> Self {
+    pub(crate) fn new(binding: FormulaBinding, token: String, lifetime_key: Arc<str>) -> Self {
         Self {
             binding,
             token,
-            rtd_key,
+            lifetime_key,
             state: AtomicU8::new(PublishedTopicState::Provisional as u8),
         }
     }
@@ -139,8 +139,8 @@ pub(crate) struct TopicTableState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
     // Excel RTD callback strings are resolved here; they are not lifecycle
     // identities and are never parsed back into formula components.
-    pub(crate) by_rtd_key: FxHashMap<Arc<str>, HandleTopicKey>,
-    pub(crate) by_excel_id: FxHashMap<HandleTopicOwner, HandleTopicKey>,
+    pub(crate) by_lifetime_key: FxHashMap<Arc<str>, HandleTopicKey>,
+    pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
     pub(crate) initializing: FxHashMap<HandleTopicKey, Arc<Initialization>>,
     pub(crate) generation: TopicGeneration,
     pub(crate) closed: bool,
@@ -150,8 +150,8 @@ impl Default for TopicTableState {
     fn default() -> Self {
         Self {
             by_key: FxHashMap::default(),
-            by_rtd_key: FxHashMap::default(),
-            by_excel_id: FxHashMap::default(),
+            by_lifetime_key: FxHashMap::default(),
+            by_observer_id: FxHashMap::default(),
             initializing: FxHashMap::default(),
             generation: TopicGeneration::ONE,
             closed: false,
@@ -213,7 +213,7 @@ impl TopicTable {
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
                 token: topic.publication.token.clone(),
-                rtd_key: Arc::clone(&topic.publication.rtd_key),
+                lifetime_key: Arc::clone(&topic.publication.lifetime_key),
                 generation: state.generation,
             });
         }
@@ -232,7 +232,7 @@ impl TopicTable {
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
                 token: topic.publication.token.clone(),
-                rtd_key: Arc::clone(&topic.publication.rtd_key),
+                lifetime_key: Arc::clone(&topic.publication.lifetime_key),
                 generation: state.generation,
             });
         }
@@ -247,49 +247,49 @@ impl TopicTable {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn claim_server(
+    pub(crate) fn claim_lifetime(
         &self,
-        rtd_key: &str,
-        server_generation: ServerGeneration,
+        lifetime_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
     ) -> XllResult<HandleTopicKey> {
         let mut state = self.state.write();
         if state.closed {
             return Err(XllError::Closing);
         }
         let key = state
-            .by_rtd_key
-            .get(rtd_key)
+            .by_lifetime_key
+            .get(lifetime_key)
             .copied()
             .ok_or(XllError::StaleHandle)?;
         let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
         if topic
-            .server_generation
-            .is_some_and(|existing| existing != server_generation)
+            .lifetime_generation
+            .is_some_and(|existing| existing != lifetime_generation)
         {
             return Err(XllError::InvalidHandle);
         }
-        topic.server_generation = Some(server_generation);
+        topic.lifetime_generation = Some(lifetime_generation);
         Ok(key)
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect(
         &self,
-        server_generation: ServerGeneration,
-        owner: HandleTopicOwner,
-        rtd_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+        owner: FormulaObserverId,
+        lifetime_key: &str,
     ) -> XllResult<(HandleTopicKey, String, bool)> {
         let mut state = self.state.write();
         if state.closed {
             return Err(XllError::Closing);
         }
         let key = state
-            .by_rtd_key
-            .get(rtd_key)
+            .by_lifetime_key
+            .get(lifetime_key)
             .copied()
             .ok_or(XllError::StaleHandle)?;
         if state
-            .by_excel_id
+            .by_observer_id
             .get(&owner)
             .is_some_and(|existing| existing != &key)
         {
@@ -298,68 +298,73 @@ impl TopicTable {
         let (token, created) = {
             let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
             if topic
-                .server_generation
-                .is_some_and(|existing| existing != server_generation)
+                .lifetime_generation
+                .is_some_and(|existing| existing != lifetime_generation)
             {
                 return Err(XllError::InvalidHandle);
             }
-            topic.server_generation = Some(server_generation);
-            let created = if let Some(existing) = topic.excel_topic {
+            topic.lifetime_generation = Some(lifetime_generation);
+            let created = if let Some(existing) = topic.observer {
                 if existing != owner {
                     return Err(XllError::InvalidHandle);
                 }
-                if !topic.excel_topic_committed {
+                if !topic.observer_committed {
                     return Err(XllError::Overloaded);
                 }
                 false
             } else {
-                topic.excel_topic = Some(owner);
-                topic.excel_topic_committed = false;
+                topic.observer = Some(owner);
+                topic.observer_committed = false;
                 true
             };
             (topic.publication.token.clone(), created)
         };
-        state.by_excel_id.insert(owner, key);
+        state.by_observer_id.insert(owner, key);
         Ok((key, token, created))
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn commit_connection(
         &self,
-        owner: HandleTopicOwner,
+        owner: FormulaObserverId,
         key: HandleTopicKey,
     ) -> XllResult<()> {
         let mut state = self.state.write();
         if state.closed {
             return Err(XllError::Closing);
         }
-        if state.by_excel_id.get(&owner) != Some(&key) {
+        if state.by_observer_id.get(&owner) != Some(&key) {
             return Err(XllError::StaleHandle);
         }
         let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
-        if topic.excel_topic != Some(owner) {
+        if topic.observer != Some(owner) {
             return Err(XllError::StaleHandle);
         }
-        topic.excel_topic_committed = true;
+        topic.observer_committed = true;
         Ok(())
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: HandleTopicKey) -> bool {
+    pub(crate) fn rollback_connection(
+        &self,
+        owner: FormulaObserverId,
+        key: HandleTopicKey,
+    ) -> bool {
         let mut state = self.state.write();
-        if state.by_excel_id.get(&owner) != Some(&key)
-            || !state.by_key.get(&key).is_some_and(|topic| {
-                topic.excel_topic == Some(owner) && !topic.excel_topic_committed
-            })
+        if state.by_observer_id.get(&owner) != Some(&key)
+            || !state
+                .by_key
+                .get(&key)
+                .is_some_and(|topic| topic.observer == Some(owner) && !topic.observer_committed)
         {
             return false;
         }
-        state.by_excel_id.remove(&owner);
+        state.by_observer_id.remove(&owner);
         if let Some(topic) = state.by_key.get_mut(&key) {
             // The formula already owns the object and token. Roll back only
             // the COM topic assignment so a failed value write can be retried.
-            topic.excel_topic = None;
-            topic.excel_topic_committed = false;
+            topic.observer = None;
+            topic.observer_committed = false;
         }
         true
     }
@@ -372,12 +377,14 @@ impl TopicTable {
         publication: triomphe::Arc<PublishedTopic>,
         on_linearized: impl FnOnce(),
     ) -> XllResult<Arc<str>> {
-        let rtd_key = Arc::clone(&publication.rtd_key);
+        let lifetime_key = Arc::clone(&publication.lifetime_key);
         let mut state = self.state.write();
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
-        if state.by_key.contains_key(&key) || state.by_rtd_key.contains_key(rtd_key.as_ref()) {
+        if state.by_key.contains_key(&key)
+            || state.by_lifetime_key.contains_key(lifetime_key.as_ref())
+        {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
             });
@@ -387,15 +394,15 @@ impl TopicTable {
             Topic {
                 publication,
                 #[cfg(any(target_os = "windows", test))]
-                server_generation: None,
-                excel_topic: None,
+                lifetime_generation: None,
+                observer: None,
                 #[cfg(any(target_os = "windows", test))]
-                excel_topic_committed: false,
+                observer_committed: false,
             },
         );
-        state.by_rtd_key.insert(Arc::clone(&rtd_key), key);
+        state.by_lifetime_key.insert(Arc::clone(&lifetime_key), key);
         on_linearized();
-        Ok(rtd_key)
+        Ok(lifetime_key)
     }
 
     /// Make a provisional publication visible only after its initializer is
@@ -495,9 +502,11 @@ impl TopicTable {
             .store(PublishedTopicState::Stale as u8, Ordering::Release);
         self.published.remove(key);
         let topic = state.by_key.remove(&key)?;
-        state.by_rtd_key.remove(topic.publication.rtd_key.as_ref());
-        if let Some(owner) = topic.excel_topic {
-            state.by_excel_id.remove(&owner);
+        state
+            .by_lifetime_key
+            .remove(topic.publication.lifetime_key.as_ref());
+        if let Some(owner) = topic.observer {
+            state.by_observer_id.remove(&owner);
         }
         Some(TopicRemoval {
             token: topic.publication.token.clone(),
@@ -508,16 +517,16 @@ impl TopicTable {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn remove_by_excel_owner(&self, owner: HandleTopicOwner) -> Option<TopicRemoval> {
+    pub(crate) fn remove_by_observer(&self, owner: FormulaObserverId) -> Option<TopicRemoval> {
         let mut state = self.state.write();
-        let key = state.by_excel_id.remove(&owner)?;
+        let key = state.by_observer_id.remove(&owner)?;
         self.remove_topic_locked(&mut state, key)
     }
 
     #[cfg(test)]
-    pub(crate) fn remove_by_rtd_key(&self, rtd_key: &str) -> Option<TopicRemoval> {
+    pub(crate) fn remove_by_lifetime_key(&self, lifetime_key: &str) -> Option<TopicRemoval> {
         let mut state = self.state.write();
-        let key = state.by_rtd_key.get(rtd_key).copied()?;
+        let key = state.by_lifetime_key.get(lifetime_key).copied()?;
         self.remove_topic_locked(&mut state, key)
     }
 
@@ -556,8 +565,8 @@ impl TopicTable {
         }
         self.published.clear();
         state.by_key.clear();
-        state.by_rtd_key.clear();
-        state.by_excel_id.clear();
+        state.by_lifetime_key.clear();
+        state.by_observer_id.clear();
         state
             .initializing
             .drain()
@@ -576,13 +585,13 @@ impl TopicTable {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn remove_generation(
         &self,
-        server_generation: ServerGeneration,
+        lifetime_generation: FormulaLifetimeGeneration,
     ) -> Vec<TopicRemoval> {
         let mut state = self.state.write();
         let keys = state
             .by_key
             .iter()
-            .filter(|(_, topic)| topic.server_generation == Some(server_generation))
+            .filter(|(_, topic)| topic.lifetime_generation == Some(lifetime_generation))
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         keys.into_iter()
@@ -636,7 +645,7 @@ impl Initialization {
 pub(crate) enum PrepareDecision {
     Existing {
         token: String,
-        rtd_key: Arc<str>,
+        lifetime_key: Arc<str>,
         generation: TopicGeneration,
     },
     Wait {

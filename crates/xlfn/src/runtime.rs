@@ -219,7 +219,7 @@ impl<A: crate::Addin> Runtime<A> {
             .map_err(crate::error::IntoXllError::into_xll_error)
     }
 
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(any(feature = "rtd", feature = "handles", test))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
@@ -349,7 +349,7 @@ impl<A: crate::Addin> Runtime<A> {
         let services = GenerationServices::arm_generation(
             crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
             crate::addin::RuntimeConfig::new(),
-            crate::rtd::RtdSubscriptionHost::detached(),
+            Some(crate::excel_rtd::RtdSubscriptionHost::detached()),
         )
         .expect("test runtime generation can be armed once")
         .commit();
@@ -610,7 +610,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[inline]
     #[cfg(test)]
-    pub(crate) fn subscriptions(&self) -> XllResult<crate::rtd::service::SubscriptionRuntimeRead> {
+    pub(crate) fn subscriptions(&self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead> {
         let services = self.generation_services()?;
         services
             .subscriptions_slot()
@@ -620,7 +620,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(any(feature = "rtd", test)))]
         {
-            Ok(crate::rtd::stopped_subscriptions(
+            Ok(crate::excel_rtd::stopped_subscriptions(
                 self.protocol_generation(),
             ))
         }
@@ -629,7 +629,7 @@ impl<A: crate::Addin> Runtime<A> {
             let Some(services) = self.generation_services_snapshot() else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::rtd::stopped_subscriptions(
+                    return Ok(crate::excel_rtd::stopped_subscriptions(
                         self.protocol_generation(),
                     ));
                 }
@@ -838,7 +838,7 @@ pub(crate) mod tests {
         // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
         runtime.disable_trace_for_test();
-        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
@@ -876,7 +876,7 @@ pub(crate) mod tests {
                 exports,
                 module_quiescent,
                 returns: crate::shutdown::ReturnsQuiescent::for_test(),
-                rtd: crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
+                rtd: crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
                 subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
@@ -1092,7 +1092,7 @@ pub(crate) mod tests {
         });
         let exports = ingress.seal_and_drain();
         runtime.disable_trace_for_test();
-        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
                 exports,
@@ -1230,7 +1230,7 @@ pub(crate) mod tests {
             runtime.refinement_hooks().begin_close(&runtime);
         });
         let exports = ingress.seal_and_drain();
-        let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(QuiescenceProof {
             exports,
             module_quiescent: crate::module_runtime::ModuleQuiescent::for_test(),

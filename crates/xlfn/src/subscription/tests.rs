@@ -1,5 +1,5 @@
 use super::*;
-use crate::rtd::RtdNotifier;
+use crate::excel_rtd::RtdNotifier;
 use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
 
 use std::num::NonZeroUsize;

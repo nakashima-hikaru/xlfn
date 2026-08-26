@@ -21,6 +21,7 @@ pub(crate) use return_protocol::ReturnProtocol;
 pub(crate) use services::RuntimeExecutors;
 pub(crate) use services::{GenerationServices, SealedGenerationServices};
 
+#[cfg(any(feature = "handles", feature = "rtd", test))]
 pub(crate) fn map_service_error(
     error: xlfn_kernel::service_slot::ServiceSlotError<crate::XllError>,
 ) -> crate::XllError {

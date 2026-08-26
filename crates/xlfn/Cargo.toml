@@ -18,9 +18,9 @@ async = [
 ]
 # Enables the RTD/COM subsystem and its add-in capability surface.
 rtd = []
-# Formula handles are generation-scoped RTD capabilities, so this feature
-# deliberately implies the RTD subsystem instead of creating a second graph.
-handles = ["rtd"]
+# Formula handles use the private Excel RTD transport internally, but do not
+# expose the generic RTD subscription capability.
+handles = []
 unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
@@ -74,7 +74,7 @@ required-features = ["bench-internals"]
 [[bench]]
 name = "rtd_publish"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["bench-internals", "rtd"]
 
 [[bench]]
 name = "handle_call_resolution"

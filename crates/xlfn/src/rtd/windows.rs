@@ -33,16 +33,27 @@ use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
 
+#[path = "windows/automation.rs"]
 mod automation;
+#[path = "windows/class_factory.rs"]
 mod class_factory;
+#[path = "windows/com_abi.rs"]
 mod com_abi;
+#[path = "windows/event.rs"]
 mod event;
+#[path = "windows/excel_rtd.rs"]
 mod excel_rtd;
+#[path = "windows/global_interface_table.rs"]
 mod global_interface_table;
+#[path = "windows/module_state.rs"]
 mod module_state;
+#[path = "windows/registration.rs"]
 mod registration;
+#[path = "windows/server.rs"]
 mod server;
+#[path = "windows/server_gate.rs"]
 mod server_gate;
+#[path = "windows/update_event.rs"]
 mod update_event;
 #[cfg(test)]
 use crate::win32::{
@@ -112,21 +123,22 @@ pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) 
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
-    if crate::rtd::logical_quiescence_certified() && module_lifetime().can_unload_now() {
+    if crate::excel_rtd::logical_quiescence_certified() && module_lifetime().can_unload_now() {
         S_OK
     } else {
         1 // S_FALSE
     }
 }
 
-pub(super) fn wait_for_module_quiescence() -> Result<(), crate::rtd::RtdQuiescenceError> {
+pub(super) fn wait_for_module_quiescence() -> Result<(), crate::excel_rtd::RtdQuiescenceError> {
     module_lifetime()
         .wait_for_quiescence(retry_git_revocation_debt)
-        .map_err(|error| crate::rtd::RtdQuiescenceError {
+        .map_err(|error| crate::excel_rtd::RtdQuiescenceError {
             outstanding_git_cookies: error.state.outstanding_git_cookies,
             revocation_debt: error.state.revocation_debt,
         })
 }
 
 #[cfg(test)]
+#[path = "windows/tests.rs"]
 mod tests;

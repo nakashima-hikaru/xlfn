@@ -725,7 +725,7 @@ fn module_quiescence_refuses_debt_claim_in_flight() {
     assert_eq!(claims.len(), 1);
     assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 
-    let error = crate::rtd::wait_for_module_quiescence().unwrap_err();
+    let error = crate::excel_rtd::wait_for_module_quiescence().unwrap_err();
     assert_eq!(error.outstanding_git_cookies, 0);
     assert_eq!(error.revocation_debt, 1);
     assert!(!module_lifetime().can_unload_now());
@@ -2581,7 +2581,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let notifier_state = Arc::new(crate::rtd::test_support::TestNotifierState::new());
     let handle = ensured.subscription_server.as_ref().unwrap();
     handle
-        .attach_update_notifier(crate::rtd::RtdNotifier::for_test(Arc::clone(
+        .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(Arc::clone(
             &notifier_state,
         )))
         .unwrap();

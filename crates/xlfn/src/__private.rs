@@ -60,8 +60,8 @@ pub mod v1 {
     pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
     #[doc(hidden)]
     pub use crate::return_value::ReturnContext;
-    /// Forwards the generated COM export to the internal RTD implementation.
-    #[cfg(feature = "rtd")]
+    /// Forwards the generated COM export to the private Excel RTD transport.
+    #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
     pub unsafe fn dll_get_class_object(
@@ -70,16 +70,16 @@ pub mod v1 {
         output: *mut *mut core::ffi::c_void,
     ) -> i32 {
         // SAFETY: the generated export forwards Excel/COM's live pointer contract.
-        unsafe { crate::rtd::dll_get_class_object(class_id, interface_id, output) }
+        unsafe { crate::excel_rtd::dll_get_class_object(class_id, interface_id, output) }
     }
 
-    #[cfg(feature = "rtd")]
+    #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
     pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         if runtime.runtime().module_residency_held() {
             1 // COM S_FALSE: the XLL still owns its physical residency lease.
         } else {
-            crate::rtd::dll_can_unload_now()
+            crate::excel_rtd::dll_can_unload_now()
         }
     }
     #[doc(hidden)]
@@ -87,7 +87,7 @@ pub mod v1 {
     #[doc(hidden)]
     pub use crate::__xlfn_private_async_only as __xlfn_async_only;
     #[doc(hidden)]
-    pub use crate::__xlfn_private_rtd_exports as __xlfn_rtd_exports;
+    pub use crate::__xlfn_private_excel_rtd_exports as __xlfn_excel_rtd_exports;
     #[doc(hidden)]
     pub use crate::utf16::utf16_eq_ignore_ascii_case;
     pub use crate::value::ExcelOutput;

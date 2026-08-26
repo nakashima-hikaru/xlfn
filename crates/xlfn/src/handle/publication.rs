@@ -223,7 +223,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
     pub(super) fn publish_and_observe(
         self,
         publication: triomphe::Arc<PublishedTopic>,
-        rtd_key: Arc<str>,
+        lifetime_key: Arc<str>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
         on_linearized: impl FnOnce(),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
@@ -237,7 +237,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
-        observe(&rtd_key, token)?;
+        observe(&lifetime_key, token)?;
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;

@@ -948,9 +948,9 @@ mod tests {
             )
             .unwrap();
         server
-            .attach_update_notifier(crate::rtd::RtdNotifier::for_test(std::sync::Arc::clone(
-                &notifier_state,
-            )))
+            .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
+                std::sync::Arc::clone(&notifier_state),
+            ))
             .unwrap();
         let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let source = crate::subscription::RtdSourceHandle::for_internal(

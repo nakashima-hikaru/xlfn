@@ -66,7 +66,7 @@ where
         let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
             && runtime.host_callbacks_detached()
             && !runtime.registration_state_unknown()
-            && crate::rtd::logical_quiescence_certified();
+            && crate::excel_rtd::logical_quiescence_certified();
         return OpenRollbackOutcome {
             status: if finalized {
                 OpenRollbackStatus::Finalized
@@ -235,7 +235,7 @@ where
         }
     };
 
-    let rtd_quiescent = match crate::rtd::wait_for_module_quiescence() {
+    let rtd_quiescent = match crate::excel_rtd::wait_for_module_quiescence() {
         Ok(certificate) => certificate,
         Err(_) => {
             let error = XllError::Internal {

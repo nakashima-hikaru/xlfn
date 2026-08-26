@@ -1,7 +1,7 @@
 use super::*;
 
-fn server_generation(raw: u64) -> crate::generation::ServerGeneration {
-    crate::generation::ServerGeneration::new(raw).expect("test server generation is non-zero")
+fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
+    crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
 }
 use crate::input_identity::InputFingerprint;
 use crate::input_identity::InputFingerprintBuilder;
@@ -12,7 +12,7 @@ fn format_formula_revision_key(
     input_bytes: &[u8; 32],
 ) -> String {
     FormulaRevisionKey::new(caller, udf_id, InputFingerprint::from_bytes(*input_bytes))
-        .format_rtd_key()
+        .format_lifetime_key()
 }
 
 fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
@@ -88,7 +88,8 @@ struct SerializationGoldenVector {
     column: i32,
     udf_id: String,
     digest_hex: String,
-    rtd_key: String,
+    #[serde(rename = "rtd_key")]
+    lifetime_key: String,
 }
 
 fn decode_digest_hex(hex: &str) -> [u8; 32] {
@@ -110,7 +111,7 @@ fn decode_digest_hex(hex: &str) -> [u8; 32] {
 }
 
 #[test]
-fn rtd_key_golden_vectors_match_wire_contract() {
+fn lifetime_key_golden_vectors_match_wire_contract() {
     let golden: SerializationGoldenFile = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../formal/fixtures/topics/serialization-golden.json"
@@ -138,7 +139,7 @@ fn rtd_key_golden_vectors_match_wire_contract() {
 
         assert_eq!(
             actual.as_bytes(),
-            vector.rtd_key.as_bytes(),
+            vector.lifetime_key.as_bytes(),
             "Rust RTD formatter disagrees with golden vector {}",
             vector.name
         );
@@ -220,7 +221,7 @@ fn formula_revision_key_changes_with_every_component() {
 fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("reverse-map");
-    let expected_rtd_key = key.format_rtd_key();
+    let expected_lifetime_key = key.format_lifetime_key();
     let observed = Arc::new(Mutex::new(None::<String>));
     let observed_for_callback = Arc::clone(&observed);
 
@@ -228,9 +229,9 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         .prepare_observed(
             key,
             || Ok(DataRecord(7)),
-            move |rtd_key, observed_token| {
+            move |lifetime_key, observed_token| {
                 assert!(!observed_token.is_empty());
-                *observed_for_callback.lock() = Some(rtd_key.to_owned());
+                *observed_for_callback.lock() = Some(lifetime_key.to_owned());
                 Ok(())
             },
         )
@@ -239,24 +240,27 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     let token = preparation.into_token();
     assert!(created);
 
-    let rtd_key = observed
+    let lifetime_key = observed
         .lock()
         .clone()
         .expect("observation key was recorded");
-    assert_eq!(rtd_key, expected_rtd_key);
+    assert_eq!(lifetime_key, expected_lifetime_key);
     let topics = runtime.topics.read();
     let identity = topics
-        .by_rtd_key
-        .get(rtd_key.as_str())
+        .by_lifetime_key
+        .get(lifetime_key.as_str())
         .copied()
         .expect("published RTD key must resolve to its identity");
     let topic = topics
         .by_key
         .get(&identity)
         .expect("reverse map identity must resolve to a topic");
-    assert_eq!(topic.publication.rtd_key.as_ref(), rtd_key.as_str());
+    assert_eq!(
+        topic.publication.lifetime_key.as_ref(),
+        lifetime_key.as_str()
+    );
     assert_eq!(topic.publication.token, token);
-    assert!(topics.by_excel_id.is_empty());
+    assert!(topics.by_observer_id.is_empty());
     drop(topics);
 
     let published = runtime.topics.published().load(&key);
@@ -268,18 +272,20 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         PublishedTopicState::Live as u8
     );
 
-    runtime.connect(server_generation(1), 41, &rtd_key).unwrap();
+    runtime
+        .connect(lifetime_generation(1), 41, &lifetime_key)
+        .unwrap();
     {
         let topics = runtime.topics.read();
-        assert_eq!(topics.by_excel_id.len(), 1);
-        assert_eq!(topics.by_excel_id.values().next(), Some(&identity));
+        assert_eq!(topics.by_observer_id.len(), 1);
+        assert_eq!(topics.by_observer_id.values().next(), Some(&identity));
     }
 
-    runtime.disconnect(server_generation(1), 41);
+    runtime.disconnect(lifetime_generation(1), 41);
     let topics = runtime.topics.read();
     assert!(topics.by_key.is_empty());
-    assert!(topics.by_rtd_key.is_empty());
-    assert!(topics.by_excel_id.is_empty());
+    assert!(topics.by_lifetime_key.is_empty());
+    assert!(topics.by_observer_id.is_empty());
 }
 
 #[test]
@@ -303,13 +309,13 @@ fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
 }
 
 #[test]
-fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
+fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic() {
     let runtime = FormulaHandleService::new(8);
     let first_key = test_topic_key("collision-first");
     let second_key = test_topic_key("collision-second");
-    let first_rtd_key = first_key.format_rtd_key();
-    let second_rtd_key = second_key.format_rtd_key();
-    assert_ne!(first_rtd_key, second_rtd_key);
+    let first_lifetime_key = first_key.format_lifetime_key();
+    let second_lifetime_key = second_key.format_lifetime_key();
+    assert_ne!(first_lifetime_key, second_lifetime_key);
 
     let first_preparation = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
     let created = first_preparation.is_published();
@@ -320,10 +326,10 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     // publication boundary: the existing topic owns the incoming RTD key.
     {
         let mut topics = runtime.topics.write();
-        topics.by_rtd_key.remove(first_rtd_key.as_str());
+        topics.by_lifetime_key.remove(first_lifetime_key.as_str());
         topics
-            .by_rtd_key
-            .insert(Arc::from(second_rtd_key.as_str()), first_key);
+            .by_lifetime_key
+            .insert(Arc::from(second_lifetime_key.as_str()), first_key);
     }
 
     let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
@@ -346,7 +352,7 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
         );
         assert!(!topics.by_key.contains_key(&second_key));
         assert_eq!(
-            topics.by_rtd_key.get(second_rtd_key.as_str()),
+            topics.by_lifetime_key.get(second_lifetime_key.as_str()),
             Some(&first_key)
         );
     }
@@ -355,12 +361,12 @@ fn publication_rejects_rtd_key_collision_without_overwriting_existing_topic() {
     // registry root through the normal rollback path.
     {
         let mut topics = runtime.topics.write();
-        topics.by_rtd_key.remove(second_rtd_key.as_str());
+        topics.by_lifetime_key.remove(second_lifetime_key.as_str());
         topics
-            .by_rtd_key
-            .insert(Arc::from(first_rtd_key.as_str()), first_key);
+            .by_lifetime_key
+            .insert(Arc::from(first_lifetime_key.as_str()), first_key);
     }
-    runtime.rollback(&first_rtd_key);
+    runtime.rollback(&first_lifetime_key);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -789,7 +795,7 @@ fn token_value(token: &str) -> (Vec<u16>, xlfn_sys::XLOPER12) {
 fn repeated_formula_revision_runs_factory_exactly_once() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("same");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let calls = AtomicUsize::new(0);
 
     let first_preparation = runtime
@@ -819,8 +825,10 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
         1
     );
 
-    runtime.connect(server_generation(1), 41, &rtd_key).unwrap();
-    runtime.disconnect(server_generation(1), 41);
+    runtime
+        .connect(lifetime_generation(1), 41, &lifetime_key)
+        .unwrap();
+    runtime.disconnect(lifetime_generation(1), 41);
     assert_eq!(runtime.len(), 0);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
@@ -887,13 +895,15 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     runtime.arm_test_generation();
     let handles = runtime.formula_handle_service().unwrap();
     let key = test_topic_key("argument-errors");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let services = runtime.generation_services().unwrap();
     let token = handles
         .prepare(key, || Ok(DataRecord(23)))
         .unwrap()
         .into_token();
-    handles.connect(server_generation(1), 91, &rtd_key).unwrap();
+    handles
+        .connect(lifetime_generation(1), 91, &lifetime_key)
+        .unwrap();
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
     // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
@@ -950,7 +960,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         assert!(matches!(tampered, Err(XllError::InvalidHandle)));
     });
 
-    handles.disconnect(server_generation(1), 91);
+    handles.disconnect(lifetime_generation(1), 91);
     let (_stale_encoded, mut stale_raw) = token_value(&token);
     // SAFETY: `stale_raw` and its counted UTF-16 storage remain live for conversion.
     crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
@@ -1014,17 +1024,17 @@ fn optional_handle_conversion_preserves_blank_and_missing_policy() {
 fn existing_handle_publication_creates_an_independent_formula_owner() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("source");
-    let source_rtd_key = source_key.format_rtd_key();
+    let source_lifetime_key = source_key.format_lifetime_key();
     let source_token = runtime
         .prepare(source_key, || Ok(DataRecord(31)))
         .unwrap()
         .into_token();
     runtime
-        .connect(server_generation(1), 1, &source_rtd_key)
+        .connect(lifetime_generation(1), 1, &source_lifetime_key)
         .unwrap();
 
     let alias_key = test_topic_key("alias");
-    let alias_rtd_key = alias_key.format_rtd_key();
+    let alias_lifetime_key = alias_key.format_lifetime_key();
     let (alias_token, object_id) = crate::value::with_excel_call_scope(|scope| {
         let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         let object_id = resolved.object_id();
@@ -1035,7 +1045,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         (alias, object_id)
     });
     runtime
-        .connect(server_generation(1), 2, &alias_rtd_key)
+        .connect(lifetime_generation(1), 2, &alias_lifetime_key)
         .unwrap();
     assert_ne!(source_token, alias_token);
     let source_binding = runtime
@@ -1069,7 +1079,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     assert_eq!(alias_object_id, object_id);
     drop(state);
 
-    runtime.disconnect(server_generation(1), 1);
+    runtime.disconnect(lifetime_generation(1), 1);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &source_token, |_| ()),
         Err(XllError::StaleHandle)
@@ -1079,7 +1089,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         31
     );
 
-    runtime.disconnect(server_generation(1), 2);
+    runtime.disconnect(lifetime_generation(1), 2);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1101,7 +1111,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("alias-binding-source");
-    let source_rtd_key = source_key.format_rtd_key();
+    let source_lifetime_key = source_key.format_lifetime_key();
     let source_token = runtime
         .prepare(source_key, || {
             Ok(DropTracked {
@@ -1112,11 +1122,11 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
         .unwrap()
         .into_token();
     runtime
-        .connect(server_generation(1), 3, &source_rtd_key)
+        .connect(lifetime_generation(1), 3, &source_lifetime_key)
         .unwrap();
 
     let alias_key = test_topic_key("alias-binding-target");
-    let alias_rtd_key = alias_key.format_rtd_key();
+    let alias_lifetime_key = alias_key.format_lifetime_key();
     let alias_token = crate::value::with_excel_call_scope(|scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
         runtime
@@ -1125,7 +1135,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
             .into_token()
     });
 
-    runtime.disconnect(server_generation(1), 3);
+    runtime.disconnect(lifetime_generation(1), 3);
     assert!(matches!(
         with_handle::<DropTracked, _>(&runtime, &source_token, |_| ()),
         Err(XllError::StaleHandle)
@@ -1133,14 +1143,14 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     runtime
-        .connect(server_generation(1), 4, &alias_rtd_key)
+        .connect(lifetime_generation(1), 4, &alias_lifetime_key)
         .unwrap();
 
     assert_eq!(
         with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
         73
     );
-    runtime.disconnect(server_generation(1), 4);
+    runtime.disconnect(lifetime_generation(1), 4);
     assert_eq!(runtime.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
@@ -1234,13 +1244,13 @@ fn alias_publication_keeps_a_snapshot_owned_object_alive() {
 fn aliases_of_one_object_have_one_semantic_input_identity() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("identity-source");
-    let source_rtd_key = source_key.format_rtd_key();
+    let source_lifetime_key = source_key.format_lifetime_key();
     let source_token = runtime
         .prepare(source_key, || Ok(DataRecord(91)))
         .unwrap()
         .into_token();
     runtime
-        .connect(server_generation(1), 5, &source_rtd_key)
+        .connect(lifetime_generation(1), 5, &source_lifetime_key)
         .unwrap();
 
     let alias_key = test_topic_key("identity-alias");
@@ -1252,19 +1262,19 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
             .into_token()
     });
 
-    let alias_rtd_key = alias_key.format_rtd_key();
+    let alias_lifetime_key = alias_key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 6, &alias_rtd_key)
+        .connect(lifetime_generation(1), 6, &alias_lifetime_key)
         .unwrap();
 
     let other_key = test_topic_key("identity-other");
-    let other_rtd_key = other_key.format_rtd_key();
+    let other_lifetime_key = other_key.format_lifetime_key();
     let other_token = runtime
         .prepare(other_key, || Ok(DataRecord(91)))
         .unwrap()
         .into_token();
     runtime
-        .connect(server_generation(1), 7, &other_rtd_key)
+        .connect(lifetime_generation(1), 7, &other_lifetime_key)
         .unwrap();
 
     crate::value::with_excel_call_scope(|scope| {
@@ -1281,9 +1291,9 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         assert_ne!(input_identity(&source), input_identity(&other));
     });
 
-    runtime.disconnect(server_generation(1), 5);
-    runtime.disconnect(server_generation(1), 6);
-    runtime.disconnect(server_generation(1), 7);
+    runtime.disconnect(lifetime_generation(1), 5);
+    runtime.disconnect(lifetime_generation(1), 6);
+    runtime.disconnect(lifetime_generation(1), 7);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1296,9 +1306,9 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .prepare(source_key, || Ok(DataRecord(91)))
         .unwrap()
         .into_token();
-    let source_rtd_key = source_key.format_rtd_key();
+    let source_lifetime_key = source_key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 50, &source_rtd_key)
+        .connect(lifetime_generation(1), 50, &source_lifetime_key)
         .unwrap();
 
     let alias_key = test_topic_key("semantic-memo-alias");
@@ -1310,9 +1320,9 @@ fn semantic_handle_identity_controls_formula_memoization() {
             .into_token()
     });
 
-    let alias_rtd_key = alias_key.format_rtd_key();
+    let alias_lifetime_key = alias_key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 51, &alias_rtd_key)
+        .connect(lifetime_generation(1), 51, &alias_lifetime_key)
         .unwrap();
 
     let other_key = test_topic_key("semantic-memo-other");
@@ -1320,9 +1330,9 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .prepare(other_key, || Ok(DataRecord(91)))
         .unwrap()
         .into_token();
-    let other_rtd_key = other_key.format_rtd_key();
+    let other_lifetime_key = other_key.format_lifetime_key();
     runtime
-        .connect(server_generation(1), 52, &other_rtd_key)
+        .connect(lifetime_generation(1), 52, &other_lifetime_key)
         .unwrap();
 
     let (source_revision, alias_revision, other_revision) =
@@ -1399,17 +1409,17 @@ fn semantic_handle_identity_controls_formula_memoization() {
         with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object_id()).unwrap();
     assert_ne!(object_a, object_c);
 
-    for (topic_id, rtd_key) in [
-        (53, source_revision.format_rtd_key()),
-        (55, other_revision.format_rtd_key()),
+    for (topic_id, lifetime_key) in [
+        (53, source_revision.format_lifetime_key()),
+        (55, other_revision.format_lifetime_key()),
     ] {
         runtime
-            .connect(server_generation(1), topic_id, &rtd_key)
+            .connect(lifetime_generation(1), topic_id, &lifetime_key)
             .unwrap();
     }
 
     for topic_id in [50, 51, 52, 53, 55] {
-        runtime.disconnect(server_generation(1), topic_id);
+        runtime.disconnect(lifetime_generation(1), topic_id);
     }
     assert_eq!(runtime.len(), 0);
 }
@@ -1418,42 +1428,44 @@ fn semantic_handle_identity_controls_formula_memoization() {
 fn failed_rtd_connection_rolls_back_pending_object() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("pending");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
-    runtime.rollback(&rtd_key);
+    runtime.rollback(&lifetime_key);
     assert_eq!(runtime.len(), 0);
 }
 
 #[test]
-fn server_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
+fn lifetime_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("server-generation");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
 
     runtime
-        .claim_server(&rtd_key, server_generation(1))
+        .claim_lifetime(&lifetime_key, lifetime_generation(1))
         .unwrap();
     assert!(matches!(
-        runtime.claim_server(&rtd_key, server_generation(2)),
+        runtime.claim_lifetime(&lifetime_key, lifetime_generation(2)),
         Err(XllError::InvalidHandle)
     ));
     assert!(matches!(
-        runtime.connect(server_generation(2), 7, &rtd_key),
+        runtime.connect(lifetime_generation(2), 7, &lifetime_key),
         Err(XllError::InvalidHandle)
     ));
 
     let provisional = runtime
-        .connect_transaction(server_generation(1), 7, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 7, &lifetime_key)
         .unwrap();
     drop(provisional);
     assert!(matches!(
-        runtime.connect(server_generation(2), 7, &rtd_key),
+        runtime.connect(lifetime_generation(2), 7, &lifetime_key),
         Err(XllError::InvalidHandle)
     ));
 
-    runtime.connect(server_generation(1), 8, &rtd_key).unwrap();
-    runtime.disconnect(server_generation(1), 8);
+    runtime
+        .connect(lifetime_generation(1), 8, &lifetime_key)
+        .unwrap();
+    runtime.disconnect(lifetime_generation(1), 8);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1461,12 +1473,14 @@ fn server_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
 fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("uncalculated");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
-    runtime.connect(server_generation(1), 9, &rtd_key).unwrap();
-    runtime.rollback(&rtd_key);
+    runtime
+        .connect(lifetime_generation(1), 9, &lifetime_key)
+        .unwrap();
+    runtime.rollback(&lifetime_key);
     assert_eq!(runtime.len(), 0);
-    runtime.disconnect(server_generation(1), 9);
+    runtime.disconnect(lifetime_generation(1), 9);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1474,14 +1488,14 @@ fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
 fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("transactional");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let token = runtime
         .prepare(key, || Ok(DataRecord(1)))
         .unwrap()
         .into_token();
 
     let connection = runtime
-        .connect_transaction(server_generation(1), 10, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
         .unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
@@ -1493,11 +1507,11 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     );
 
     let retry = runtime
-        .connect_transaction(server_generation(1), 10, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
         .unwrap();
     assert_eq!(retry.token(), token);
     retry.commit().unwrap();
-    runtime.disconnect(server_generation(1), 10);
+    runtime.disconnect(lifetime_generation(1), 10);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1505,23 +1519,23 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
 fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("concurrent-transaction");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     runtime.prepare(key, || Ok(DataRecord(3))).unwrap();
 
     let connection = runtime
-        .connect_transaction(server_generation(1), 12, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 12, &lifetime_key)
         .unwrap();
     assert!(matches!(
-        runtime.connect_transaction(server_generation(1), 12, &rtd_key),
+        runtime.connect_transaction(lifetime_generation(1), 12, &lifetime_key),
         Err(XllError::Overloaded)
     ));
     connection.commit().unwrap();
 
     let repeated = runtime
-        .connect_transaction(server_generation(1), 12, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 12, &lifetime_key)
         .unwrap();
     repeated.commit().unwrap();
-    runtime.disconnect(server_generation(1), 12);
+    runtime.disconnect(lifetime_generation(1), 12);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1529,15 +1543,17 @@ fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
 fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("existing-transaction");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let token = runtime
         .prepare(key, || Ok(DataRecord(2)))
         .unwrap()
         .into_token();
-    runtime.connect(server_generation(1), 11, &rtd_key).unwrap();
+    runtime
+        .connect(lifetime_generation(1), 11, &lifetime_key)
+        .unwrap();
 
     let connection = runtime
-        .connect_transaction(server_generation(1), 11, &rtd_key)
+        .connect_transaction(lifetime_generation(1), 11, &lifetime_key)
         .unwrap();
     assert_eq!(connection.token(), token);
     drop(connection);
@@ -1546,7 +1562,7 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
         2
     );
-    runtime.disconnect(server_generation(1), 11);
+    runtime.disconnect(lifetime_generation(1), 11);
     assert_eq!(runtime.len(), 0);
 }
 
@@ -1554,19 +1570,19 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
 fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     let runtime = FormulaHandleService::new(8);
     let first_key = test_topic_key("first");
-    let first_rtd_key = first_key.format_rtd_key();
+    let first_lifetime_key = first_key.format_lifetime_key();
     let second_key = test_topic_key("second");
-    let second_rtd_key = second_key.format_rtd_key();
+    let second_lifetime_key = second_key.format_lifetime_key();
     runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
     runtime.prepare(second_key, || Ok(DataRecord(2))).unwrap();
     runtime
-        .connect(server_generation(1), 9, &first_rtd_key)
+        .connect(lifetime_generation(1), 9, &first_lifetime_key)
         .unwrap();
     assert!(matches!(
-        runtime.connect(server_generation(1), 9, &second_rtd_key),
+        runtime.connect(lifetime_generation(1), 9, &second_lifetime_key),
         Err(XllError::InvalidHandle)
     ));
-    runtime.disconnect(server_generation(1), 9);
+    runtime.disconnect(lifetime_generation(1), 9);
     assert_eq!(runtime.len(), 1);
 }
 
@@ -1715,20 +1731,22 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("sheet:A1");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let token = runtime
         .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
         .unwrap()
         .into_token();
-    runtime.connect(server_generation(1), 7, &rtd_key).unwrap();
+    runtime
+        .connect(lifetime_generation(1), 7, &lifetime_key)
+        .unwrap();
     crate::value::with_excel_call_scope(|scope| {
         let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
-        runtime.disconnect(server_generation(1), 7);
+        runtime.disconnect(lifetime_generation(1), 7);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(consumer.0.load(Ordering::Relaxed) == 0);
     });
     assert_eq!(drops.load(Ordering::Relaxed), 1);
-    runtime.disconnect(server_generation(1), 7);
+    runtime.disconnect(lifetime_generation(1), 7);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -1738,15 +1756,15 @@ fn terminate_and_close_release_every_remaining_topic_once() {
     let runtime = FormulaHandleService::new(8);
     for label in ["one", "two"] {
         let key = test_topic_key(label);
-        let rtd_key = key.format_rtd_key();
+        let lifetime_key = key.format_lifetime_key();
         runtime
             .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
             .unwrap();
         runtime
-            .claim_server(&rtd_key, server_generation(1))
+            .claim_lifetime(&lifetime_key, lifetime_generation(1))
             .unwrap();
     }
-    runtime.terminate_topics(server_generation(1));
+    runtime.terminate_topics(lifetime_generation(1));
     assert_eq!(drops.load(Ordering::Relaxed), 2);
     runtime.seal().map(|_| ()).unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -2017,9 +2035,9 @@ fn published_warm_observation_rejects_topic_removed_reentrantly() {
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
         || -> XllResult<DataRecord> { panic!("warm factory must not run") },
-        |rtd_key, observed_token| {
+        |lifetime_key, observed_token| {
             assert_eq!(observed_token, token);
-            runtime.rollback(rtd_key);
+            runtime.rollback(lifetime_key);
             Ok(())
         },
     );
@@ -2032,7 +2050,7 @@ fn published_warm_observation_rejects_topic_removed_reentrantly() {
 fn warm_observation_rejects_generation_terminated_topic() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("warm-generation-terminated");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
@@ -2041,17 +2059,17 @@ fn warm_observation_rejects_generation_terminated_topic() {
     assert!(created);
 
     runtime
-        .claim_server(&rtd_key, server_generation(1))
+        .claim_lifetime(&lifetime_key, lifetime_generation(1))
         .unwrap();
 
     let observed_runtime = Arc::clone(&runtime);
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
         || -> XllResult<DataRecord> { panic!("warm factory must not run") },
-        move |observed_rtd_key, observed_token| {
-            assert_eq!(observed_rtd_key, rtd_key);
+        move |observed_lifetime_key, observed_token| {
+            assert_eq!(observed_lifetime_key, lifetime_key);
             assert_eq!(observed_token, token);
-            observed_runtime.terminate_topics(server_generation(1));
+            observed_runtime.terminate_topics(lifetime_generation(1));
             Ok(())
         },
     );
@@ -2064,7 +2082,7 @@ fn warm_observation_rejects_generation_terminated_topic() {
 fn warm_observation_does_not_follow_recreated_same_key() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("warm-same-key-aba");
-    let rtd_key = key.format_rtd_key();
+    let lifetime_key = key.format_lifetime_key();
     let old_preparation = runtime
         .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
         .unwrap();
@@ -2075,11 +2093,11 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let (observation_started_tx, observation_started_rx) = std::sync::mpsc::sync_channel(0);
     let (replacement_ready_tx, replacement_ready_rx) = std::sync::mpsc::sync_channel(0);
     let replacement_runtime = Arc::clone(&runtime);
-    let replacement_rtd_key = rtd_key.clone();
+    let replacement_lifetime_key = lifetime_key.clone();
     let replacement_old_token = old_token.clone();
     let replacement = std::thread::spawn(move || {
         observation_started_rx.recv().unwrap();
-        replacement_runtime.rollback(&replacement_rtd_key);
+        replacement_runtime.rollback(&replacement_lifetime_key);
         let new_preparation = replacement_runtime
             .prepare(key, || Ok(DataRecord(2)))
             .unwrap();
@@ -2094,8 +2112,8 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     let result = runtime.prepare_observed::<DataRecord, _>(
         key,
         || -> XllResult<DataRecord> { panic!("warm factory must not run") },
-        move |observed_rtd_key, observed_token| {
-            assert_eq!(observed_rtd_key, rtd_key);
+        move |observed_lifetime_key, observed_token| {
+            assert_eq!(observed_lifetime_key, lifetime_key);
             assert_eq!(observed_token, old_token);
             observation_started_tx.send(()).unwrap();
             let replacement_token = replacement_ready_rx.recv().unwrap();
@@ -2122,9 +2140,9 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
     let result = runtime.prepare_observed(
         key,
         || Ok(DataRecord(1)),
-        move |rtd_key, token| {
+        move |lifetime_key, token| {
             let connection = observed_runtime
-                .connect_transaction(server_generation(1), 17, rtd_key)
+                .connect_transaction(lifetime_generation(1), 17, lifetime_key)
                 .expect("ConnectData must be able to claim the visible topic");
             assert_eq!(connection.token(), token);
 
@@ -2135,7 +2153,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
             let disconnect_runtime = Arc::clone(&observed_runtime);
             let disconnect = std::thread::spawn(move || {
                 release_rx.recv().unwrap();
-                disconnect_runtime.disconnect(server_generation(1), 17);
+                disconnect_runtime.disconnect(lifetime_generation(1), 17);
             });
             release_tx.send(()).unwrap();
             disconnect.join().unwrap();
@@ -2167,15 +2185,15 @@ fn disconnect_rejects_provisional_excel_commit_after_topic_detach() {
     let result = runtime.prepare_observed(
         key,
         || Ok(DataRecord(1)),
-        move |rtd_key, token| {
+        move |lifetime_key, token| {
             let connection = observed_runtime
-                .connect_transaction(server_generation(1), 17, rtd_key)
+                .connect_transaction(lifetime_generation(1), 17, lifetime_key)
                 .expect("ConnectData must be able to claim the visible topic");
             assert_eq!(connection.token(), token);
 
             // DisconnectData may detach the topic before ConnectData commits
             // its provisional Excel connection.
-            observed_runtime.disconnect(server_generation(1), 17);
+            observed_runtime.disconnect(lifetime_generation(1), 17);
 
             // The commit must fail at the detached ownership boundary. Its
             // drop path must not recreate the topic or registry root.
@@ -2482,7 +2500,7 @@ fn warm_hit_does_not_enter_single_flight_initialization() {
             |key, _| {
                 let topics = runtime.topics.read();
                 let identity = topics
-                    .by_rtd_key
+                    .by_lifetime_key
                     .get(key)
                     .copied()
                     .expect("warm observation must use a published RTD key");
@@ -2924,7 +2942,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     let services = crate::runtime_components::GenerationServices::arm_generation(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         crate::RuntimeConfig::new(),
-        crate::rtd::RtdSubscriptionHost::detached(),
+        Some(crate::excel_rtd::RtdSubscriptionHost::detached()),
     )
     .unwrap()
     .commit();

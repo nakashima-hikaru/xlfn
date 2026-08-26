@@ -17,7 +17,7 @@ use super::update_event::{
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
-use crate::rtd::{HandleRtdBackend, HandleRtdConnection};
+use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::win32::{
@@ -56,6 +56,11 @@ pub(super) struct ActiveServer {
 
 pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
 pub(super) static LAST_SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn lifetime_generation(generation: ServerGeneration) -> FormulaLifetimeGeneration {
+    FormulaLifetimeGeneration::new(generation.get())
+        .expect("an active Excel RTD server has a non-zero lifetime generation")
+}
 
 fn allocate_server_generation(last_generation: &AtomicU64) -> Option<ServerGeneration> {
     // `try_update` returns the previous value; expose the checked successor
@@ -170,7 +175,7 @@ impl Drop for OwnedServerReference {
 }
 
 pub(super) struct ServerBackends {
-    pub(super) handles: Option<Arc<dyn HandleRtdBackend>>,
+    pub(super) handles: Option<Arc<dyn FormulaLifetimeBackend>>,
     pub(super) subscriptions: Option<Arc<SubscriptionRuntime>>,
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
@@ -316,7 +321,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     unsafe { server_release(server) };
 }
 
-pub(crate) fn shutdown<H: HandleRtdBackend + 'static>(handles: Arc<H>) -> XllResult<()> {
+pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: Arc<H>) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -375,7 +380,7 @@ pub(crate) fn shutdown<H: HandleRtdBackend + 'static>(handles: Arc<H>) -> XllRes
             }
             Err(_) => std::process::abort(),
         }
-        handles.terminate_topics(retained.generation);
+        handles.terminate_topics(lifetime_generation(retained.generation));
         // No operation can retain or invoke the callback after the server gate
         // and handle topics are quiescent. Revoke the GIT cookie while the XLL
         // is still loaded, without holding the callback or global server lock.
@@ -514,11 +519,11 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
     }
 }
 
-pub(super) fn ensure_server<H: HandleRtdBackend + 'static>(
+pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
     handles: Option<&Arc<H>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
-    let backend = handles.map(|handles| -> Arc<dyn HandleRtdBackend> { handles.clone() });
+    let backend = handles.map(|handles| -> Arc<dyn FormulaLifetimeBackend> { handles.clone() });
     ensure_server_impl(backend.as_ref(), subscriptions)
 }
 
@@ -529,7 +534,7 @@ pub(super) fn ensure_server_without_handles(
 }
 
 fn ensure_server_impl(
-    handles: Option<&Arc<dyn HandleRtdBackend>>,
+    handles: Option<&Arc<dyn FormulaLifetimeBackend>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();
@@ -924,7 +929,7 @@ pub(super) unsafe extern "system" fn connect_data(
 }
 
 enum ConnectDataTransaction<'runtime> {
-    Handle(Box<dyn HandleRtdConnection + 'runtime>),
+    Handle(Box<dyn FormulaLifetimeConnection + 'runtime>),
     Subscription(crate::subscription::SubscriptionConnection),
 }
 
@@ -1003,7 +1008,7 @@ unsafe fn connect_data_inner(
             return E_FAIL;
         };
 
-        match handles.connect_transaction(generation, topic_id, rtd_key) {
+        match handles.connect_lifetime(lifetime_generation(generation), topic_id, rtd_key) {
             Ok(connection) => ConnectDataTransaction::Handle(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
@@ -1153,7 +1158,7 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     let generation = unsafe { (*this).generation };
 
     if let Some(handles) = handles {
-        handles.disconnect(generation, topic_id);
+        handles.disconnect(lifetime_generation(generation), topic_id);
     }
 
     if let Some(subscription_server) = subscription_server.as_ref() {
@@ -1354,7 +1359,7 @@ pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_acti
     };
 
     if let Some(handles) = handles {
-        handles.terminate_topics(generation);
+        handles.terminate_topics(lifetime_generation(generation));
     }
 
     // SAFETY: the caller retains the server through callback revocation.

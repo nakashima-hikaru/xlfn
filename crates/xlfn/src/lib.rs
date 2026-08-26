@@ -16,9 +16,9 @@
 //! definitions remain in `xlfn-sys`, while this crate owns the runtime,
 //! lifecycle, value, diagnostics, and optional handle/RTD implementations.
 //!
-//! The `rtd` feature enables RTD and COM capabilities; `handles` enables
-//! formula handles and therefore implies `rtd`. Core XLLs do not expose or
-//! generate either optional subsystem.
+//! The `rtd` feature enables the generic RTD subscription API; `handles`
+//! enables formula handles. Both features share a private Excel RTD/COM
+//! transport, but neither public capability implies the other.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unsafe_code)]
@@ -58,6 +58,7 @@ mod composition_refinement;
 mod crt;
 pub mod diagnostics;
 pub mod error;
+mod excel_rtd;
 /// Stable execution-layer contracts and per-call metadata.
 pub mod execution;
 mod generation;
@@ -94,8 +95,6 @@ mod return_storage;
 mod return_value;
 #[cfg(any(feature = "rtd", test))]
 pub mod rtd;
-#[cfg(all(not(feature = "rtd"), not(test)))]
-mod rtd;
 mod runtime;
 mod runtime_components;
 mod runtime_refinement;
@@ -462,10 +461,10 @@ macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {};
 }
 
-#[cfg(feature = "rtd")]
+#[cfg(any(feature = "rtd", feature = "handles"))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_private_rtd_exports {
+macro_rules! __xlfn_private_excel_rtd_exports {
     ($runtime:expr) => {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
@@ -495,10 +494,10 @@ macro_rules! __xlfn_private_rtd_exports {
     };
 }
 
-#[cfg(not(feature = "rtd"))]
+#[cfg(not(any(feature = "rtd", feature = "handles")))]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __xlfn_private_rtd_exports {
+macro_rules! __xlfn_private_excel_rtd_exports {
     ($runtime:expr) => {};
 }
 

@@ -84,7 +84,7 @@ bench-full:
     just bench-one handle_lookup
     just bench-one formula_caller
     just bench-one argument_ingress
-    just bench-one rtd_publish
+    just bench-one rtd_publish "bench-internals rtd"
     just bench-one handle_call_resolution
 
 # Representative PR suite. Scaling curves remain available through
@@ -98,7 +98,7 @@ bench-pr:
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
     just bench-one formula_caller
     just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/with_identity|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
-    just bench-one rtd_publish
+    just bench-one rtd_publish "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^(handle_call_resolution/handles/(1|8)|handle_runtime_resolution/concurrent/(1|32))\z"
 
 # Diagnostic microbenchmarks are useful for diagnosis, but are not part of

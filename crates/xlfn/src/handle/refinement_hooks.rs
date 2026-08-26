@@ -5,11 +5,9 @@
 //! test and checker builds delegate to `refinement.rs`.
 
 use super::HandleTopicKey;
-#[cfg(any(target_os = "windows", test))]
-use super::HandleTopicOwner;
 use super::refinement_wire::TokenWire;
 #[cfg(any(target_os = "windows", test))]
-use crate::generation::ServerGeneration;
+use super::{FormulaLifetimeGeneration, FormulaObserverId};
 
 #[cfg(any(test, feature = "refinement"))]
 use super::refinement::HandleRefinementTrace;
@@ -103,12 +101,12 @@ impl HandleRefinementHooks {
         key: &HandleTopicKey,
         runtime_id: u64,
         token: TokenWire,
-        rtd_key: &str,
+        lifetime_key: &str,
     ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace
-            .publish_and_install(key, runtime_id, token, rtd_key);
-        let _ = (key, runtime_id, token, rtd_key);
+            .publish_and_install(key, runtime_id, token, lifetime_key);
+        let _ = (key, runtime_id, token, lifetime_key);
     }
 
     #[inline]
@@ -205,14 +203,18 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_claim_server(&self, key: &HandleTopicKey, generation: ServerGeneration) {
+    pub(crate) fn observe_claim_lifetime(
+        &self,
+        key: &HandleTopicKey,
+        generation: FormulaLifetimeGeneration,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
-        self.trace.claim_server(key, generation);
+        self.trace.claim_lifetime(key, generation);
         let _ = (key, generation);
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_begin_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn observe_begin_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.begin_connection(key, owner);
         let _ = (key, owner);
@@ -222,7 +224,7 @@ impl HandleRefinementHooks {
     pub(crate) fn observe_reuse_committed_connection(
         &self,
         key: &HandleTopicKey,
-        owner: HandleTopicOwner,
+        owner: FormulaObserverId,
     ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.reuse_committed_connection(key, owner);
@@ -230,7 +232,7 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_commit_connection(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn observe_commit_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.commit_connection(key, owner);
         let _ = (key, owner);
@@ -240,7 +242,7 @@ impl HandleRefinementHooks {
     pub(crate) fn observe_rollback_connection(
         &self,
         key: &HandleTopicKey,
-        owner: HandleTopicOwner,
+        owner: FormulaObserverId,
     ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.rollback_connection(key, owner);
@@ -248,14 +250,14 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_disconnect(&self, key: &HandleTopicKey, owner: HandleTopicOwner) {
+    pub(crate) fn observe_disconnect(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.disconnect(key, owner);
         let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_detach_generation(&self, generation: ServerGeneration) {
+    pub(crate) fn observe_detach_generation(&self, generation: FormulaLifetimeGeneration) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.detach_generation(generation);
         let _ = generation;

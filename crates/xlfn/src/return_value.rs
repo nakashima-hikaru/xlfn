@@ -140,7 +140,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
-                crate::rtd::observe(
+                crate::excel_rtd::observe_handle(
                     arc_handles,
                     crate::module_runtime::ingress(),
                     key,
@@ -160,7 +160,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let arc_handles = std::sync::Arc::clone(access.runtime.get_arc()?);
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation = handles.prepare_observed(key, operation, |key, token| {
-            crate::rtd::observe(
+            crate::excel_rtd::observe_handle(
                 arc_handles,
                 crate::module_runtime::ingress(),
                 key,

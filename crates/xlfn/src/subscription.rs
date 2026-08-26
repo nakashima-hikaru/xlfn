@@ -29,18 +29,17 @@ mod topic;
 mod value;
 
 pub(crate) type ErasedSink = delivery::ErasedSink;
-pub(crate) type SubscriptionRuntime = runtime::SubscriptionRuntime<crate::rtd::RtdSubscriptionHost>;
+pub(crate) type SubscriptionRuntime =
+    runtime::SubscriptionRuntime<crate::excel_rtd::RtdSubscriptionHost>;
 pub(crate) type SubscriptionConnection =
-    runtime::SubscriptionConnection<crate::rtd::RtdSubscriptionHost>;
+    runtime::SubscriptionConnection<crate::excel_rtd::RtdSubscriptionHost>;
 pub(crate) type SubscriptionServerHandle =
-    server::SubscriptionServerHandle<crate::rtd::RtdSubscriptionHost>;
+    server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
 #[cfg(any(feature = "rtd", test))]
 pub use source::{
     RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
 };
-#[cfg(all(not(feature = "rtd"), not(test)))]
-pub(crate) use topic::RtdLimits;
 #[cfg(any(feature = "rtd", test))]
 pub use topic::RtdTopic;
 #[cfg(any(feature = "rtd", test))]
@@ -52,11 +51,7 @@ pub use value::RtdValue;
 #[cfg(all(not(feature = "rtd"), not(test)))]
 pub(crate) use value::RtdValue;
 
-#[cfg(any(
-    all(target_os = "windows", feature = "rtd"),
-    test,
-    feature = "bench-internals"
-))]
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
 pub(crate) use crate::generation::ServerGeneration;
 #[cfg(test)]
 pub(crate) use crate::generation::{ConnectionGeneration, RuntimeGeneration};
@@ -66,11 +61,7 @@ use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
 #[cfg(test)]
 pub(crate) use catalog::SubscriptionCatalog;
-#[cfg(any(
-    all(target_os = "windows", feature = "rtd"),
-    test,
-    feature = "bench-internals"
-))]
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) use delivery::RtdUpdate;
@@ -100,6 +91,7 @@ pub(crate) use server::{
     cleanup_catalog_binding_and_pending, disconnect_all_no_unwind, disconnect_one_no_unwind,
     drop_notifier_no_unwind,
 };
+#[cfg(any(feature = "rtd", test))]
 pub(crate) use source::SourceHandleAllocator;
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};
@@ -114,11 +106,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
 pub(crate) use topic::SubscriptionKey;
-#[cfg(any(
-    all(target_os = "windows", feature = "rtd"),
-    test,
-    feature = "bench-internals"
-))]
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
 pub(crate) use topic::TopicId;
 #[cfg(test)]
 pub(crate) use topic::{

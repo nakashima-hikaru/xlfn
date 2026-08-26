@@ -135,7 +135,7 @@ fn expand_excel_addin(
         #krate::__private::v1::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
 
         #(#gating)*
-        #krate::__private::v1::__xlfn_rtd_exports!(&crate::__XLFN_RUNTIME);
+        #krate::__private::v1::__xlfn_excel_rtd_exports!(&crate::__XLFN_RUNTIME);
 
         #(#gating)*
         #[unsafe(no_mangle)]
@@ -739,7 +739,7 @@ mod tests {
         assert!(expanded.contains("addin_manager_info"));
         assert!(expanded.contains("__XLFN_FRAMEWORK_EXPORTS"));
         assert!(expanded.contains("__xlfn_async_exports"));
-        assert!(expanded.contains("__xlfn_rtd_exports"));
+        assert!(expanded.contains("__xlfn_excel_rtd_exports"));
         assert!(!expanded.contains("fn __xlfn_calculation_canceled"));
     }
 

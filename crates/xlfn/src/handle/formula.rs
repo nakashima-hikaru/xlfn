@@ -31,11 +31,12 @@ impl FormulaRevisionKey {
         }
     }
 
-    /// Serialize the structured identity at the Excel RTD boundary.
+    /// Serialize the structured identity for the private Excel lifetime
+    /// observer boundary.
     ///
     /// This representation is part of the Excel protocol and must remain
     /// byte-for-byte compatible with the previous formula topic formatter.
-    pub(crate) fn format_rtd_key(&self) -> String {
+    pub(crate) fn format_lifetime_key(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         // 20 digits for a 64-bit IDSHEET, 11 for each i32 coordinate, four
         // separators, and the 64-character digest. This upper bound keeps the
@@ -71,9 +72,9 @@ pub(crate) enum HandleTopicKey {
 }
 
 impl HandleTopicKey {
-    pub(crate) fn format_rtd_key(&self) -> String {
+    pub(crate) fn format_lifetime_key(&self) -> String {
         match self {
-            Self::Formula(key) => key.format_rtd_key(),
+            Self::Formula(key) => key.format_lifetime_key(),
         }
     }
 }

@@ -6,10 +6,8 @@ use super::{
     PublishedTopic, PublishedTopicState, SharedObject, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
-use super::{HandleConnection, HandleTopicOwner};
+use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
 use crate::generation::RuntimeGeneration;
-#[cfg(any(target_os = "windows", test))]
-use crate::generation::ServerGeneration;
 use crate::generation::TopicGeneration;
 use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
@@ -136,7 +134,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    pub(crate) fn rtd_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+    pub(crate) fn lifetime_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
         self.store.trace_handle()
     }
 
@@ -162,12 +160,12 @@ impl FormulaHandleService {
     pub(crate) fn observe_existing(
         &self,
         key: HandleTopicKey,
-        rtd_key: Arc<str>,
+        lifetime_key: Arc<str>,
         token: String,
         generation: TopicGeneration,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<HandlePreparation> {
-        observe(&rtd_key, &token)?;
+        observe(&lifetime_key, &token)?;
         self.topics.is_current(key, generation, &token)?;
         Ok(HandlePreparation::Reused { token })
     }
@@ -295,12 +293,12 @@ impl FormulaHandleService {
         let (initialization, generation) = match decision {
             PrepareDecision::Existing {
                 token,
-                rtd_key,
+                lifetime_key,
                 generation,
             } => {
                 return self.observe_existing(
                     key,
-                    rtd_key,
+                    lifetime_key,
                     token,
                     generation,
                     observe
@@ -346,15 +344,15 @@ impl FormulaHandleService {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization.refinement_id);
         }
-        let rtd_key: Arc<str> = key.format_rtd_key().into();
+        let lifetime_key: Arc<str> = key.format_lifetime_key().into();
         let publication = triomphe::Arc::new(PublishedTopic::new(
             binding,
             token.clone(),
-            Arc::clone(&rtd_key),
+            Arc::clone(&lifetime_key),
         ));
         let publication_txn = publication_txn.publish_and_observe(
             publication.clone(),
-            Arc::clone(&rtd_key),
+            Arc::clone(&lifetime_key),
             observe
                 .take()
                 .expect("the cold path owns the observation closure"),
@@ -363,7 +361,7 @@ impl FormulaHandleService {
                     &key,
                     initialization.refinement_id,
                     self.refinement_token(&token),
-                    &rtd_key,
+                    &lifetime_key,
                 );
             },
         )?;
@@ -394,7 +392,7 @@ impl FormulaHandleService {
         let observed = observe
             .take()
             .expect("a live warm publication consumes the observation closure")(
-            &publication.rtd_key,
+            &publication.lifetime_key,
             &publication.token,
         );
         if let Err(error) = observed {
@@ -427,30 +425,32 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn claim_server(
+    pub(crate) fn claim_lifetime(
         &self,
-        rtd_key: &str,
-        server_generation: ServerGeneration,
+        lifetime_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
     ) -> XllResult<()> {
-        let _key = self.topics.claim_server(rtd_key, server_generation)?;
+        let _key = self
+            .topics
+            .claim_lifetime(lifetime_key, lifetime_generation)?;
         self.refinement
-            .observe_claim_server(&_key, server_generation);
+            .observe_claim_lifetime(&_key, lifetime_generation);
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn connect(
         &self,
-        server_generation: ServerGeneration,
-        excel_topic_id: i32,
-        rtd_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+        topic_id: i32,
+        lifetime_key: &str,
     ) -> XllResult<String> {
-        let owner = HandleTopicOwner {
-            server_generation,
-            topic_id: excel_topic_id,
+        let owner = FormulaObserverId {
+            generation: lifetime_generation,
+            topic_id,
         };
         let (key, token, created) =
-            self.connect_inner(server_generation, excel_topic_id, rtd_key)?;
+            self.connect_inner(lifetime_generation, topic_id, lifetime_key)?;
         if created && let Err(error) = self.commit_connection(owner, key) {
             self.rollback_connection(owner, key);
             return Err(error);
@@ -461,16 +461,16 @@ impl FormulaHandleService {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect_transaction(
         &self,
-        server_generation: ServerGeneration,
-        excel_topic_id: i32,
-        rtd_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+        topic_id: i32,
+        lifetime_key: &str,
     ) -> XllResult<HandleConnection<'_>> {
-        let owner = HandleTopicOwner {
-            server_generation,
-            topic_id: excel_topic_id,
+        let owner = FormulaObserverId {
+            generation: lifetime_generation,
+            topic_id,
         };
         let (key, token, created) =
-            self.connect_inner(server_generation, excel_topic_id, rtd_key)?;
+            self.connect_inner(lifetime_generation, topic_id, lifetime_key)?;
         Ok(HandleConnection {
             runtime: self,
             owner,
@@ -484,15 +484,17 @@ impl FormulaHandleService {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect_inner(
         &self,
-        server_generation: ServerGeneration,
-        excel_topic_id: i32,
-        rtd_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+        topic_id: i32,
+        lifetime_key: &str,
     ) -> XllResult<(HandleTopicKey, String, bool)> {
-        let owner = HandleTopicOwner {
-            server_generation,
-            topic_id: excel_topic_id,
+        let owner = FormulaObserverId {
+            generation: lifetime_generation,
+            topic_id,
         };
-        let (key, token, created) = self.topics.connect(server_generation, owner, rtd_key)?;
+        let (key, token, created) =
+            self.topics
+                .connect(lifetime_generation, owner, lifetime_key)?;
         if created {
             self.refinement.observe_begin_connection(&key, owner);
         } else {
@@ -505,7 +507,7 @@ impl FormulaHandleService {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn commit_connection(
         &self,
-        owner: HandleTopicOwner,
+        owner: FormulaObserverId,
         key: HandleTopicKey,
     ) -> XllResult<()> {
         self.topics.commit_connection(owner, key)?;
@@ -514,7 +516,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn rollback_connection(&self, owner: HandleTopicOwner, key: HandleTopicKey) {
+    pub(crate) fn rollback_connection(&self, owner: FormulaObserverId, key: HandleTopicKey) {
         if !self.topics.rollback_connection(owner, key) {
             return;
         }
@@ -522,8 +524,8 @@ impl FormulaHandleService {
     }
 
     #[cfg(test)]
-    pub(crate) fn rollback(&self, rtd_key: &str) {
-        if let Some(removed) = self.topics.remove_by_rtd_key(rtd_key) {
+    pub(crate) fn rollback(&self, lifetime_key: &str) {
+        if let Some(removed) = self.topics.remove_by_lifetime_key(lifetime_key) {
             self.remove_topic_value(&removed, "handle topic rollback");
         }
     }
@@ -548,12 +550,12 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
-        let owner = HandleTopicOwner {
-            server_generation,
-            topic_id: excel_topic_id,
+    pub(crate) fn disconnect(&self, lifetime_generation: FormulaLifetimeGeneration, topic_id: i32) {
+        let owner = FormulaObserverId {
+            generation: lifetime_generation,
+            topic_id,
         };
-        let Some(removed) = self.topics.remove_by_excel_owner(owner) else {
+        let Some(removed) = self.topics.remove_by_observer(owner) else {
             return;
         };
         self.refinement.observe_disconnect(&removed.key, owner);
@@ -608,20 +610,21 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn terminate_topics(&self, server_generation: ServerGeneration) {
-        let removals = self.topics.remove_generation(server_generation);
+    pub(crate) fn terminate_topics(&self, lifetime_generation: FormulaLifetimeGeneration) {
+        let removals = self.topics.remove_generation(lifetime_generation);
         if !removals.is_empty() {
-            self.refinement.observe_detach_generation(server_generation);
+            self.refinement
+                .observe_detach_generation(lifetime_generation);
         }
         for removed in removals {
-            self.remove_topic_value(&removed, "handle RTD termination");
+            self.remove_topic_value(&removed, "handle lifetime termination");
         }
     }
 
     pub(crate) fn terminate_all_topics(&self) {
         let removals = self.topics.remove_all();
         for removed in removals {
-            self.remove_topic_value(&removed, "handle RTD termination");
+            self.remove_topic_value(&removed, "handle lifetime termination");
         }
     }
 
@@ -631,7 +634,7 @@ impl FormulaHandleService {
     }
 }
 
-impl crate::rtd::HandleRtdBackend for FormulaHandleService {
+impl super::lifetime::FormulaLifetimeBackend for FormulaHandleService {
     #[cfg(target_os = "windows")]
     fn identity(&self) -> usize {
         self as *const Self as usize
@@ -642,10 +645,10 @@ impl crate::rtd::HandleRtdBackend for FormulaHandleService {
     }
 
     #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    fn rtd_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+    fn lifetime_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
         #[cfg(target_os = "windows")]
         {
-            FormulaHandleService::rtd_trace(self)
+            FormulaHandleService::lifetime_trace(self)
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -654,33 +657,37 @@ impl crate::rtd::HandleRtdBackend for FormulaHandleService {
     }
 
     #[cfg(target_os = "windows")]
-    fn claim_server(&self, rtd_key: &str, server_generation: ServerGeneration) -> XllResult<()> {
-        FormulaHandleService::claim_server(self, rtd_key, server_generation)
+    fn claim_lifetime(
+        &self,
+        lifetime_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+    ) -> XllResult<()> {
+        FormulaHandleService::claim_lifetime(self, lifetime_key, lifetime_generation)
     }
 
     #[cfg(target_os = "windows")]
-    fn connect_transaction<'a>(
+    fn connect_lifetime<'a>(
         &'a self,
-        server_generation: ServerGeneration,
-        excel_topic_id: i32,
-        rtd_key: &str,
-    ) -> XllResult<Box<dyn crate::rtd::HandleRtdConnection + 'a>> {
+        lifetime_generation: FormulaLifetimeGeneration,
+        topic_id: i32,
+        lifetime_key: &str,
+    ) -> XllResult<Box<dyn super::lifetime::FormulaLifetimeConnection + 'a>> {
         Ok(Box::new(FormulaHandleService::connect_transaction(
             self,
-            server_generation,
-            excel_topic_id,
-            rtd_key,
+            lifetime_generation,
+            topic_id,
+            lifetime_key,
         )?))
     }
 
     #[cfg(target_os = "windows")]
-    fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
-        FormulaHandleService::disconnect(self, server_generation, excel_topic_id);
+    fn disconnect(&self, lifetime_generation: FormulaLifetimeGeneration, topic_id: i32) {
+        FormulaHandleService::disconnect(self, lifetime_generation, topic_id);
     }
 
     #[cfg(target_os = "windows")]
-    fn terminate_topics(&self, server_generation: ServerGeneration) {
-        FormulaHandleService::terminate_topics(self, server_generation);
+    fn terminate_topics(&self, lifetime_generation: FormulaLifetimeGeneration) {
+        FormulaHandleService::terminate_topics(self, lifetime_generation);
     }
 }
 
@@ -721,6 +728,7 @@ impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 pub(crate) struct FormulaHandleServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
         crate::addin::HandleConfig,
@@ -737,6 +745,7 @@ pub(crate) struct FormulaHandleServiceSlot {
 pub(crate) type FormulaHandleServiceRead =
     xlfn_kernel::service_slot::GenerationServiceRead<FormulaHandleService>;
 
+#[cfg(any(feature = "handles", test))]
 impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
@@ -866,6 +875,7 @@ impl<'call> FormulaHandleServiceResolver<'call> {
         }
     }
 
+    #[cfg(any(feature = "rtd", test))]
     #[inline]
     pub(crate) fn services(&self) -> &'call GenerationServices {
         self.services

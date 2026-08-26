@@ -1,4 +1,4 @@
-use super::RtdNotifier;
+use crate::excel_rtd::RtdNotifier;
 use crate::ingress::{AdmittedExport, ExportIngress};
 use crate::subscription::SubscriptionHost;
 use crate::{XllError, XllResult};

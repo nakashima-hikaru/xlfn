@@ -3,9 +3,9 @@ use super::server::{
     RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server,
     ensure_server_without_handles,
 };
+use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
-use crate::rtd::HandleRtdBackend;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
 use crate::{XllError, XllResult};
@@ -14,14 +14,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
-pub(crate) fn observe<H: HandleRtdBackend + 'static>(
+pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
     handles: Arc<H>,
     ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    let _rtd_operation = crate::rtd::begin_operation(handles.as_ref(), ingress)?;
+    let _rtd_operation = crate::excel_rtd::begin_operation(handles.as_ref(), ingress)?;
     let ensured = ensure_server(Some(&handles), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
@@ -65,7 +65,9 @@ pub(crate) fn observe<H: HandleRtdBackend + 'static>(
         }
     };
 
-    if let Err(error) = handles.claim_server(rtd_key, active.generation) {
+    let lifetime_generation = FormulaLifetimeGeneration::new(active.generation.get())
+        .expect("an active Excel RTD server has a non-zero lifetime generation");
+    if let Err(error) = handles.claim_lifetime(rtd_key, lifetime_generation) {
         discard_unpublished_server(active.pointer, ensured.newly_created);
         return Err(error);
     }

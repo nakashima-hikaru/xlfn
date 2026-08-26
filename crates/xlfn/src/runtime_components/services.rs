@@ -20,8 +20,8 @@ enum FormulaHandleServices {
 
 #[cfg(any(feature = "rtd", test))]
 struct RtdGenerationServices {
-    subscriptions: crate::rtd::SubscriptionServiceSlot,
-    subscription_host: crate::rtd::RtdSubscriptionHost,
+    subscriptions: crate::excel_rtd::SubscriptionServiceSlot,
+    subscription_host: crate::excel_rtd::RtdSubscriptionHost,
 }
 
 /// Access to the optional formula-handle capability in one generation.
@@ -42,15 +42,17 @@ impl FormulaHandleServices {
         Self::Absent
     }
 
+    #[cfg(any(feature = "handles", test))]
     fn arm(&self, config: crate::addin::HandleConfig) -> crate::XllResult<()> {
         #[cfg(any(feature = "handles", test))]
         {
             let Self::Active(slot) = self;
             slot.arm(config)
         }
-        #[cfg(not(any(feature = "handles", test)))]
-        let _ = config;
-        #[cfg(not(any(feature = "handles", test)))]
+    }
+
+    #[cfg(not(any(feature = "handles", test)))]
+    fn arm(&self) -> crate::XllResult<()> {
         Ok(())
     }
 
@@ -213,16 +215,16 @@ impl GenerationServices {
         Self {
             formula_handles: FormulaHandleServices::new(),
             rtd: RtdGenerationServices {
-                subscriptions: crate::rtd::SubscriptionServiceSlot::new(),
-                subscription_host: crate::rtd::RtdSubscriptionHost::detached(),
+                subscriptions: crate::excel_rtd::SubscriptionServiceSlot::new(),
+                subscription_host: crate::excel_rtd::RtdSubscriptionHost::detached(),
             },
         }
     }
 
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
-        config: crate::addin::RuntimeConfig,
-        subscription_host: crate::rtd::RtdSubscriptionHost,
+        _config: crate::addin::RuntimeConfig,
+        subscription_host: Option<crate::excel_rtd::RtdSubscriptionHost>,
     ) -> crate::XllResult<ArmedServices> {
         #[cfg(not(any(feature = "rtd", test)))]
         let _ = (generation, subscription_host);
@@ -230,16 +232,20 @@ impl GenerationServices {
             formula_handles: FormulaHandleServices::new(),
             #[cfg(any(feature = "rtd", test))]
             rtd: RtdGenerationServices {
-                subscriptions: crate::rtd::SubscriptionServiceSlot::new(),
-                subscription_host,
+                subscriptions: crate::excel_rtd::SubscriptionServiceSlot::new(),
+                subscription_host: subscription_host
+                    .expect("RTD generation services require an RTD host capability"),
             },
         };
-        services.formula_handles.arm(config.handle_config())?;
+        #[cfg(any(feature = "handles", test))]
+        services.formula_handles.arm(_config.handle_config())?;
+        #[cfg(not(any(feature = "handles", test)))]
+        services.formula_handles.arm()?;
         #[cfg(any(feature = "rtd", test))]
         if let Err(error) = services
             .rtd
             .subscriptions
-            .arm(generation, config.rtd_limits())
+            .arm(generation, _config.rtd_limits())
         {
             services.disarm_or_abort();
             return Err(error);
@@ -259,12 +265,12 @@ impl GenerationServices {
     }
 
     #[cfg(any(feature = "rtd", test))]
-    pub(crate) fn subscriptions_slot(&self) -> &crate::rtd::SubscriptionServiceSlot {
+    pub(crate) fn subscriptions_slot(&self) -> &crate::excel_rtd::SubscriptionServiceSlot {
         &self.rtd.subscriptions
     }
 
     #[cfg(any(feature = "rtd", test))]
-    pub(crate) fn subscription_host(&self) -> crate::rtd::RtdSubscriptionHost {
+    pub(crate) fn subscription_host(&self) -> crate::excel_rtd::RtdSubscriptionHost {
         self.rtd.subscription_host
     }
 
@@ -274,7 +280,7 @@ impl GenerationServices {
         let Some(handles) = self.formula_handles.access().read_if_ready() else {
             return Ok(());
         };
-        crate::rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
+        crate::excel_rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
     }
 
     pub(crate) fn seal(

@@ -1,11 +1,11 @@
 #[cfg(any(target_os = "windows", test))]
 use super::FormulaHandleService;
+use super::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use super::HandleTopicKey;
 use super::{HandleId, ObjectId, PublishedTopic};
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
-use crate::generation::ServerGeneration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FormulaBinding {
@@ -17,15 +17,15 @@ pub(crate) struct Topic {
     /// The immutable publication owns the formula binding and wire identities.
     pub(crate) publication: triomphe::Arc<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) server_generation: Option<ServerGeneration>,
-    pub(crate) excel_topic: Option<HandleTopicOwner>,
+    pub(crate) lifetime_generation: Option<FormulaLifetimeGeneration>,
+    pub(crate) observer: Option<FormulaObserverId>,
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) excel_topic_committed: bool,
+    pub(crate) observer_committed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct HandleTopicOwner {
-    pub(crate) server_generation: ServerGeneration,
+pub(crate) struct FormulaObserverId {
+    pub(crate) generation: FormulaLifetimeGeneration,
     pub(crate) topic_id: i32,
 }
 
@@ -35,7 +35,7 @@ pub(crate) struct HandleTopicOwner {
 /// without a temporary `Weak` upgrade.
 pub(crate) struct HandleConnection<'runtime> {
     pub(crate) runtime: &'runtime FormulaHandleService,
-    pub(crate) owner: HandleTopicOwner,
+    pub(crate) owner: FormulaObserverId,
     pub(crate) key: HandleTopicKey,
     pub(crate) token: String,
     pub(crate) created: bool,
@@ -78,7 +78,7 @@ impl Drop for HandleConnection<'_> {
 }
 
 #[cfg(target_os = "windows")]
-impl crate::rtd::HandleRtdConnection for HandleConnection<'_> {
+impl super::lifetime::FormulaLifetimeConnection for HandleConnection<'_> {
     fn token(&self) -> &str {
         self.token()
     }
