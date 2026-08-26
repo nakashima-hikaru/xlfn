@@ -1,3 +1,11 @@
+#[cfg(any(
+    test,
+    feature = "rtd",
+    feature = "bench-internals",
+    feature = "refinement"
+))]
+use crate::XllError;
+use crate::XllResult;
 use crate::addin::PhysicallyUnloadableAddin;
 #[cfg(feature = "async")]
 use crate::generation::ExecutionLease;
@@ -7,17 +15,14 @@ use crate::generation::OpenAttemptId;
 use crate::generation::OpeningGeneration;
 use crate::generation::{ExecutionGeneration, RemovalEpoch, RuntimeGeneration, ShutdownGeneration};
 use crate::ingress::AdmittedExport;
+#[cfg(any(test, feature = "bench-internals"))]
 use crate::registration::RegistrationId;
-use crate::{XllError, XllResult};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 #[cfg(not(feature = "async"))]
 use std::sync::atomic::Ordering;
 
 #[cfg(any(test, feature = "refinement"))]
 use crate::lifecycle::ClosedWitness;
-#[cfg(any(test, feature = "bench-internals"))]
-use crate::lifecycle::OpeningTxn;
 use crate::lifecycle::{
     GenerationAdmission, HostLifecycleIntent, LifecycleCoordinator, LifecyclePhase,
 };
@@ -27,6 +32,8 @@ use crate::runtime_components::{
     GenerationServices, HostLedger, ModuleResidency, QuarantineReason, QuarantineVault,
     ReturnProtocol, SealedGenerationServices,
 };
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::runtime_open_txn::OpeningTxn;
 use crate::runtime_refinement::RuntimeRefinementHooks;
 use xlfn_kernel::thread_affine::{
     ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
@@ -93,8 +100,14 @@ pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
 
 impl<A: crate::Addin> Runtime<A> {
-    pub(crate) fn lifecycle_runtime(&self) -> crate::lifecycle::LifecycleAuthority<'_, A> {
-        crate::lifecycle::LifecycleAuthority::new(self)
+    pub(crate) fn lifecycle_control(&self) -> crate::lifecycle::LifecycleControl<'_, A> {
+        crate::lifecycle::LifecycleControl::new(&self.lifecycle)
+    }
+
+    pub(crate) fn runtime_orchestrator(
+        &self,
+    ) -> crate::runtime_orchestration::RuntimeOrchestrator<'_, A> {
+        crate::runtime_orchestration::RuntimeOrchestrator::new(self)
     }
 }
 
@@ -276,7 +289,7 @@ impl<A: crate::Addin> Runtime<A> {
             .open_attempt()
             .expect("test publish requires an open attempt");
         assert!(
-            self.lifecycle_runtime()
+            self.lifecycle_control()
                 .stage_opening_generation(
                     attempt,
                     OpeningGeneration {
@@ -374,14 +387,6 @@ impl<A: crate::Addin> Runtime<A> {
         attempt.commit_in_place(registrations)
     }
 
-    pub(crate) fn retain_host_mutations(&self, journal: crate::registration::HostMutationJournal) {
-        self.host.merge(journal);
-    }
-
-    pub(crate) fn registration_state_unknown(&self) -> bool {
-        self.host.registration_state_unknown()
-    }
-
     pub(crate) fn enter<'call>(
         &'call self,
         ingress: &'call AdmittedExport<'call>,
@@ -402,63 +407,6 @@ impl<A: crate::Addin> Runtime<A> {
             #[cfg(any(test, feature = "refinement"))]
             activity_id,
         })
-    }
-
-    pub(crate) fn registrations(&self) -> Vec<crate::registration::PendingRegistration> {
-        self.host.registrations_snapshot()
-    }
-
-    pub(crate) fn retain_failed_registrations(
-        &self,
-        failed: Vec<(crate::registration::PendingRegistration, XllError)>,
-    ) {
-        self.host
-            .replace_registrations(failed.into_iter().map(|(entry, _)| entry).collect());
-    }
-
-    pub(crate) fn retain_metadata_debt(
-        &self,
-        metadata_debt: Vec<crate::registration::MetadataDebt>,
-    ) {
-        self.host.retain_metadata_debt(metadata_debt);
-    }
-
-    pub(crate) fn metadata_debt(
-        &self,
-    ) -> BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>> {
-        self.host.metadata_debt_snapshot()
-    }
-
-    pub(crate) fn clear_metadata_debt_for_registrations(&self, registrations: &[RegistrationId]) {
-        self.host
-            .clear_metadata_debt_for_registrations(registrations);
-    }
-
-    pub(crate) fn replace_metadata_debt(
-        &self,
-        debts: BTreeMap<crate::registration::ExcelNameKey, Vec<crate::registration::MetadataDebt>>,
-    ) {
-        self.host.replace_metadata_debt(debts);
-    }
-
-    pub(crate) fn has_metadata_debt(&self) -> bool {
-        self.host.has_metadata_debt()
-    }
-
-    pub(crate) fn event_registrations(&self) -> Vec<crate::registration::EventRegistration> {
-        self.host.event_registrations_snapshot()
-    }
-
-    pub(crate) fn host_callbacks_detached(&self) -> bool {
-        self.host.callbacks_detached()
-    }
-
-    pub(crate) fn retain_failed_event_registrations(
-        &self,
-        failed: Vec<(crate::registration::EventRegistration, XllError)>,
-    ) {
-        self.host
-            .replace_event_registrations(failed.into_iter().map(|(entry, _)| entry).collect());
     }
 
     #[inline]
@@ -907,7 +855,7 @@ pub(crate) mod tests {
         impl crate::handle::ExcelHandleObject for TestHandle {}
 
         let runtime = Runtime::<TestU32Addin>::new();
-        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(1_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
@@ -919,11 +867,14 @@ pub(crate) mod tests {
             .into_token();
         drop(ingress);
 
-        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let removal_attempt = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
         finish_test_close(&runtime, removal_attempt);
 
-        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(2_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
@@ -952,7 +903,10 @@ pub(crate) mod tests {
         ));
         drop(ingress);
 
-        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let removal_attempt = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         assert_eq!(runtime.take_current_generation().unwrap().shared_state, 2);
         finish_test_close(&runtime, removal_attempt);
     }
@@ -963,15 +917,20 @@ pub(crate) mod tests {
         let runtime = Runtime::<()>::new();
         let stale_epoch = runtime.removal_epoch();
 
-        assert!(runtime.lifecycle_runtime().begin_final_removal().is_none());
         assert!(
             runtime
-                .lifecycle_runtime()
+                .runtime_orchestrator()
+                .begin_final_removal()
+                .is_none()
+        );
+        assert!(
+            runtime
+                .runtime_orchestrator()
                 .begin_open_if_epoch(stale_epoch)
                 .is_err()
         );
 
-        let mut current = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut current = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut current, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
@@ -981,9 +940,9 @@ pub(crate) mod tests {
     fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<TestU32Addin>::new();
-        let mut first = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut first = runtime.runtime_orchestrator().begin_open().unwrap();
 
-        assert!(runtime.lifecycle_runtime().begin_open().is_err());
+        assert!(runtime.runtime_orchestrator().begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
 
         runtime.publish(11_u32, ());
@@ -992,7 +951,10 @@ pub(crate) mod tests {
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
         drop(ingress);
-        let close = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let close = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, close);
     }
@@ -1001,7 +963,7 @@ pub(crate) mod tests {
     fn dropping_open_attempt_quarantines_without_implicit_rollback() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
-        let opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let opening = runtime.runtime_orchestrator().begin_open().unwrap();
 
         drop(opening);
 
@@ -1010,7 +972,7 @@ pub(crate) mod tests {
         assert!(!trace.contains("\"failOpen\""));
         assert!(
             runtime
-                .lifecycle_runtime()
+                .runtime_orchestrator()
                 .acquire_open_rollback()
                 .is_none()
         );
@@ -1020,7 +982,7 @@ pub(crate) mod tests {
     fn final_close_cancels_an_in_flight_open_commit() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(17_u32, ());
 
         let removal_epoch = runtime.removal_epoch();
@@ -1030,7 +992,7 @@ pub(crate) mod tests {
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = thread::spawn(move || {
             let close = closing_runtime
-                .lifecycle_runtime()
+                .runtime_orchestrator()
                 .begin_final_removal()
                 .expect("the opening runtime requires final close");
             closing_entered_tx.send(()).unwrap();
@@ -1071,11 +1033,14 @@ pub(crate) mod tests {
     fn logical_quiescence_certificate_survives_a_concurrent_removal_epoch_bump() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let removal_attempt = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         runtime.wait_for_returns();
         let subscriptions_stopped = runtime.close_subscriptions().unwrap();
         runtime.shutdown_handle_topics().unwrap();
@@ -1124,7 +1089,7 @@ pub(crate) mod tests {
             started_tx.send(()).unwrap();
             assert!(
                 concurrent_runtime
-                    .lifecycle_runtime()
+                    .runtime_orchestrator()
                     .begin_final_removal()
                     .is_none()
             );
@@ -1149,16 +1114,19 @@ pub(crate) mod tests {
     fn close_waiter_is_not_lost_when_open_rollback_finishes() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         assert!(opening.fail().requires_rollback());
-        let rollback = runtime.lifecycle_runtime().acquire_open_rollback().unwrap();
+        let rollback = runtime
+            .runtime_orchestrator()
+            .acquire_open_rollback()
+            .unwrap();
 
         let closing_runtime = Arc::clone(&runtime);
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = thread::spawn(move || {
             assert!(
                 closing_runtime
-                    .lifecycle_runtime()
+                    .runtime_orchestrator()
                     .begin_final_removal()
                     .is_none()
             );
@@ -1183,14 +1151,20 @@ pub(crate) mod tests {
     fn abandoned_close_owner_notifies_and_allows_takeover() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let first = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let first = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         drop(first);
 
-        let second = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let second = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         let _ = runtime.take_current_generation();
         finish_test_close(&runtime, second);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -1204,7 +1178,7 @@ pub(crate) mod tests {
             .lifecycle
             .access()
             .set_next_lifecycle_attempt_for_test(u64::MAX);
-        assert!(runtime.lifecycle_runtime().begin_open().is_err());
+        assert!(runtime.runtime_orchestrator().begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 
@@ -1212,11 +1186,14 @@ pub(crate) mod tests {
     fn logical_quiescence_certificate_refuses_to_publish_closed_before_state_is_released() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let removal_attempt = runtime.lifecycle_runtime().begin_final_removal().unwrap();
+        let removal_attempt = runtime
+            .runtime_orchestrator()
+            .begin_final_removal()
+            .unwrap();
         runtime.wait_for_returns();
         let subscriptions_stopped = runtime.close_subscriptions().unwrap();
         runtime.shutdown_handle_topics().unwrap();
@@ -1262,7 +1239,7 @@ pub(crate) mod tests {
     fn close_rejects_new_calls_and_waits_for_existing_call() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
-        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(7_u32, ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
@@ -1271,7 +1248,7 @@ pub(crate) mod tests {
             .into_admitted()
             .expect("test call enters during OPEN");
         let guard = runtime.enter(&ingress).unwrap();
-        assert!(runtime.lifecycle_runtime().begin_close());
+        assert!(runtime.runtime_orchestrator().begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
         assert!(matches!(runtime.enter(&ingress), Err(XllError::Closing)));
 
@@ -1300,8 +1277,8 @@ pub(crate) mod tests {
                     excel_name: "TEST",
                 },
             ));
-        runtime.retain_host_mutations(journal);
-        assert_eq!(runtime.registrations().len(), 1);
+        runtime.host.merge(journal);
+        assert_eq!(runtime.host.registrations_snapshot().len(), 1);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1313,7 +1290,7 @@ pub(crate) mod tests {
         assert!(runtime.module_residency_held());
         assert!(!runtime.ensure_module_residency(std::ptr::null()).unwrap());
 
-        runtime.lifecycle_runtime().quarantine();
+        runtime.runtime_orchestrator().quarantine();
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.module_residency_held());
         runtime.release_module_residency().unwrap();
@@ -1323,7 +1300,7 @@ pub(crate) mod tests {
     #[test]
     fn metadata_debt_storage_is_queryable() {
         let runtime = Runtime::<()>::new();
-        runtime.retain_metadata_debt(vec![
+        runtime.host.retain_metadata_debt(vec![
             crate::registration::MetadataDebt::new(
                 RegistrationId {
                     id: 1.0,
@@ -1339,17 +1316,34 @@ pub(crate) mod tests {
                 XllError::Panic,
             ),
         ]);
-        assert_eq!(runtime.metadata_debt().len(), 1);
-        assert_eq!(runtime.metadata_debt().values().next().unwrap().len(), 2);
+        assert_eq!(runtime.host.metadata_debt_snapshot().len(), 1);
         assert_eq!(
-            runtime.metadata_debt().values().next().unwrap()[0].expected_registration_id(),
+            runtime
+                .host
+                .metadata_debt_snapshot()
+                .values()
+                .next()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            runtime
+                .host
+                .metadata_debt_snapshot()
+                .values()
+                .next()
+                .unwrap()[0]
+                .expected_registration_id(),
             1.0
         );
-        runtime.clear_metadata_debt_for_registrations(&[RegistrationId {
-            id: 1.0,
-            excel_name: "Test_Debt",
-        }]);
-        assert!(runtime.metadata_debt().is_empty());
+        runtime
+            .host
+            .clear_metadata_debt_for_registrations(&[RegistrationId {
+                id: 1.0,
+                excel_name: "Test_Debt",
+            }]);
+        assert!(runtime.host.metadata_debt_snapshot().is_empty());
     }
 
     #[cfg(feature = "async")]

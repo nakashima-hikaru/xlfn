@@ -5,8 +5,62 @@ use crate::generation::RuntimeGeneration;
 #[cfg(feature = "async")]
 pub(crate) use crate::async_udf::AsyncStopped;
 #[cfg(not(feature = "async"))]
-pub(crate) use crate::lifecycle::AsyncStopped;
-pub(crate) use crate::lifecycle::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
+mod non_async_tokens {
+    macro_rules! shutdown_token {
+        ($name:ident) => {
+            #[derive(Debug)]
+            pub(crate) struct $name {
+                _private: (),
+            }
+
+            impl $name {
+                // Issuance stays in the shutdown domain; callers can only
+                // consume the resulting proof values.
+                pub(crate) const fn issue() -> Self {
+                    Self { _private: () }
+                }
+
+                #[cfg(test)]
+                pub(crate) const fn for_test() -> Self {
+                    Self { _private: () }
+                }
+            }
+        };
+    }
+
+    shutdown_token!(AsyncStopped);
+}
+#[cfg(not(feature = "async"))]
+pub(crate) use non_async_tokens::AsyncStopped;
+
+mod certificate_tokens {
+    macro_rules! shutdown_token {
+        ($name:ident) => {
+            #[derive(Debug)]
+            pub(crate) struct $name {
+                _private: (),
+            }
+
+            impl $name {
+                // Issuance stays in the shutdown domain; callers can only
+                // consume the resulting proof values.
+                pub(crate) const fn issue() -> Self {
+                    Self { _private: () }
+                }
+
+                #[cfg(test)]
+                pub(crate) const fn for_test() -> Self {
+                    Self { _private: () }
+                }
+            }
+        };
+    }
+
+    shutdown_token!(AddinQuiesced);
+    shutdown_token!(GenerationReclaimed);
+    shutdown_token!(HostCallbacksDetached);
+}
+pub(crate) use certificate_tokens::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
 
 /// Teardown work owned by the handle implementation after its public
 /// bindings have been sealed.  The lifecycle core only sees this narrow

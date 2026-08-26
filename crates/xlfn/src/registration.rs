@@ -1,6 +1,7 @@
 pub(crate) mod host;
 pub(crate) mod ledger;
 pub(crate) mod preflight;
+pub(crate) mod recovery;
 #[allow(
     unsafe_code,
     reason = "Excel registration ABI is isolated in this leaf module"
@@ -14,6 +15,7 @@ pub(crate) use ledger::{
     RegistrationTransactionError, UnknownRegistrationState, UnregisterResult,
 };
 pub(crate) use preflight::preflight_registration;
+pub(crate) use recovery::retry_metadata_debt;
 pub(crate) use registrar::HostRegistrar;
 pub use schema::{ArgumentAbi, ArgumentDescriptor};
 pub(crate) use schema::{RegistrationDescriptor, RegistrationId, RegistrationSignature};

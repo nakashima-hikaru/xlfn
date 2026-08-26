@@ -847,7 +847,7 @@ mod tests {
     fn synchronous_contexts_expose_their_state_by_value() {
         let state = 17_u32;
         let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let services = runtime.generation_services().unwrap();
@@ -904,7 +904,7 @@ mod tests {
         let state = ();
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
             let runtime = crate::runtime::Runtime::<()>::new();
-            let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+            let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
             runtime.publish((), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             let context = MacroSheetContext::<()>::new(state, scope);
@@ -959,7 +959,7 @@ mod tests {
         }
 
         let runtime = crate::runtime::Runtime::<()>::new();
-        let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions().unwrap();

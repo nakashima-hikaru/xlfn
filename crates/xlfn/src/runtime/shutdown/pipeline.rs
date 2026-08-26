@@ -3,8 +3,8 @@
 //! The two boundary pipelines intentionally keep different failure policy and
 //! proof certificates. They do, however, share one ordering-sensitive stage:
 //! close export admission, drain active calls, and wait for return producers.
-//! Keeping that stage here prevents either pipeline from silently changing the
-//! unload-safety ordering.
+//! Keeping that stage in the runtime shutdown domain prevents either pipeline
+//! from silently changing the unload-safety ordering.
 
 use crate::addin::Addin;
 use crate::lifecycle::{QuiescenceProof, RemovalOwner, TerminalCertificateKind};
@@ -73,7 +73,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                     let mut reporter = crate::shutdown::CleanupReporter::new(report);
                     A::cleanup(lifecycle_state, &mut reporter);
                 })
-                .map_err(super::lifecycle_access_error)
+                .map_err(crate::lifecycle::lifecycle_access_error)
         }));
         if cleanup.is_err() || cleanup.as_ref().is_ok_and(|result| result.is_err()) {
             report.push(
@@ -105,7 +105,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 report.push(
                     "Addin::LifecycleState",
                     crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    super::lifecycle_access_error(error),
+                    crate::lifecycle::lifecycle_access_error(error),
                 );
                 false
             }
@@ -140,7 +140,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         shared_state: A::SharedState,
         reason: crate::runtime_components::QuarantineReason,
     ) {
-        self.runtime.lifecycle_runtime().quarantine_shared_state(
+        self.runtime.runtime_orchestrator().quarantine_shared_state(
             self.generation,
             shared_state,
             reason,
@@ -151,7 +151,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
 impl<A: Addin> Drop for QuiescedAddin<'_, A> {
     fn drop(&mut self) {
         if let Some(shared_state) = self.shared_state.take() {
-            self.runtime.lifecycle_runtime().quarantine_shared_state(
+            self.runtime.runtime_orchestrator().quarantine_shared_state(
                 self.generation,
                 shared_state,
                 crate::runtime_components::QuarantineReason::TeardownIncomplete,
@@ -485,9 +485,11 @@ fn retain_drained_module<A: Addin>(
     runtime: &Runtime<A>,
     module: crate::module_runtime::ModuleExportsDrained,
 ) {
-    crate::lifecycle::LifecycleAuthority::new(runtime).install_module_cleanup_authority(
-        crate::module_runtime::ModuleCleanupAuthority::Drained(module),
-    );
+    runtime
+        .lifecycle_control()
+        .install_module_cleanup_authority(crate::module_runtime::ModuleCleanupAuthority::Drained(
+            module,
+        ));
 }
 
 impl<A: Addin> ModuleAuthorityRecovery<A> for ExecutionDrained {
@@ -570,7 +572,7 @@ impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
 impl<A: Addin> Drop for TeardownOwner<'_, A> {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.as_ref() {
-            owner.runtime().lifecycle_runtime().quarantine();
+            owner.runtime().runtime_orchestrator().quarantine();
         }
     }
 }

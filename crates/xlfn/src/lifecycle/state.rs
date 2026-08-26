@@ -8,16 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cold]
 fn lifecycle_invariant_violation(message: &'static str) -> ! {
-    #[cfg(not(test))]
-    {
-        tracing::error!(
-            invariant = message,
-            "lifecycle ownership invariant violated"
-        );
-        std::process::abort();
-    }
-    #[cfg(test)]
-    panic!("lifecycle ownership invariant violated: {message}");
+    super::lifecycle_invariant_violation(message)
 }
 
 #[inline]
@@ -1026,8 +1017,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     fn advance_removal_epoch(&self, access: &mut LifecycleAccess<'_, A>) {
         access.transition(|core| {
             core.removal_epoch = core.removal_epoch.checked_add(1).unwrap_or_else(|| {
-                tracing::error!("lifecycle close epoch exhausted; fail-stopping");
-                std::process::abort();
+                lifecycle_invariant_violation("lifecycle close epoch exhausted");
             });
             ((), TransitionEffect::Keep)
         });
@@ -1064,13 +1054,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         access.transition(|core| {
             let attempt_id = core.next_removal_attempt;
             let next = attempt_id.checked_add(1).unwrap_or_else(|| {
-                tracing::error!("lifecycle removal-attempt identity exhausted; fail-stopping");
-                std::process::abort();
+                lifecycle_invariant_violation("lifecycle removal-attempt identity exhausted");
             });
             core.next_removal_attempt = next;
             let attempt = RemovalAttemptId::new(attempt_id).unwrap_or_else(|| {
-                tracing::error!("lifecycle removal-attempt identity reached zero; fail-stopping");
-                std::process::abort();
+                lifecycle_invariant_violation("lifecycle removal-attempt identity reached zero");
             });
             (attempt, TransitionEffect::Keep)
         })

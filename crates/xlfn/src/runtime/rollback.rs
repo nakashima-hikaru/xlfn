@@ -1,20 +1,23 @@
 //! Open-attempt rollback transition and its terminal proof.
 //!
-//! This module owns the rollback-specific state and cleanup pipeline. The
-//! lifecycle root retains only the public boundary and shared cleanup helpers.
+//! This module owns the rollback-specific state and cleanup pipeline. It is
+//! loaded into the runtime recovery domain; the lifecycle root retains only
+//! canonical state and ownership types.
 
-use super::teardown;
-use super::{drain_execution, lifecycle_access_error, report_boundary_error, report_cleanup_issue};
 use crate::XllError;
 use crate::addin::Addin;
+use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::HostRegistrar;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
+use crate::runtime_shutdown::{self as teardown, drain_execution};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-pub(super) enum OpenRollbackStatus {
+use crate::lifecycle::lifecycle_access_error;
+
+pub(crate) enum OpenRollbackStatus {
     /// Every terminal certificate was issued and the lifecycle binding was
     /// released. A later open may safely reuse the runtime.
     Finalized,
@@ -23,35 +26,35 @@ pub(super) enum OpenRollbackStatus {
     Incomplete,
 }
 
-pub(super) struct OpenRollbackOutcome {
+pub(crate) struct OpenRollbackOutcome {
     status: OpenRollbackStatus,
 }
 
-pub(super) fn active_runtime_generation<A: Addin>(
+pub(crate) fn active_runtime_generation<A: Addin>(
     runtime: &Runtime<A>,
 ) -> Option<RuntimeGeneration> {
     runtime.protocol_generation()
 }
 
 impl OpenRollbackOutcome {
-    pub(super) fn unload_safe(&self) -> bool {
+    pub(crate) fn unload_safe(&self) -> bool {
         matches!(self.status, OpenRollbackStatus::Finalized)
     }
 
     #[cfg(test)]
-    pub(super) fn is_finalized(&self) -> bool {
+    pub(crate) fn is_finalized(&self) -> bool {
         self.unload_safe()
     }
 }
 
 fn incomplete<A: Addin>(runtime: &Runtime<A>) -> OpenRollbackOutcome {
-    runtime.lifecycle_runtime().quarantine();
+    runtime.runtime_orchestrator().quarantine();
     OpenRollbackOutcome {
         status: OpenRollbackStatus::Incomplete,
     }
 }
 
-pub(super) fn rollback_open<A>(
+pub(crate) fn rollback_open<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
@@ -62,10 +65,10 @@ where
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    let Some(rollback_attempt) = runtime.lifecycle_runtime().acquire_open_rollback() else {
+    let Some(rollback_attempt) = runtime.runtime_orchestrator().acquire_open_rollback() else {
         let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-            && runtime.host_callbacks_detached()
-            && !runtime.registration_state_unknown()
+            && runtime.host.callbacks_detached()
+            && !runtime.host.registration_state_unknown()
             && crate::excel_rtd::logical_quiescence_certified();
         return OpenRollbackOutcome {
             status: if finalized {
@@ -113,7 +116,7 @@ where
         }
     };
 
-    let registrations = runtime.registrations();
+    let registrations = runtime.host.registrations_snapshot();
     let outcome = HostRegistrar::unregister_pending(callbacks, &registrations);
     for (registration, error) in &outcome.failed {
         if registration.cleanup_severity().is_unload_unsafe() {
@@ -130,10 +133,12 @@ where
             error: error.clone(),
         });
     }
-    runtime.retain_failed_registrations(outcome.failed);
-    runtime.retain_metadata_debt(outcome.metadata_debt);
+    runtime
+        .host
+        .replace_registrations(outcome.failed.into_iter().map(|(entry, _)| entry).collect());
+    runtime.host.retain_metadata_debt(outcome.metadata_debt);
 
-    let events = runtime.event_registrations();
+    let events = runtime.host.event_registrations_snapshot();
     if callbacks.permits_callbacks() {
         let event_outcome = HostRegistrar::unregister_events_detailed(callbacks, &events);
         for (_, error) in &event_outcome.failed {
@@ -146,7 +151,13 @@ where
                 error: error.clone(),
             });
         }
-        runtime.retain_failed_event_registrations(event_outcome.failed);
+        runtime.host.replace_event_registrations(
+            event_outcome
+                .failed
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .collect(),
+        );
     } else if !events.is_empty() {
         let error = callbacks
             .terminal_status()
@@ -156,26 +167,21 @@ where
             })
             .unwrap_or(XllError::Closing);
         report_boundary_error("xlAutoOpen event rollback", &error);
-        runtime.retain_failed_event_registrations(
-            events
-                .into_iter()
-                .map(|event| (event, error.clone()))
-                .collect(),
-        );
+        runtime.host.replace_event_registrations(events);
     } else {
-        runtime.retain_failed_event_registrations(Vec::new());
+        runtime.host.replace_event_registrations(Vec::new());
     }
 
     teardown.close_module_callbacks();
 
-    if runtime.registration_state_unknown() {
+    if runtime.host.registration_state_unknown() {
         let error = XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
         return incomplete(runtime);
     }
-    if !runtime.host_callbacks_detached() {
+    if !runtime.host.callbacks_detached() {
         let error = XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
@@ -187,7 +193,7 @@ where
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
     // are call-scoped borrows and cannot be stored in state.
-    let addin = if let Some(opening) = runtime.lifecycle_runtime().take_opening_for_rollback() {
+    let addin = if let Some(opening) = runtime.runtime_orchestrator().take_opening_for_rollback() {
         let (mut shared_state, layers, _config) = opening.into_parts();
         let quiesce = catch_unwind(AssertUnwindSafe(|| {
             runtime
@@ -202,12 +208,12 @@ where
             report_boundary_error("xlAutoOpen rollback quiesce", &error);
             // A failed quiesce cannot prove that shared-state-owned execution
             // resources have stopped. Preserve both parts until quarantine.
-            runtime.lifecycle_runtime().quarantine_layers(
+            runtime.runtime_orchestrator().quarantine_layers(
                 generation,
                 layers,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
-            runtime.lifecycle_runtime().quarantine_shared_state(
+            runtime.runtime_orchestrator().quarantine_shared_state(
                 generation,
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,

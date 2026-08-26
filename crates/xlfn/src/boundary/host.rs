@@ -1,14 +1,18 @@
 //! Excel lifecycle callback adapters.
 //!
-//! These functions are the only lifecycle entry points that translate host
-//! callbacks into the runtime protocol. Transition implementation remains in
-//! the parent module; this module owns the host-facing policy decisions.
+//! These functions are the only host-boundary entry points that translate
+//! Excel callbacks into the runtime protocol. They live beside the lifecycle
+//! domain but own host-facing policy rather than canonical state transitions.
 
-use super::{open_addin, quarantine_runtime, remove_addin, report_boundary_error};
 use crate::addin::Addin;
+use crate::boundary::report_boundary_error;
 use crate::diagnostics::AddinId;
+use crate::lifecycle::{HostLifecycleIntent, lifecycle_access_error};
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
+use crate::runtime_open::open_addin_boundary as open_addin;
+use crate::runtime_recovery::quarantine_runtime;
+use crate::runtime_transactions::remove_addin;
 
 /// Handles the generated `xlAutoOpen` boundary.
 pub(crate) fn host_auto_open<A>(
@@ -27,7 +31,7 @@ where
     let mut lifecycle = match runtime.bind_addin_lifecycle() {
         Ok(access) => access,
         Err(error) => {
-            let error = super::lifecycle_access_error(error);
+            let error = lifecycle_access_error(error);
             report_boundary_error("xlAutoOpen lifecycle thread", &error);
             quarantine_runtime(runtime);
             return 0;
@@ -35,7 +39,7 @@ where
     };
     let controlled_reload = runtime.phase() == crate::lifecycle::LifecyclePhase::Open;
     let removal_completed_before_open = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-        && runtime.host_intent() == super::HostLifecycleIntent::ExplicitRemovalComplete;
+        && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
     if controlled_reload {
         let result = remove_addin::<A>(runtime, &lifecycle);
         if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
@@ -44,13 +48,13 @@ where
         lifecycle = match runtime.bind_addin_lifecycle() {
             Ok(access) => access,
             Err(error) => {
-                let error = super::lifecycle_access_error(error);
+                let error = lifecycle_access_error(error);
                 report_boundary_error("xlAutoOpen lifecycle rebind", &error);
                 quarantine_runtime(runtime);
                 return 0;
             }
         };
-        runtime.lifecycle_runtime().clear_host_intent();
+        runtime.lifecycle_control().clear_host_intent();
     }
     let result = open_addin(runtime, &lifecycle, addin_id, version, target, descriptors);
     if controlled_reload
@@ -68,7 +72,7 @@ where
         // The old generation was already removed successfully, but Excel
         // attempted a new open before delivering its close hint. Preserve
         // the release marker so that the later hint can release the lease.
-        runtime.lifecycle_runtime().complete_explicit_removal();
+        runtime.lifecycle_control().complete_explicit_removal();
     }
     result
 }
@@ -79,20 +83,20 @@ where
     A: Addin,
 {
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-        && runtime.host_intent() == super::HostLifecycleIntent::ExplicitRemovalComplete
+        && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
     {
         if runtime.physical_unload_enabled() {
             if let Err(error) = runtime.release_module_residency() {
                 report_boundary_error("xlAutoClose module residency release", &error);
                 quarantine_runtime(runtime);
             } else {
-                runtime.lifecycle_runtime().clear_host_intent();
+                runtime.lifecycle_control().clear_host_intent();
             }
         } else {
             // A safe Addin may own executable sources outside framework
             // accounting. Keep the DLL resident unless the Addin explicitly
             // accepted the physical-unload contract.
-            runtime.lifecycle_runtime().clear_host_intent();
+            runtime.lifecycle_control().clear_host_intent();
         }
     }
     1
@@ -109,16 +113,16 @@ where
     let lifecycle = match runtime.bind_addin_lifecycle() {
         Ok(access) => access,
         Err(error) => {
-            let error = super::lifecycle_access_error(error);
+            let error = lifecycle_access_error(error);
             report_boundary_error("xlAutoRemove lifecycle thread", &error);
             quarantine_runtime(runtime);
             return 1;
         }
     };
-    runtime.lifecycle_runtime().request_explicit_removal();
+    runtime.lifecycle_control().request_explicit_removal();
     let result = remove_addin::<A>(runtime, &lifecycle);
     if result == 1 && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed {
-        runtime.lifecycle_runtime().complete_explicit_removal();
+        runtime.lifecycle_control().complete_explicit_removal();
     }
     1
 }

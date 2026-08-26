@@ -17,7 +17,7 @@ pub mod v1 {
     #[cfg(feature = "async")]
     use crate::cancellation::CancellationToken;
     use crate::error::{InputError, XllError, XllResult};
-    use crate::lifecycle::{host_auto_close, host_auto_open, host_auto_remove};
+    use crate::lifecycle_boundary::{host_auto_close, host_auto_open, host_auto_remove};
     use crate::reference::{ExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
@@ -294,7 +294,7 @@ pub mod v1 {
         }
         if let Err(error) = runtime.runtime().release_module_residency() {
             crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
-            runtime.runtime().lifecycle_runtime().quarantine();
+            runtime.runtime().runtime_orchestrator().quarantine();
         }
     }
 
@@ -311,7 +311,7 @@ pub mod v1 {
     ) -> i32 {
         let newly_acquired = match runtime.runtime().ensure_module_residency(module_anchor) {
             Ok(newly_acquired) => newly_acquired,
-            Err(error) => crate::lifecycle::fail_stop_module_residency(&error),
+            Err(error) => crate::boundary::fail_stop_module_residency(&error),
         };
         let parsed_id = match crate::diagnostics::AddinId::parse(addin_id) {
             Ok(id) => id,

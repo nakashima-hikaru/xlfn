@@ -1089,7 +1089,7 @@ mod tests {
     fn open_static_test_runtime() -> crate::runtime::StaticTestRuntime<()> {
         let fixture = crate::runtime::StaticTestRuntime::new();
         let runtime = fixture.runtime();
-        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
@@ -1424,7 +1424,7 @@ mod tests {
         });
 
         converting_rx.recv().unwrap();
-        assert!(runtime.lifecycle_runtime().begin_close());
+        assert!(runtime.runtime_orchestrator().begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
@@ -1446,7 +1446,7 @@ mod tests {
 
         let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
-        assert!(runtime.lifecycle_runtime().begin_close());
+        assert!(runtime.runtime_orchestrator().begin_close());
 
         let (drained_tx, drained_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
@@ -1468,7 +1468,7 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        assert!(runtime.lifecycle_runtime().begin_close());
+        assert!(runtime.runtime_orchestrator().begin_close());
 
         let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
@@ -1536,7 +1536,7 @@ mod tests {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let fixture = crate::runtime::StaticTestRuntime::<LayerTestAddin>::new();
         let runtime = fixture.runtime();
-        let mut open_attempt = runtime.lifecycle_runtime().begin_open().unwrap();
+        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish((), (Recorder(Arc::clone(&events)),));
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);

@@ -320,12 +320,7 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
         );
         #[cfg(any(test, feature = "refinement"))]
         if runtime.phase() != LifecyclePhase::Closed {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoOpen rollback close postcondition",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
-                },
-            );
+            super::lifecycle_invariant_violation("open rollback close postcondition");
         }
         #[cfg(any(test, feature = "refinement"))]
         runtime.mark_composition_terminal_pending();
@@ -398,12 +393,7 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         runtime.lifecycle.finish_closed(&mut control);
         #[cfg(any(test, feature = "refinement"))]
         if runtime.phase() != LifecyclePhase::Closed {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoRemove close postcondition",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                },
-            );
+            super::lifecycle_invariant_violation("final close postcondition");
         }
         #[cfg(any(test, feature = "refinement"))]
         if committed {
@@ -447,7 +437,8 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
         // removal request can take it over without minting a second close
         // authority.
         if let Some(module_closing) = self.module_closing.take() {
-            crate::lifecycle::LifecycleAuthority::new(self.runtime)
+            self.runtime
+                .lifecycle_control()
                 .install_module_closing(module_closing);
         }
         let mut control = self.runtime.lifecycle.access();
@@ -455,12 +446,7 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
             .lifecycle
             .release_removal_owner(&mut control, self.attempt);
         if control.removal_attempt().is_some() {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoRemove removal-owner release",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                },
-            );
+            super::lifecycle_invariant_violation("removal-owner release");
         }
         self.runtime.refinement.release_cleanup_owner(self.runtime);
         self.runtime.lifecycle.notify_all();

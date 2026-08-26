@@ -40,6 +40,7 @@ mod async_udf;
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub mod benchmark_support;
+mod boundary;
 #[cfg(feature = "unstable-cache")]
 mod cache;
 mod call;
@@ -75,6 +76,8 @@ mod host_api;
 mod host_callback;
 mod input_identity;
 mod lifecycle;
+#[path = "boundary/host.rs"]
+mod lifecycle_boundary;
 #[allow(
     unsafe_code,
     reason = "Win32 module residency management requires raw FFI calls"
@@ -97,7 +100,19 @@ mod return_value;
 pub mod rtd;
 mod runtime;
 mod runtime_components;
+#[path = "runtime/open.rs"]
+mod runtime_open;
+#[path = "runtime/open_txn.rs"]
+mod runtime_open_txn;
+mod runtime_orchestration;
+mod runtime_recovery;
 mod runtime_refinement;
+#[path = "runtime/rollback.rs"]
+mod runtime_rollback;
+#[path = "runtime/shutdown/pipeline.rs"]
+mod runtime_shutdown;
+#[path = "runtime/transactions.rs"]
+mod runtime_transactions;
 mod shutdown;
 #[cfg(any(test, feature = "refinement"))]
 mod shutdown_trace;
