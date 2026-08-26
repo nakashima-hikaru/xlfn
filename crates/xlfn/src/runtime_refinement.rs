@@ -39,17 +39,8 @@ impl RuntimeRefinementHooks {
         let _ = runtime;
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    #[inline]
-    pub(crate) fn event_linearized<A: Addin>(
-        &self,
-        runtime: &Runtime<A>,
-        event: crate::shutdown_trace::ShutdownEvent,
-    ) {
-        crate::module_runtime::ingress().with_linearization(|| self.event(runtime, event));
-    }
-
     #[cfg(all(feature = "async", any(test, feature = "refinement")))]
+    #[inline]
     pub(crate) fn async_stopped<A: Addin>(&self, runtime: &Runtime<A>) {
         // The async manager has already performed the concrete stop before
         // this observation is emitted.  The recorder must not infer whether
@@ -133,6 +124,59 @@ impl RuntimeRefinementHooks {
                 .trace
                 .get_or_init(|| Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new())),
         )
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn next_activity_id(&self) -> crate::shutdown_trace::ActivityId {
+        crate::shutdown_trace::ActivityId::fresh()
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn external_entered<A: Addin>(
+        &self,
+        runtime: &Runtime<A>,
+        id: crate::shutdown_trace::ActivityId,
+    ) {
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::EnterExternal { id },
+        );
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn external_left<A: Addin>(
+        &self,
+        runtime: &Runtime<A>,
+        id: crate::shutdown_trace::ActivityId,
+    ) {
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::LeaveExternal { id },
+        );
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn call_entered<A: Addin>(
+        &self,
+        runtime: &Runtime<A>,
+        id: crate::shutdown_trace::ActivityId,
+    ) {
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::EnterCall { id },
+        );
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn call_left<A: Addin>(
+        &self,
+        runtime: &Runtime<A>,
+        id: crate::shutdown_trace::ActivityId,
+    ) {
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::LeaveCall { id },
+        );
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -329,10 +373,6 @@ macro_rules! runtime_shutdown_events {
 }
 
 runtime_shutdown_events! {
-    external_entered => EnterExternal,
-    external_left => LeaveExternal,
-    call_entered => EnterCall,
-    call_left => LeaveCall,
     begin_close => BeginClose,
     returns_drained => ReturnsDrained,
     async_drained => AsyncDrained,
@@ -353,6 +393,6 @@ runtime_shutdown_events! {
 impl RuntimeRefinementHooks {
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn calls_drained<A: Addin>(&self, runtime: &Runtime<A>) {
-        self.event_linearized(runtime, crate::shutdown_trace::ShutdownEvent::CallsDrained);
+        self.event(runtime, crate::shutdown_trace::ShutdownEvent::CallsDrained);
     }
 }

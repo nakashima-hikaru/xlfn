@@ -13,10 +13,49 @@ private structure WireState where
   state : State
   deriving DecidableEq
 
+/-! Activity observations are deliberately kept separate from the ordered
+    certificate stream.  Activity observations describe ownership edges; the
+    order in which concurrent observers appended them is not a protocol
+    linearization order. -/
+private inductive Activity where
+  | enterExternal (id : Nat)
+  | leaveExternal (id : Nat)
+  | enterCall (id : Nat)
+  | leaveCall (id : Nat)
+  | createReturnBlock
+  | beginReturnFree
+  | releaseReturnBlock
+  | endReturnFree
+  | startAsyncTask
+  | endAsyncTask (completion : Completion)
+  | beginRtdOperation
+  | endRtdOperation
+  | addSubscription
+  | removeSubscription
+  | beginCallback
+  | endCallback
+  | addRtdClassFactory
+  | removeRtdClassFactory
+  | addRtdServer
+  | removeRtdServer
+  | lockRtdServer
+  | unlockRtdServer
+  | addHandle
+  | removeHandle
+  | addHandleObject
+  | removeHandleObject
+  | addHandlePin
+  | removeHandlePin
+  | enqueueDiagnostic
+  | flushDiagnostic
+  | discardDiagnostic
+  | recordCleanupIssue
+
 private structure WireTrace where
   generation : Nat
   initial : Resources
-  events : Array Event
+  activities : Array Activity
+  certificates : Array Event
   traceTruncated : Bool
   outcome : String
 
@@ -82,22 +121,37 @@ private def parseCompletion : Json → Except String Completion
   | .str "failed" => return .failed
   | json => throw s!"unknown async completion: {json}"
 
-private def simpleEvent : String → Option Event
+private def simpleCertificateEvent : String → Option Event
   | "registerFunction" => some .registerFunction
   | "unregisterFunction" => some .unregisterFunction
   | "registerEvent" => some .registerEvent
   | "unregisterEvent" => some .unregisterEvent
-  | "enterExternal" => some .enterExternal
-  | "leaveExternal" => some .leaveExternal
-  | "enterCall" => some .enterCall
-  | "leaveCall" => some .leaveCall
+  | "startAsyncExecutor" => some .startAsyncExecutor
+  | "stopAsyncExecutor" => some .stopAsyncExecutor
+  | "startDiagnostics" => some .startDiagnostics
+  | "stopDiagnostics" => some .stopDiagnostics
+  | "beginClose" => some .beginClose
+  | "callsDrained" => some .callsDrained
+  | "returnsDrained" => some .returnsDrained
+  | "asyncDrained" => some .asyncDrained
+  | "subscriptionsDrained" => some .subscriptionsDrained
+  | "closeCallbackGate" => some .closeCallbackGate
+  | "hostDetached" => some .hostDetached
+  | "proveGenerationUnique" => some .proveGenerationUnique
+  | "proveAddinQuiesced" => some .proveAddinQuiesced
+  | "generationReclaimed" => some .generationReclaimed
+  | "handlesDrained" => some .handlesDrained
+  | "diagnosticsDrained" => some .diagnosticsDrained
+  | "rtdDrained" => some .rtdDrained
+  | "finishClose" => some .finishClose
+  | _ => none
+
+private def simpleActivityEvent : String → Option Activity
   | "createReturnBlock" => some .createReturnBlock
   | "beginReturnFree" => some .beginReturnFree
   | "releaseReturnBlock" => some .releaseReturnBlock
   | "endReturnFree" => some .endReturnFree
-  | "startAsyncExecutor" => some .startAsyncExecutor
   | "startAsyncTask" => some .startAsyncTask
-  | "stopAsyncExecutor" => some .stopAsyncExecutor
   | "beginRtdOperation" => some .beginRtdOperation
   | "endRtdOperation" => some .endRtdOperation
   | "addSubscription" => some .addSubscription
@@ -116,34 +170,15 @@ private def simpleEvent : String → Option Event
   | "removeHandleObject" => some .removeHandleObject
   | "addHandlePin" => some .addHandlePin
   | "removeHandlePin" => some .removeHandlePin
-  | "startDiagnostics" => some .startDiagnostics
   | "enqueueDiagnostic" => some .enqueueDiagnostic
   | "flushDiagnostic" => some .flushDiagnostic
   | "discardDiagnostic" => some .discardDiagnostic
-  | "stopDiagnostics" => some .stopDiagnostics
   | "recordCleanupIssue" => some .recordCleanupIssue
-  | "beginClose" => some .beginClose
-  | "callsDrained" => some .callsDrained
-  | "returnsDrained" => some .returnsDrained
-  | "asyncDrained" => some .asyncDrained
-  | "subscriptionsDrained" => some .subscriptionsDrained
-  | "closeCallbackGate" => some .closeCallbackGate
-  | "hostDetached" => some .hostDetached
-  | "proveGenerationUnique" => some .proveGenerationUnique
-  | "proveAddinQuiesced" => some .proveAddinQuiesced
-  | "generationReclaimed" => some .generationReclaimed
-  | "handlesDrained" => some .handlesDrained
-  | "diagnosticsDrained" => some .diagnosticsDrained
-  | "rtdDrained" => some .rtdDrained
-  | "finishClose" => some .finishClose
   | _ => none
 
-private def parseEvent : Json → Except String Event
+private def parseCertificateEvent : Json → Except String Event
   | json =>
       match json.getTag? with
-      | some "endAsyncTask" => do
-          let payload ← json.getObjVal? "endAsyncTask"
-          return .endAsyncTask (← parseCompletion payload)
       | some "quarantine" => do
           let payload ← json.getObjVal? "quarantine"
           return .quarantine (← parseFailure payload)
@@ -151,10 +186,34 @@ private def parseEvent : Json → Except String Event
           let payload ← json.getObjVal? "failStop"
           return .failStop (← parseFailure payload)
       | some tag =>
-          match simpleEvent tag with
+          match simpleCertificateEvent tag with
           | some event => return event
           | none => throw s!"unknown shutdown event: {tag}"
       | none => throw s!"shutdown event must be a string or tagged object: {json}"
+
+private def parseActivityEvent : Json → Except String Activity
+  | json =>
+      match json.getTag? with
+      | some "enterExternal" => do
+          let payload ← json.getObjVal? "enterExternal"
+          return .enterExternal (← field payload "id")
+      | some "leaveExternal" => do
+          let payload ← json.getObjVal? "leaveExternal"
+          return .leaveExternal (← field payload "id")
+      | some "enterCall" => do
+          let payload ← json.getObjVal? "enterCall"
+          return .enterCall (← field payload "id")
+      | some "leaveCall" => do
+          let payload ← json.getObjVal? "leaveCall"
+          return .leaveCall (← field payload "id")
+      | some "endAsyncTask" => do
+          let payload ← json.getObjVal? "endAsyncTask"
+          return .endAsyncTask (← parseCompletion payload)
+      | some tag =>
+          match simpleActivityEvent tag with
+          | some event => return event
+          | none => throw s!"unknown shutdown activity: {tag}"
+      | none => throw s!"shutdown activity must be a string or tagged object: {json}"
 
 private def parseResources (json : Json) : Except String Resources := do
   let ingressOpen : Bool ← field json "ingressOpen"
@@ -215,14 +274,158 @@ private def parseResources (json : Json) : Except String Resources := do
   }
 
 private def parseTrace (json : Json) : Except String WireTrace := do
-  let eventsJson : Array Json ← field json "events"
+  let activitiesJson : Array Json ← field json "activities"
+  let certificatesJson : Array Json ← field json "certificates"
   return {
     generation := (← field json "generation")
     initial := (← parseResources (← json.getObjVal? "initial"))
-    events := (← eventsJson.mapM parseEvent)
+    activities := (← activitiesJson.mapM parseActivityEvent)
+    certificates := (← certificatesJson.mapM parseCertificateEvent)
     traceTruncated := (← field json "trace_truncated")
     outcome := (← field json "outcome")
   }
+
+private def removeId (id : Nat) : List Nat → Option (List Nat)
+  | [] => none
+  | head :: tail =>
+      if id = head then
+        some tail
+      else
+        match removeId id tail with
+        | some remaining => some (head :: remaining)
+        | none => none
+
+private def uniqueIds : List Nat → Bool
+  | [] => true
+  | head :: tail =>
+      !tail.contains head && uniqueIds tail
+
+private def idsFor : (Activity → Option Nat) → Array Activity → List Nat
+  | selector, activities => activities.toList.filterMap selector
+
+private def checkActivityPair (label : String) (enters leaves : List Nat) :
+    Except String Unit := do
+  if !uniqueIds enters then
+    throw s!"duplicate {label} activity identifier"
+  if !uniqueIds leaves then
+    throw s!"duplicate {label} release identifier"
+  for id in leaves do
+    if id ∉ enters then
+      throw s!"{label} release has no matching activity"
+
+private def countActivity (predicate : Activity → Bool) : List Activity → Nat
+  | [] => 0
+  | head :: tail =>
+      (if predicate head then 1 else 0) + countActivity predicate tail
+
+private def checkCountPair (label : String) (starts stops : Nat) : Except String Unit := do
+  if stops > starts then
+    throw s!"{label} activity balance underflow"
+
+private def checkActivities (activities : Array Activity) : Except String Unit := do
+  let externalEnters := idsFor (fun activity =>
+    match activity with
+    | .enterExternal id => some id
+    | _ => none) activities
+  let externalLeaves := idsFor (fun activity =>
+    match activity with
+    | .leaveExternal id => some id
+    | _ => none) activities
+  let callEnters := idsFor (fun activity =>
+    match activity with
+    | .enterCall id => some id
+    | _ => none) activities
+  let callLeaves := idsFor (fun activity =>
+    match activity with
+    | .leaveCall id => some id
+    | _ => none) activities
+  checkActivityPair "external entry" externalEnters externalLeaves
+  checkActivityPair "call" callEnters callLeaves
+  let observations := activities.toList
+  checkCountPair "return block" 
+    (countActivity (fun activity => match activity with
+      | .createReturnBlock => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .releaseReturnBlock => true
+      | _ => false) observations)
+  checkCountPair "return free" 
+    (countActivity (fun activity => match activity with
+      | .beginReturnFree => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .endReturnFree => true
+      | _ => false) observations)
+  checkCountPair "async task" 
+    (countActivity (fun activity => match activity with
+      | .startAsyncTask => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .endAsyncTask _ => true
+      | _ => false) observations)
+  checkCountPair "RTD operation" 
+    (countActivity (fun activity => match activity with
+      | .beginRtdOperation => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .endRtdOperation => true
+      | _ => false) observations)
+  checkCountPair "subscription" 
+    (countActivity (fun activity => match activity with
+      | .addSubscription => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeSubscription => true
+      | _ => false) observations)
+  checkCountPair "callback" 
+    (countActivity (fun activity => match activity with
+      | .beginCallback => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .endCallback => true
+      | _ => false) observations)
+  checkCountPair "RTD class factory" 
+    (countActivity (fun activity => match activity with
+      | .addRtdClassFactory => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeRtdClassFactory => true
+      | _ => false) observations)
+  checkCountPair "RTD server" 
+    (countActivity (fun activity => match activity with
+      | .addRtdServer => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeRtdServer => true
+      | _ => false) observations)
+  checkCountPair "RTD server lock" 
+    (countActivity (fun activity => match activity with
+      | .lockRtdServer => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .unlockRtdServer => true
+      | _ => false) observations)
+  checkCountPair "handle" 
+    (countActivity (fun activity => match activity with
+      | .addHandle => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeHandle => true
+      | _ => false) observations)
+  checkCountPair "handle object" 
+    (countActivity (fun activity => match activity with
+      | .addHandleObject => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeHandleObject => true
+      | _ => false) observations)
+  checkCountPair "handle pin" 
+    (countActivity (fun activity => match activity with
+      | .addHandlePin => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .removeHandlePin => true
+      | _ => false) observations)
 
 private def checkEventWithProof (current : WireState) (event : Event) :
     Except String (Subtype fun next => wireRefinement.concreteStep current event next) := do
@@ -266,6 +469,7 @@ private def checkTrace (json : Json) : Except String Unit := do
   let trace ← parseTrace json
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"
+  checkActivities trace.activities
   let initial : WireState := {
     generation := trace.generation
     state := State.opened trace.initial
@@ -274,12 +478,12 @@ private def checkTrace (json : Json) : Except String Unit := do
     let hInitialOpen := wire_initial_open_of_bool hInitial
     if trace.traceTruncated then
       throw "shutdown trace exceeded its in-memory event budget"
-    let replayed ← replayEvents trace.events.toList initial
+    let replayed ← replayEvents trace.certificates.toList initial
     let ⟨final, hSteps⟩ := replayed
     match trace.outcome with
     | "in_progress" => return ()
     | "returned_success" =>
-        checkReturnedSuccess initial final trace.events.toList hInitialOpen hSteps
+        checkReturnedSuccess initial final trace.certificates.toList hInitialOpen hSteps
     | "fail_stopped" =>
         match final.state.phase with
         | .failStopped _ => return ()

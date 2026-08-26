@@ -1138,8 +1138,11 @@ mod tests {
         let mut opening = runtime.lifecycle_runtime().begin_open().unwrap();
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        runtime.refinement_hooks().call_entered(&runtime);
-        runtime.refinement_hooks().call_left(&runtime);
+        let activity_id = runtime.refinement_hooks().next_activity_id();
+        runtime
+            .refinement_hooks()
+            .call_entered(&runtime, activity_id);
+        runtime.refinement_hooks().call_left(&runtime, activity_id);
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         assert_commit_open_precedes_lift_shutdown(&runtime.composition_trace_json());

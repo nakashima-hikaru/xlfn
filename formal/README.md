@@ -302,7 +302,8 @@ Executable Lean checkers validate trace fixtures and Rust-produced execution tra
 lake exe shutdown_trace_checker < shutdown-trace.json
 ```
 
-Validates staged shutdown event ordering and resource quiescence certificates.
+Validates ordered lifecycle certificates and order-independent activity
+ownership observations against the independent shutdown specification.
 
 ### Composition trace checker
 

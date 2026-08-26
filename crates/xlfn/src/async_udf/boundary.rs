@@ -37,21 +37,24 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     T: ExcelReturn + Send + 'static,
 {
     let ingress = match crate::module_runtime::ingress()
-        .enter_udf_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_entered(runtime);
-        })
+        .enter_udf_with(|| {})
         .into_admitted()
     {
         Ok(ingress) => ingress,
         Err(_) => return,
     };
+    #[cfg(any(test, feature = "refinement"))]
+    runtime
+        .refinement_hooks()
+        .external_entered(runtime, ingress.activity_id());
 
     let call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_left(runtime);
+            runtime
+                .refinement_hooks()
+                .external_left(runtime, ingress.activity_id());
             return;
         }
     };
@@ -70,7 +73,9 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     drop(call);
 
     #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().external_left(runtime);
+    runtime
+        .refinement_hooks()
+        .external_left(runtime, ingress.activity_id());
 }
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(

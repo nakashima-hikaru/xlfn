@@ -1,4 +1,4 @@
-use crate::shutdown_trace::{ShutdownEvent, ShutdownResources};
+use crate::shutdown_trace::{CertificateEvent, ShutdownResources};
 use parking_lot::Mutex;
 use serde::Serialize;
 
@@ -25,7 +25,7 @@ pub(crate) enum CompositionEvent {
         attempt: u64,
         resources: ShutdownResources,
     },
-    LiftShutdown(ShutdownEvent),
+    LiftShutdown(CertificateEvent),
     FinishCommittedShutdown,
     PublishCommittedClosed,
     RetireCommittedShutdown,

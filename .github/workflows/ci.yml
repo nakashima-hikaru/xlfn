@@ -294,6 +294,13 @@ jobs:
                     formal/.lake/build/bin/composition_trace_checker < "$trace"
                   done
 
+            - name: Validate shutdown observation fixtures
+              shell: bash
+              run: |
+                  for trace in formal/fixtures/shutdown/*.json; do
+                    formal/.lake/build/bin/shutdown_trace_checker < "$trace"
+                  done
+
             - name: Validate Windows RTD shutdown traces
               shell: bash
               run: |

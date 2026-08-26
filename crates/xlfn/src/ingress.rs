@@ -219,13 +219,6 @@ pub(crate) struct ExportIngress {
     // guards leave. Publication takes this lock so the zero-active check and
     // the final OPEN transition cannot be overtaken by a new entry.
     opening_lock: Mutex<()>,
-    #[cfg(any(test, feature = "refinement"))]
-    // Refinement hooks must be serialized with the ingress CAS. Otherwise a
-    // thread accepted by `enter` can be descheduled before its trace event is
-    // recorded and let `begin_close` overtake that event.
-    linearization_lock: Mutex<()>,
-    #[cfg(test)]
-    close_waiters: AtomicUsize,
     #[cfg(test)]
     test_epoch_active: AtomicUsize,
 }
@@ -264,11 +257,18 @@ impl<'a> ExportEntry<'a> {
 }
 
 impl AdmittedExport<'_> {
-    pub(crate) fn with_linearization<F, R>(&self, operation: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        self.guard.ingress.with_linearization(operation)
+    pub(crate) fn assert_active(&self) {
+        assert!(
+            self.guard.stripe.is_some(),
+            "admitted export must own an active ingress reservation"
+        );
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn activity_id(&self) -> crate::shutdown_trace::ActivityId {
+        self.guard
+            .activity_id
+            .expect("admitted export has an activity identity")
     }
 }
 
@@ -299,10 +299,6 @@ impl ExportIngress {
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             opening_lock: Mutex::new(()),
-            #[cfg(any(test, feature = "refinement"))]
-            linearization_lock: Mutex::new(()),
-            #[cfg(test)]
-            close_waiters: AtomicUsize::new(0),
             #[cfg(test)]
             test_epoch_active: AtomicUsize::new(0),
         }
@@ -363,11 +359,6 @@ impl ExportIngress {
             .opening_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        #[cfg(any(test, feature = "refinement"))]
-        let _linearization_guard = self
-            .linearization_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
 
         self.wait_for_quiescence();
 
@@ -390,8 +381,8 @@ impl ExportIngress {
         }
     }
 
-    /// Attempts to enter an export entry and runs `on_accepted` at the same
-    /// refinement linearization point as the accepting state transition.
+    /// Attempts to enter an export entry and runs `on_accepted` after the
+    /// accepting state transition has reserved its striped counter.
     pub(crate) fn enter_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
@@ -402,11 +393,6 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "refinement"))]
-        let _linearization_guard = self
-            .linearization_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
             return ExportEntry::Rejected(self.rejected_guard());
@@ -422,6 +408,8 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
+        #[cfg(any(test, feature = "refinement"))]
+        let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
         if accepted {
             let hook = on_accepted
                 .take()
@@ -433,6 +421,8 @@ impl ExportIngress {
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
             udf: false,
+            #[cfg(any(test, feature = "refinement"))]
+            activity_id,
         };
         if accepted {
             ExportEntry::Admitted(AdmittedExport { guard: entry })
@@ -441,8 +431,8 @@ impl ExportIngress {
         }
     }
 
-    /// Attempts to enter a UDF export entry and runs `on_accepted` at the same
-    /// refinement linearization point as the accepting state transition.
+    /// Attempts to enter a UDF export entry and runs `on_accepted` after the
+    /// accepting state transition has reserved its striped counter.
     pub(crate) fn enter_udf_with<F>(&self, on_accepted: F) -> ExportEntry<'_>
     where
         F: FnOnce(),
@@ -453,11 +443,6 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "refinement"))]
-        let _linearization_guard = self
-            .linearization_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
             return ExportEntry::Rejected(self.rejected_guard());
@@ -474,6 +459,8 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
+        #[cfg(any(test, feature = "refinement"))]
+        let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
         if accepted {
             let hook = on_accepted
                 .take()
@@ -485,6 +472,8 @@ impl ExportIngress {
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
             udf: true,
+            #[cfg(any(test, feature = "refinement"))]
+            activity_id,
         };
         if accepted {
             ExportEntry::Admitted(AdmittedExport { guard: entry })
@@ -493,8 +482,8 @@ impl ExportIngress {
         }
     }
 
-    /// Stops accepting new export calls and runs `on_closed` at the same
-    /// refinement linearization point as the closing state transition.
+    /// Stops accepting new export calls and runs `on_closed` after the
+    /// operational closing transition succeeds.
     pub(crate) fn begin_close_with<F>(&self, on_closed: F)
     where
         F: FnOnce(),
@@ -517,21 +506,12 @@ impl ExportIngress {
         G: FnOnce(),
     {
         on_attempt();
-        #[cfg(test)]
-        self.close_waiters.fetch_add(1, Ordering::AcqRel);
         let observed_phase = self.phase.load(Ordering::Acquire);
         let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        #[cfg(any(test, feature = "refinement"))]
-        let _linearization_guard = self
-            .linearization_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        #[cfg(test)]
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.close_waiters);
         with_diagnostic_linearization(|| {
             let mut on_closed = Some(on_closed);
             let mut observed = self.phase.load(Ordering::Acquire);
@@ -554,20 +534,6 @@ impl ExportIngress {
                 }
             }
         });
-    }
-
-    /// Runs a refinement-sensitive operation in the same serialization domain
-    /// as ingress admission and close initiation.
-    pub(crate) fn with_linearization<F, R>(&self, operation: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        #[cfg(any(test, feature = "refinement"))]
-        let _linearization_guard = self
-            .linearization_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        operation()
     }
 
     fn wait_for_quiescence(&self) {
@@ -669,6 +635,8 @@ impl ExportIngress {
                 epoch: self.epoch.load(Ordering::Acquire),
                 stripe: None,
                 udf: false,
+                #[cfg(any(test, feature = "refinement"))]
+                activity_id: None,
             },
         }
     }
@@ -690,6 +658,8 @@ pub(crate) struct ExportCallGuard<'a> {
     epoch: u64,
     stripe: Option<usize>,
     udf: bool,
+    #[cfg(any(test, feature = "refinement"))]
+    activity_id: Option<crate::shutdown_trace::ActivityId>,
 }
 
 impl Drop for ExportCallGuard<'_> {
@@ -760,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn close_cannot_overtake_an_accepted_entry_hook() {
+    fn close_progresses_while_accepted_entry_observation_is_paused() {
         let ingress = Arc::new(ExportIngress::new());
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
@@ -787,23 +757,14 @@ mod tests {
             );
         });
         close_attempt_rx.recv().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while ingress.close_waiters.load(Ordering::Acquire) == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "close thread did not reach the linearization lock"
-            );
-            std::thread::yield_now();
-        }
-        assert!(matches!(
-            closed_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
+        closed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("close must not wait for an observation hook");
+        assert_eq!(ingress.phase(), PHASE_CLOSING);
 
         release_hook_tx.send(()).unwrap();
         entry.join().unwrap();
         close.join().unwrap();
-        closed_rx.recv().unwrap();
         assert_eq!(ingress.phase(), PHASE_CLOSING);
     }
 

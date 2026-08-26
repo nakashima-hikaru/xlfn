@@ -346,7 +346,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
     #[cfg(test)]
     pub(crate) fn begin_close(&self) -> bool {
         let mut control = self.runtime.lifecycle.access();
-        let should_close = crate::module_runtime::ingress().with_linearization(|| {
+        let should_close = {
             if matches!(
                 control.phase(),
                 crate::lifecycle::LifecyclePhase::Opening | crate::lifecycle::LifecyclePhase::Open
@@ -357,7 +357,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
             } else {
                 false
             }
-        });
+        };
         if should_close {
             let _ = self.take_module_closing_for_test(&mut control);
         }
@@ -372,7 +372,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
         self.runtime.return_protocol.close_admission();
         let mut request_recorded = false;
         loop {
-            let decision = crate::module_runtime::ingress().with_linearization(|| {
+            let decision = 'decision: {
                 match wait_guard.phase() {
                     crate::lifecycle::LifecyclePhase::Closed => {
                         if wait_guard.removal_attempt().is_none()
@@ -381,7 +381,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
                             self.runtime
                                 .refinement
                                 .request_final_close(self.runtime, &mut request_recorded);
-                            return Some(None);
+                            break 'decision Some(None);
                         }
                         if wait_guard.removal_attempt().is_none() {
                             self.runtime.lifecycle.request_closing(&mut wait_guard);
@@ -393,7 +393,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
                     | crate::lifecycle::LifecyclePhase::OpenRollbackPending => {
                         self.runtime.lifecycle.request_closing(&mut wait_guard);
                     }
-                    crate::lifecycle::LifecyclePhase::Quarantined => return Some(None),
+                    crate::lifecycle::LifecyclePhase::Quarantined => break 'decision Some(None),
                 }
 
                 if !request_recorded {
@@ -426,7 +426,7 @@ impl<'runtime, A: Addin> LifecycleAuthority<'runtime, A> {
                 } else {
                     None
                 }
-            });
+            };
             match decision {
                 Some(Some(attempt)) => {
                     let module_closing = self.take_module_closing_for_owner(&mut wait_guard);

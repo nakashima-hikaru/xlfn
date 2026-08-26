@@ -1,4 +1,6 @@
-//! Passive shutdown observations emitted at operational linearization points.
+//! Passive shutdown observations emitted after concrete operational
+//! transitions. Certificate observations retain lifecycle order; activity
+//! observations are ownership evidence and do not define a total order.
 //!
 //! This module deliberately contains no shutdown state machine.  The runtime
 //! owns concrete lifecycle state, ownership, and quiescence certificates; the
@@ -15,6 +17,23 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ActivityId(u64);
+
+impl ActivityId {
+    pub(crate) fn fresh() -> Self {
+        let id = NEXT_ACTIVITY_ID.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            std::process::abort();
+        }
+        Self(id)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,10 +167,10 @@ pub(crate) enum ShutdownEvent {
     UnregisterFunction,
     RegisterEvent,
     UnregisterEvent,
-    EnterExternal,
-    LeaveExternal,
-    EnterCall,
-    LeaveCall,
+    EnterExternal { id: ActivityId },
+    LeaveExternal { id: ActivityId },
+    EnterCall { id: ActivityId },
+    LeaveCall { id: ActivityId },
     CreateReturnBlock,
     BeginReturnFree,
     ReleaseReturnBlock,
@@ -202,6 +221,207 @@ pub(crate) enum ShutdownEvent {
     FailStop(ShutdownFailure),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ActivityEvent {
+    EnterExternal { id: ActivityId },
+    LeaveExternal { id: ActivityId },
+    EnterCall { id: ActivityId },
+    LeaveCall { id: ActivityId },
+    CreateReturnBlock,
+    BeginReturnFree,
+    ReleaseReturnBlock,
+    EndReturnFree,
+    StartAsyncTask,
+    EndAsyncTask(Completion),
+    BeginRtdOperation,
+    EndRtdOperation,
+    AddSubscription,
+    RemoveSubscription,
+    BeginCallback,
+    EndCallback,
+    AddRtdClassFactory,
+    RemoveRtdClassFactory,
+    AddRtdServer,
+    RemoveRtdServer,
+    LockRtdServer,
+    UnlockRtdServer,
+    AddHandle,
+    RemoveHandle,
+    AddHandleObject,
+    RemoveHandleObject,
+    AddHandlePin,
+    RemoveHandlePin,
+    EnqueueDiagnostic,
+    FlushDiagnostic,
+    DiscardDiagnostic,
+    RecordCleanupIssue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CertificateEvent {
+    RegisterFunction,
+    UnregisterFunction,
+    RegisterEvent,
+    UnregisterEvent,
+    StartAsyncExecutor,
+    StopAsyncExecutor,
+    StartDiagnostics,
+    StopDiagnostics,
+    BeginClose,
+    CallsDrained,
+    ReturnsDrained,
+    AsyncDrained,
+    SubscriptionsDrained,
+    CloseCallbackGate,
+    HostDetached,
+    ProveGenerationUnique,
+    ProveAddinQuiesced,
+    GenerationReclaimed,
+    HandlesDrained,
+    DiagnosticsDrained,
+    RtdDrained,
+    FinishClose,
+    Quarantine(ShutdownFailure),
+    FailStop(ShutdownFailure),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ShutdownObservation {
+    Activity(ActivityEvent),
+    Certificate(CertificateEvent),
+}
+
+impl ShutdownEvent {
+    fn into_observation(self) -> ShutdownObservation {
+        match self {
+            Self::EnterExternal { id } => {
+                ShutdownObservation::Activity(ActivityEvent::EnterExternal { id })
+            }
+            Self::LeaveExternal { id } => {
+                ShutdownObservation::Activity(ActivityEvent::LeaveExternal { id })
+            }
+            Self::EnterCall { id } => {
+                ShutdownObservation::Activity(ActivityEvent::EnterCall { id })
+            }
+            Self::LeaveCall { id } => {
+                ShutdownObservation::Activity(ActivityEvent::LeaveCall { id })
+            }
+            Self::RegisterFunction => {
+                ShutdownObservation::Certificate(CertificateEvent::RegisterFunction)
+            }
+            Self::UnregisterFunction => {
+                ShutdownObservation::Certificate(CertificateEvent::UnregisterFunction)
+            }
+            Self::RegisterEvent => {
+                ShutdownObservation::Certificate(CertificateEvent::RegisterEvent)
+            }
+            Self::UnregisterEvent => {
+                ShutdownObservation::Certificate(CertificateEvent::UnregisterEvent)
+            }
+            Self::StartAsyncExecutor => {
+                ShutdownObservation::Certificate(CertificateEvent::StartAsyncExecutor)
+            }
+            Self::StopAsyncExecutor => {
+                ShutdownObservation::Certificate(CertificateEvent::StopAsyncExecutor)
+            }
+            Self::StartDiagnostics => {
+                ShutdownObservation::Certificate(CertificateEvent::StartDiagnostics)
+            }
+            Self::StopDiagnostics => {
+                ShutdownObservation::Certificate(CertificateEvent::StopDiagnostics)
+            }
+            Self::BeginClose => ShutdownObservation::Certificate(CertificateEvent::BeginClose),
+            Self::CallsDrained => ShutdownObservation::Certificate(CertificateEvent::CallsDrained),
+            Self::ReturnsDrained => {
+                ShutdownObservation::Certificate(CertificateEvent::ReturnsDrained)
+            }
+            Self::AsyncDrained => ShutdownObservation::Certificate(CertificateEvent::AsyncDrained),
+            Self::SubscriptionsDrained => {
+                ShutdownObservation::Certificate(CertificateEvent::SubscriptionsDrained)
+            }
+            Self::CloseCallbackGate => {
+                ShutdownObservation::Certificate(CertificateEvent::CloseCallbackGate)
+            }
+            Self::HostDetached => ShutdownObservation::Certificate(CertificateEvent::HostDetached),
+            Self::ProveGenerationUnique => {
+                ShutdownObservation::Certificate(CertificateEvent::ProveGenerationUnique)
+            }
+            Self::ProveAddinQuiesced => {
+                ShutdownObservation::Certificate(CertificateEvent::ProveAddinQuiesced)
+            }
+            Self::GenerationReclaimed => {
+                ShutdownObservation::Certificate(CertificateEvent::GenerationReclaimed)
+            }
+            Self::HandlesDrained => {
+                ShutdownObservation::Certificate(CertificateEvent::HandlesDrained)
+            }
+            Self::DiagnosticsDrained => {
+                ShutdownObservation::Certificate(CertificateEvent::DiagnosticsDrained)
+            }
+            Self::RtdDrained => ShutdownObservation::Certificate(CertificateEvent::RtdDrained),
+            Self::FinishClose => ShutdownObservation::Certificate(CertificateEvent::FinishClose),
+            Self::Quarantine(reason) => {
+                ShutdownObservation::Certificate(CertificateEvent::Quarantine(reason))
+            }
+            Self::FailStop(reason) => {
+                ShutdownObservation::Certificate(CertificateEvent::FailStop(reason))
+            }
+            Self::CreateReturnBlock => {
+                ShutdownObservation::Activity(ActivityEvent::CreateReturnBlock)
+            }
+            Self::BeginReturnFree => ShutdownObservation::Activity(ActivityEvent::BeginReturnFree),
+            Self::ReleaseReturnBlock => {
+                ShutdownObservation::Activity(ActivityEvent::ReleaseReturnBlock)
+            }
+            Self::EndReturnFree => ShutdownObservation::Activity(ActivityEvent::EndReturnFree),
+            Self::StartAsyncTask => ShutdownObservation::Activity(ActivityEvent::StartAsyncTask),
+            Self::EndAsyncTask(completion) => {
+                ShutdownObservation::Activity(ActivityEvent::EndAsyncTask(completion))
+            }
+            Self::BeginRtdOperation => {
+                ShutdownObservation::Activity(ActivityEvent::BeginRtdOperation)
+            }
+            Self::EndRtdOperation => ShutdownObservation::Activity(ActivityEvent::EndRtdOperation),
+            Self::AddSubscription => ShutdownObservation::Activity(ActivityEvent::AddSubscription),
+            Self::RemoveSubscription => {
+                ShutdownObservation::Activity(ActivityEvent::RemoveSubscription)
+            }
+            Self::BeginCallback => ShutdownObservation::Activity(ActivityEvent::BeginCallback),
+            Self::EndCallback => ShutdownObservation::Activity(ActivityEvent::EndCallback),
+            Self::AddRtdClassFactory => {
+                ShutdownObservation::Activity(ActivityEvent::AddRtdClassFactory)
+            }
+            Self::RemoveRtdClassFactory => {
+                ShutdownObservation::Activity(ActivityEvent::RemoveRtdClassFactory)
+            }
+            Self::AddRtdServer => ShutdownObservation::Activity(ActivityEvent::AddRtdServer),
+            Self::RemoveRtdServer => ShutdownObservation::Activity(ActivityEvent::RemoveRtdServer),
+            Self::LockRtdServer => ShutdownObservation::Activity(ActivityEvent::LockRtdServer),
+            Self::UnlockRtdServer => ShutdownObservation::Activity(ActivityEvent::UnlockRtdServer),
+            Self::AddHandle => ShutdownObservation::Activity(ActivityEvent::AddHandle),
+            Self::RemoveHandle => ShutdownObservation::Activity(ActivityEvent::RemoveHandle),
+            Self::AddHandleObject => ShutdownObservation::Activity(ActivityEvent::AddHandleObject),
+            Self::RemoveHandleObject => {
+                ShutdownObservation::Activity(ActivityEvent::RemoveHandleObject)
+            }
+            Self::AddHandlePin => ShutdownObservation::Activity(ActivityEvent::AddHandlePin),
+            Self::RemoveHandlePin => ShutdownObservation::Activity(ActivityEvent::RemoveHandlePin),
+            Self::EnqueueDiagnostic => {
+                ShutdownObservation::Activity(ActivityEvent::EnqueueDiagnostic)
+            }
+            Self::FlushDiagnostic => ShutdownObservation::Activity(ActivityEvent::FlushDiagnostic),
+            Self::DiscardDiagnostic => {
+                ShutdownObservation::Activity(ActivityEvent::DiscardDiagnostic)
+            }
+            Self::RecordCleanupIssue => {
+                ShutdownObservation::Activity(ActivityEvent::RecordCleanupIssue)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TraceOutcome {
     InProgress,
@@ -226,7 +446,9 @@ impl TraceOutcome {
 pub(crate) struct ShutdownTrace {
     pub(crate) generation: u64,
     pub(crate) initial: ShutdownResources,
-    pub(crate) events: Vec<ShutdownEvent>,
+    pub(crate) activities: Vec<ActivityEvent>,
+    pub(crate) certificates: Vec<CertificateEvent>,
+    #[serde(rename = "trace_truncated")]
     pub(crate) trace_truncated: bool,
     pub(crate) outcome: String,
 }
@@ -253,7 +475,8 @@ const MAX_TRACE_EVENTS: usize = 16_384;
 struct TraceSession {
     generation: u64,
     initial: ShutdownResources,
-    events: Vec<ShutdownEvent>,
+    activities: Vec<ActivityEvent>,
+    certificates: Vec<CertificateEvent>,
     trace_truncated: bool,
     outcome: TraceOutcome,
 }
@@ -300,46 +523,68 @@ impl ShutdownTraceRecorder {
         *state = RecorderState::Recording(TraceSession {
             generation,
             initial,
-            events: Vec::new(),
+            activities: Vec::new(),
+            certificates: Vec::new(),
             trace_truncated: false,
             outcome: TraceOutcome::InProgress,
         });
         Ok(())
     }
 
-    /// Record an event that the operational path has already performed.
+    /// Record an observation that the operational path has already produced.
     ///
     /// No abstract phase, resource predicate, or event precondition is
     /// evaluated here.  The event is also lifted into the composition trace
     /// as a wire observation, preserving the existing composition boundary.
     pub(crate) fn record(&self, event: ShutdownEvent) {
-        let should_lift = {
+        let observation = event.into_observation();
+        let mut lifted_certificate = None;
+        let mut terminal_outcome = None;
+        {
             let mut state = self.state.lock();
             let RecorderState::Recording(session) = &mut *state else {
                 return;
             };
-            if session.events.len() < MAX_TRACE_EVENTS {
-                session.events.push(event.clone());
-            } else {
-                session.trace_truncated = true;
-            }
-            let terminal_outcome = match event {
-                ShutdownEvent::Quarantine(_) => Some(TraceOutcome::Quarantined),
-                ShutdownEvent::FailStop(_) => Some(TraceOutcome::FailStopped),
-                _ => None,
-            };
-            if let Some(outcome) = terminal_outcome {
-                let previous = std::mem::replace(&mut *state, RecorderState::Idle);
-                if let RecorderState::Recording(mut session) = previous {
-                    session.outcome = outcome;
-                    *state = RecorderState::Terminal(session);
+            match observation {
+                ShutdownObservation::Activity(activity) => {
+                    if session.activities.len() < MAX_TRACE_EVENTS {
+                        session.activities.push(activity);
+                    } else {
+                        session.trace_truncated = true;
+                    }
+                }
+                ShutdownObservation::Certificate(certificate) => {
+                    if session.certificates.len() < MAX_TRACE_EVENTS {
+                        session.certificates.push(certificate.clone());
+                    } else {
+                        session.trace_truncated = true;
+                    }
+                    terminal_outcome = match &certificate {
+                        CertificateEvent::Quarantine(_) => Some(TraceOutcome::Quarantined),
+                        CertificateEvent::FailStop(_) => Some(TraceOutcome::FailStopped),
+                        _ => None,
+                    };
+                    if !matches!(&certificate, CertificateEvent::FinishClose) {
+                        lifted_certificate = Some(certificate);
+                    }
                 }
             }
-            !matches!(event, ShutdownEvent::FinishClose)
-        };
-        if should_lift && let Some(composition) = self.composition.lock().as_ref().cloned() {
+            if let Some(outcome) = terminal_outcome {
+                session.outcome = outcome;
+            }
+        }
+        if terminal_outcome.is_some() {
+            let mut state = self.state.lock();
+            let previous = std::mem::replace(&mut *state, RecorderState::Idle);
+            if let RecorderState::Recording(session) = previous {
+                *state = RecorderState::Terminal(session);
+            }
+        }
+        if let Some(certificate) = lifted_certificate
+            && let Some(composition) = self.composition.lock().as_ref().cloned()
+        {
             composition
-                .record(crate::composition_refinement::CompositionEvent::LiftShutdown(event));
+                .record(crate::composition_refinement::CompositionEvent::LiftShutdown(certificate));
         }
     }
 
@@ -369,7 +614,8 @@ impl ShutdownTraceRecorder {
         Some(ShutdownTrace {
             generation: session.generation,
             initial: session.initial.clone(),
-            events: session.events.clone(),
+            activities: session.activities.clone(),
+            certificates: session.certificates.clone(),
             trace_truncated: session.trace_truncated,
             outcome: session.outcome.as_str().to_owned(),
         })
@@ -383,11 +629,22 @@ impl ShutdownTraceRecorder {
     }
 
     #[cfg(test)]
-    pub(crate) fn events(&self) -> Vec<ShutdownEvent> {
+    pub(crate) fn activities(&self) -> Vec<ActivityEvent> {
         let state = self.state.lock();
         match &*state {
             RecorderState::Recording(session) | RecorderState::Terminal(session) => {
-                session.events.clone()
+                session.activities.clone()
+            }
+            RecorderState::Idle => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn certificates(&self) -> Vec<CertificateEvent> {
+        let state = self.state.lock();
+        match &*state {
+            RecorderState::Recording(session) | RecorderState::Terminal(session) => {
+                session.certificates.clone()
             }
             RecorderState::Idle => Vec::new(),
         }
@@ -416,8 +673,8 @@ mod tests {
         recorder.record(ShutdownEvent::BeginClose);
         recorder.record(ShutdownEvent::FinishClose);
         assert_eq!(
-            recorder.events(),
-            [ShutdownEvent::BeginClose, ShutdownEvent::FinishClose]
+            recorder.certificates(),
+            [CertificateEvent::BeginClose, CertificateEvent::FinishClose]
         );
         assert!(recorder.active());
     }
@@ -427,10 +684,29 @@ mod tests {
         let recorder = recorder();
         recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
         recorder.record(ShutdownEvent::Quarantine(ShutdownFailure::BoundaryPanic));
-        recorder.record(ShutdownEvent::LeaveExternal);
+        recorder.record(ShutdownEvent::LeaveExternal {
+            id: ActivityId::fresh(),
+        });
         assert!(!recorder.active());
-        assert_eq!(recorder.events().len(), 1);
+        assert!(recorder.certificates().len() == 1);
         assert_eq!(recorder.trace().unwrap().outcome, "quarantined");
+    }
+
+    #[test]
+    fn activity_observations_do_not_require_append_order() {
+        let recorder = recorder();
+        let id = ActivityId::fresh();
+        recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
+        recorder.record(ShutdownEvent::LeaveCall { id });
+        recorder.record(ShutdownEvent::EnterCall { id });
+
+        assert_eq!(
+            recorder.activities(),
+            [
+                ActivityEvent::LeaveCall { id },
+                ActivityEvent::EnterCall { id }
+            ]
+        );
     }
 
     #[test]

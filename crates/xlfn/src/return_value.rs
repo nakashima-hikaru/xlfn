@@ -583,26 +583,31 @@ where
     T: ExcelReturn,
 {
     let ingress = match crate::module_runtime::ingress()
-        .enter_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_entered(runtime);
-        })
+        .enter_with(|| {})
         .into_admitted()
     {
         Ok(ingress) => ingress,
         Err(_) => return closing_error_pointer(),
     };
+    #[cfg(any(test, feature = "refinement"))]
+    runtime
+        .refinement_hooks()
+        .external_entered(runtime, ingress.activity_id());
     let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_left(runtime);
+            runtime
+                .refinement_hooks()
+                .external_left(runtime, ingress.activity_id());
             return closing_error_pointer();
         }
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
         #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_left(runtime);
+        runtime
+            .refinement_hooks()
+            .external_left(runtime, ingress.activity_id());
         return closing_error_pointer();
     };
     let result = match catch_unwind(AssertUnwindSafe(|| {
@@ -620,7 +625,9 @@ where
         }
     };
     #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().external_left(runtime);
+    runtime
+        .refinement_hooks()
+        .external_left(runtime, ingress.activity_id());
     result
 }
 
@@ -632,26 +639,31 @@ where
 #[doc(hidden)]
 pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
     let ingress = match crate::module_runtime::ingress()
-        .enter_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_entered(runtime);
-        })
+        .enter_with(|| {})
         .into_admitted()
     {
         Ok(ingress) => ingress,
         Err(_) => return,
     };
+    #[cfg(any(test, feature = "refinement"))]
+    runtime
+        .refinement_hooks()
+        .external_entered(runtime, ingress.activity_id());
     let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_left(runtime);
+            runtime
+                .refinement_hooks()
+                .external_left(runtime, ingress.activity_id());
             return;
         }
     };
     let _ = catch_unwind(AssertUnwindSafe(operation));
     #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().external_left(runtime);
+    runtime
+        .refinement_hooks()
+        .external_left(runtime, ingress.activity_id());
 }
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
@@ -671,26 +683,31 @@ where
     T: ExcelReturn,
 {
     let ingress = match crate::module_runtime::ingress()
-        .enter_udf_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_entered(runtime);
-        })
+        .enter_udf_with(|| {})
         .into_admitted()
     {
         Ok(ingress) => ingress,
         Err(_) => return closing_error_pointer(),
     };
+    #[cfg(any(test, feature = "refinement"))]
+    runtime
+        .refinement_hooks()
+        .external_entered(runtime, ingress.activity_id());
     let call = match runtime.enter(&ingress) {
         Ok(call) => call,
         Err(_) => {
             #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().external_left(runtime);
+            runtime
+                .refinement_hooks()
+                .external_left(runtime, ingress.activity_id());
             return closing_error_pointer();
         }
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
         #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().external_left(runtime);
+        runtime
+            .refinement_hooks()
+            .external_left(runtime, ingress.activity_id());
         return closing_error_pointer();
     };
     let result = match catch_unwind(AssertUnwindSafe(|| {
@@ -707,7 +724,9 @@ where
     drop(producer);
     drop(call);
     #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().external_left(runtime);
+    runtime
+        .refinement_hooks()
+        .external_left(runtime, ingress.activity_id());
     result
 }
 

@@ -1,0 +1,39 @@
+{
+  "generation": 1,
+  "initial": {
+    "ingressOpen": true,
+    "externalEntries": 0,
+    "registrations": 0,
+    "eventRegistrations": 0,
+    "registrationStateKnown": true,
+    "callbackGateOpen": true,
+    "activeCalls": 0,
+    "returnBlocks": 0,
+    "returnBlocksInFree": 0,
+    "returnFreeOperations": 0,
+    "asyncTasks": 0,
+    "asyncExecutorRunning": false,
+    "rtdOperations": 0,
+    "subscriptions": 0,
+    "callbacks": 0,
+    "rtdClassFactories": 0,
+    "rtdServers": 0,
+    "rtdServerLocks": 0,
+    "handles": 0,
+    "handlePins": 0,
+    "handleObjects": 0,
+    "generationUnique": false,
+    "addinQuiesced": false,
+    "generationOwnedByRuntime": true,
+    "diagnosticsPending": 0,
+    "diagnosticsRunning": false,
+    "cleanupIssues": 0
+  },
+  "activities": [
+    { "leaveCall": { "id": 7 } },
+    { "enterCall": { "id": 7 } }
+  ],
+  "certificates": [],
+  "trace_truncated": false,
+  "outcome": "in_progress"
+}

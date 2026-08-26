@@ -386,18 +386,21 @@ impl<A: crate::Addin> Runtime<A> {
         &'call self,
         ingress: &'call AdmittedExport<'call>,
     ) -> XllResult<CallGuard<'call, A>> {
-        ingress.with_linearization(|| {
-            let admission = self.lifecycle.try_admit()?;
+        ingress.assert_active();
+        let admission = self.lifecycle.try_admit()?;
+        #[cfg(any(test, feature = "refinement"))]
+        let activity_id = self.refinement_hooks().next_activity_id();
+        #[cfg(any(test, feature = "refinement"))]
+        self.refinement_hooks().call_entered(self, activity_id);
+        Ok(CallGuard {
             #[cfg(any(test, feature = "refinement"))]
-            self.refinement_hooks().call_entered(self);
-            Ok(CallGuard {
-                #[cfg(any(test, feature = "refinement"))]
-                runtime: self,
-                #[cfg(not(any(test, feature = "refinement")))]
-                _runtime: std::marker::PhantomData,
-                admission,
-                _ingress: ingress,
-            })
+            runtime: self,
+            #[cfg(not(any(test, feature = "refinement")))]
+            _runtime: std::marker::PhantomData,
+            admission,
+            _ingress: ingress,
+            #[cfg(any(test, feature = "refinement"))]
+            activity_id,
         })
     }
 
@@ -732,6 +735,8 @@ pub struct CallGuard<'runtime, A: crate::Addin> {
     #[cfg(not(any(test, feature = "refinement")))]
     _runtime: std::marker::PhantomData<&'runtime Runtime<A>>,
     admission: GenerationAdmission<A>,
+    #[cfg(any(test, feature = "refinement"))]
+    activity_id: crate::shutdown_trace::ActivityId,
 }
 
 impl<A: crate::Addin> CallGuard<'_, A> {
@@ -774,7 +779,9 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 impl<A: crate::Addin> Drop for CallGuard<'_, A> {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "refinement"))]
-        self.runtime.refinement_hooks().call_left(self.runtime);
+        self.runtime
+            .refinement_hooks()
+            .call_left(self.runtime, self.activity_id);
     }
 }
 
