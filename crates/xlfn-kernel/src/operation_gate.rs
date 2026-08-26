@@ -1,19 +1,13 @@
 //! A generic admission gate for operations that must drain before shutdown.
 
-use parking_lot::{Condvar, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::drain_gate::{DrainGate, DrainPermit};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GateClosed;
 
 pub struct OperationGate {
-    state: AtomicUsize,
-    wait_lock: Mutex<()>,
-    idle: Condvar,
+    drain: DrainGate,
 }
-
-pub const CLOSING_BIT: usize = usize::MAX / 2 + 1;
-const ACTIVE_COUNT_MASK: usize = !CLOSING_BIT;
 
 impl Default for OperationGate {
     fn default() -> Self {
@@ -24,43 +18,29 @@ impl Default for OperationGate {
 impl OperationGate {
     pub const fn new() -> Self {
         Self {
-            state: AtomicUsize::new(0),
-            wait_lock: Mutex::new(()),
-            idle: Condvar::new(),
+            drain: DrainGate::new_open(),
         }
     }
 
     #[inline]
     pub fn is_closing(&self) -> bool {
-        (self.state.load(Ordering::Acquire) & CLOSING_BIT) != 0
+        self.drain.is_sealed()
     }
 
     #[inline]
     pub fn begin_close(&self) {
-        self.state.fetch_or(CLOSING_BIT, Ordering::AcqRel);
+        self.drain.seal();
     }
 
     #[inline]
     pub fn acquire(&self) -> Result<(), GateClosed> {
-        self.state
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |val| {
-                if (val & CLOSING_BIT) != 0 {
-                    None
-                } else {
-                    if (val & ACTIVE_COUNT_MASK) == ACTIVE_COUNT_MASK {
-                        std::process::abort();
-                    }
-                    Some(val + 1)
-                }
-            })
-            .map(|_| ())
-            .map_err(|_| GateClosed)
+        self.drain.try_acquire().map_err(|_| GateClosed)
     }
 
     #[inline]
     pub fn enter(&self) -> Result<OperationGuard<'_>, GateClosed> {
-        self.acquire()?;
-        Ok(OperationGuard { gate: self })
+        let permit = self.drain.try_enter().map_err(|_| GateClosed)?;
+        Ok(OperationGuard { _permit: permit })
     }
 
     pub fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
@@ -74,28 +54,12 @@ impl OperationGate {
     /// borrow of the gate and therefore cannot store [`OperationGuard`].
     #[inline]
     pub fn release(&self) {
-        let prev = self.state.fetch_sub(1, Ordering::AcqRel);
-        let active = prev & ACTIVE_COUNT_MASK;
-        if active == 0 {
-            std::process::abort();
-        }
-        let active_count = active - 1;
-        if active_count == 0 && (prev & CLOSING_BIT) != 0 {
-            let _guard = self.wait_lock.lock();
-            self.idle.notify_all();
-        }
+        self.drain.release();
     }
 }
 
 pub struct OperationGuard<'a> {
-    gate: &'a OperationGate,
-}
-
-impl Drop for OperationGuard<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        self.gate.release();
-    }
+    _permit: DrainPermit<'a>,
 }
 
 pub struct TerminationWaitGuard<'a> {
@@ -104,9 +68,30 @@ pub struct TerminationWaitGuard<'a> {
 
 impl TerminationWaitGuard<'_> {
     pub fn wait(self) {
-        let mut guard = self.gate.wait_lock.lock();
-        while (self.gate.state.load(Ordering::Acquire) & ACTIVE_COUNT_MASK) > 0 {
-            self.gate.idle.wait(&mut guard);
-        }
+        self.gate.drain.wait_until_idle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_acquisition_is_drained_by_the_close_wait() {
+        let gate = OperationGate::new();
+        gate.acquire().unwrap();
+        let wait = gate.close_and_wait_begin();
+        assert!(gate.acquire().is_err());
+        gate.release();
+        wait.wait();
+    }
+
+    #[test]
+    fn an_operation_guard_releases_its_permit() {
+        let gate = OperationGate::new();
+        let operation = gate.enter().unwrap();
+        gate.begin_close();
+        drop(operation);
+        gate.close_and_wait_begin().wait();
     }
 }

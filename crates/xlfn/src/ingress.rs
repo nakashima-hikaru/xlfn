@@ -1,9 +1,14 @@
 use std::cell::Cell;
+#[cfg(test)]
+use std::sync::Condvar;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
 #[cfg(test)]
 use std::thread::ThreadId;
+#[cfg(test)]
 use std::time::Duration;
+
+use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
 
 pub(crate) const PHASE_OPENING: u8 = 0;
 pub(crate) const PHASE_OPEN: u8 = 1;
@@ -11,9 +16,6 @@ pub(crate) const PHASE_CLOSING: u8 = 2;
 pub(crate) const PHASE_CLOSED: u8 = 3;
 
 const INGRESS_STRIPE_COUNT: usize = 32;
-const STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
-const STRIPE_COUNT_MASK: usize = STRIPE_SEALED - 1;
-const QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 thread_local! {
     static INGRESS_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -33,86 +35,35 @@ static NEXT_INGRESS_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 #[repr(C, align(128))]
-struct IngressStripe {
-    // The high bit closes this stripe against new reservations during the
-    // terminal drain. The low bits count every live external export.
+struct UdfStripe {
     active: AtomicUsize,
-    udf_active: AtomicUsize,
 }
 
-impl IngressStripe {
+impl UdfStripe {
     const fn new() -> Self {
         Self {
             active: AtomicUsize::new(0),
-            udf_active: AtomicUsize::new(0),
         }
     }
 
-    fn try_enter(&self) -> bool {
+    fn enter(&self) {
         self.active
-            .try_update(Ordering::Acquire, Ordering::Relaxed, |state| {
-                if state & STRIPE_SEALED != 0 {
-                    return None;
-                }
-                if state & STRIPE_COUNT_MASK == STRIPE_COUNT_MASK {
-                    std::process::abort();
-                }
-                Some(state + 1)
-            })
-            .is_ok()
-    }
-
-    fn enter_udf(&self) {
-        self.udf_active
             .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
-            .unwrap_or_else(|_| std::process::abort());
-    }
-
-    fn leave_udf(&self) {
-        self.udf_active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_sub(1)
-            })
-            .unwrap_or_else(|_| std::process::abort());
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
     fn leave(&self) {
         self.active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                let active = state & STRIPE_COUNT_MASK;
-                active
-                    .checked_sub(1)
-                    .map(|next| (state & STRIPE_SEALED) | next)
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_sub(1)
             })
-            .unwrap_or_else(|_| std::process::abort());
-    }
-
-    fn seal(&self) {
-        let _ = self
-            .active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                if state & STRIPE_SEALED != 0 {
-                    None
-                } else {
-                    Some(state | STRIPE_SEALED)
-                }
-            });
-    }
-
-    fn reopen(&self) {
-        debug_assert_eq!(self.active.load(Ordering::Acquire) & STRIPE_COUNT_MASK, 0);
-        debug_assert_eq!(self.udf_active.load(Ordering::Acquire), 0);
-        self.active.store(0, Ordering::Release);
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
     fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire) & STRIPE_COUNT_MASK
-    }
-
-    fn active_udfs(&self) -> usize {
-        self.udf_active.load(Ordering::Acquire)
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -210,11 +161,8 @@ pub(crate) struct ExportIngress {
     // has already started.
     phase: AtomicU8,
     epoch: AtomicU64,
-    stripes: [IngressStripe; INGRESS_STRIPE_COUNT],
-    // Used only by rare lifecycle quiescence waits.
-    // Ordinary export/UDF entry and exit never acquire this mutex.
-    wait_lock: Mutex<()>,
-    idle: Condvar,
+    exports: StripedDrainGate<INGRESS_STRIPE_COUNT>,
+    udf_stripes: [UdfStripe; INGRESS_STRIPE_COUNT],
     // Opening entries are rejected by the caller but counted until their
     // guards leave. Publication takes this lock so the zero-active check and
     // the final OPEN transition cannot be overtaken by a new entry.
@@ -295,9 +243,8 @@ impl ExportIngress {
         Self {
             phase: AtomicU8::new(PHASE_CLOSED),
             epoch: AtomicU64::new(0),
-            stripes: [const { IngressStripe::new() }; INGRESS_STRIPE_COUNT],
-            wait_lock: Mutex::new(()),
-            idle: Condvar::new(),
+            exports: StripedDrainGate::new_sealed(),
+            udf_stripes: [const { UdfStripe::new() }; INGRESS_STRIPE_COUNT],
             opening_lock: Mutex::new(()),
             #[cfg(test)]
             test_epoch_active: AtomicUsize::new(0),
@@ -336,9 +283,9 @@ impl ExportIngress {
                 epoch.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());
-        for stripe in &self.stripes {
-            stripe.reopen();
-        }
+        self.exports
+            .reopen()
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         self.phase.store(PHASE_OPENING, Ordering::Release);
     }
 
@@ -398,32 +345,33 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let stripe_index = current_ingress_stripe();
-        let stripe = &self.stripes[stripe_index];
-        if !stripe.try_enter() {
-            return ExportEntry::Rejected(self.rejected_guard());
-        }
+        let permit = match self.exports.try_enter(stripe_index) {
+            Ok(permit) => permit,
+            Err(_) => return ExportEntry::Rejected(self.rejected_guard()),
+        };
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
-            self.release_reservation(stripe_index, false);
+            drop(permit);
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
         #[cfg(any(test, feature = "refinement"))]
         let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
+        let entry = ExportCallGuard {
+            ingress: self,
+            epoch: self.epoch.load(Ordering::Acquire),
+            stripe: Some(stripe_index),
+            _permit: Some(permit),
+            udf: false,
+            #[cfg(any(test, feature = "refinement"))]
+            activity_id,
+        };
         if accepted {
             let hook = on_accepted
                 .take()
                 .expect("ingress acceptance hook called once");
             hook();
         }
-        let entry = ExportCallGuard {
-            ingress: self,
-            epoch: self.epoch.load(Ordering::Acquire),
-            stripe: Some(stripe_index),
-            udf: false,
-            #[cfg(any(test, feature = "refinement"))]
-            activity_id,
-        };
         if accepted {
             ExportEntry::Admitted(AdmittedExport { guard: entry })
         } else {
@@ -448,33 +396,35 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let stripe_index = current_ingress_stripe();
-        let stripe = &self.stripes[stripe_index];
-        if !stripe.try_enter() {
-            return ExportEntry::Rejected(self.rejected_guard());
-        }
-        stripe.enter_udf();
+        let permit = match self.exports.try_enter(stripe_index) {
+            Ok(permit) => permit,
+            Err(_) => return ExportEntry::Rejected(self.rejected_guard()),
+        };
+        self.udf_stripes[stripe_index].enter();
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
-            self.release_reservation(stripe_index, true);
+            self.udf_stripes[stripe_index].leave();
+            drop(permit);
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
         #[cfg(any(test, feature = "refinement"))]
         let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
+        let entry = ExportCallGuard {
+            ingress: self,
+            epoch: self.epoch.load(Ordering::Acquire),
+            stripe: Some(stripe_index),
+            _permit: Some(permit),
+            udf: true,
+            #[cfg(any(test, feature = "refinement"))]
+            activity_id,
+        };
         if accepted {
             let hook = on_accepted
                 .take()
                 .expect("ingress acceptance hook called once");
             hook();
         }
-        let entry = ExportCallGuard {
-            ingress: self,
-            epoch: self.epoch.load(Ordering::Acquire),
-            stripe: Some(stripe_index),
-            udf: true,
-            #[cfg(any(test, feature = "refinement"))]
-            activity_id,
-        };
         if accepted {
             ExportEntry::Admitted(AdmittedExport { guard: entry })
         } else {
@@ -537,19 +487,7 @@ impl ExportIngress {
     }
 
     fn wait_for_quiescence(&self) {
-        let mut guard = self
-            .wait_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-
-        while self.active_calls() != 0 {
-            let (next_guard, _) = self
-                .idle
-                .wait_timeout(guard, QUIESCENCE_RECHECK_INTERVAL)
-                .unwrap_or_else(|error| error.into_inner());
-
-            guard = next_guard;
-        }
+        self.exports.wait_until_idle();
     }
 
     /// Waits for the current epoch to drain and seals it CLOSED in the same
@@ -579,10 +517,7 @@ impl ExportIngress {
         // Closing entries may have started after the zero observation. Seal
         // every stripe to prevent a late reservation from being missed by the
         // terminal CLOSED transition, then drain those reservations.
-        for stripe in &self.stripes {
-            stripe.seal();
-        }
-        self.wait_for_quiescence();
+        self.exports.seal_and_wait();
 
         match self.phase.compare_exchange(
             PHASE_CLOSING,
@@ -621,11 +556,11 @@ impl ExportIngress {
     }
 
     pub(crate) fn active_calls(&self) -> usize {
-        self.stripes.iter().map(IngressStripe::active).sum()
+        self.exports.active()
     }
 
     pub(crate) fn active_udfs(&self) -> usize {
-        self.stripes.iter().map(IngressStripe::active_udfs).sum()
+        self.udf_stripes.iter().map(UdfStripe::active).sum()
     }
 
     fn rejected_guard(&self) -> RejectedExport<'_> {
@@ -634,21 +569,12 @@ impl ExportIngress {
                 ingress: self,
                 epoch: self.epoch.load(Ordering::Acquire),
                 stripe: None,
+                _permit: None,
                 udf: false,
                 #[cfg(any(test, feature = "refinement"))]
                 activity_id: None,
             },
         }
-    }
-
-    fn release_reservation(&self, stripe_index: usize, udf: bool) {
-        let stripe = &self.stripes[stripe_index];
-
-        if udf {
-            stripe.leave_udf();
-        }
-
-        stripe.leave();
     }
 }
 
@@ -657,6 +583,7 @@ pub(crate) struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
     stripe: Option<usize>,
+    _permit: Option<StripedDrainPermit<'a, INGRESS_STRIPE_COUNT>>,
     udf: bool,
     #[cfg(any(test, feature = "refinement"))]
     activity_id: Option<crate::shutdown_trace::ActivityId>,
@@ -672,7 +599,10 @@ impl Drop for ExportCallGuard<'_> {
             self.epoch,
             "export guard crossed ingress epochs"
         );
-        self.ingress.release_reservation(stripe_index, self.udf);
+        if self.udf {
+            self.ingress.udf_stripes[stripe_index].leave();
+        }
+        let _ = self._permit.take();
     }
 }
 

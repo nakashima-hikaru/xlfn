@@ -4,8 +4,10 @@
 //! and COM integration layer. Its public items are consumed by the `xlfn`
 //! adapter and are not a supported direct application API.
 
+pub mod drain_gate;
 pub mod invariant;
 pub mod operation_gate;
 pub mod quota;
+pub mod sealable_counter;
 pub mod service_slot;
 pub mod thread_affine;

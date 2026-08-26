@@ -6,13 +6,11 @@
 //! Excel-owned return-obligation ownership and quiescence accounting.
 
 use crate::{XllError, XllResult};
-use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
 
 const RETURN_STRIPE_COUNT: usize = 32;
-const RETURN_STRIPE_SEALED: usize = 1_usize << (usize::BITS - 1);
-const RETURN_STRIPE_COUNT_MASK: usize = RETURN_STRIPE_SEALED - 1;
 thread_local! {
     static RETURN_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
 }
@@ -29,78 +27,15 @@ fn current_return_stripe() -> usize {
     assigned
 }
 
-#[derive(Debug)]
-#[repr(C, align(128))]
-struct ReturnStripe {
-    state: AtomicUsize,
-}
-
-impl ReturnStripe {
-    const fn new_closed() -> Self {
-        Self {
-            state: AtomicUsize::new(RETURN_STRIPE_SEALED),
-        }
-    }
-
-    fn try_enter(&self) -> bool {
-        self.state
-            .try_update(Ordering::Acquire, Ordering::Relaxed, |state| {
-                if state & RETURN_STRIPE_SEALED != 0 {
-                    return None;
-                }
-                if state & RETURN_STRIPE_COUNT_MASK == RETURN_STRIPE_COUNT_MASK {
-                    std::process::abort();
-                }
-                Some(state + 1)
-            })
-            .is_ok()
-    }
-
-    fn release(&self) -> bool {
-        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
-        if previous & RETURN_STRIPE_COUNT_MASK == 0 {
-            std::process::abort();
-        }
-        previous & RETURN_STRIPE_COUNT_MASK == 1
-    }
-
-    fn seal(&self) {
-        let _ = self
-            .state
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                if state & RETURN_STRIPE_SEALED != 0 {
-                    None
-                } else {
-                    Some(state | RETURN_STRIPE_SEALED)
-                }
-            });
-    }
-
-    fn reopen(&self) {
-        debug_assert!(self.state.load(Ordering::Acquire) & RETURN_STRIPE_SEALED != 0);
-        debug_assert_eq!(self.active(), 0);
-        self.state.store(0, Ordering::Release);
-    }
-
-    fn is_sealed(&self) -> bool {
-        self.state.load(Ordering::Acquire) & RETURN_STRIPE_SEALED != 0
-    }
-
-    fn active(&self) -> usize {
-        self.state.load(Ordering::Acquire) & RETURN_STRIPE_COUNT_MASK
-    }
-}
-
 pub(crate) struct ReturnTracker {
-    stripes: [ReturnStripe; RETURN_STRIPE_COUNT],
-    wait_lock: Mutex<()>,
-    quiescent: Condvar,
+    gate: StripedDrainGate<RETURN_STRIPE_COUNT>,
     #[cfg(any(test, feature = "refinement"))]
     trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 pub(crate) struct ReturnObligation<'tracker> {
-    stripe: &'tracker ReturnStripe,
+    _permit: StripedDrainPermit<'tracker, RETURN_STRIPE_COUNT>,
+    #[cfg(any(test, feature = "refinement"))]
     tracker: &'tracker ReturnTracker,
 }
 
@@ -111,24 +46,10 @@ impl<'tracker> ReturnObligation<'tracker> {
     }
 }
 
-impl Drop for ReturnObligation<'_> {
-    fn drop(&mut self) {
-        if self.stripe.release() {
-            // Synchronize the condition check and notification with the
-            // waiter. Without this lock, the final release could notify just
-            // before `wait_for_quiescence` goes to sleep.
-            let _wait = self.tracker.wait_lock.lock();
-            self.tracker.quiescent.notify_all();
-        }
-    }
-}
-
 impl ReturnTracker {
     pub(crate) const fn new_closed() -> Self {
         Self {
-            stripes: [const { ReturnStripe::new_closed() }; RETURN_STRIPE_COUNT],
-            wait_lock: Mutex::new(()),
-            quiescent: Condvar::new(),
+            gate: StripedDrainGate::new_sealed(),
             #[cfg(any(test, feature = "refinement"))]
             trace: std::sync::OnceLock::new(),
         }
@@ -152,51 +73,43 @@ impl ReturnTracker {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
             });
         }
-        for stripe in &self.stripes {
-            stripe.reopen();
-        }
-        Ok(())
+        self.gate.reopen().map_err(|_| XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
+        })
     }
 
     pub(crate) fn close_admission(&self) {
-        for stripe in &self.stripes {
-            stripe.seal();
-        }
+        self.gate.seal();
     }
 
     pub(crate) fn try_enter_producer(&self) -> Option<ReturnProducerGuard<'_>> {
         let stripe_index = current_return_stripe();
-        if !self.stripes[stripe_index].try_enter() {
-            return None;
-        }
+        let permit = self.gate.try_enter(stripe_index).ok()?;
         Some(ReturnProducerGuard {
             obligation: Some(ReturnObligation {
-                stripe: &self.stripes[stripe_index],
+                _permit: permit,
+                #[cfg(any(test, feature = "refinement"))]
                 tracker: self,
             }),
         })
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
-        self.stripes.iter().all(|stripe| stripe.active() == 0)
+        self.gate.active() == 0
     }
 
     pub(crate) fn admission_closed(&self) -> bool {
-        self.stripes.iter().all(|stripe| stripe.is_sealed())
+        self.gate.is_sealed()
     }
 
     pub(crate) fn wait_for_quiescence(&self) {
         debug_assert!(self.admission_closed());
-
-        let mut wait = self.wait_lock.lock();
-        while !self.is_quiescent() {
-            self.quiescent.wait(&mut wait);
-        }
+        self.gate.wait_until_idle();
     }
 
     #[cfg(test)]
     pub(crate) fn outstanding_obligations(&self) -> usize {
-        self.stripes.iter().map(|stripe| stripe.active()).sum()
+        self.gate.active()
     }
 }
 

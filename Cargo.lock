@@ -1827,6 +1827,7 @@ name = "xlfn-kernel"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "crossbeam-utils",
  "parking_lot",
  "static_assertions",
  "triomphe",
