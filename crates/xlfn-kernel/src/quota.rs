@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use triomphe::Arc;
 
+use crate::invariant::checked_atomic_dec;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuotaExceeded;
 
@@ -43,7 +45,6 @@ pub struct QuotaPermit {
 
 impl Drop for QuotaPermit {
     fn drop(&mut self) {
-        let previous = self.quota.used.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous != 0, "quota permit drop underflow");
+        let _ = checked_atomic_dec(&self.quota.used);
     }
 }

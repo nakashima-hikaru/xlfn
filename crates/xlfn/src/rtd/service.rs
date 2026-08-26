@@ -1,4 +1,5 @@
 use crate::generation::RuntimeGeneration;
+use crate::shutdown::SubscriptionsStopped;
 use crate::subscription::{RtdLimits, SubscriptionRuntime};
 use std::sync::Arc;
 
@@ -9,23 +10,7 @@ pub(crate) struct SubscriptionServiceSlot {
         crate::XllError,
     >,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
-}
-
-#[derive(Debug)]
-pub(crate) struct SubscriptionsStopped {
-    _private: (),
-}
-
-impl SubscriptionsStopped {
-    pub(super) const fn issue() -> Self {
-        Self { _private: () }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test() -> Self {
-        Self { _private: () }
-    }
+    trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 pub(crate) type SubscriptionRuntimeRead =
@@ -42,7 +27,7 @@ impl SubscriptionServiceSlot {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: std::sync::OnceLock::new(),
+            trace: std::sync::OnceLock::new(),
         }
     }
 
@@ -78,8 +63,8 @@ impl SubscriptionServiceSlot {
                 },
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
-                    if let Some(ghost) = self.ghost.get() {
-                        _runtime.set_ghost(std::sync::Arc::clone(ghost));
+                    if let Some(trace) = self.trace.get() {
+                        _runtime.set_trace_sink(std::sync::Arc::clone(trace));
                     }
                 },
             )
@@ -91,27 +76,35 @@ impl SubscriptionServiceSlot {
         self.service.is_none()
     }
 
-    pub(crate) fn seal(&self) -> crate::XllResult<SubscriptionsStopped> {
+    pub(crate) fn seal(
+        &self,
+        generation: Option<RuntimeGeneration>,
+    ) -> crate::XllResult<SubscriptionsStopped> {
+        let generation = generation.or_else(|| {
+            self.service
+                .read_if_ready()
+                .map(|runtime| runtime.as_arc().generation)
+        });
         self.service
             .seal(
                 crate::XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SLOTS,
                 },
-                SubscriptionsStopped::issue,
+                move || SubscriptionsStopped::issue(generation),
                 |runtime| {
                     crate::rtd::shutdown_subscriptions(Arc::clone(&runtime))
-                        .map(|()| SubscriptionsStopped::issue())
+                        .map(|()| SubscriptionsStopped::issue(Some(runtime.generation)))
                 },
             )
             .map_err(crate::runtime_components::map_service_error)
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(std::sync::Arc::clone(&ghost));
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        let _ = self.trace.set(std::sync::Arc::clone(&trace));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
-                runtime.set_ghost(ghost);
+                runtime.set_trace_sink(trace);
             }
         });
     }
@@ -171,7 +164,7 @@ mod tests {
         drop(read);
 
         assert!(!slot.is_none());
-        slot.seal().unwrap();
+        slot.seal(Some(generation())).unwrap();
         assert!(slot.is_none());
         assert!(matches!(
             slot.read(RtdSubscriptionHost::detached()),
@@ -188,7 +181,7 @@ mod tests {
         let first_runtime = Arc::clone(first.as_arc());
         drop(first);
 
-        slot.seal().unwrap();
+        slot.seal(Some(generation())).unwrap();
 
         slot.arm(generation(), RtdLimits::standard()).unwrap();
         let second = slot.read(RtdSubscriptionHost::detached()).unwrap();
@@ -207,7 +200,7 @@ mod tests {
         slot.arm(generation(), RtdLimits::standard()).unwrap();
         assert!(slot.read(RtdSubscriptionHost::detached()).is_ok());
 
-        slot.seal().unwrap();
+        slot.seal(Some(generation())).unwrap();
         assert!(slot.is_none());
     }
 }

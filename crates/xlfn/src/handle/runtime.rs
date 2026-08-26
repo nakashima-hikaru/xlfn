@@ -1,4 +1,5 @@
 use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
+use super::registry::HandleRegistrySealed;
 use super::{
     ExcelHandleObject, FormulaBinding, Handle, HandleAlias, HandlePrepareState,
     HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, PrepareDecision,
@@ -11,7 +12,6 @@ use crate::generation::RuntimeGeneration;
 use crate::generation::ServerGeneration;
 use crate::generation::TopicGeneration;
 use crate::runtime_components::GenerationServices;
-use crate::shutdown::HandleRegistrySealed;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
 use std::cell::OnceCell;
@@ -122,8 +122,8 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.store.set_ghost(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.store.set_trace_sink(trace);
     }
 
     pub(super) fn refinement_token(&self, token: &str) -> super::TokenWire {
@@ -136,8 +136,8 @@ impl FormulaHandleService {
     }
 
     #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    pub(crate) fn rtd_ghost(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
-        self.store.ghost_handle()
+    pub(crate) fn rtd_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        self.store.trace_handle()
     }
 
     #[cfg(test)]
@@ -460,7 +460,7 @@ impl FormulaHandleService {
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn connect_transaction(
-        self: &Arc<Self>,
+        &self,
         server_generation: ServerGeneration,
         excel_topic_id: i32,
         rtd_key: &str,
@@ -571,7 +571,7 @@ impl FormulaHandleService {
         self.store.lookup(scope, token)
     }
 
-    pub(crate) fn seal(&self) -> XllResult<crate::shutdown::HandleRegistrySealed> {
+    pub(crate) fn seal(&self) -> XllResult<HandleRegistrySealed> {
         self.prepares.close_admission();
         self.store.begin_close();
         let initializations = self.topics.close();
@@ -631,13 +631,63 @@ impl FormulaHandleService {
     }
 }
 
+impl crate::rtd::HandleRtdBackend for FormulaHandleService {
+    #[cfg(target_os = "windows")]
+    fn identity(&self) -> usize {
+        self as *const Self as usize
+    }
+
+    fn terminate_all_topics(&self) {
+        FormulaHandleService::terminate_all_topics(self);
+    }
+
+    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
+    fn rtd_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        #[cfg(target_os = "windows")]
+        {
+            FormulaHandleService::rtd_trace(self)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn claim_server(&self, rtd_key: &str, server_generation: ServerGeneration) -> XllResult<()> {
+        FormulaHandleService::claim_server(self, rtd_key, server_generation)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn connect_transaction<'a>(
+        &'a self,
+        server_generation: ServerGeneration,
+        excel_topic_id: i32,
+        rtd_key: &str,
+    ) -> XllResult<Box<dyn crate::rtd::HandleRtdConnection + 'a>> {
+        Ok(Box::new(FormulaHandleService::connect_transaction(
+            self,
+            server_generation,
+            excel_topic_id,
+            rtd_key,
+        )?))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn disconnect(&self, server_generation: ServerGeneration, excel_topic_id: i32) {
+        FormulaHandleService::disconnect(self, server_generation, excel_topic_id);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn terminate_topics(&self, server_generation: ServerGeneration) {
+        FormulaHandleService::terminate_topics(self, server_generation);
+    }
+}
+
 /// The handle runtime has stopped accepting work and its registry has removed
 /// every live binding. The service keeps the generation alive until add-in
 /// state cleanup has completed and object/lease quiescence is certified.
-pub(crate) enum FormulaHandleServiceSealed {
-    Absent {
-        generation: Option<RuntimeGeneration>,
-    },
+enum FormulaHandleServiceSealed {
     Present {
         generation: RuntimeGeneration,
         service: Arc<FormulaHandleService>,
@@ -645,39 +695,11 @@ pub(crate) enum FormulaHandleServiceSealed {
     },
 }
 
-/// Proof that the handle registry for one specific runtime generation has
-/// completed its object/lease quiescence check. The generation identity
-/// travels with the proof so a certificate cannot be silently reused for a
-/// different service instance.
-#[derive(Debug)]
-pub(crate) struct HandleStoreQuiescent {
-    generation: Option<RuntimeGeneration>,
-}
-
-impl HandleStoreQuiescent {
-    pub(super) fn new(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
-    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
-        self.generation
-    }
-}
-
 impl FormulaHandleServiceSealed {
-    pub(crate) fn empty(generation: Option<RuntimeGeneration>) -> Self {
-        Self::Absent { generation }
-    }
-
     fn from_service(
         generation: Option<RuntimeGeneration>,
         service: Arc<FormulaHandleService>,
-        registry: crate::shutdown::HandleRegistrySealed,
+        registry: super::registry::HandleRegistrySealed,
     ) -> Self {
         Self::Present {
             generation: generation.expect("a published formula handle service has a generation"),
@@ -685,10 +707,11 @@ impl FormulaHandleServiceSealed {
             registry,
         }
     }
+}
 
-    pub(crate) fn finish(self) -> XllResult<HandleStoreQuiescent> {
-        match self {
-            Self::Absent { generation } => Ok(HandleStoreQuiescent::new(generation)),
+impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
+    fn finish(self: Box<Self>) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        match *self {
             Self::Present {
                 generation,
                 service,
@@ -705,7 +728,7 @@ pub(crate) struct FormulaHandleServiceSlot {
         crate::XllError,
     >,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
+    trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 /// A read capability that holds an `arc_swap::Guard` over a published
@@ -719,7 +742,7 @@ impl FormulaHandleServiceSlot {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: std::sync::OnceLock::new(),
+            trace: std::sync::OnceLock::new(),
         }
     }
 
@@ -748,11 +771,11 @@ impl FormulaHandleServiceSlot {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(std::sync::Arc::clone(&ghost));
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        let _ = self.trace.set(std::sync::Arc::clone(&trace));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
-                runtime.set_ghost(ghost);
+                runtime.set_trace_sink(trace);
             }
         });
     }
@@ -779,8 +802,8 @@ impl FormulaHandleServiceSlot {
                 },
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
-                    if let Some(ghost) = self.ghost.get() {
-                        _runtime.set_ghost(Arc::clone(ghost));
+                    if let Some(trace) = self.trace.get() {
+                        _runtime.set_trace_sink(Arc::clone(trace));
                     }
                 },
             )
@@ -806,17 +829,20 @@ impl FormulaHandleServiceSlot {
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
-    ) -> XllResult<FormulaHandleServiceSealed> {
+    ) -> XllResult<crate::shutdown::HandlesSealed> {
         self.service
             .seal(
                 crate::XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
                 },
-                || FormulaHandleServiceSealed::empty(generation),
+                || crate::shutdown::HandlesSealed::empty(generation),
                 |handles| {
                     let handle_result = handles.seal();
                     handle_result.map(|registry| {
-                        FormulaHandleServiceSealed::from_service(generation, handles, registry)
+                        crate::shutdown::HandlesSealed::from_teardown(
+                            generation,
+                            FormulaHandleServiceSealed::from_service(generation, handles, registry),
+                        )
                     })
                 },
             )

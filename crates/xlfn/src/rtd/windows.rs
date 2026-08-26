@@ -7,6 +7,7 @@
 use crate::XllError;
 #[cfg(test)]
 use crate::XllResult;
+#[cfg(test)]
 use crate::handle::FormulaHandleService;
 #[cfg(test)]
 use crate::subscription::RtdValue;
@@ -86,7 +87,8 @@ use server::{
     FAIL_DEFERRED_TERMINATION_SPAWN, IID_IDISPATCH, IID_IRTD_SERVER,
     PANIC_DEFERRED_TERMINATION_CLEANUP, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED,
     SERVER_START_FAILED, SERVER_STARTED, SERVER_STARTING, ServerStartReservation,
-    discard_unpublished_server, ensure_server, synchronize_callback_notification,
+    discard_unpublished_server, ensure_server, ensure_server_without_handles,
+    synchronize_callback_notification,
 };
 pub(super) use server::{shutdown, shutdown_subscriptions};
 #[cfg(test)]
@@ -105,8 +107,8 @@ pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(super) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
-    module_lifetime().set_ghost(ghost);
+pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
+    module_lifetime().set_trace_sink(trace);
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {

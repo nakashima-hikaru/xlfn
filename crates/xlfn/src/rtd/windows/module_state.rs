@@ -77,7 +77,7 @@ pub(crate) struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
     #[cfg(any(test, feature = "refinement"))]
-    pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
 }
 
 impl ComModuleLifetime {
@@ -96,19 +96,19 @@ impl ComModuleLifetime {
             }),
             quiescent: Condvar::new(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         }
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(super) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(ghost);
+    pub(super) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.trace.lock() = Some(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
-            ghost.record_event(event);
+    fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            trace.record(event);
         }
     }
 
@@ -175,7 +175,7 @@ impl ComModuleLifetime {
     pub(super) fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
         let ingress_guard = crate::module_runtime::ingress().enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+            self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
         });
         let accepted = matches!(&ingress_guard, crate::ingress::ExportEntry::Admitted(_));
         let mut inner = self.inner.lock();
@@ -186,7 +186,7 @@ impl ComModuleLifetime {
                 lifetime: self,
                 _ingress_guard: ingress_guard,
                 #[cfg(any(test, feature = "refinement"))]
-                record_ghost: accepted,
+                record_trace: accepted,
             },
             accepted,
         )
@@ -200,9 +200,9 @@ impl ComModuleLifetime {
         }
         drop(inner);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(match kind {
-            ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::AddRtdClassFactory,
-            ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::AddRtdServer,
+        self.record_shutdown_event(match kind {
+            ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::AddRtdClassFactory,
+            ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::AddRtdServer,
         });
     }
 
@@ -214,9 +214,9 @@ impl ComModuleLifetime {
         }
         drop(inner);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(match kind {
-            ComObjectKind::Factory => crate::shutdown_refinement::GhostEvent::RemoveRtdClassFactory,
-            ComObjectKind::Server => crate::shutdown_refinement::GhostEvent::RemoveRtdServer,
+        self.record_shutdown_event(match kind {
+            ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::RemoveRtdClassFactory,
+            ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::RemoveRtdServer,
         });
         self.quiescent.notify_all();
     }
@@ -236,10 +236,10 @@ impl ComModuleLifetime {
         drop(inner);
         #[cfg(any(test, feature = "refinement"))]
         if changed {
-            self.record_ghost_event(if lock {
-                crate::shutdown_refinement::GhostEvent::LockRtdServer
+            self.record_shutdown_event(if lock {
+                crate::shutdown_trace::ShutdownEvent::LockRtdServer
             } else {
-                crate::shutdown_refinement::GhostEvent::UnlockRtdServer
+                crate::shutdown_trace::ShutdownEvent::UnlockRtdServer
             });
         }
         changed
@@ -298,7 +298,7 @@ pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportEntry<'static>,
     #[cfg(any(test, feature = "refinement"))]
-    record_ghost: bool,
+    record_trace: bool,
 }
 
 impl Drop for ComModuleCallGuard {
@@ -308,9 +308,9 @@ impl Drop for ComModuleCallGuard {
         self.lifetime.quiescent.notify_all();
         drop(inner);
         #[cfg(any(test, feature = "refinement"))]
-        if self.record_ghost {
+        if self.record_trace {
             self.lifetime
-                .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
     }
 }

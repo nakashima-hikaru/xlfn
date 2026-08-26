@@ -81,16 +81,14 @@ pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
 #[cfg(test)]
 pub(crate) use registry::HandleRegistryPhase;
-pub(crate) use registry::HandleRegistrySealed;
 #[cfg(test)]
 pub(crate) use registry::{HandleRegistry, PendingHandleValue};
+#[cfg(any(test, feature = "bench-internals", target_os = "windows"))]
+pub(crate) use runtime::FormulaHandleService;
 pub(crate) use runtime::FormulaHandleServiceRead;
+pub(crate) use runtime::FormulaHandleServiceResolver;
 #[cfg(any(feature = "handles", test))]
 pub(crate) use runtime::FormulaHandleServiceSlot;
-pub(crate) use runtime::{
-    FormulaHandleService, FormulaHandleServiceResolver, FormulaHandleServiceSealed,
-    HandleStoreQuiescent,
-};
 pub(crate) use store::HandleStore;
 pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{

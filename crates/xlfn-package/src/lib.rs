@@ -20,7 +20,6 @@ use object::read::pe::{
     PeFile32, PeFile64,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -75,6 +74,10 @@ pub use error::{
     SYSTEM_IMPORT_POLICY_VERSION,
 };
 pub use fs_identity::{DirectoryIdentity, directory_identity};
+pub use manifest::{
+    BUILD_MANIFEST_SCHEMA, BuildManifest, BuildManifestInput, BundlePolicy, BundleSource,
+    CargoConstraints, CrtManifest, FeatureSelection, IntegrityMetadata,
+};
 pub use names::{validate_directory_path, validate_path_components, validate_windows_basename};
 pub use pe::{
     ExportSymbol, ForwardedExport, PeInfo, inspect_pe, parse_pe_bytes, sha256,

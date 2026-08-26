@@ -55,9 +55,9 @@ impl<'a> ActiveReservation<'a> {
             generation,
             id,
             #[cfg(any(test, feature = "refinement"))]
-            completion: Mutex::new(crate::shutdown_refinement::Completion::Failed),
+            completion: Mutex::new(crate::shutdown_trace::Completion::Failed),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: None,
+            trace: None,
         }
     }
 }
@@ -75,17 +75,17 @@ pub(crate) struct CompletionGuard {
     pub(crate) generation: triomphe::Arc<GenerationState>,
     pub(crate) id: u64,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) completion: Mutex<crate::shutdown_refinement::Completion>,
+    pub(crate) completion: Mutex<crate::shutdown_trace::Completion>,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Option<crate::shutdown_refinement::GhostHandle>,
+    pub(crate) trace: Option<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         self.generation.remove_task(self.id);
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.as_ref() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndAsyncTask(
+        if let Some(trace) = self.trace.as_ref() {
+            trace.record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
                 *self.completion.lock(),
             ));
         }

@@ -96,7 +96,7 @@ struct DiagnosticRouter {
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
 }
 
 impl DiagnosticRouter {
@@ -127,16 +127,16 @@ impl DiagnosticRouter {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(Arc::clone(&ghost));
+    fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.trace.lock() = Some(Arc::clone(&trace));
         if let Some(sink) = self.sink.load().as_ref() {
-            sink.set_ghost(ghost);
+            sink.set_trace_sink(trace);
         }
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
-        self.ghost.lock().clone()
+    fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        self.trace.lock().clone()
     }
 
     #[cfg(test)]
@@ -215,8 +215,8 @@ impl DiagnosticRouter {
             Err(DiagnosticShutdownError::WorkerPanicked) => {
                 self.unmark_retiring(&previous);
                 #[cfg(any(test, feature = "refinement"))]
-                if let Some(ghost) = self.ghost_handle() {
-                    record_ghost_diagnostics_cleanup_issue(ghost);
+                if let Some(trace) = self.trace_handle() {
+                    record_trace_diagnostics_cleanup_issue(trace);
                 }
                 sink.report(OwnedDiagnosticEvent {
                     udf_id: "diagnostic sink replacement",
@@ -241,9 +241,9 @@ impl DiagnosticRouter {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn ghost_snapshot(&self) -> GhostDiagnosticsSnapshot {
+    fn trace_snapshot(&self) -> DiagnosticSnapshot {
         let sink = self.sink.load();
-        GhostDiagnosticsSnapshot {
+        DiagnosticSnapshot {
             running: sink.is_some(),
             pending: sink.as_ref().map_or(0, |sink| sink.pending()),
         }
@@ -253,10 +253,8 @@ impl DiagnosticRouter {
     fn record_stop_diagnostics(&self) {
         crate::ingress::with_diagnostic_linearization(|| {
             #[cfg(any(test, feature = "refinement"))]
-            if let Some(ghost) = self.ghost_handle()
-                && ghost.state().resources.diagnostics_running
-            {
-                ghost.record_event(crate::shutdown_refinement::GhostEvent::StopDiagnostics);
+            if let Some(trace) = self.trace_handle() {
+                trace.record(crate::shutdown_trace::ShutdownEvent::StopDiagnostics);
             }
         });
     }
@@ -316,8 +314,8 @@ impl DiagnosticRouter {
             self.record_stop_diagnostics();
         } else if matches!(result, Err(DiagnosticShutdownError::WorkerPanicked)) {
             #[cfg(any(test, feature = "refinement"))]
-            if let Some(ghost) = self.ghost_handle() {
-                record_ghost_diagnostics_cleanup_issue(ghost);
+            if let Some(trace) = self.trace_handle() {
+                record_trace_diagnostics_cleanup_issue(trace);
             }
             // A panicked reopenable worker has stopped the current dispatcher.
             // The queue items lost with it are accounted for by the sink
@@ -415,7 +413,7 @@ static ROUTER: LazyLock<DiagnosticRouter> = LazyLock::new(|| DiagnosticRouter {
     transition: Mutex::new(DiagnosticPhase::Closed),
     retiring_workers: Mutex::new(Vec::new()),
     #[cfg(any(test, feature = "refinement"))]
-    ghost: Mutex::new(None),
+    trace: Mutex::new(None),
 });
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -439,11 +437,8 @@ fn admit_published_sink(
     #[cfg(not(any(test, feature = "refinement")))]
     let _ = (router, had_sink);
     #[cfg(any(test, feature = "refinement"))]
-    if let Some(ghost) = router.ghost_handle()
-        && !had_sink
-        && ghost.active()
-    {
-        ghost.record_event(crate::shutdown_refinement::GhostEvent::StartDiagnostics);
+    if !had_sink && let Some(trace) = router.trace_handle() {
+        trace.record(crate::shutdown_trace::ShutdownEvent::StartDiagnostics);
     }
     Ok(())
 }
@@ -468,8 +463,8 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
         || {
             let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
             #[cfg(any(test, feature = "refinement"))]
-            if let Some(ghost) = router.ghost_handle() {
-                sink.set_ghost(ghost);
+            if let Some(trace) = router.trace_handle() {
+                sink.set_trace_sink(trace);
             }
             Ok(sink)
         },
@@ -493,59 +488,37 @@ pub(crate) fn reset_diagnostic_router() -> XllResult<()> {
 }
 
 #[cfg(any(test, feature = "refinement"))]
+pub(crate) fn diagnostic_sink_running() -> bool {
+    router().trace_snapshot().running
+}
+
+#[cfg(any(test, feature = "refinement"))]
 #[derive(Clone, Copy)]
-pub(crate) struct GhostDiagnosticsSnapshot {
+pub(crate) struct DiagnosticSnapshot {
     pub(crate) running: bool,
     pub(crate) pending: u64,
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(crate) fn connect_ghost<F>(
-    ghost: crate::shutdown_refinement::GhostHandle,
+pub(crate) fn connect_trace<F>(
+    trace: crate::shutdown_trace::ShutdownTraceHandle,
     initialize: F,
 ) -> XllResult<()>
 where
-    F: FnOnce(GhostDiagnosticsSnapshot) -> XllResult<()>,
+    F: FnOnce(DiagnosticSnapshot) -> XllResult<()>,
 {
     crate::ingress::with_diagnostic_linearization(|| {
-        let snapshot = router().ghost_snapshot();
+        let snapshot = router().trace_snapshot();
         initialize(snapshot)?;
-        router().set_ghost(ghost);
+        router().set_trace_sink(trace);
         Ok(())
     })
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(crate) fn record_ghost_diagnostics_stopped(
-    ghost: crate::shutdown_refinement::GhostHandle,
-) -> XllResult<()> {
+fn record_trace_diagnostics_cleanup_issue(trace: crate::shutdown_trace::ShutdownTraceHandle) {
     crate::ingress::with_diagnostic_linearization(|| {
-        let state = ghost.state();
-        if !state.resources.diagnostics_running {
-            return Ok(());
-        }
-        if state.resources.diagnostics_pending != 0 {
-            ghost
-                .fail_stop(crate::shutdown_refinement::GhostFailure::DiagnosticsShutdownFailed)
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: DiagnosticId::DIAGNOSTICS_FAILURE,
-                })?;
-            Err(XllError::Internal {
-                diagnostic_id: DiagnosticId::DIAGNOSTICS_PENDING,
-            })
-        } else {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::StopDiagnostics);
-            Ok(())
-        }
-    })
-}
-
-#[cfg(any(test, feature = "refinement"))]
-fn record_ghost_diagnostics_cleanup_issue(ghost: crate::shutdown_refinement::GhostHandle) {
-    crate::ingress::with_diagnostic_linearization(|| {
-        if ghost.active() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::RecordCleanupIssue);
-        }
+        trace.record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
     });
 }
 
@@ -763,20 +736,13 @@ mod tests {
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
 
-        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
-        ghost
-            .begin_generation(1, crate::shutdown_refinement::GhostResources::opened(0, 0))
-            .unwrap();
-        let ghost_for_close = Arc::clone(&ghost);
-        ingress.begin_close_with(move || {
-            ghost_for_close.record_event(crate::shutdown_refinement::GhostEvent::BeginClose);
-        });
+        ingress.begin_close_with(|| {});
 
         let router = DiagnosticRouter {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(Some(Arc::clone(&ghost))),
+            trace: Mutex::new(None),
         };
         let result = router.replace_with(
             || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new),
@@ -785,12 +751,6 @@ mod tests {
 
         assert!(matches!(result, Err(DiagnosticInitError::RouterClosed)));
         assert!(router.current().is_none());
-        assert!(matches!(
-            ghost.state().phase,
-            crate::shutdown_refinement::GhostPhase::Closing(
-                crate::shutdown_refinement::GhostStage::DrainCalls
-            )
-        ));
     }
 
     #[test]
@@ -824,7 +784,7 @@ mod tests {
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
             pending: Arc::new(AtomicU64::new(0)),
-            ghost: Arc::new(Mutex::new(None)),
+            trace: Arc::new(Mutex::new(None)),
         };
         assert_eq!(
             sink.shutdown(),
@@ -848,7 +808,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         };
         router
             .replace_with(
@@ -910,7 +870,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -966,145 +926,6 @@ mod tests {
         );
         replacing.join().unwrap().unwrap();
         router.drain_reopenable().unwrap();
-    }
-
-    #[test]
-    fn panicked_previous_worker_is_not_restored_over_a_healthy_replacement() {
-        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
-        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
-        resources.diagnostics_running = true;
-        ghost.begin_generation(1, resources).unwrap();
-        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
-        let worker_thread_id = worker.thread().id();
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let terminal = Arc::new(AsyncDiagnosticSink {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
-            worker_thread_id,
-            pending: Arc::new(AtomicU64::new(0)),
-            ghost: Arc::new(Mutex::new(None)),
-        });
-        let delivered = Arc::new(AtomicUsize::new(0));
-        let replacement =
-            Arc::new(AsyncDiagnosticSink::new(CountingSink(Arc::clone(&delivered))).unwrap());
-        let router = DiagnosticRouter {
-            sink: ArcSwapOption::new(Some(terminal)),
-            transition: Mutex::new(DiagnosticPhase::Open),
-            retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(Some(Arc::clone(&ghost))),
-        };
-
-        router
-            .replace_with(|| Ok(Arc::clone(&replacement)), |_| Ok(()))
-            .unwrap();
-        let current = router.current();
-        assert!(Arc::ptr_eq(current.as_ref().unwrap(), &replacement));
-        router
-            .current()
-            .as_ref()
-            .unwrap()
-            .report(OwnedDiagnosticEvent {
-                udf_id: "replacement",
-                argument: None,
-                error: XllError::Panic,
-                diagnostic_id: DiagnosticId::from_u64(1),
-                timestamp: SystemTime::now(),
-            });
-        assert_eq!(
-            ghost.state().phase,
-            crate::shutdown_refinement::GhostPhase::Open
-        );
-        assert_eq!(ghost.state().resources.cleanup_issues, 1);
-        assert!(ghost.state().resources.diagnostics_running);
-        router.drain_reopenable().unwrap();
-        assert_eq!(delivered.load(Ordering::Relaxed), 2);
-        assert_eq!(
-            ghost.state().phase,
-            crate::shutdown_refinement::GhostPhase::Open
-        );
-        assert_eq!(ghost.state().resources.cleanup_issues, 1);
-        assert!(!ghost.state().resources.diagnostics_running);
-    }
-
-    #[test]
-    fn reopenable_worker_panic_does_not_fail_stop_the_live_router() {
-        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
-        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
-        resources.diagnostics_running = true;
-        ghost.begin_generation(1, resources).unwrap();
-        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
-        let worker_thread_id = worker.thread().id();
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let router = DiagnosticRouter {
-            sink: ArcSwapOption::new(Some(Arc::new(AsyncDiagnosticSink {
-                sender: Mutex::new(Some(sender)),
-                worker: Mutex::new(Some(worker)),
-                worker_thread_id,
-                pending: Arc::new(AtomicU64::new(0)),
-                ghost: Arc::new(Mutex::new(None)),
-            }))),
-            transition: Mutex::new(DiagnosticPhase::Open),
-            retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(Some(Arc::clone(&ghost))),
-        };
-
-        assert!(matches!(
-            router.drain_reopenable(),
-            Err(DiagnosticShutdownError::WorkerPanicked)
-        ));
-        assert_eq!(router.phase(), DiagnosticPhase::Open);
-        assert!(router.current().is_none());
-        assert_eq!(
-            ghost.state().phase,
-            crate::shutdown_refinement::GhostPhase::Open
-        );
-        assert_eq!(ghost.state().resources.cleanup_issues, 1);
-        assert!(!ghost.state().resources.diagnostics_running);
-    }
-
-    #[test]
-    fn panicked_worker_accounts_for_queued_events_as_discarded() {
-        let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
-        let mut resources = crate::shutdown_refinement::GhostResources::opened(0, 0);
-        resources.diagnostics_running = true;
-        ghost.begin_generation(1, resources).unwrap();
-
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            entered_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            panic!("injected diagnostic worker panic");
-        });
-        entered_rx.recv().unwrap();
-        let worker_thread_id = worker.thread().id();
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let sink = AsyncDiagnosticSink {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
-            worker_thread_id,
-            pending: Arc::new(AtomicU64::new(0)),
-            ghost: Arc::new(Mutex::new(Some(Arc::clone(&ghost)))),
-        };
-        sink.report(OwnedDiagnosticEvent {
-            udf_id: "discarded",
-            argument: None,
-            error: XllError::Panic,
-            diagnostic_id: DiagnosticId::from_u64(1),
-            timestamp: SystemTime::now(),
-        });
-        release_tx.send(()).unwrap();
-
-        assert!(matches!(
-            sink.shutdown(),
-            Err(DiagnosticShutdownError::WorkerPanicked)
-        ));
-        assert_eq!(
-            ghost.state().phase,
-            crate::shutdown_refinement::GhostPhase::Open
-        );
-        assert_eq!(ghost.state().resources.diagnostics_pending, 0);
-        assert!(ghost.trace_json().unwrap().contains("discardDiagnostic"));
     }
 
     #[test]
@@ -1214,7 +1035,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -1291,7 +1112,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         });
         let (factory_entered_tx, factory_entered_rx) = std::sync::mpsc::sync_channel(1);
         let (release_factory_tx, release_factory_rx) = std::sync::mpsc::sync_channel(1);
@@ -1331,7 +1152,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         };
         let _certificate = router.close_terminal().unwrap().certificate;
 
@@ -1370,11 +1191,11 @@ mod tests {
                 worker: Mutex::new(Some(worker)),
                 worker_thread_id,
                 pending: Arc::new(AtomicU64::new(0)),
-                ghost: Arc::new(Mutex::new(None)),
+                trace: Arc::new(Mutex::new(None)),
             }))),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         };
 
         let error = match router.close_terminal() {

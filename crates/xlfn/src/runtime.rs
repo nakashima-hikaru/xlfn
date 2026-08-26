@@ -1,37 +1,36 @@
 use crate::addin::PhysicallyUnloadableAddin;
-use crate::generation::{OpenAttemptId, RemovalAttemptId, RemovalEpoch, RuntimeGeneration};
-use crate::host_callback::HostCallbackSession;
+#[cfg(feature = "async")]
+use crate::generation::ExecutionLease;
+#[cfg(any(test, feature = "refinement"))]
+use crate::generation::OpenAttemptId;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::generation::OpeningGeneration;
+use crate::generation::{ExecutionGeneration, RemovalEpoch, RuntimeGeneration, ShutdownGeneration};
 use crate::ingress::AdmittedExport;
-use crate::registration::{HostMutationJournal, RegistrationId};
+use crate::registration::RegistrationId;
 use crate::{XllError, XllResult};
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 #[cfg(not(feature = "async"))]
 use std::sync::atomic::Ordering;
 
+#[cfg(any(test, feature = "refinement"))]
+use crate::lifecycle::ClosedWitness;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::lifecycle::OpeningTxn;
+use crate::lifecycle::{
+    GenerationAdmission, HostLifecycleIntent, LifecycleCoordinator, LifecyclePhase,
+};
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
-    GenerationAdmission, GenerationServices, HostLedger, HostLifecycleIntent, LifecycleAccess,
-    LifecycleCoordinator, LifecyclePhase, LifecycleRemovalState, ModuleResidency, QuarantineReason,
-    QuarantineVault, ReturnProtocol, SealedGenerationServices,
+    GenerationServices, HostLedger, ModuleResidency, QuarantineReason, QuarantineVault,
+    ReturnProtocol, SealedGenerationServices,
 };
 use crate::runtime_refinement::RuntimeRefinementHooks;
 use xlfn_kernel::thread_affine::{
     ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
 };
-
-#[cold]
-fn opening_publication_lost() -> ! {
-    #[cfg(not(test))]
-    {
-        tracing::error!("lifecycle opening publication lost its ingress linearization");
-        std::process::abort();
-    }
-    #[cfg(test)]
-    panic!("lifecycle opening publication lost its ingress linearization");
-}
 
 type QuiesceOperation<A> = fn(
     &mut <A as crate::Addin>::SharedState,
@@ -77,65 +76,6 @@ impl<A: crate::Addin> UnloadPolicy<A> {
     }
 }
 
-/// The published root of an open Add-in generation.
-pub(crate) struct ExecutionGeneration<A: crate::Addin> {
-    pub(crate) id: RuntimeGeneration,
-    pub(crate) shared_state: A::SharedState,
-    pub(crate) layers: A::Layers,
-}
-
-impl<A: crate::Addin> ExecutionGeneration<A> {
-    pub(crate) const fn id(&self) -> RuntimeGeneration {
-        self.id
-    }
-}
-
-/// Unique Add-in state staged during `OPENING`.
-pub(crate) struct OpeningGeneration<A: crate::Addin> {
-    pub(crate) shared_state: A::SharedState,
-    pub(crate) layers: A::Layers,
-    pub(crate) init_config: crate::addin::RuntimeConfig,
-}
-
-impl<A: crate::Addin> OpeningGeneration<A> {
-    #[must_use]
-    pub(crate) fn into_parts(self) -> (A::SharedState, A::Layers, crate::addin::RuntimeConfig) {
-        (self.shared_state, self.layers, self.init_config)
-    }
-}
-
-/// Generation reclaimed during shutdown.
-pub(crate) enum ShutdownGeneration<A: crate::Addin> {
-    Opening(OpeningGeneration<A>),
-    Open(Arc<ExecutionGeneration<A>>),
-}
-
-/// Explicit open-generation lifetime lease for call-scoped and asynchronous
-/// UDF executions.
-pub struct ExecutionLease<A: crate::Addin> {
-    pub(crate) generation: Arc<ExecutionGeneration<A>>,
-}
-
-impl<A: crate::Addin> Clone for ExecutionLease<A> {
-    fn clone(&self) -> Self {
-        Self {
-            generation: Arc::clone(&self.generation),
-        }
-    }
-}
-
-impl<A: crate::Addin> ExecutionLease<A> {
-    #[must_use]
-    pub fn state(&self) -> &A::SharedState {
-        &self.generation.shared_state
-    }
-
-    #[must_use]
-    pub fn layers(&self) -> &A::Layers {
-        &self.generation.layers
-    }
-}
-
 pub struct Runtime<A: crate::Addin> {
     pub(crate) lifecycle: LifecycleCoordinator<A>,
     pub(crate) addin_lifecycle: ThreadAffineSlot<A::LifecycleState>,
@@ -149,116 +89,12 @@ pub struct Runtime<A: crate::Addin> {
     pub(crate) refinement: RuntimeRefinementHooks,
 }
 
-/// Write-side lifecycle capability for one runtime aggregate.
-///
-/// Read-side admission remains available directly from [`Runtime`], while
-/// lifecycle mutations are issued through this narrow capability. Keeping the
-/// capability separate prevents call-facing code from treating lifecycle
-/// control operations as ordinary runtime services.
-pub(crate) struct LifecycleRuntime<'runtime, A: crate::Addin> {
-    runtime: &'runtime Runtime<A>,
-}
-
 pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
 
 impl<A: crate::Addin> Runtime<A> {
-    pub(crate) fn lifecycle_runtime(&self) -> LifecycleRuntime<'_, A> {
-        LifecycleRuntime { runtime: self }
-    }
-}
-
-impl<'runtime, A: crate::Addin> LifecycleRuntime<'runtime, A> {
-    pub(crate) fn request_explicit_removal(&self) {
-        self.runtime.request_explicit_removal_internal();
-    }
-
-    pub(crate) fn complete_explicit_removal(&self) {
-        self.runtime.complete_explicit_removal_internal();
-    }
-
-    pub(crate) fn clear_host_intent(&self) {
-        self.runtime.clear_host_intent_internal();
-    }
-
-    pub(crate) fn quarantine(&self) {
-        self.runtime.quarantine_internal();
-    }
-
-    pub(crate) fn quarantine_shared_state(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        shared_state: A::SharedState,
-        reason: QuarantineReason,
-    ) {
-        self.runtime
-            .quarantine_shared_state_internal(generation, shared_state, reason);
-    }
-
-    pub(crate) fn quarantine_layers(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        layers: A::Layers,
-        reason: QuarantineReason,
-    ) {
-        self.runtime
-            .quarantine_layers_internal(generation, layers, reason);
-    }
-
-    pub(crate) fn quarantine_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: ExecutionGeneration<A>,
-        reason: QuarantineReason,
-    ) {
-        self.runtime
-            .quarantine_generation_internal(generation, root, reason);
-    }
-
-    pub(crate) fn quarantine_shared_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: Arc<ExecutionGeneration<A>>,
-        reason: QuarantineReason,
-    ) {
-        self.runtime
-            .quarantine_shared_generation_internal(generation, root, reason);
-    }
-
-    pub(crate) fn quarantine_opening_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        opening: OpeningGeneration<A>,
-        reason: QuarantineReason,
-    ) {
-        self.runtime
-            .quarantine_opening_generation_internal(generation, opening, reason);
-    }
-
-    pub(crate) fn begin_open_if_epoch(
-        &self,
-        expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
-        self.runtime
-            .begin_open_if_epoch_internal(expected_removal_epoch)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
-        self.runtime.begin_open_internal()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_close(&self) -> bool {
-        self.runtime.begin_close_internal()
-    }
-
-    pub(crate) fn begin_final_removal(&self) -> Option<RemovalOwner<'runtime, A>> {
-        self.runtime.begin_final_removal_internal()
-    }
-
-    pub(crate) fn acquire_open_rollback(&self) -> Option<RemovalOwner<'runtime, A>> {
-        self.runtime.acquire_open_rollback_internal()
+    pub(crate) fn lifecycle_runtime(&self) -> crate::lifecycle::LifecycleAuthority<'_, A> {
+        crate::lifecycle::LifecycleAuthority::new(self)
     }
 }
 
@@ -344,7 +180,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn mark_composition_terminal_pending(&self) {
+    pub(crate) fn mark_composition_terminal_pending(&self) {
         self.composition_trace().mark_terminal_pending();
     }
 
@@ -357,20 +193,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.access().host_intent()
     }
 
-    fn request_explicit_removal_internal(&self) {
-        self.lifecycle
-            .set_host_intent(HostLifecycleIntent::ExplicitRemovalRequested);
-    }
-
-    fn complete_explicit_removal_internal(&self) {
-        self.lifecycle
-            .set_host_intent(HostLifecycleIntent::ExplicitRemovalComplete);
-    }
-
-    fn clear_host_intent_internal(&self) {
-        self.lifecycle.set_host_intent(HostLifecycleIntent::None);
-    }
-
     /// Acquires the DLL's self-reference before a generated `xlAutoOpen`
     /// enters the logical opening transaction.
     pub(crate) fn ensure_module_residency(&self, anchor: *const ()) -> XllResult<bool> {
@@ -381,57 +203,6 @@ impl<A: crate::Addin> Runtime<A> {
     /// completed. Ordinary host shutdown hints never call this method.
     pub(crate) fn release_module_residency(&self) -> XllResult<()> {
         self.residency.release()
-    }
-
-    fn install_module_closing(&self, closing: crate::module_runtime::ModuleClosing) {
-        self.lifecycle.install_module_closing(closing);
-    }
-
-    fn install_module_closing_with_control(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-        closing: crate::module_runtime::ModuleClosing,
-    ) {
-        self.lifecycle
-            .install_module_closing_locked(control, closing);
-    }
-
-    /// Takes the close capability retained by an abandoned owner, falling
-    /// back to the module's emergency quarantine path only when no affine
-    /// owner can be recovered. Quarantine is the sole production path that
-    /// may use that emergency fallback.
-    pub(crate) fn take_module_closing_for_quarantine(
-        &self,
-    ) -> crate::module_runtime::ModuleClosing {
-        self.lifecycle
-            .take_module_closing_for_quarantine()
-            .unwrap_or_else(|| crate::module_runtime::begin_close_for_quarantine(|| {}))
-    }
-
-    fn take_module_closing_for_owner(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-    ) -> crate::module_runtime::ModuleClosing {
-        self.lifecycle
-            .take_module_closing_for_close(control)
-            .unwrap_or_else(|| {
-                crate::lifecycle::fail_stop_invariant(
-                    "removal owner lacks module close authority",
-                    &XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-                    },
-                )
-            })
-    }
-
-    #[cfg(test)]
-    fn take_module_closing_for_test(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-    ) -> crate::module_runtime::ModuleClosing {
-        self.lifecycle
-            .take_module_closing_for_close(control)
-            .unwrap_or_else(crate::module_runtime::begin_close_for_test)
     }
 
     pub(crate) fn physical_unload_enabled(&self) -> bool {
@@ -453,82 +224,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.residency.is_held()
     }
 
-    /// Publishes the fail-safe terminal state. A quarantined runtime rejects
-    /// new opens and calls while retaining the module residency lease and any
-    /// resources whose destruction was not proven safe.
-    fn quarantine_internal(&self) {
-        let mut control = self.lifecycle.access();
-        self.return_protocol.close_admission();
-        self.lifecycle.quarantine_core(&mut control);
-        self.lifecycle.notify_all();
-    }
-
-    fn quarantine_shared_state_internal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        shared_state: A::SharedState,
-        reason: QuarantineReason,
-    ) {
-        self.quarantine
-            .retain_shared_state(generation, shared_state, reason);
-    }
-
-    fn quarantine_layers_internal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        layers: A::Layers,
-        reason: QuarantineReason,
-    ) {
-        self.quarantine.retain_layers(generation, layers, reason);
-    }
-
-    fn quarantine_generation_internal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: ExecutionGeneration<A>,
-        reason: QuarantineReason,
-    ) {
-        self.quarantine.retain_generation(generation, root, reason);
-    }
-
-    fn quarantine_shared_generation_internal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: Arc<ExecutionGeneration<A>>,
-        reason: QuarantineReason,
-    ) {
-        self.quarantine
-            .retain_shared_generation(generation, root, reason);
-    }
-
-    fn quarantine_opening_generation_internal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        opening: OpeningGeneration<A>,
-        reason: QuarantineReason,
-    ) {
-        let OpeningGeneration {
-            shared_state,
-            layers,
-            init_config: _,
-        } = opening;
-        if let Some(id) = generation {
-            self.quarantine.retain_generation(
-                Some(id),
-                ExecutionGeneration {
-                    id,
-                    shared_state,
-                    layers,
-                },
-                reason,
-            );
-        } else {
-            self.quarantine
-                .retain_shared_state(None, shared_state, reason);
-            self.quarantine.retain_layers(None, layers, reason);
-        }
-    }
-
     pub(crate) fn quarantine_snapshot(&self) -> Vec<(Option<RuntimeGeneration>, QuarantineReason)> {
         self.quarantine.snapshot()
     }
@@ -544,50 +239,6 @@ impl<A: crate::Addin> Runtime<A> {
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
         self.lifecycle.access().open_attempt()
-    }
-
-    fn begin_open_if_epoch_internal(
-        &self,
-        expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
-        #[cfg(test)]
-        let test_module_lease = crate::ingress::acquire_test_module_lease();
-        let mut control = self.lifecycle.access();
-        if control.removal_epoch() != expected_removal_epoch.get()
-            || control.phase() != LifecyclePhase::Closed
-            || control.open_attempt().is_some()
-            || control.removal_attempt().is_some()
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
-            });
-        }
-
-        self.lifecycle.prepare_open(&mut control);
-        let attempt_id = self.lifecycle.allocate_open_attempt(&mut control)?;
-        self.return_protocol.reopen_admission()?;
-
-        let module_opening = crate::module_runtime::begin_open();
-        #[cfg(test)]
-        {
-            *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
-        }
-        self.lifecycle.begin_opening(&mut control, attempt_id);
-        self.refinement
-            .begin_open(self, expected_removal_epoch.get(), attempt_id);
-        Ok(OpeningTxn {
-            runtime: self,
-            attempt_id,
-            module_opening: Some(module_opening),
-            host: Some(NoHost),
-            lifecycle_state: None,
-            _stage: PhantomData,
-        })
-    }
-
-    #[cfg(test)]
-    fn begin_open_internal(&self) -> XllResult<OpeningTxn<'_, A, OpenAttemptBegun>> {
-        self.begin_open_if_epoch_internal(self.removal_epoch())
     }
 
     pub(crate) fn removal_epoch(&self) -> RemovalEpoch {
@@ -619,16 +270,20 @@ impl<A: crate::Addin> Runtime<A> {
                 "test runtime has one lifecycle state"
             );
         }
-        let mut control = self.lifecycle.access();
+        let attempt = self
+            .lifecycle
+            .access()
+            .open_attempt()
+            .expect("test publish requires an open attempt");
         assert!(
-            self.lifecycle
-                .stage_opening_generation_locked(
-                    &mut control,
+            self.lifecycle_runtime()
+                .stage_opening_generation(
+                    attempt,
                     OpeningGeneration {
                         shared_state: state,
                         layers,
                         init_config: crate::addin::RuntimeConfig::new(),
-                    }
+                    },
                 )
                 .is_ok()
         );
@@ -677,55 +332,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.addin_lifecycle.release_empty_binding(access)
     }
 
-    fn stage_opening_generation_for_attempt(
-        &self,
-        attempt_id: OpenAttemptId,
-        opening: OpeningGeneration<A>,
-    ) -> Result<(), (XllError, OpeningGeneration<A>)> {
-        let mut control = self.lifecycle.access();
-        if control.open_attempt() != Some(attempt_id) || control.phase() != LifecyclePhase::Opening
-        {
-            return Err((XllError::Closing, opening));
-        }
-        self.lifecycle
-            .stage_opening_generation_locked(&mut control, opening)
-    }
-
-    pub(crate) fn publish_opening_generation(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-        attempt_id: OpenAttemptId,
-        module_epoch: crate::module_runtime::ModuleEpochLease,
-    ) -> XllResult<()> {
-        let generation = attempt_id.into_runtime_generation();
-        let config = control.opening_config().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-        })?;
-        let armed_services = GenerationServices::arm_generation(
-            generation,
-            config,
-            crate::rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-        )?;
-        let services = armed_services.commit();
-        if let Err(failure) = self.lifecycle.publish_opening_generation_locked(
-            control,
-            generation,
-            std::sync::Arc::clone(&services),
-            module_epoch,
-        ) {
-            services.disarm_or_abort();
-            if let Some(opening) = failure.opening {
-                self.quarantine_opening_generation_internal(
-                    Some(generation),
-                    opening,
-                    QuarantineReason::OpenStateInvariant,
-                );
-            }
-            return Err(failure.error);
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     #[must_use]
     pub(crate) fn has_opening_generation(&self) -> bool {
@@ -750,10 +356,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.install_test_generation_services(services);
     }
 
-    pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
-        self.lifecycle.take_opening_for_rollback()
-    }
-
     #[cfg(test)]
     pub(crate) fn take_current_generation(&self) -> Option<Arc<ExecutionGeneration<A>>> {
         self.lifecycle.take_current_generation()
@@ -772,102 +374,12 @@ impl<A: crate::Addin> Runtime<A> {
         attempt.commit_in_place(registrations)
     }
 
-    fn finish_open_for_attempt(
-        &self,
-        attempt_id: OpenAttemptId,
-        module_opening: crate::module_runtime::ModuleOpening,
-        journal: &mut crate::registration::HostMutationJournal,
-    ) -> XllResult<()> {
-        let mut control = self.lifecycle.access();
-        if control.open_attempt() != Some(attempt_id) {
-            return Err(XllError::Closing);
-        }
-
-        // Once this attempt owns the lifecycle slot, retain every host
-        // registration even when a concurrent close has already won the phase
-        // transition. The close owner needs those IDs to unregister the host
-        // mutations before publishing Closed.
-        let registration_ids = journal
-            .pending_registrations
-            .iter()
-            .map(|entry| entry.registration)
-            .collect::<Vec<_>>();
-        self.clear_metadata_debt_for_registrations(&registration_ids);
-        self.host.merge(std::mem::take(journal));
-        let can_commit = control.phase() == LifecyclePhase::Opening;
-        if can_commit {
-            let ingress = crate::module_runtime::ingress();
-            ingress
-                .complete_open(|| {
-                    self.publish_opening_generation(
-                        &mut control,
-                        attempt_id,
-                        module_opening.commit(),
-                    )?;
-                    let generation = attempt_id.into_runtime_generation();
-                    self.refinement.commit_open(self, attempt_id, || {
-                        self.lifecycle.commit_open(&mut control, generation)?;
-                        if control.phase() != LifecyclePhase::Open
-                            || control.last_committed_generation() != Some(generation)
-                            || control.open_attempt().is_some()
-                        {
-                            crate::lifecycle::fail_stop_invariant(
-                                "xlAutoOpen commit postcondition",
-                                &XllError::Internal {
-                                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                                },
-                            );
-                        }
-                        Ok(())
-                    })?;
-                    Ok::<(), XllError>(())
-                })
-                .unwrap_or_else(|_| opening_publication_lost())?;
-            self.lifecycle.notify_all();
-            Ok(())
-        } else {
-            self.reject_open_attempt(&mut control, module_opening);
-            self.lifecycle.notify_all();
-            drop(control);
-            self.refinement.reject_open(self, attempt_id);
-            Err(XllError::Closing)
-        }
-    }
-
     pub(crate) fn retain_host_mutations(&self, journal: crate::registration::HostMutationJournal) {
         self.host.merge(journal);
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {
         self.host.registration_state_unknown()
-    }
-
-    fn reject_open_attempt(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-        module_opening: crate::module_runtime::ModuleOpening,
-    ) {
-        self.lifecycle.reject_open_attempt(control);
-        self.install_module_closing_with_control(control, module_opening.rollback(|| {}));
-    }
-
-    fn fail_and_record(
-        &self,
-        attempt_id: OpenAttemptId,
-    ) -> crate::runtime_components::OpenFailureDisposition {
-        let mut control = self.lifecycle.access();
-        if control.open_attempt() != Some(attempt_id) {
-            return crate::runtime_components::OpenFailureDisposition::ClosingOwnsCleanup;
-        }
-
-        if control.phase() == LifecyclePhase::Opening {
-            self.return_protocol.close_admission();
-        }
-        let disposition = self.lifecycle.record_open_failure(&mut control);
-        self.lifecycle.notify_all();
-        drop(control);
-        self.refinement.fail_open(self, attempt_id);
-        disposition
     }
 
     pub(crate) fn enter<'call>(
@@ -887,130 +399,6 @@ impl<A: crate::Addin> Runtime<A> {
                 _ingress: ingress,
             })
         })
-    }
-
-    #[cfg(test)]
-    fn begin_close_internal(&self) -> bool {
-        let mut control = self.lifecycle.access();
-        let should_close = crate::module_runtime::ingress().with_linearization(|| {
-            if matches!(
-                control.phase(),
-                LifecyclePhase::Opening | LifecyclePhase::Open
-            ) {
-                self.return_protocol.close_admission();
-                self.lifecycle.request_closing(&mut control);
-                true
-            } else {
-                false
-            }
-        });
-        if should_close {
-            let _module_closing = self.take_module_closing_for_test(&mut control);
-        }
-        should_close
-    }
-
-    fn begin_final_removal_internal(&self) -> Option<RemovalOwner<'_, A>> {
-        let mut wait_guard = self.lifecycle.access();
-        // Every final-close invocation invalidates open operations that started
-        // before it, including an operation that is between rollback recovery
-        // and acquisition of its open-attempt token while the phase is Closed.
-        // The removal-request epoch is deliberately not part of TerminalCertificate: a waiting
-        // final-close caller may advance it while the active owner finishes.
-        self.lifecycle.begin_removal_request(&mut wait_guard);
-        self.return_protocol.close_admission();
-        let mut request_recorded = false;
-        loop {
-            let decision = crate::module_runtime::ingress().with_linearization(|| {
-                match wait_guard.phase() {
-                    LifecyclePhase::Closed => {
-                        // A cleanup owner publishes Closed before its guard leaves
-                        // the callback stack. A concurrent explicit removal must
-                        // not return until that owner has fully exited, because
-                        // the host may immediately continue with residency release.
-                        if wait_guard.removal_attempt().is_none() && self.returns_are_quiescent() {
-                            self.refinement
-                                .request_final_close(self, &mut request_recorded);
-                            return Some(None);
-                        }
-                        if wait_guard.removal_attempt().is_none() {
-                            self.lifecycle.request_closing(&mut wait_guard);
-                        }
-                    }
-                    LifecyclePhase::Closing => {}
-                    LifecyclePhase::Opening
-                    | LifecyclePhase::Open
-                    | LifecyclePhase::OpenRollbackPending => {
-                        self.lifecycle.request_closing(&mut wait_guard);
-                    }
-                    LifecyclePhase::Quarantined => return Some(None),
-                }
-
-                if !request_recorded {
-                    if !matches!(
-                        wait_guard.phase(),
-                        LifecyclePhase::Closed | LifecyclePhase::Closing
-                    ) {
-                        crate::lifecycle::fail_stop_invariant(
-                            "xlAutoRemove close-request postcondition",
-                            &XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                            },
-                        );
-                    }
-                    self.refinement
-                        .request_final_close(self, &mut request_recorded);
-                }
-
-                if wait_guard.phase() != LifecyclePhase::Closed
-                    && wait_guard.open_attempt().is_none()
-                    && let Some(attempt) = self.lifecycle.claim_removal_owner(&mut wait_guard)
-                {
-                    self.refinement.acquire_final_close_owner(self);
-                    Some(Some(attempt))
-                } else {
-                    None
-                }
-            });
-            match decision {
-                Some(Some(attempt)) => {
-                    let module_closing = self.take_module_closing_for_owner(&mut wait_guard);
-                    return Some(RemovalOwner {
-                        runtime: self,
-                        attempt,
-                        module_closing: Some(module_closing),
-                    });
-                }
-                Some(None) => return None,
-                None => self.lifecycle.wait(&mut wait_guard),
-            }
-        }
-    }
-
-    fn acquire_open_rollback_internal(&self) -> Option<RemovalOwner<'_, A>> {
-        let mut wait_guard = self.lifecycle.access();
-        loop {
-            match wait_guard.phase() {
-                LifecyclePhase::Closed => return None,
-                LifecyclePhase::OpenRollbackPending => {}
-                LifecyclePhase::Closing
-                | LifecyclePhase::Opening
-                | LifecyclePhase::Open
-                | LifecyclePhase::Quarantined => {
-                    return None;
-                }
-            }
-            if let Some(attempt) = self.lifecycle.claim_removal_owner(&mut wait_guard) {
-                self.refinement.acquire_open_rollback_owner(self);
-                let module_closing = self.take_module_closing_for_owner(&mut wait_guard);
-                return Some(RemovalOwner {
-                    runtime: self,
-                    attempt,
-                    module_closing: Some(module_closing),
-                });
-            }
-            self.lifecycle.wait(&mut wait_guard);
-        }
     }
 
     pub(crate) fn registrations(&self) -> Vec<crate::registration::PendingRegistration> {
@@ -1107,7 +495,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn disable_ghost_for_test(&self) {
+    pub(crate) fn disable_trace_for_test(&self) {
         self.refinement_hooks().disable_for_test();
     }
 
@@ -1120,11 +508,11 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn ghost_trace_json(&self) -> String {
+    pub(crate) fn shutdown_trace_json(&self) -> String {
         self.refinement_hooks()
-            .ghost_handle()
+            .trace_handle()
             .trace_json()
-            .expect("ghost trace serialization")
+            .expect("shutdown trace is not active")
     }
 
     #[cfg(test)]
@@ -1132,433 +520,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.composition_trace()
             .trace_json()
             .expect("composition trace serialization")
-    }
-}
-
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "linear proof tokens are consumed by terminal transitions"
-)]
-pub(crate) struct QuiescenceProof {
-    pub(crate) exports: crate::ingress::ExportsDrained,
-    pub(crate) module_quiescent: crate::module_runtime::ModuleQuiescent,
-    pub(crate) returns: crate::shutdown::ReturnsQuiescent,
-    pub(crate) rtd: crate::rtd::RtdQuiescent,
-    pub(crate) host_callbacks: crate::shutdown::HostCallbacksDetached,
-    pub(crate) async_stopped: crate::shutdown::AsyncStopped,
-    pub(crate) subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    pub(crate) handle_store_quiescent: crate::shutdown::HandleStoreQuiescent,
-    pub(crate) diagnostics_stopped: crate::diagnostics::DiagnosticsStopped,
-    pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
-    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
-}
-
-pub(crate) struct FinalRemoval;
-pub(crate) struct OpenRollback;
-
-pub(crate) trait TerminalCertificateKind {
-    type Certificate<'runtime, A: crate::Addin>
-    where
-        A: 'runtime;
-
-    fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
-        proof: QuiescenceProof,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
-    where
-        A: crate::Addin + 'runtime;
-}
-
-impl TerminalCertificateKind for FinalRemoval {
-    type Certificate<'runtime, A: crate::Addin>
-        = FinalRemovalCertificate<'runtime, A>
-    where
-        A: 'runtime;
-
-    fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
-        proof: QuiescenceProof,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
-    where
-        A: crate::Addin + 'runtime,
-    {
-        owner.certify_final_removal(proof)
-    }
-}
-
-impl TerminalCertificateKind for OpenRollback {
-    type Certificate<'runtime, A: crate::Addin>
-        = OpenRollbackCertificate<'runtime, A>
-    where
-        A: 'runtime;
-
-    fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
-        proof: QuiescenceProof,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
-    where
-        A: crate::Addin + 'runtime,
-    {
-        owner.certify_open_rollback(proof)
-    }
-}
-
-/// The final-removal certificate has the same two shapes as the formal
-/// lifecycle model: a committed generation owns both its generation identity
-/// and module epoch, while an uncommitted close owns neither.
-#[allow(
-    dead_code,
-    reason = "certificate fields are linear proof ownership consumed at finish"
-)]
-pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
-    Committed {
-        proof: QuiescenceProof,
-        #[cfg(any(test, feature = "refinement"))]
-        composition_resources: crate::shutdown_refinement::GhostResources,
-        owner: RemovalOwner<'runtime, A>,
-        generation: RuntimeGeneration,
-    },
-    Uncommitted {
-        proof: QuiescenceProof,
-        #[cfg(any(test, feature = "refinement"))]
-        composition_resources: crate::shutdown_refinement::GhostResources,
-        owner: RemovalOwner<'runtime, A>,
-    },
-}
-
-/// Open rollback never owns a committed-generation/module-epoch certificate.
-/// Any temporary module epoch is consumed while issuing this value.
-pub(crate) struct OpenRollbackCertificate<'runtime, A: crate::Addin> {
-    proof: QuiescenceProof,
-    #[cfg(any(test, feature = "refinement"))]
-    composition_resources: crate::shutdown_refinement::GhostResources,
-    owner: RemovalOwner<'runtime, A>,
-}
-
-#[derive(Debug)]
-pub(crate) struct ClosedWitness {
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) runtime_address: usize,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) generation: Option<RuntimeGeneration>,
-}
-
-#[cfg(any(test, feature = "refinement"))]
-fn composition_resources_from_quiescence_proof(
-    proof: &QuiescenceProof,
-) -> crate::shutdown_refinement::GhostResources {
-    // These linear tokens are the concrete proof that every resource family
-    // represented by the abstract snapshot has drained. Keep this projection
-    // at certificate issuance so finish events cannot observe a later ad-hoc
-    // runtime snapshot.
-    let _proofs = (
-        &proof.exports,
-        &proof.rtd,
-        &proof.host_callbacks,
-        &proof.async_stopped,
-        &proof.subscriptions_stopped,
-        &proof.handle_store_quiescent,
-        &proof.diagnostics_stopped,
-        &proof.addin_quiesced,
-        &proof.generation_reclaimed,
-    );
-    crate::shutdown_refinement::GhostResources::quiescent_snapshot()
-}
-
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
-    fn validate_certificate(
-        &self,
-        proof: &QuiescenceProof,
-        accepts_phase: impl FnOnce(LifecyclePhase) -> bool,
-    ) -> Option<LifecycleRemovalState> {
-        let runtime = self.runtime;
-        let control = runtime.lifecycle.access();
-        let lifecycle_state: LifecycleRemovalState = control.removal_state();
-        let services = runtime
-            .lifecycle
-            .load_generation_services()
-            .or_else(|| control.retiring_services().map(Arc::clone));
-        let services_stopped = services.as_ref().is_none_or(|services| services.is_none());
-        let handles_match_generation = lifecycle_state
-            .last_committed_generation
-            .is_none_or(|generation| proof.handle_store_quiescent.generation() == Some(generation));
-        let services_owned = services_stopped || lifecycle_state.has_retirement();
-
-        let certified = accepts_phase(lifecycle_state.phase)
-            && lifecycle_state.open_attempt.is_none()
-            && lifecycle_state.removal_attempt == Some(self.attempt)
-            // `QuiescenceProof::returns` is issued only after the return
-            // admission is closed and all return obligations have drained.
-            // The certificate therefore consumes the proof token instead of
-            // reopening the ambient return protocol here.
-            && services_stopped
-            && !lifecycle_state.has_opening_generation()
-            && !lifecycle_state.has_current_generation()
-            && services_owned
-            && runtime.host.is_quiescent();
-
-        certified
-            .then_some(lifecycle_state)
-            .filter(|_| handles_match_generation)
-    }
-
-    fn certify_final_removal(
-        self,
-        proof: QuiescenceProof,
-    ) -> Result<FinalRemovalCertificate<'runtime, A>, (XllError, Self)> {
-        let lifecycle_state =
-            match self.validate_certificate(&proof, |phase| phase == LifecyclePhase::Closing) {
-                Some(state) => state,
-                None => {
-                    return Err((
-                        XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                        },
-                        self,
-                    ));
-                }
-            };
-        let runtime = self.runtime;
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = composition_resources_from_quiescence_proof(&proof);
-
-        if let Some(generation) = lifecycle_state.last_committed_generation {
-            if !lifecycle_state.has_module_epoch() || !lifecycle_state.module_epoch_is_current() {
-                return Err((
-                    XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                    },
-                    self,
-                ));
-            }
-            let module_epoch_matches = runtime
-                .lifecycle
-                .access()
-                .module_epoch_id()
-                .is_some_and(|epoch| epoch == proof.module_quiescent.id());
-            if !module_epoch_matches {
-                return Err((
-                    XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                    },
-                    self,
-                ));
-            }
-            let mut control = runtime.lifecycle.access();
-            if !runtime.lifecycle.clear_certified_retirement(&mut control) {
-                return Err((
-                    XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                    },
-                    self,
-                ));
-            }
-            Ok(FinalRemovalCertificate::Committed {
-                proof,
-                #[cfg(any(test, feature = "refinement"))]
-                composition_resources,
-                owner: self,
-                generation,
-            })
-        } else {
-            Ok(FinalRemovalCertificate::Uncommitted {
-                proof,
-                #[cfg(any(test, feature = "refinement"))]
-                composition_resources,
-                owner: self,
-            })
-        }
-    }
-
-    fn certify_open_rollback(
-        self,
-        proof: QuiescenceProof,
-    ) -> Result<OpenRollbackCertificate<'runtime, A>, (XllError, Self)> {
-        if self
-            .validate_certificate(&proof, |phase| {
-                matches!(
-                    phase,
-                    LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
-                )
-            })
-            .is_none()
-        {
-            return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
-                },
-                self,
-            ));
-        }
-
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = composition_resources_from_quiescence_proof(&proof);
-
-        Ok(OpenRollbackCertificate {
-            proof,
-            #[cfg(any(test, feature = "refinement"))]
-            composition_resources,
-            owner: self,
-        })
-    }
-
-    /// Consume the affine removal owner and issue the certificate shape
-    /// selected by `K`. On failure, return the owner so the caller can retain
-    /// the quarantine guard.
-    pub(crate) fn certify<K: TerminalCertificateKind>(
-        self,
-        proof: QuiescenceProof,
-    ) -> Result<K::Certificate<'runtime, A>, (XllError, Self)> {
-        K::certify(self, proof)
-    }
-}
-
-impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
-    pub(crate) fn finish(self) -> Result<RemovalOwner<'runtime, A>, (XllError, Box<Self>)> {
-        let runtime = self.owner.runtime;
-        let mut control = runtime.lifecycle.access();
-        if control.removal_attempt() != Some(self.owner.attempt)
-            || control.open_attempt().is_some()
-            || !matches!(
-                control.phase(),
-                LifecyclePhase::OpenRollbackPending | LifecyclePhase::Closing
-            )
-        {
-            return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
-                },
-                Box::new(self),
-            ));
-        }
-        let OpenRollbackCertificate {
-            proof,
-            #[cfg(any(test, feature = "refinement"))]
-            composition_resources,
-            owner,
-        } = self;
-        let _module_quiescent = proof.module_quiescent;
-        runtime.lifecycle.finish_closed(&mut control);
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.record_composition_event(
-            crate::composition_refinement::CompositionEvent::FinishOpenRollback(
-                composition_resources,
-            ),
-        );
-        #[cfg(any(test, feature = "refinement"))]
-        if runtime.phase() != LifecyclePhase::Closed {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoOpen rollback close postcondition",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
-                },
-            );
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.mark_composition_terminal_pending();
-        runtime.lifecycle.notify_all();
-        #[cfg(test)]
-        drop(runtime.lifecycle.test_module_lease.lock().take());
-        Ok(owner)
-    }
-}
-
-impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
-    pub(crate) fn finish(
-        self,
-    ) -> Result<(ClosedWitness, RemovalOwner<'runtime, A>), (XllError, Box<Self>)> {
-        let runtime = match &self {
-            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.runtime,
-        };
-        let expected_generation = match &self {
-            Self::Committed { generation, .. } => Some(*generation),
-            Self::Uncommitted { .. } => None,
-        };
-        let removal_attempt = match &self {
-            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.attempt,
-        };
-        if expected_generation != runtime.last_committed_generation() {
-            return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,
-                },
-                Box::new(self),
-            ));
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        let committed = matches!(self, Self::Committed { .. });
-        #[cfg(any(test, feature = "refinement"))]
-        if committed && let Err(error) = runtime.refinement_hooks().finish_close(runtime) {
-            return Err((error, Box::new(self)));
-        }
-        let mut control = runtime.lifecycle.access();
-        if control.removal_attempt() != Some(removal_attempt) {
-            return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-                },
-                Box::new(self),
-            ));
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = match &self {
-            Self::Committed {
-                composition_resources,
-                ..
-            }
-            | Self::Uncommitted {
-                composition_resources,
-                ..
-            } => composition_resources.clone(),
-        };
-        #[cfg(any(test, feature = "refinement"))]
-        let generation = match &self {
-            Self::Committed { generation, .. } => Some(*generation),
-            Self::Uncommitted { .. } => None,
-        };
-        let owner = match self {
-            Self::Committed { owner, proof, .. } | Self::Uncommitted { owner, proof, .. } => {
-                let _module_quiescent = proof.module_quiescent;
-                owner
-            }
-        };
-        runtime.lifecycle.finish_closed(&mut control);
-        #[cfg(any(test, feature = "refinement"))]
-        if runtime.phase() != LifecyclePhase::Closed {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoRemove close postcondition",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                },
-            );
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        if committed {
-            runtime.record_composition_event(
-                crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
-            );
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        if !committed {
-            runtime.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(
-                    composition_resources,
-                ),
-            );
-        }
-        runtime.lifecycle.notify_all();
-        #[cfg(test)]
-        drop(runtime.lifecycle.test_module_lease.lock().take());
-        Ok((
-            ClosedWitness {
-                #[cfg(any(test, feature = "refinement"))]
-                runtime_address: std::ptr::from_ref(runtime).addr(),
-                #[cfg(any(test, feature = "refinement"))]
-                generation,
-            },
-            owner,
-        ))
     }
 }
 
@@ -1614,7 +575,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     pub(crate) fn seal_generation_services(
         &self,
-        subscriptions_stopped: crate::rtd::SubscriptionsStopped,
+        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> XllResult<SealedGenerationServices> {
         let generation = self.protocol_generation();
         let Some(services) = self.generation_services_snapshot() else {
@@ -1638,8 +599,8 @@ impl<A: crate::Addin> Runtime<A> {
         &self,
         sealed: SealedGenerationServices,
     ) -> XllResult<(
-        crate::shutdown::HandleStoreQuiescent,
-        crate::rtd::SubscriptionsStopped,
+        crate::shutdown::HandlesQuiescent,
+        crate::shutdown::SubscriptionsStopped,
     )> {
         sealed.finish()
     }
@@ -1656,21 +617,27 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(any(feature = "rtd", test)))]
         {
-            Ok(crate::rtd::stopped_subscriptions())
+            Ok(crate::rtd::stopped_subscriptions(
+                self.protocol_generation(),
+            ))
         }
         #[cfg(any(feature = "rtd", test))]
         {
             let Some(services) = self.generation_services_snapshot() else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::rtd::stopped_subscriptions());
+                    return Ok(crate::rtd::stopped_subscriptions(
+                        self.protocol_generation(),
+                    ));
                 }
                 #[cfg(not(test))]
                 {
                     return Err(XllError::Closing);
                 }
             };
-            services.subscriptions_slot().seal()
+            services
+                .subscriptions_slot()
+                .seal(self.protocol_generation())
         }
     }
 
@@ -1758,306 +725,6 @@ impl<A: crate::Addin> Drop for StaticTestRuntime<A> {
     }
 }
 
-pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
-    runtime: &'runtime Runtime<A>,
-    attempt: RemovalAttemptId,
-    module_closing: Option<crate::module_runtime::ModuleClosing>,
-}
-
-impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
-    fn drop(&mut self) {
-        // An owner may be abandoned before teardown consumes the module
-        // capability. Return that capability to the runtime so a waiting
-        // removal request can take it over without minting a second close
-        // authority.
-        if let Some(module_closing) = self.module_closing.take() {
-            self.runtime.install_module_closing(module_closing);
-        }
-        let mut control = self.runtime.lifecycle.access();
-        self.runtime
-            .lifecycle
-            .release_removal_owner(&mut control, self.attempt);
-        if control.removal_attempt().is_some() {
-            crate::lifecycle::fail_stop_invariant(
-                "xlAutoRemove removal-owner release",
-                &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                },
-            );
-        }
-        self.runtime.refinement.release_cleanup_owner(self.runtime);
-        self.runtime.lifecycle.notify_all();
-    }
-}
-
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
-    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
-        self.runtime
-    }
-
-    pub(crate) fn take_module_closing(&mut self) -> crate::module_runtime::ModuleClosing {
-        self.module_closing
-            .take()
-            .expect("removal owner carries module close capability")
-    }
-}
-
-pub(crate) struct OpenAttemptBegun;
-
-pub(crate) struct OpenGenerationStaged;
-
-pub(crate) struct HostMutated;
-
-type OpeningStageFailure<'runtime, A, Host = NoHost> = (
-    XllError,
-    Box<OpeningTxn<'runtime, A, OpenAttemptBegun, Host>>,
-    Box<OpeningGeneration<A>>,
-);
-
-pub(crate) struct NoHost;
-
-pub(crate) struct HostOpeningState {
-    callbacks: HostCallbackSession,
-    journal: HostMutationJournal,
-}
-
-pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage, Host = NoHost> {
-    runtime: &'runtime Runtime<A>,
-    attempt_id: OpenAttemptId,
-    module_opening: Option<crate::module_runtime::ModuleOpening>,
-    host: Option<Host>,
-    lifecycle_state: Option<A::LifecycleState>,
-    _stage: PhantomData<fn() -> Stage>,
-}
-
-impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host> {
-    pub(crate) const fn attempt_id(&self) -> OpenAttemptId {
-        self.attempt_id
-    }
-
-    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
-        self.runtime
-    }
-
-    pub(crate) fn fail(&mut self) -> crate::runtime_components::OpenFailureDisposition {
-        let disposition = self.runtime.fail_and_record(self.attempt_id);
-        if let Some(module_opening) = self.module_opening.take() {
-            self.runtime
-                .install_module_closing(module_opening.rollback(|| {}));
-        }
-        disposition
-    }
-
-    pub(crate) fn with_lifecycle_state(mut self, state: A::LifecycleState) -> Self {
-        debug_assert!(
-            self.lifecycle_state.is_none(),
-            "an opening transaction receives one lifecycle state"
-        );
-        self.lifecycle_state = Some(state);
-        self
-    }
-
-    pub(crate) fn take_lifecycle_state(&mut self) -> Option<A::LifecycleState> {
-        self.lifecycle_state.take()
-    }
-
-    pub(crate) fn install_lifecycle(
-        mut self,
-        access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<Self, (ThreadAffineError, Self)> {
-        let Some(state) = self.lifecycle_state.take() else {
-            return Ok(self);
-        };
-        match self.runtime.install_addin_lifecycle(access, state) {
-            Ok(()) => Ok(self),
-            Err(error) => {
-                self.lifecycle_state = Some(error.value);
-                Err((error.reason, self))
-            }
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
-    pub(crate) fn attach_host(mut self) -> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
-        OpeningTxn {
-            runtime: self.runtime,
-            attempt_id: self.attempt_id,
-            module_opening: self.module_opening.take(),
-            host: Some(HostOpeningState {
-                callbacks: HostCallbackSession::new(),
-                journal: HostMutationJournal::default(),
-            }),
-            lifecycle_state: self.lifecycle_state.take(),
-            _stage: PhantomData,
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin, Host> OpeningTxn<'runtime, A, OpenAttemptBegun, Host> {
-    pub(crate) fn stage(
-        mut self,
-        opening: OpeningGeneration<A>,
-    ) -> Result<
-        OpeningTxn<'runtime, A, OpenGenerationStaged, Host>,
-        OpeningStageFailure<'runtime, A, Host>,
-    > {
-        let result = self
-            .runtime
-            .stage_opening_generation_for_attempt(self.attempt_id, opening);
-        match result {
-            Ok(()) => {
-                let module_opening = self
-                    .module_opening
-                    .take()
-                    .expect("an open attempt owns the module token before staging");
-                Ok(OpeningTxn {
-                    runtime: self.runtime,
-                    attempt_id: self.attempt_id,
-                    module_opening: Some(module_opening),
-                    host: self.host.take(),
-                    lifecycle_state: self.lifecycle_state.take(),
-                    _stage: PhantomData,
-                })
-            }
-            Err((error, opening)) => Err((error, Box::new(self), Box::new(opening))),
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState> {
-    fn stage_registrations(&mut self, registrations: Vec<RegistrationId>) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .pending_registrations = registrations
-            .into_iter()
-            .map(crate::registration::PendingRegistration::from)
-            .collect();
-    }
-
-    pub(crate) fn stage_host_mutations(
-        mut self,
-        registrations: Vec<RegistrationId>,
-    ) -> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
-        self.stage_registrations(registrations);
-        OpeningTxn {
-            runtime: self.runtime,
-            attempt_id: self.attempt_id,
-            module_opening: self.module_opening.take(),
-            host: self.host.take(),
-            lifecycle_state: self.lifecycle_state.take(),
-            _stage: PhantomData,
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
-    fn journal_mut(&mut self) -> &mut HostMutationJournal {
-        &mut self
-            .host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-    }
-
-    pub(crate) fn commit(mut self) -> XllResult<()> {
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        self.runtime
-            .finish_open_for_attempt(self.attempt_id, module_opening, self.journal_mut())
-    }
-}
-
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn commit_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
-        let mut journal = HostMutationJournal {
-            pending_registrations: registrations
-                .into_iter()
-                .map(crate::registration::PendingRegistration::from)
-                .collect(),
-            ..Default::default()
-        };
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        self.runtime
-            .finish_open_for_attempt(self.attempt_id, module_opening, &mut journal)
-    }
-}
-
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
-    pub(crate) fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        &mut self
-            .host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .callbacks
-    }
-
-    #[cfg(feature = "async")]
-    pub(crate) fn stage_events(
-        &mut self,
-        registrations: Vec<crate::registration::EventRegistration>,
-    ) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .pending_events = registrations;
-    }
-
-    pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .merge(journal);
-    }
-
-    pub(crate) fn take_journal(&mut self) -> HostMutationJournal {
-        std::mem::take(
-            &mut self
-                .host
-                .as_mut()
-                .expect("a host transaction owns its opening state")
-                .journal,
-        )
-    }
-}
-
-impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
-    fn drop(&mut self) {
-        if let Some(module_opening) = self.module_opening.take() {
-            self.runtime
-                .install_module_closing(module_opening.rollback(|| {}));
-        } else {
-            if let Some(lifecycle_state) = self.lifecycle_state.take() {
-                #[allow(
-                    clippy::mem_forget,
-                    reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
-                )]
-                std::mem::forget(lifecycle_state);
-            }
-            return;
-        }
-        // Lifecycle rollback is owned by OpeningTxn and must be explicit.
-        // Dropping any unfinished stage can only enter the fail-safe state;
-        // Drop never invokes host callbacks or resource cleanup.
-        self.runtime.lifecycle_runtime().quarantine();
-        if let Some(lifecycle_state) = self.lifecycle_state.take() {
-            #[allow(
-                clippy::mem_forget,
-                reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
-            )]
-            std::mem::forget(lifecycle_state);
-        }
-    }
-}
-
 pub struct CallGuard<'runtime, A: crate::Addin> {
     _ingress: &'runtime AdmittedExport<'runtime>,
     #[cfg(any(test, feature = "refinement"))]
@@ -2114,6 +781,7 @@ impl<A: crate::Addin> Drop for CallGuard<'_, A> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::lifecycle::{FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -2160,9 +828,9 @@ pub(crate) mod tests {
             .expect("test generation service seal");
         let _ = runtime.finish_generation_services(sealed);
         // This helper validates Runtime's close certificate in isolation. It
-        // deliberately does not synthesize lifecycle ghost milestones; those
+        // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
-        runtime.disable_ghost_for_test();
+        runtime.disable_trace_for_test();
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
@@ -2173,10 +841,10 @@ pub(crate) mod tests {
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(
                     last_generation,
                 ),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(last_generation),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
                 addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
                 generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
@@ -2204,8 +872,10 @@ pub(crate) mod tests {
                 rtd: crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
+                    crate::generation::RuntimeGeneration::new(1).unwrap(),
+                )),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
@@ -2411,12 +1081,10 @@ pub(crate) mod tests {
         let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
             #[cfg(any(test, feature = "refinement"))]
-            if runtime.refinement_hooks().generation_active(&runtime) {
-                runtime.refinement_hooks().begin_close(&runtime);
-            }
+            runtime.refinement_hooks().begin_close(&runtime);
         });
         let exports = ingress.seal_and_drain();
-        runtime.disable_ghost_for_test();
+        runtime.disable_trace_for_test();
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(QuiescenceProof {
@@ -2426,8 +1094,10 @@ pub(crate) mod tests {
                 rtd,
                 host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
                 async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-                handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
+                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
+                    crate::generation::RuntimeGeneration::new(1).unwrap(),
+                )),
+                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                     crate::generation::RuntimeGeneration::new(1).unwrap(),
                 )),
                 diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
@@ -2550,9 +1220,7 @@ pub(crate) mod tests {
         let ingress = crate::module_runtime::ingress();
         ingress.begin_close_with(|| {
             #[cfg(any(test, feature = "refinement"))]
-            if runtime.refinement_hooks().generation_active(&runtime) {
-                runtime.refinement_hooks().begin_close(&runtime);
-            }
+            runtime.refinement_hooks().begin_close(&runtime);
         });
         let exports = ingress.seal_and_drain();
         let rtd = crate::rtd::wait_for_module_quiescence().expect("RTD module quiescence");
@@ -2563,8 +1231,10 @@ pub(crate) mod tests {
             rtd,
             host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
             async_stopped: crate::shutdown::AsyncStopped::for_test(),
-            subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(),
-            handle_store_quiescent: crate::shutdown::HandleStoreQuiescent::for_test(Some(
+            subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
+                crate::generation::RuntimeGeneration::new(1).unwrap(),
+            )),
+            handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
                 crate::generation::RuntimeGeneration::new(1).unwrap(),
             )),
             diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),

@@ -43,7 +43,7 @@ pub(crate) struct AsyncManager {
     pub(crate) generation_transition: Mutex<()>,
     pub(crate) current_generation: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    pub(crate) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
     #[cfg(test)]
     pub(crate) after_generation_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -69,7 +69,7 @@ impl AsyncManager {
             generation_transition: Mutex::new(()),
             current_generation: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
             #[cfg(test)]
             after_generation_publish_hook: Mutex::new(None),
             #[cfg(test)]
@@ -91,27 +91,27 @@ impl AsyncManager {
         }
         let executor = Executor::start(worker_count, self.current_generation())?;
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
-            executor.set_ghost(ghost);
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            executor.set_trace_sink(trace);
         }
         let published_executor = Arc::clone(&executor.shared);
         *state = ExecutorState::Running(executor);
         self.published_executor.store(Some(published_executor));
         drop(state);
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncExecutor);
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            trace.record(crate::shutdown_trace::ShutdownEvent::StartAsyncExecutor);
         }
         Ok(())
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(Arc::clone(&ghost));
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.trace.lock() = Some(Arc::clone(&trace));
         let mut state = self.state.lock();
         match &mut *state {
             ExecutorState::Running(executor) | ExecutorState::Closing(Some(executor)) => {
-                executor.set_ghost(ghost);
+                executor.set_trace_sink(trace);
             }
             ExecutorState::Stopped | ExecutorState::Closing(None) => {}
         }
@@ -360,6 +360,11 @@ impl AsyncManager {
             certificate: AsyncStopped::new(),
             issues,
         }
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(*self.state.lock(), ExecutorState::Running(_))
     }
 
     #[cfg(any(test, feature = "refinement"))]

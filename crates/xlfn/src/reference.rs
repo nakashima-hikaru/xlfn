@@ -211,7 +211,7 @@ impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
 ///
 /// # Safety
 /// The pointer must remain live for `'call` and satisfy the XLOPER12 contract.
-pub unsafe fn reference_from_raw<'call, T>(
+pub(crate) unsafe fn reference_from_raw<'call, T>(
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>

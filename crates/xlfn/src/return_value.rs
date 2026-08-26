@@ -136,7 +136,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
     {
         let access = self;
         let handles = access.runtime.get()?;
-        let arc_handles = access.runtime.get_arc()?;
+        let arc_handles = std::sync::Arc::clone(access.runtime.get_arc()?);
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
@@ -157,7 +157,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
     {
         let access = self;
         let handles = access.runtime.get()?;
-        let arc_handles = access.runtime.get_arc()?;
+        let arc_handles = std::sync::Arc::clone(access.runtime.get_arc()?);
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation = handles.prepare_observed(key, operation, |key, token| {
             crate::rtd::observe(
@@ -422,7 +422,7 @@ impl Drop for ReturnBlock {
             if self.array.is_some() {
                 RETURN_BLOCKS_WITH_ARRAY.fetch_add(1, Ordering::Relaxed);
             }
-            LIVE_BLOCKS.fetch_sub(1, Ordering::Relaxed);
+            let _ = xlfn_kernel::invariant::checked_atomic_dec(&LIVE_BLOCKS);
             if PANIC_ON_RETURN_BLOCK_DROP.swap(false, Ordering::SeqCst) {
                 panic!("injected ReturnBlock drop panic");
             }
@@ -935,7 +935,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
 
                 _obligation
                     .tracker()
-                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginReturnFree);
+                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginReturnFree);
             }
 
             Some(ReturnFreeGuard {
@@ -967,7 +967,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
             _operation
                 .obligation
                 .tracker()
-                .record_ghost_event(crate::shutdown_refinement::GhostEvent::ReleaseReturnBlock);
+                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::ReleaseReturnBlock);
         }
         #[cfg(any(feature = "async", test))]
         ReturnOwnership::Local => {

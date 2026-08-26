@@ -13,6 +13,7 @@ pub struct OperationGate {
 }
 
 pub const CLOSING_BIT: usize = usize::MAX / 2 + 1;
+const ACTIVE_COUNT_MASK: usize = !CLOSING_BIT;
 
 impl Default for OperationGate {
     fn default() -> Self {
@@ -46,6 +47,9 @@ impl OperationGate {
                 if (val & CLOSING_BIT) != 0 {
                     None
                 } else {
+                    if (val & ACTIVE_COUNT_MASK) == ACTIVE_COUNT_MASK {
+                        std::process::abort();
+                    }
                     Some(val + 1)
                 }
             })
@@ -71,7 +75,11 @@ impl OperationGate {
     #[inline]
     pub fn release(&self) {
         let prev = self.state.fetch_sub(1, Ordering::AcqRel);
-        let active_count = (prev & !CLOSING_BIT) - 1;
+        let active = prev & ACTIVE_COUNT_MASK;
+        if active == 0 {
+            std::process::abort();
+        }
+        let active_count = active - 1;
         if active_count == 0 && (prev & CLOSING_BIT) != 0 {
             let _guard = self.wait_lock.lock();
             self.idle.notify_all();
@@ -97,7 +105,7 @@ pub struct TerminationWaitGuard<'a> {
 impl TerminationWaitGuard<'_> {
     pub fn wait(self) {
         let mut guard = self.gate.wait_lock.lock();
-        while (self.gate.state.load(Ordering::Acquire) & !CLOSING_BIT) > 0 {
+        while (self.gate.state.load(Ordering::Acquire) & ACTIVE_COUNT_MASK) > 0 {
             self.gate.idle.wait(&mut guard);
         }
     }

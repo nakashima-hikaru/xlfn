@@ -101,7 +101,7 @@ mod runtime_components;
 mod runtime_refinement;
 mod shutdown;
 #[cfg(any(test, feature = "refinement"))]
-mod shutdown_refinement;
+mod shutdown_trace;
 mod subscription;
 mod utf16;
 pub mod value;

@@ -19,14 +19,14 @@ impl Drop for WorkerExitGuard {
                 .fatal_worker_failure
                 .store(true, Ordering::Release);
         }
-        self.shared.live_workers.fetch_sub(1, Ordering::AcqRel);
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.shared.live_workers);
         let _guard = self.shared.wait_lock.lock();
         self.shared.idle.notify_all();
     }
 }
 
 pub(crate) fn release_active(shared: &ExecutorShared) {
-    if shared.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+    if xlfn_kernel::invariant::checked_atomic_dec(&shared.active) == 1 {
         let _guard = shared.wait_lock.lock();
         shared.idle.notify_all();
     }

@@ -3,6 +3,10 @@ use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
+use crate::lifecycle::{
+    ClosedWitness, FinalRemoval, HostOpeningState, OpenAttemptBegun, OpenGenerationStaged,
+    OpeningTxn, RemovalOwner,
+};
 use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
@@ -18,12 +22,7 @@ use super::{
 
 type StagedOpenResult<'runtime, A> = Result<
     (
-        crate::runtime::OpeningTxn<
-            'runtime,
-            A,
-            crate::runtime::OpenGenerationStaged,
-            crate::runtime::HostOpeningState,
-        >,
+        OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>,
         Vec<crate::registration::RegistrationId>,
     ),
     open::OpenFailure<'runtime, A>,
@@ -31,12 +30,7 @@ type StagedOpenResult<'runtime, A> = Result<
 
 type InitializedOpenResult<'runtime, A> = Result<
     (
-        crate::runtime::OpeningTxn<
-            'runtime,
-            A,
-            crate::runtime::OpenGenerationStaged,
-            crate::runtime::HostOpeningState,
-        >,
+        OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>,
         RuntimeConfig,
     ),
     open::OpenFailure<'runtime, A>,
@@ -46,12 +40,7 @@ pub(super) fn open_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
-    mut transaction: crate::runtime::OpeningTxn<
-        'runtime,
-        A,
-        crate::runtime::OpenAttemptBegun,
-        crate::runtime::HostOpeningState,
-    >,
+    mut transaction: OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState>,
 ) -> StagedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -119,9 +108,7 @@ where
 
 pub(super) fn rollback_active_open<'runtime, A, Stage>(
     lifecycle: &AddinLifecycleAccess<'_, A>,
-    attempt: Option<
-        crate::runtime::OpeningTxn<'runtime, A, Stage, crate::runtime::HostOpeningState>,
-    >,
+    attempt: Option<OpeningTxn<'runtime, A, Stage, HostOpeningState>>,
 ) where
     A: Addin,
 {
@@ -170,12 +157,7 @@ pub(super) fn rollback_active_open<'runtime, A, Stage>(
 
 pub(super) fn initialize_addin<'runtime, A>(
     context: &OpenContext,
-    transaction: crate::runtime::OpeningTxn<
-        'runtime,
-        A,
-        crate::runtime::OpenAttemptBegun,
-        crate::runtime::HostOpeningState,
-    >,
+    transaction: OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState>,
 ) -> InitializedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -191,7 +173,7 @@ where
     // final pre-publication transfer into the thread-affine slot. It must not
     // become part of the cross-thread generation root.
     let transaction = transaction.with_lifecycle_state(lifecycle_state);
-    let opening = crate::runtime::OpeningGeneration {
+    let opening = crate::generation::OpeningGeneration {
         shared_state,
         layers,
         init_config: runtime_config,
@@ -201,7 +183,7 @@ where
 }
 
 fn retain_transaction_error<A: Addin, Stage>(
-    transaction: &mut crate::runtime::OpeningTxn<'_, A, Stage, crate::runtime::HostOpeningState>,
+    transaction: &mut OpeningTxn<'_, A, Stage, HostOpeningState>,
     error: crate::registration::RegistrationTransactionError,
 ) -> XllError {
     if error.journal.is_unknown() {
@@ -284,8 +266,8 @@ pub(super) enum RemovalSuccess<'runtime, A: Addin> {
     AlreadyClosed,
     Quarantined,
     Closed {
-        witness: crate::runtime::ClosedWitness,
-        removal_attempt: crate::runtime::RemovalOwner<'runtime, A>,
+        witness: ClosedWitness,
+        removal_attempt: RemovalOwner<'runtime, A>,
     },
 }
 
@@ -303,7 +285,7 @@ pub(super) enum RemovalControl {
 struct RemovalTransaction<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     callbacks: HostCallbackSession,
-    attempt: Option<crate::runtime::RemovalOwner<'runtime, A>>,
+    attempt: Option<RemovalOwner<'runtime, A>>,
 }
 
 impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
@@ -323,7 +305,7 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
         &mut self.callbacks
     }
 
-    fn take_attempt(&mut self) -> crate::runtime::RemovalOwner<'runtime, A> {
+    fn take_attempt(&mut self) -> RemovalOwner<'runtime, A> {
         self.attempt
             .take()
             .expect("a removal transaction always owns its attempt")
@@ -373,9 +355,7 @@ where
         return Ok(RemovalSuccess::AlreadyClosed);
     };
     #[cfg(any(test, feature = "refinement"))]
-    if runtime.refinement_hooks().generation_active(runtime) {
-        runtime.refinement_hooks().begin_close(runtime);
-    }
+    runtime.refinement_hooks().begin_close(runtime);
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
@@ -405,12 +385,8 @@ where
             ));
         }
     };
-    let teardown: teardown::TeardownTxn<
-        'runtime,
-        A,
-        crate::runtime::FinalRemoval,
-        teardown::ExecutionDrained,
-    > = teardown::TeardownTxn::new(owner, execution_drained);
+    let teardown: teardown::TeardownTxn<'runtime, A, FinalRemoval, teardown::ExecutionDrained> =
+        teardown::TeardownTxn::new(owner, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
@@ -425,8 +401,6 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().async_stopped(runtime);
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().async_drained(runtime);
 
@@ -583,7 +557,7 @@ where
 
     let addin = if let Some(generation) = runtime.take_generation_for_shutdown() {
         match generation {
-            crate::runtime::ShutdownGeneration::Open(generation) => {
+            crate::generation::ShutdownGeneration::Open(generation) => {
                 match std::sync::Arc::try_unwrap(generation) {
                     Ok(mut generation) => {
                         let quiesce = catch_unwind(AssertUnwindSafe(|| {
@@ -639,7 +613,7 @@ where
                     }
                 }
             }
-            crate::runtime::ShutdownGeneration::Opening(opening) => {
+            crate::generation::ShutdownGeneration::Opening(opening) => {
                 let (mut shared_state, layers, _config) = opening.into_parts();
                 let quiesce = catch_unwind(AssertUnwindSafe(|| {
                     runtime
@@ -762,6 +736,8 @@ where
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().handles_drained(runtime);
 
+    #[cfg(any(test, feature = "refinement"))]
+    let diagnostics_was_running = crate::diagnostics::diagnostic_sink_running();
     let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router().map(|outcome| {
         for issue in outcome.issues {
             #[cfg(any(test, feature = "refinement"))]
@@ -783,7 +759,9 @@ where
     };
 
     #[cfg(any(test, feature = "refinement"))]
-    if let Err(error) = runtime.refinement_hooks().diagnostics_stopped(runtime) {
+    if diagnostics_was_running
+        && let Err(error) = runtime.refinement_hooks().diagnostics_stopped(runtime)
+    {
         return Err(handle_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,

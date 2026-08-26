@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -306,15 +306,15 @@ impl CrtObservation {
         }
     }
 
-    pub(crate) fn manifest(self, requested: ResolvedCrtPolicy) -> Value {
-        json!({
-            "requested": requested.policy.name(),
-            "source": requested.source.name(),
-            "effective_rust": self.effective_rust.name(),
-            "enforcement": requested.enforcement(),
-            "observed_dynamic_crt_imports": self.observed_dynamic_crt_imports,
-            "consistency": self.consistency,
-        })
+    pub(crate) fn manifest(self, requested: ResolvedCrtPolicy) -> xlfn_package::CrtManifest {
+        xlfn_package::CrtManifest {
+            requested: requested.policy.name().to_owned(),
+            source: requested.source.name().to_owned(),
+            effective_rust: self.effective_rust.name().to_owned(),
+            enforcement: requested.enforcement().to_owned(),
+            observed_dynamic_crt_imports: self.observed_dynamic_crt_imports,
+            consistency: self.consistency.to_owned(),
+        }
     }
 }
 

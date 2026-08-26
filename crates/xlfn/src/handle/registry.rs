@@ -57,7 +57,7 @@ pub(crate) struct HandleRegistry {
     pub(super) lifetime: Arc<ObjectLifetimeTracker>,
     next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
-    pub(super) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
 }
 
 /// Owns an object until a binding reservation consumes it. If publication
@@ -138,26 +138,26 @@ impl HandleRegistry {
             lifetime,
             next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
         }
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.lifetime.set_ghost(std::sync::Arc::clone(&ghost));
-        *self.ghost.lock() = Some(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.lifetime.set_trace_sink(std::sync::Arc::clone(&trace));
+        *self.trace.lock() = Some(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.lock().as_ref() {
-            ghost.record_event(event);
+    pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        if let Some(trace) = self.trace.lock().as_ref() {
+            trace.record(event);
         }
     }
 
     #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
-        self.ghost.lock().clone()
+    pub(crate) fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        self.trace.lock().clone()
     }
 
     #[cfg(test)]
@@ -229,7 +229,7 @@ impl HandleRegistry {
         let object_id = object.id();
         let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
 
@@ -252,7 +252,7 @@ impl HandleRegistry {
         }
         let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandle);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
     }
 
@@ -347,7 +347,7 @@ impl HandleRegistry {
         }
         removal.commit();
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandle);
         Ok(())
     }
 
@@ -368,7 +368,7 @@ impl HandleRegistry {
         let reusable = removal.commit();
         on_linearized(reusable);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandle);
         Ok(reusable)
     }
 
@@ -394,7 +394,7 @@ impl HandleRegistry {
         let (live_bindings, retired) = self.bindings.retire_all();
         #[cfg(any(test, feature = "refinement"))]
         for _ in 0..live_bindings {
-            self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandle);
+            self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandle);
         }
         // `retire_all` releases the binding-table write lock before returning;
         // dropping these records here keeps arbitrary user destructors out of

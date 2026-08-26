@@ -64,7 +64,7 @@ pub(crate) struct ExecutorShared {
     pub(crate) wait_lock: Mutex<()>,
     pub(crate) idle: Condvar,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    pub(crate) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
     #[cfg(test)]
     pub(crate) before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -114,7 +114,7 @@ impl Executor {
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
             #[cfg(test)]
             before_task_schedule_hook: Mutex::new(None),
             #[cfg(test)]
@@ -152,7 +152,7 @@ impl Executor {
             let worker = match worker {
                 Ok(worker) => worker,
                 Err(_) => {
-                    shared.live_workers.fetch_sub(1, Ordering::AcqRel);
+                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&shared.live_workers);
                     return Err(XllError::Internal {
                         diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                     });
@@ -169,8 +169,8 @@ impl Executor {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.shared.ghost.lock() = Some(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.shared.trace.lock() = Some(trace);
     }
 
     pub(crate) fn wait_for_idle(&self) -> bool {
@@ -267,7 +267,7 @@ impl ExecutorShared {
             });
         }
 
-        let Some(admission) = current.admission.try_enter() else {
+        let Some(admission) = current.admission.enter().ok() else {
             let error = if self.closing.load(Ordering::Acquire) {
                 XllError::Closing
             } else {
@@ -319,16 +319,16 @@ impl ExecutorShared {
 
         #[allow(
             unused_mut,
-            reason = "completion.ghost is mutated only when feature-gated ghost recording is active"
+            reason = "completion.trace is mutated only when feature-gated trace recording is active"
         )]
         let mut completion = reservation.commit(self, triomphe::Arc::clone(&*current), id);
 
         drop(admission);
 
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::StartAsyncTask);
-            completion.ghost = Some(ghost);
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            trace.record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
+            completion.trace = Some(trace);
         }
 
         let wrapped = async move {
@@ -338,9 +338,9 @@ impl ExecutorShared {
             #[cfg(any(test, feature = "refinement"))]
             {
                 *_completion.completion.lock() = if result.is_ok() {
-                    crate::shutdown_refinement::Completion::Completed
+                    crate::shutdown_trace::Completion::Completed
                 } else {
-                    crate::shutdown_refinement::Completion::Canceled
+                    crate::shutdown_trace::Completion::Canceled
                 };
             }
             #[cfg(not(any(test, feature = "refinement")))]
@@ -370,10 +370,10 @@ impl ExecutorShared {
                 return Vec::new();
             };
             debug_assert_eq!(state.id, generation);
-            state.admission.close();
+            state.admission.begin_close();
             triomphe::Arc::clone(state)
         };
-        generation_arc.admission.wait_for_idle();
+        generation_arc.admission.close_and_wait_begin().wait();
         generation_arc.drain_tasks()
     }
 
@@ -390,7 +390,7 @@ impl ExecutorShared {
             }
 
             let old = self.current.load_full();
-            old.admission.close();
+            old.admission.begin_close();
             control.phase = ControlPhase::Advancing {
                 from: old.id,
                 to: next,
@@ -398,7 +398,7 @@ impl ExecutorShared {
             old
         };
 
-        old.admission.wait_for_idle();
+        old.admission.close_and_wait_begin().wait();
 
         let mut control = self.control.lock();
         match control.phase {
@@ -439,13 +439,13 @@ impl ExecutorShared {
 
             let generations = control.generations.values().cloned().collect::<Vec<_>>();
             for generation in &generations {
-                generation.admission.close();
+                generation.admission.begin_close();
             }
             generations
         };
 
         for generation in &generations {
-            generation.admission.wait_for_idle();
+            generation.admission.close_and_wait_begin().wait();
         }
 
         let mut tasks = Vec::new();

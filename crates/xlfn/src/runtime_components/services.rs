@@ -3,7 +3,7 @@
 use crate::generation::RuntimeGeneration;
 
 /// Service slots whose liveness is coupled to one open generation.
-/// Generation-specific policy is consumed from [`crate::runtime::OpeningGeneration`]
+/// Generation-specific policy is consumed from [`crate::generation::OpeningGeneration`]
 /// while these slots carry the service state owned by the open bundle.
 pub(crate) struct GenerationServices {
     formula_handles: FormulaHandleServices,
@@ -78,14 +78,14 @@ impl FormulaHandleServices {
     fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
-    ) -> crate::XllResult<crate::handle::FormulaHandleServiceSealed> {
+    ) -> crate::XllResult<crate::shutdown::HandlesSealed> {
         #[cfg(any(feature = "handles", test))]
         {
             let Self::Active(slot) = self;
             slot.seal(generation)
         }
         #[cfg(not(any(feature = "handles", test)))]
-        Ok(crate::handle::FormulaHandleServiceSealed::empty(generation))
+        Ok(crate::shutdown::HandlesSealed::empty(generation))
     }
 
     fn is_none(&self) -> bool {
@@ -146,14 +146,14 @@ impl FormulaHandleSlotAccess<'_> {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         #[cfg(any(feature = "handles", test))]
         {
             let FormulaHandleServices::Active(slot) = self.services;
-            slot.set_ghost(ghost);
+            slot.set_trace_sink(trace);
         }
         #[cfg(not(any(feature = "handles", test)))]
-        let _ = ghost;
+        let _ = trace;
     }
 }
 
@@ -163,8 +163,8 @@ impl FormulaHandleSlotAccess<'_> {
 /// sealing. This token reunites that subscription certificate with the handle
 /// slot seal so the two generation services leave the runtime as one unit.
 pub(crate) struct SealedGenerationServices {
-    formula_handles: crate::handle::FormulaHandleServiceSealed,
-    subscriptions_stopped: crate::rtd::SubscriptionsStopped,
+    handles: crate::shutdown::HandlesSealed,
+    subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
 }
 
 /// Runtime-owned executors whose lifecycle is independent from generation
@@ -280,11 +280,11 @@ impl GenerationServices {
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
-        subscriptions_stopped: crate::rtd::SubscriptionsStopped,
+        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<SealedGenerationServices> {
-        let formula_handles = self.formula_handles.seal(generation)?;
+        let handles = self.formula_handles.seal(generation)?;
         Ok(SealedGenerationServices {
-            formula_handles,
+            handles,
             subscriptions_stopped,
         })
     }
@@ -322,10 +322,10 @@ impl GenerationServices {
 impl SealedGenerationServices {
     pub(crate) fn empty(
         generation: Option<RuntimeGeneration>,
-        subscriptions_stopped: crate::rtd::SubscriptionsStopped,
+        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> Self {
         Self {
-            formula_handles: crate::handle::FormulaHandleServiceSealed::empty(generation),
+            handles: crate::shutdown::HandlesSealed::empty(generation),
             subscriptions_stopped,
         }
     }
@@ -333,11 +333,11 @@ impl SealedGenerationServices {
     pub(crate) fn finish(
         self,
     ) -> crate::XllResult<(
-        crate::shutdown::HandleStoreQuiescent,
-        crate::rtd::SubscriptionsStopped,
+        crate::shutdown::HandlesQuiescent,
+        crate::shutdown::SubscriptionsStopped,
     )> {
-        let handle_store_quiescent = self.formula_handles.finish()?;
-        Ok((handle_store_quiescent, self.subscriptions_stopped))
+        let handles_quiescent = self.handles.finish()?;
+        Ok((handles_quiescent, self.subscriptions_stopped))
     }
 }
 

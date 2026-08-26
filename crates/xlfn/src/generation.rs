@@ -1,4 +1,5 @@
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 /// Identity of one published or staged runtime service generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -14,6 +15,69 @@ impl RuntimeGeneration {
 
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
+    }
+}
+
+/// The execution root of one published Add-in generation.
+///
+/// Generation ownership lives in this module so lifecycle code can move the
+/// root between staged, published, and retired states without depending on
+/// the runtime composition root.
+pub(crate) struct ExecutionGeneration<A: crate::Addin> {
+    pub(crate) id: RuntimeGeneration,
+    pub(crate) shared_state: A::SharedState,
+    pub(crate) layers: A::Layers,
+}
+
+impl<A: crate::Addin> ExecutionGeneration<A> {
+    pub(crate) const fn id(&self) -> RuntimeGeneration {
+        self.id
+    }
+}
+
+/// Unique Add-in state staged during `OPENING`.
+pub(crate) struct OpeningGeneration<A: crate::Addin> {
+    pub(crate) shared_state: A::SharedState,
+    pub(crate) layers: A::Layers,
+    pub(crate) init_config: crate::addin::RuntimeConfig,
+}
+
+impl<A: crate::Addin> OpeningGeneration<A> {
+    #[must_use]
+    pub(crate) fn into_parts(self) -> (A::SharedState, A::Layers, crate::addin::RuntimeConfig) {
+        (self.shared_state, self.layers, self.init_config)
+    }
+}
+
+/// Generation reclaimed during shutdown.
+pub(crate) enum ShutdownGeneration<A: crate::Addin> {
+    Opening(OpeningGeneration<A>),
+    Open(Arc<ExecutionGeneration<A>>),
+}
+
+/// Explicit open-generation lifetime lease for call-scoped and asynchronous
+/// UDF executions.
+pub struct ExecutionLease<A: crate::Addin> {
+    pub(crate) generation: Arc<ExecutionGeneration<A>>,
+}
+
+impl<A: crate::Addin> Clone for ExecutionLease<A> {
+    fn clone(&self) -> Self {
+        Self {
+            generation: Arc::clone(&self.generation),
+        }
+    }
+}
+
+impl<A: crate::Addin> ExecutionLease<A> {
+    #[must_use]
+    pub fn state(&self) -> &A::SharedState {
+        &self.generation.shared_state
+    }
+
+    #[must_use]
+    pub fn layers(&self) -> &A::Layers {
+        &self.generation.layers
     }
 }
 

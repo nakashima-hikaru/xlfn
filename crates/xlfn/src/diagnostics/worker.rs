@@ -41,7 +41,7 @@ pub(crate) struct AsyncDiagnosticSink {
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) pending: Arc<AtomicU64>,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Arc<Mutex<Option<crate::shutdown_refinement::GhostHandle>>>,
+    pub(crate) trace: Arc<Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>>,
 }
 
 impl AsyncDiagnosticSink {
@@ -66,9 +66,11 @@ impl AsyncDiagnosticSink {
         #[cfg(any(test, feature = "refinement"))]
         let worker_pending = Arc::clone(&pending);
         #[cfg(any(test, feature = "refinement"))]
-        let ghost = Arc::new(Mutex::new(None::<crate::shutdown_refinement::GhostHandle>));
+        let trace = Arc::new(Mutex::new(
+            None::<crate::shutdown_trace::ShutdownTraceHandle>,
+        ));
         #[cfg(any(test, feature = "refinement"))]
-        let worker_ghost = Arc::clone(&ghost);
+        let worker_trace = Arc::clone(&trace);
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())
             .spawn(move || {
@@ -76,13 +78,11 @@ impl AsyncDiagnosticSink {
                     event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
                         #[cfg(any(test, feature = "refinement"))]
-                        if let Some(ghost) = worker_ghost.lock().as_ref().cloned() {
-                            ghost.record_event(
-                                crate::shutdown_refinement::GhostEvent::FlushDiagnostic,
-                            );
+                        if let Some(trace) = worker_trace.lock().as_ref().cloned() {
+                            trace.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
                         }
                         #[cfg(any(test, feature = "refinement"))]
-                        worker_pending.fetch_sub(1, Ordering::AcqRel);
+                        let _ = xlfn_kernel::invariant::checked_atomic_dec_u64(&worker_pending);
                     });
                 }
             })
@@ -95,13 +95,13 @@ impl AsyncDiagnosticSink {
             #[cfg(any(test, feature = "refinement"))]
             pending,
             #[cfg(any(test, feature = "refinement"))]
-            ghost,
+            trace,
         })
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.trace.lock() = Some(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -124,14 +124,14 @@ impl AsyncDiagnosticSink {
             };
             #[cfg(any(test, feature = "refinement"))]
             if result.is_err() {
-                self.pending.fetch_sub(1, Ordering::AcqRel);
+                let _ = xlfn_kernel::invariant::checked_atomic_dec_u64(&self.pending);
             }
             drop(sender);
             #[cfg(any(test, feature = "refinement"))]
             if result.is_ok()
-                && let Some(ghost) = self.ghost.lock().as_ref().cloned()
+                && let Some(trace) = self.trace.lock().as_ref().cloned()
             {
-                ghost.record_event(crate::shutdown_refinement::GhostEvent::EnqueueDiagnostic);
+                trace.record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
             }
             result
         });
@@ -155,12 +155,12 @@ impl AsyncDiagnosticSink {
                 {
                     let discarded = self.pending.swap(0, Ordering::AcqRel);
                     if discarded != 0
-                        && let Some(ghost) = self.ghost.lock().as_ref().cloned()
+                        && let Some(trace) = self.trace.lock().as_ref().cloned()
                     {
                         crate::ingress::with_diagnostic_linearization(|| {
                             for _ in 0..discarded {
-                                ghost.record_event(
-                                    crate::shutdown_refinement::GhostEvent::DiscardDiagnostic,
+                                trace.record(
+                                    crate::shutdown_trace::ShutdownEvent::DiscardDiagnostic,
                                 );
                             }
                         });

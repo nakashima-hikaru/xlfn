@@ -80,8 +80,7 @@ impl HandlePrepareState {
                 .wait_for(&mut guard, HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL);
         }
 
-        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.waiters);
     }
 
     fn active(&self) -> usize {

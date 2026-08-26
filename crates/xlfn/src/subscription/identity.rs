@@ -1,20 +1,35 @@
 use super::source::SourceHandleId;
 use super::topic::{SubscriptionIdentity, SubscriptionKey};
 use crate::{XllError, XllResult};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 #[derive(Debug)]
 pub(crate) struct SourceIdentityReservation {
     source_id: SourceHandleId,
+    registry: Weak<Mutex<FxHashMap<SourceHandleId, NonZeroUsize>>>,
+    committed: bool,
 }
 
 impl SourceIdentityReservation {
-    pub(crate) fn commit(self) {
-        // The registry keeps the committed identity reference. Consuming this
-        // token makes that ownership transfer explicit; rollback is performed
-        // by `SourceIdentityRegistry::release` before the identity is inserted.
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SourceIdentityReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        release_ref(&mut registry.lock(), self.source_id);
     }
 }
 
@@ -24,13 +39,13 @@ impl SourceIdentityReservation {
 // the number of live subscription identities using each source, so the limit
 // is a limit on live distinct sources rather than a lifetime allocation quota.
 pub(crate) struct SourceIdentityRegistry {
-    pub(crate) refs: FxHashMap<SourceHandleId, NonZeroUsize>,
+    refs: Arc<Mutex<FxHashMap<SourceHandleId, NonZeroUsize>>>,
 }
 
 impl SourceIdentityRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            refs: FxHashMap::default(),
+            refs: Arc::new(Mutex::new(FxHashMap::default())),
         }
     }
 
@@ -39,43 +54,62 @@ impl SourceIdentityRegistry {
         source_id: SourceHandleId,
         limit: usize,
     ) -> XllResult<SourceIdentityReservation> {
-        if let Some(refs) = self.refs.get_mut(&source_id) {
+        let mut refs = self.refs.lock();
+        if let Some(refs) = refs.get_mut(&source_id) {
             let next = refs.get().checked_add(1).ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
             })?;
             *refs = NonZeroUsize::new(next).expect("the incremented source refcount is non-zero");
         } else {
-            if self.refs.len() >= limit {
+            if refs.len() >= limit {
                 return Err(XllError::Overloaded);
             }
 
-            self.refs
-                .insert(source_id, NonZeroUsize::new(1).expect("one is non-zero"));
+            refs.insert(source_id, NonZeroUsize::new(1).expect("one is non-zero"));
         }
 
-        Ok(SourceIdentityReservation { source_id })
+        drop(refs);
+        Ok(SourceIdentityReservation {
+            source_id,
+            registry: Arc::downgrade(&self.refs),
+            committed: false,
+        })
     }
 
-    pub(crate) fn release(&mut self, reservation: SourceIdentityReservation) {
-        self.release_source(reservation.source_id);
+    pub(crate) fn release_source(&self, source_id: SourceHandleId) {
+        release_ref(&mut self.refs.lock(), source_id);
     }
 
-    pub(crate) fn release_source(&mut self, source_id: SourceHandleId) {
-        let Some(refs) = self.refs.get_mut(&source_id) else {
-            debug_assert!(false, "source identity release is balanced");
-            return;
-        };
-
-        if refs.get() == 1 {
-            self.refs.remove(&source_id);
-        } else {
-            *refs = NonZeroUsize::new(refs.get() - 1)
-                .expect("a source refcount greater than one remains non-zero");
-        }
+    pub(crate) fn clear(&self) {
+        self.refs.lock().clear();
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.refs.clear();
+    #[cfg(test)]
+    pub(crate) fn distinct_count(&self) -> usize {
+        self.refs.lock().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ref_count(&self, source_id: SourceHandleId) -> Option<NonZeroUsize> {
+        self.refs.lock().get(&source_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> FxHashMap<SourceHandleId, NonZeroUsize> {
+        self.refs.lock().clone()
+    }
+}
+
+fn release_ref(refs: &mut FxHashMap<SourceHandleId, NonZeroUsize>, source_id: SourceHandleId) {
+    let count = refs
+        .get_mut(&source_id)
+        .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+
+    if count.get() == 1 {
+        refs.remove(&source_id);
+    } else {
+        *count = NonZeroUsize::new(count.get() - 1)
+            .expect("a source refcount greater than one remains non-zero");
     }
 }
 

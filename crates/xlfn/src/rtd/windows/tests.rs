@@ -440,11 +440,11 @@ fn cleanup_test_active_server() {
     }
 }
 
-fn clear_test_shutdown_ghost() {
-    // Runtime/lifecycle tests install a process-global shutdown ghost.
+fn clear_test_shutdown_trace() {
+    // Runtime/lifecycle tests install a process-global shutdown trace.
     // An RTD unit test owns a synthetic module epoch and must not append
     // resource events to a previous runtime generation.
-    *module_lifetime().ghost.lock() = None;
+    *module_lifetime().trace.lock() = None;
 }
 
 impl Drop for RtdTestGuard {
@@ -452,7 +452,7 @@ impl Drop for RtdTestGuard {
         // Test assertions may unwind before their explicit shutdown path.
         // Remove the process-global server before releasing serialization,
         // otherwise Runtime close can wait forever for RTD quiescence.
-        clear_test_shutdown_ghost();
+        clear_test_shutdown_trace();
         cleanup_test_active_server();
         close_test_ingress();
         crate::module_runtime::certify_quiescence_for_test();
@@ -471,10 +471,10 @@ impl RtdTestLock {
         let module_lease = crate::ingress::acquire_test_module_lease();
 
         // The module lease proves that no lifecycle test can install a new
-        // ghost concurrently. Clear the completed or abandoned generation
+        // trace concurrently. Clear the completed or abandoned generation
         // before cleanup, because releasing an old server also emits RTD
         // resource events.
-        clear_test_shutdown_ghost();
+        clear_test_shutdown_trace();
 
         // COM entry points reject calls unless the global ingress is OPEN.
         // Establish that precondition explicitly rather than depending on
@@ -599,11 +599,11 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
         .expect("RTD test state")
         .begin_open();
 
-    let ghost = Arc::new(crate::shutdown_refinement::ShutdownGhost::new());
-    ghost
-        .begin_generation(1, crate::shutdown_refinement::GhostResources::opened(0, 0))
+    let trace = Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
+    trace
+        .begin(1, crate::shutdown_trace::ShutdownResources::opened(0, 0))
         .unwrap();
-    module_lifetime().set_ghost(Arc::clone(&ghost));
+    module_lifetime().set_trace_sink(Arc::clone(&trace));
 
     let (call, accepted) = module_lifetime().enter_call();
     assert!(accepted);
@@ -615,11 +615,11 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     drop(factory);
     drop(call);
 
-    let trace = ghost.trace_json().unwrap();
+    let trace = trace.trace_json().unwrap();
     if let Some(path) = std::env::var_os("XLFN_WINDOWS_RTD_TRACE") {
         std::fs::write(path, &trace).expect("write Windows RTD shutdown trace");
     }
-    *module_lifetime().ghost.lock() = None;
+    *module_lifetime().trace.lock() = None;
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     crate::module_runtime::certify_quiescence_for_test();
@@ -1087,8 +1087,8 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
         let attached_subscriptions = Arc::clone(&subscriptions);
         let attached_rendezvous = Arc::clone(&rendezvous);
         scope.spawn(move || {
-            let attached =
-                ensure_server(None, Some(&attached_subscriptions)).expect("attach subscriptions");
+            let attached = ensure_server_without_handles(Some(&attached_subscriptions))
+                .expect("attach subscriptions");
             attached_rendezvous.wait();
             attached_rendezvous.wait();
             drop(attached);
@@ -2324,7 +2324,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         Arc::clone(&source),
     )
     .unwrap();
-    let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
+    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.as_ref().unwrap().clone();
 
@@ -2537,7 +2537,7 @@ fn existing_server_attaches_each_backend_without_replacement() {
     let first = ensure_server(Some(&handles), None).unwrap();
     assert!(first.newly_created);
 
-    let second = ensure_server(None, Some(&subscriptions)).unwrap();
+    let second = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     assert!(!second.newly_created);
     assert_eq!(first.active.pointer, second.active.pointer);
 
@@ -2551,7 +2551,7 @@ fn existing_server_attaches_each_backend_without_replacement() {
         backends
             .handles
             .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &handles))
+            .is_some_and(|active| active.identity() == handles.identity())
     );
     assert!(
         backends
@@ -2566,7 +2566,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let _guard = TEST_LOCK.lock().unwrap();
     let subscriptions = Arc::new(SubscriptionRuntime::new());
 
-    let ensured = ensure_server(None, Some(&subscriptions)).unwrap();
+    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
 
     let callback = Arc::new(RetainedUpdateCallback {
@@ -2603,7 +2603,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
 
     for _ in 0..100 {
-        let _res = ensure_server(None, Some(&subscriptions)).unwrap();
+        let _res = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     }
 
     assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);

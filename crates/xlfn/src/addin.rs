@@ -1036,7 +1036,7 @@ mod tests {
         let (source, token) = crate::cancellation::CancellationSource::new(
             crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
-        let generation = Arc::new(crate::runtime::ExecutionGeneration::<AsyncTestAddin> {
+        let generation = Arc::new(crate::generation::ExecutionGeneration::<AsyncTestAddin> {
             id: crate::generation::RuntimeGeneration::new(1).unwrap(),
             shared_state: 23_u32,
             layers: (),

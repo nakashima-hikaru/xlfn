@@ -6,7 +6,7 @@ namespace XlFnFormal.Shutdown
 
 universe u
 
-/-- Proof obligations that connect an implementation-level ghost state to the
+/-- Proof obligations that connect an implementation-level event trace to the
 abstract shutdown protocol.
 
 The Rust integration is expected to emit one `Event` at each linearization
@@ -59,10 +59,10 @@ end ConcreteSteps
 
 /-- End-to-end refinement theorem.
 
-Once the Rust ghost state discharges `ShutdownRefinement`, every successful
-concrete shutdown return is proved to have no registration, active call,
-DLL-owned return block, in-flight `xlAutoFree12`, async task/executor, RTD
-resource, handle operation/value, escaped Add-in state, or diagnostic
+Once the recorded Rust event trace satisfies `ShutdownRefinement`, every
+successful concrete shutdown return is proved to have no registration, active
+call, DLL-owned return block, in-flight `xlAutoFree12`, async task/executor,
+RTD resource, handle operation/value, escaped Add-in state, or diagnostic
 dispatcher left alive. -/
 theorem concrete_successful_shutdown_is_quiescent
     {Concrete : Type u}

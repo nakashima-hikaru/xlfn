@@ -15,7 +15,7 @@ private structure WireState where
 
 private structure WireTrace where
   generation : Nat
-  initial : WireState
+  initial : Resources
   events : Array Event
   traceTruncated : Bool
   outcome : String
@@ -62,19 +62,6 @@ private theorem wire_refinement_success_is_quiescent
 
 private def field {α : Type} [FromJson α] (json : Json) (name : String) : Except String α :=
   json.getObjValAs? α name
-
-private def parseStage : Json → Except String CloseStage
-  | .str "drainCalls" => return .drainCalls
-  | .str "drainReturns" => return .drainReturns
-  | .str "drainAsync" => return .drainAsync
-  | .str "stopSubscriptions" => return .stopSubscriptions
-  | .str "detachHost" => return .detachHost
-  | .str "closeState" => return .closeState
-  | .str "drainHandles" => return .drainHandles
-  | .str "stopDiagnostics" => return .stopDiagnostics
-  | .str "drainRtd" => return .drainRtd
-  | .str "finalize" => return .finalize
-  | json => throw s!"unknown shutdown stage: {json}"
 
 private def parseFailure : Json → Except String Failure
   | .str "boundaryPanic" => return .boundaryPanic
@@ -169,18 +156,6 @@ private def parseEvent : Json → Except String Event
           | none => throw s!"unknown shutdown event: {tag}"
       | none => throw s!"shutdown event must be a string or tagged object: {json}"
 
-private def parsePhase : Json → Except String Phase
-  | .str "Open" => return .open
-  | .str "Closed" => return .closed
-  | json@(.obj _) =>
-      match json.getTag? with
-      | some "Closing" => return .closing (← parseStage (← json.getObjVal? "Closing"))
-      | some "FailStopped" => return .failStopped (← parseFailure (← json.getObjVal? "FailStopped"))
-      | some "Quarantined" => return .quarantined (← parseFailure (← json.getObjVal? "Quarantined"))
-      | some tag => throw s!"unknown shutdown phase: {tag}"
-      | none => throw s!"shutdown phase must be a tagged value: {json}"
-  | json => throw s!"unknown shutdown phase: {json}"
-
 private def parseResources (json : Json) : Except String Resources := do
   let ingressOpen : Bool ← field json "ingressOpen"
   let externalEntries : Nat ← field json "externalEntries"
@@ -239,20 +214,11 @@ private def parseResources (json : Json) : Except String Resources := do
     cleanupIssues
   }
 
-private def parseState (json : Json) : Except String WireState := do
-  return {
-    generation := (← field json "generation"),
-    state := {
-      phase := (← parsePhase (← json.getObjVal? "phase")),
-      resources := (← parseResources (← json.getObjVal? "resources"))
-    }
-  }
-
 private def parseTrace (json : Json) : Except String WireTrace := do
   let eventsJson : Array Json ← field json "events"
   return {
     generation := (← field json "generation")
-    initial := (← parseState (← json.getObjVal? "initial"))
+    initial := (← parseResources (← json.getObjVal? "initial"))
     events := (← eventsJson.mapM parseEvent)
     traceTruncated := (← field json "trace_truncated")
     outcome := (← field json "outcome")
@@ -300,18 +266,20 @@ private def checkTrace (json : Json) : Except String Unit := do
   let trace ← parseTrace json
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"
-  if trace.generation != trace.initial.generation then
-    throw "shutdown trace generation does not match its initial state"
-  if hInitial : trace.initial.state.phase == .open then
+  let initial : WireState := {
+    generation := trace.generation
+    state := State.opened trace.initial
+  }
+  if hInitial : initial.state.phase == .open then
     let hInitialOpen := wire_initial_open_of_bool hInitial
     if trace.traceTruncated then
       throw "shutdown trace exceeded its in-memory event budget"
-    let replayed ← replayEvents trace.events.toList trace.initial
+    let replayed ← replayEvents trace.events.toList initial
     let ⟨final, hSteps⟩ := replayed
     match trace.outcome with
     | "in_progress" => return ()
     | "returned_success" =>
-        checkReturnedSuccess trace.initial final trace.events.toList hInitialOpen hSteps
+        checkReturnedSuccess initial final trace.events.toList hInitialOpen hSteps
     | "fail_stopped" =>
         match final.state.phase with
         | .failStopped _ => return ()

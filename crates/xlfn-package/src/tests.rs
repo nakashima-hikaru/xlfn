@@ -27,6 +27,21 @@ fn xll_info() -> PeInfo {
     }
 }
 
+fn package_with_test_manifest(artifact: VerifiedArtifact) -> (VerifiedPackage, Vec<u8>) {
+    let input = BuildManifestInput::default();
+    let manifest = BuildManifest::from_input(input.clone(), std::slice::from_ref(&artifact))
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    let package = VerifiedPackage {
+        artifacts: vec![artifact],
+        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
+    }
+    .with_build_manifest(input)
+    .unwrap();
+    (package, manifest)
+}
+
 #[test]
 fn crt_marker_records_the_effective_compiler_policy() {
     let mut dynamic = [0_u8; 16];
@@ -1219,20 +1234,7 @@ fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
         bytes,
         fs::metadata(&staged).unwrap().permissions(),
     );
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "files": [{
-            "relative_path": "Engine.dll",
-            "size": artifact.size(),
-            "sha256": artifact.sha256_hex(),
-        }]
-    }))
-    .unwrap();
-    let package = VerifiedPackage {
-        artifacts: vec![artifact],
-        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
-    }
-    .with_manifest_bytes(manifest.clone())
-    .unwrap();
+    let (package, manifest) = package_with_test_manifest(artifact);
     fs::write(directory.path().join("build-manifest.json"), &manifest).unwrap();
 
     let artifact = &package.artifacts()[0];
@@ -1275,20 +1277,7 @@ fn prepared_package_rejects_unknown_entries_and_manifest_mutation() {
         Arc::from(&b"stable bytes"[..]),
         fs::metadata(&staged).unwrap().permissions(),
     );
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "files": [{
-            "relative_path": "Engine.dll",
-            "size": artifact.size(),
-            "sha256": artifact.sha256_hex(),
-        }]
-    }))
-    .unwrap();
-    let package = VerifiedPackage {
-        artifacts: vec![artifact],
-        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
-    }
-    .with_manifest_bytes(manifest.clone())
-    .unwrap();
+    let (package, manifest) = package_with_test_manifest(artifact);
     fs::write(directory.path().join("build-manifest.json"), manifest).unwrap();
     let prepared = package
         .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
@@ -1316,20 +1305,7 @@ fn prepared_package_opens_entries_without_following_symlinks() {
         Arc::from(&b"stable bytes"[..]),
         fs::metadata(&staged).unwrap().permissions(),
     );
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "files": [{
-            "relative_path": "Engine.dll",
-            "size": artifact.size(),
-            "sha256": artifact.sha256_hex(),
-        }]
-    }))
-    .unwrap();
-    let package = VerifiedPackage {
-        artifacts: vec![artifact],
-        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
-    }
-    .with_manifest_bytes(manifest.clone())
-    .unwrap();
+    let (package, manifest) = package_with_test_manifest(artifact);
     fs::write(directory.path().join("build-manifest.json"), manifest).unwrap();
     let prepared = package
         .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
@@ -1353,20 +1329,7 @@ fn prepared_package_rejects_replaced_staging_directory() {
         Arc::from(&b"stable bytes"[..]),
         fs::metadata(&staged).unwrap().permissions(),
     );
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "files": [{
-            "relative_path": "Engine.dll",
-            "size": artifact.size(),
-            "sha256": artifact.sha256_hex(),
-        }]
-    }))
-    .unwrap();
-    let package = VerifiedPackage {
-        artifacts: vec![artifact],
-        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
-    }
-    .with_manifest_bytes(manifest.clone())
-    .unwrap();
+    let (package, manifest) = package_with_test_manifest(artifact);
     fs::write(staging.join("build-manifest.json"), manifest).unwrap();
     let prepared = package
         .prepare_commit(&staging, "x86_64-pc-windows-msvc")

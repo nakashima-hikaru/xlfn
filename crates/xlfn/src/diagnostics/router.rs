@@ -11,7 +11,7 @@ pub(crate) use super::{
 };
 
 #[cfg(any(test, feature = "refinement"))]
-pub(crate) use super::connect_ghost;
+pub(crate) use super::connect_trace;
 
 #[cfg(test)]
 pub(crate) use super::{DiagnosticsDrained, clear_diagnostic_sink};

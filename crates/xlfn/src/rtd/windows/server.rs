@@ -15,8 +15,9 @@ use super::update_event::{
     GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent, ServerCallbacks,
     active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
-use super::{FormulaHandleService, com_boundary, guid_eq};
+use super::{com_boundary, guid_eq};
 use crate::error::InputError;
+use crate::rtd::{HandleRtdBackend, HandleRtdConnection};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::win32::{
@@ -169,7 +170,7 @@ impl Drop for OwnedServerReference {
 }
 
 pub(super) struct ServerBackends {
-    pub(super) handles: Option<Arc<FormulaHandleService>>,
+    pub(super) handles: Option<Arc<dyn HandleRtdBackend>>,
     pub(super) subscriptions: Option<Arc<SubscriptionRuntime>>,
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
@@ -315,7 +316,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     unsafe { server_release(server) };
 }
 
-pub(crate) fn shutdown(handles: Arc<FormulaHandleService>) -> XllResult<()> {
+pub(crate) fn shutdown<H: HandleRtdBackend + 'static>(handles: Arc<H>) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -332,7 +333,7 @@ pub(crate) fn shutdown(handles: Arc<FormulaHandleService>) -> XllResult<()> {
                         .lock()
                         .handles
                         .as_ref()
-                        .is_some_and(|active| Arc::ptr_eq(active, &handles))
+                        .is_some_and(|active| active.identity() == handles.identity())
                 }
             })
             .cloned()
@@ -513,8 +514,22 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
     }
 }
 
-pub(super) fn ensure_server(
-    handles: Option<&Arc<FormulaHandleService>>,
+pub(super) fn ensure_server<H: HandleRtdBackend + 'static>(
+    handles: Option<&Arc<H>>,
+    subscriptions: Option<&Arc<SubscriptionRuntime>>,
+) -> XllResult<EnsuredServer> {
+    let backend = handles.map(|handles| -> Arc<dyn HandleRtdBackend> { handles.clone() });
+    ensure_server_impl(backend.as_ref(), subscriptions)
+}
+
+pub(super) fn ensure_server_without_handles(
+    subscriptions: Option<&Arc<SubscriptionRuntime>>,
+) -> XllResult<EnsuredServer> {
+    ensure_server_impl(None, subscriptions)
+}
+
+fn ensure_server_impl(
+    handles: Option<&Arc<dyn HandleRtdBackend>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();
@@ -554,7 +569,7 @@ pub(super) fn ensure_server(
             let _ = unsafe { teardown_server_resources(server, true) };
             // SAFETY: balance the temporary reference acquired above.
             unsafe { server_release(server) };
-            return ensure_server(handles, subscriptions);
+            return ensure_server_impl(handles, subscriptions);
         }
 
         // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
@@ -567,13 +582,15 @@ pub(super) fn ensure_server(
 
         if let Some(handles) = handles {
             match backends.handles.as_ref() {
-                Some(active) if Arc::ptr_eq(active, handles) => {}
+                Some(active) if active.identity() == handles.identity() => {}
                 Some(_) => {
                     return Err(XllError::Internal {
                         diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
                     });
                 }
-                None => backends.handles = Some(Arc::clone(handles)),
+                None => {
+                    backends.handles = Some(handles.clone());
+                }
             }
         }
 
@@ -656,7 +673,7 @@ pub(super) fn ensure_server(
         operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
-            handles: handles.cloned(),
+            handles: handles.map(|handles| handles.clone()),
             subscriptions: subscriptions.cloned(),
             subscription_server: subscription_handle.clone(),
         }),
@@ -907,7 +924,7 @@ pub(super) unsafe extern "system" fn connect_data(
 }
 
 enum ConnectDataTransaction<'runtime> {
-    Handle(crate::handle::HandleConnection<'runtime>),
+    Handle(Box<dyn HandleRtdConnection + 'runtime>),
     Subscription(crate::subscription::SubscriptionConnection),
 }
 

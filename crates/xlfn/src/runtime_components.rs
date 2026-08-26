@@ -6,8 +6,6 @@
 
 mod formal;
 mod host_ledger;
-mod lifecycle_phase;
-mod lifecycle_state;
 mod quarantine;
 mod residency;
 mod return_protocol;
@@ -16,11 +14,6 @@ mod services;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
-pub(crate) use lifecycle_phase::{HostLifecycleIntent, LifecyclePhase};
-pub(crate) use lifecycle_state::{
-    GenerationAdmission, LifecycleAccess, LifecycleCoordinator, LifecycleRemovalState,
-    OpenFailureDisposition,
-};
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;

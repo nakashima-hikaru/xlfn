@@ -4,8 +4,8 @@ use parking_lot::Mutex;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
+use crate::generation::ExecutionGeneration;
 use crate::generation::RuntimeGeneration;
-use crate::runtime::ExecutionGeneration;
 
 /// A terminal reason for retaining a resource instead of running its
 /// destructor after unload safety could not be established.

@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(any(test, feature = "refinement"))]
 /// Verification-only state is isolated from operational runtime components.
 pub(crate) struct FormalState {
-    pub(crate) ghost: OnceLock<crate::shutdown_refinement::GhostHandle>,
+    pub(crate) trace: OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
     pub(crate) composition: OnceLock<Arc<crate::composition_refinement::CompositionTrace>>,
 }
 
@@ -14,7 +14,7 @@ pub(crate) struct FormalState {
 impl FormalState {
     pub(crate) const fn new() -> Self {
         Self {
-            ghost: OnceLock::new(),
+            trace: OnceLock::new(),
             composition: OnceLock::new(),
         }
     }

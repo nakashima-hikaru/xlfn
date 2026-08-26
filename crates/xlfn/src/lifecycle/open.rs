@@ -6,12 +6,11 @@ use super::{
 use crate::XllError;
 use crate::addin::{Addin, BuildInfo};
 use crate::diagnostics::AddinId;
+use crate::generation::OpeningGeneration;
 use crate::host_callback::HostCallbackSession;
+use crate::lifecycle::{HostOpeningState, OpenAttemptBegun, OpenGenerationStaged, OpeningTxn};
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::{
-    AddinLifecycleAccess, HostOpeningState, OpenAttemptBegun, OpenGenerationStaged,
-    OpeningGeneration, OpeningTxn, Runtime,
-};
+use crate::runtime::{AddinLifecycleAccess, Runtime};
 
 pub(super) enum OpenFailure<'runtime, A: Addin> {
     Begun {

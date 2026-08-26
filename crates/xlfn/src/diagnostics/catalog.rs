@@ -49,10 +49,10 @@ impl DiagnosticId {
     pub(crate) const CLOSE_LEASE_GATE: Self = Self::from_ascii8(*b"CLLOSEGE");
     pub(crate) const CLOSE_CERTIFICATE: Self = Self::from_ascii8(*b"CLOSECER");
     pub(crate) const CLOSE_RUNTIME: Self = Self::from_ascii8(*b"CLOSERUN");
-    pub(crate) const CLOSE_GHOST: Self = Self::from_ascii8(*b"CLOSTGHO");
+    pub(crate) const CLOSE_TRACE: Self = Self::from_ascii8(*b"CLOSTGHO");
     pub(crate) const CLOSE_RTD_SUBSCRIPTION: Self = Self::from_ascii8(*b"CLOSTRSU");
     pub(crate) const CLOSE_WAIT: Self = Self::from_ascii8(*b"CLOSWTNO");
-    pub(crate) const GHOST_GENERATION: Self = Self::from_ascii8(*b"GHOSTGEN");
+    pub(crate) const TRACE_GENERATION: Self = Self::from_ascii8(*b"GHOSTGEN");
     pub(crate) const MISSING_STATE: Self = Self::from_ascii8(*b"MISSSTAT");
     pub(crate) const OPEN_PHASE: Self = Self::from_ascii8(*b"OPENPHAS");
     pub(crate) const MODULE_RESIDENCY: Self = Self::from_ascii8(*b"MODRESID");

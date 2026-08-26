@@ -78,7 +78,7 @@ pub(crate) struct ObjectLifetimeTracker {
     sealed: AtomicBool,
     admission_gate: Mutex<()>,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
+    trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 impl ObjectLifetimeTracker {
@@ -90,7 +90,7 @@ impl ObjectLifetimeTracker {
             sealed: AtomicBool::new(false),
             admission_gate: Mutex::new(()),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: std::sync::OnceLock::new(),
+            trace: std::sync::OnceLock::new(),
         })
     }
 
@@ -113,15 +113,14 @@ impl ObjectLifetimeTracker {
             })
             .inspect(|()| {
                 #[cfg(any(test, feature = "refinement"))]
-                self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandleObject);
+                self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
             })
     }
 
     fn release_object(&self) {
-        let previous = self.live_objects.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "handle object accounting is unbalanced");
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.live_objects);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandleObject);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
     }
 
     fn acquire_lease(self: &Arc<Self>) -> XllResult<ObjectLeaseGuard> {
@@ -137,17 +136,16 @@ impl ObjectLifetimeTracker {
                 code: crate::error::DomainErrorCode::Overflow,
             })?;
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddHandlePin);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(ObjectLeaseGuard {
             tracker: Arc::clone(self),
         })
     }
 
     fn release_lease(&self) {
-        let previous = self.active_leases.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "handle lease accounting is unbalanced");
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.active_leases);
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveHandlePin);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandlePin);
     }
 
     pub(crate) fn seal(&self) {
@@ -171,14 +169,14 @@ impl ObjectLifetimeTracker {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        let _ = self.trace.set(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.get() {
-            ghost.record_event(event);
+    fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        if let Some(trace) = self.trace.get() {
+            trace.record(event);
         }
     }
 }

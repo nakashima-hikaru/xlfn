@@ -85,13 +85,13 @@ impl HandleStore {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        self.registry.set_ghost(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.registry.set_trace_sink(trace);
     }
 
     #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    pub(crate) fn ghost_handle(&self) -> Option<crate::shutdown_refinement::GhostHandle> {
-        self.registry.ghost_handle()
+    pub(crate) fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        self.registry.trace_handle()
     }
 
     pub(crate) fn begin_close(&self) {
@@ -110,9 +110,9 @@ impl HandleStore {
         &self,
         sealed: &HandleRegistrySealed,
         generation: Option<RuntimeGeneration>,
-    ) -> XllResult<super::HandleStoreQuiescent> {
+    ) -> XllResult<crate::shutdown::HandlesQuiescent> {
         self.finish_quiescence(sealed)?;
-        Ok(super::HandleStoreQuiescent::new(generation))
+        Ok(crate::shutdown::HandlesQuiescent::new(generation))
     }
 
     #[cfg(test)]

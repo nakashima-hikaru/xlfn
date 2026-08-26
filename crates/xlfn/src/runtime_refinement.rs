@@ -9,7 +9,7 @@
 use crate::XllError;
 use crate::generation::OpenAttemptId;
 #[cfg(any(test, feature = "refinement"))]
-use crate::runtime::ClosedWitness;
+use crate::lifecycle::ClosedWitness;
 use crate::runtime::Runtime;
 use crate::{Addin, XllResult};
 #[cfg(any(test, feature = "refinement"))]
@@ -33,9 +33,9 @@ impl RuntimeRefinementHooks {
     pub(crate) fn event<A: Addin>(
         &self,
         runtime: &Runtime<A>,
-        event: crate::shutdown_refinement::GhostEvent,
+        event: crate::shutdown_trace::ShutdownEvent,
     ) {
-        self.ghost_handle().record_event(event);
+        self.trace_handle().record(event);
         let _ = runtime;
     }
 
@@ -44,56 +44,53 @@ impl RuntimeRefinementHooks {
     pub(crate) fn event_linearized<A: Addin>(
         &self,
         runtime: &Runtime<A>,
-        event: crate::shutdown_refinement::GhostEvent,
+        event: crate::shutdown_trace::ShutdownEvent,
     ) {
         crate::module_runtime::ingress().with_linearization(|| self.event(runtime, event));
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn generation_active<A: Addin>(&self, runtime: &Runtime<A>) -> bool {
-        let _ = runtime;
-        self.ghost_handle().active()
-    }
-
-    #[cfg(any(test, feature = "refinement"))]
+    #[cfg(all(feature = "async", any(test, feature = "refinement")))]
     pub(crate) fn async_stopped<A: Addin>(&self, runtime: &Runtime<A>) {
-        let ghost = self.ghost_handle();
-        if ghost.state().resources.async_executor_running {
-            self.event(
-                runtime,
-                crate::shutdown_refinement::GhostEvent::StopAsyncExecutor,
-            );
-        }
+        // The async manager has already performed the concrete stop before
+        // this observation is emitted.  The recorder must not infer whether
+        // that transition happened from a shadow resource counter.
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::StopAsyncExecutor,
+        );
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn diagnostics_stopped<A: Addin>(&self, runtime: &Runtime<A>) -> XllResult<()> {
-        let _ = runtime;
-        crate::diagnostics::record_ghost_diagnostics_stopped(self.ghost_handle())
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::StopDiagnostics,
+        );
+        Ok(())
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn fail_stop<A: Addin>(
         &self,
         runtime: &Runtime<A>,
-        reason: crate::shutdown_refinement::GhostFailure,
+        reason: crate::shutdown_trace::ShutdownFailure,
     ) {
-        if let Err(violation) = self.ghost_handle().fail_stop(reason) {
-            tracing::error!(%violation, "shutdown ghost fail-stop recording failed");
-        }
-        let _ = runtime;
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::FailStop(reason),
+        );
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn quarantine<A: Addin>(
         &self,
         runtime: &Runtime<A>,
-        reason: crate::shutdown_refinement::GhostFailure,
+        reason: crate::shutdown_trace::ShutdownFailure,
     ) {
-        if let Err(violation) = self.ghost_handle().quarantine(reason) {
-            tracing::error!(%violation, "shutdown ghost quarantine recording failed");
-        }
-        let _ = runtime;
+        self.event(
+            runtime,
+            crate::shutdown_trace::ShutdownEvent::Quarantine(reason),
+        );
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -110,51 +107,31 @@ impl RuntimeRefinementHooks {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
             });
         }
-        if self.ghost_handle().active() {
-            self.ghost_handle()
-                .record_returned_success()
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
-                })?;
-            if self.ghost_handle().active() {
-                crate::lifecycle::fail_stop_invariant(
-                    "xlAutoRemove ghost shutdown postcondition",
-                    &XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RTD_SUBSCRIPTION,
-                    },
-                );
-            }
-            self.retire_committed_shutdown(runtime);
-        }
+        self.trace_handle().mark_returned_success();
+        self.retire_committed_shutdown(runtime);
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn disable_for_test(&self) {
-        self.ghost_handle().disable_for_test();
+        self.trace_handle().disable_for_test();
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn finish_close<A: Addin>(&self, runtime: &Runtime<A>) -> XllResult<()> {
-        if self.ghost_handle().active() {
-            self.ghost_handle()
-                .apply(crate::shutdown_refinement::GhostEvent::FinishClose)
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_GHOST,
-                })?;
-            runtime.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
-            );
-        }
+        self.event(runtime, crate::shutdown_trace::ShutdownEvent::FinishClose);
+        runtime.record_composition_event(
+            crate::composition_refinement::CompositionEvent::FinishCommittedShutdown,
+        );
         Ok(())
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn ghost_handle(&self) -> crate::shutdown_refinement::GhostHandle {
+    pub(crate) fn trace_handle(&self) -> crate::shutdown_trace::ShutdownTraceHandle {
         Arc::clone(
             self.formal
-                .ghost
-                .get_or_init(|| Arc::new(crate::shutdown_refinement::ShutdownGhost::new())),
+                .trace
+                .get_or_init(|| Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new())),
         )
     }
 
@@ -164,7 +141,7 @@ impl RuntimeRefinementHooks {
             .formal
             .composition
             .get_or_init(|| Arc::new(crate::composition_refinement::CompositionTrace::new()));
-        self.ghost_handle().set_composition(Arc::clone(trace));
+        self.trace_handle().set_composition(Arc::clone(trace));
         trace.as_ref()
     }
 
@@ -176,10 +153,8 @@ impl RuntimeRefinementHooks {
     ) {
         #[cfg(any(test, feature = "refinement"))]
         {
-            let ghost = runtime.refinement_hooks().ghost_handle();
-            if ghost.active() {
-                runtime.return_protocol.returns.set_ghost(ghost);
-            }
+            let trace = runtime.refinement_hooks().trace_handle();
+            runtime.return_protocol.returns.set_trace_sink(trace);
             runtime.record_composition_begin_open(sampled_epoch, attempt.get());
         }
         #[cfg(not(any(test, feature = "refinement")))]
@@ -196,8 +171,8 @@ impl RuntimeRefinementHooks {
     ) -> XllResult<()> {
         #[cfg(any(test, feature = "refinement"))]
         {
-            let ghost = runtime.refinement_hooks().ghost_handle();
-            let mut resources = crate::shutdown_refinement::GhostResources::opened(
+            let trace = runtime.refinement_hooks().trace_handle();
+            let mut resources = crate::shutdown_trace::ShutdownResources::opened(
                 runtime.host.registrations_snapshot().len() as u64,
                 runtime.host.event_registrations_snapshot().len() as u64,
             );
@@ -205,32 +180,36 @@ impl RuntimeRefinementHooks {
             {
                 resources.async_executor_running = !runtime.executors.async_manager.is_stopped();
             }
-            crate::diagnostics::connect_ghost(Arc::clone(&ghost), |snapshot| {
+            crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
                 resources.diagnostics_running = snapshot.running;
                 resources.diagnostics_pending = snapshot.pending;
-                ghost
-                    .begin_generation(attempt.get(), resources.clone())
+                trace
+                    .begin(attempt.get(), resources.clone())
                     .map_err(|_| XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::GHOST_GENERATION,
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::TRACE_GENERATION,
                     })?;
                 operation()
             })?;
-            crate::rtd::set_ghost(Arc::clone(&ghost));
+            crate::rtd::set_trace_sink(Arc::clone(&trace));
             runtime
                 .return_protocol
                 .returns
-                .set_ghost(Arc::clone(&ghost));
+                .set_trace_sink(Arc::clone(&trace));
             let services = runtime
                 .generation_services()
                 .expect("committed open generation publishes its services");
-            services.formula_handle_slot().set_ghost(Arc::clone(&ghost));
+            services
+                .formula_handle_slot()
+                .set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "rtd", test))]
-            services.subscriptions_slot().set_ghost(Arc::clone(&ghost));
+            services
+                .subscriptions_slot()
+                .set_trace_sink(Arc::clone(&trace));
             #[cfg(feature = "async")]
             runtime
                 .executors
                 .async_manager
-                .set_ghost(Arc::clone(&ghost));
+                .set_trace_sink(Arc::clone(&trace));
             runtime.record_composition_event(
                 crate::composition_refinement::CompositionEvent::CommitOpen {
                     attempt: attempt.get(),
@@ -336,20 +315,20 @@ impl RuntimeRefinementHooks {
     }
 }
 
-macro_rules! runtime_ghost_events {
+macro_rules! runtime_shutdown_events {
     ($($name:ident => $event:ident),+ $(,)?) => {
         impl RuntimeRefinementHooks {
             $(
                 #[cfg(any(test, feature = "refinement"))]
                 pub(crate) fn $name<A: Addin>(&self, runtime: &Runtime<A>) {
-                    self.event(runtime, crate::shutdown_refinement::GhostEvent::$event);
+                    self.event(runtime, crate::shutdown_trace::ShutdownEvent::$event);
                 }
             )+
         }
     };
 }
 
-runtime_ghost_events! {
+runtime_shutdown_events! {
     external_entered => EnterExternal,
     external_left => LeaveExternal,
     call_entered => EnterCall,
@@ -360,7 +339,7 @@ runtime_ghost_events! {
     subscriptions_drained => SubscriptionsDrained,
     unregister_function => UnregisterFunction,
     unregister_event => UnregisterEvent,
-    callback_admission_closed => CloseCallbackAdmission,
+    callback_admission_closed => CloseCallbackGate,
     host_detached => HostDetached,
     generation_unique => ProveGenerationUnique,
     addin_quiesced => ProveAddinQuiesced,
@@ -374,9 +353,6 @@ runtime_ghost_events! {
 impl RuntimeRefinementHooks {
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn calls_drained<A: Addin>(&self, runtime: &Runtime<A>) {
-        self.event_linearized(
-            runtime,
-            crate::shutdown_refinement::GhostEvent::CallsDrained,
-        );
+        self.event_linearized(runtime, crate::shutdown_trace::ShutdownEvent::CallsDrained);
     }
 }

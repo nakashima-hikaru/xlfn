@@ -148,8 +148,8 @@ end Phase
 
 /-! Resource fields are restricted to evidence the framework can observe or
     receive as an explicit Add-in contract.  Arbitrary user threads and native
-    callbacks are represented by `addinQuiesced`, not by unverifiable ghost
-    counters. -/
+    callbacks are represented by `addinQuiesced`, not by unverifiable
+    framework-side counters. -/
 structure Resources where
   ingressOpen : Bool := true
   externalEntries : Nat := 0

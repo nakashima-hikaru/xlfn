@@ -221,7 +221,7 @@ pub(crate) struct ExportIngress {
     opening_lock: Mutex<()>,
     #[cfg(any(test, feature = "refinement"))]
     // Refinement hooks must be serialized with the ingress CAS. Otherwise a
-    // thread accepted by `enter` can be descheduled before its ghost event is
+    // thread accepted by `enter` can be descheduled before its trace event is
     // recorded and let `begin_close` overtake that event.
     linearization_lock: Mutex<()>,
     #[cfg(test)]
@@ -531,7 +531,7 @@ impl ExportIngress {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         #[cfg(test)]
-        self.close_waiters.fetch_sub(1, Ordering::AcqRel);
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.close_waiters);
         with_diagnostic_linearization(|| {
             let mut on_closed = Some(on_closed);
             let mut observed = self.phase.load(Ordering::Acquire);

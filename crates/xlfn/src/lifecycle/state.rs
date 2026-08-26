@@ -27,11 +27,11 @@ fn require_lifecycle_invariant(condition: bool, message: &'static str) {
     }
 }
 
-use super::services::GenerationServices;
+use crate::generation::{ExecutionGeneration, OpeningGeneration, ShutdownGeneration};
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
+use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::{ModuleAuthority, ModuleEpochId, ModuleEpochLease};
-use crate::runtime::{ExecutionGeneration, OpeningGeneration};
-use crate::runtime_components::{HostLifecycleIntent, LifecyclePhase};
+use crate::runtime_components::GenerationServices;
 
 /// A read-side publication of one coherent open generation.
 ///
@@ -755,10 +755,24 @@ impl<A: crate::Addin> LifecycleCore<A> {
 /// private to this module, so runtime orchestration cannot construct or
 /// mutate an arbitrary core state.
 pub(crate) struct LifecycleAccess<'a, A: crate::Addin> {
+    coordinator: &'a LifecycleCoordinator<A>,
     core: MutexGuard<'a, LifecycleCore<A>>,
 }
 
 impl<A: crate::Addin> LifecycleAccess<'_, A> {
+    /// Applies one canonical mutation and commits its read-side projection
+    /// before returning. Lifecycle writers must use this boundary instead of
+    /// mutating the core and committing later: an early return can no longer
+    /// leave `phase` or `publication` stale.
+    fn transition<R>(
+        &mut self,
+        mutation: impl FnOnce(&mut LifecycleCore<A>) -> (R, TransitionEffect<A>),
+    ) -> R {
+        let (result, effect) = mutation(&mut self.core);
+        self.coordinator.commit_transition(self, effect);
+        result
+    }
+
     fn canonical_state(&self) -> &LifecycleState<A> {
         self.core.canonical_state()
     }
@@ -841,6 +855,18 @@ pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) opening: Option<OpeningGeneration<A>>,
 }
 
+/// The read-side effect produced by one canonical lifecycle transition.
+///
+/// A transition mutates `LifecycleCore` first and then commits exactly one of
+/// these effects. Keeping the effect with the projection commit prevents a
+/// writer from updating `phase` without updating `publication`, or from
+/// publishing a generation after the closing phase has become visible.
+enum TransitionEffect<A: crate::Addin> {
+    Keep,
+    ClearPublication,
+    Publish(Arc<PublishedGeneration<A>>),
+}
+
 impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) const fn new() -> Self {
         Self {
@@ -857,45 +883,55 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     pub(crate) fn access(&self) -> LifecycleAccess<'_, A> {
         LifecycleAccess {
+            coordinator: self,
             core: self.core.lock(),
         }
     }
 
-    pub(crate) fn take_module_closing_for_close(
+    pub(in crate::lifecycle) fn take_module_closing_for_close(
         &self,
         access: &mut LifecycleAccess<'_, A>,
     ) -> Option<crate::module_runtime::ModuleClosing> {
-        access.core.take_module_closing()
+        access.transition(|core| (core.take_module_closing(), TransitionEffect::Keep))
     }
 
-    pub(crate) fn take_module_closing_for_quarantine(
+    pub(in crate::lifecycle) fn take_module_closing_for_quarantine(
         &self,
     ) -> Option<crate::module_runtime::ModuleClosing> {
         let mut access = self.access();
-        access.core.take_module_closing()
+        access.transition(|core| (core.take_module_closing(), TransitionEffect::Keep))
     }
 
-    pub(crate) fn install_module_closing(&self, closing: crate::module_runtime::ModuleClosing) {
+    pub(in crate::lifecycle) fn install_module_closing(
+        &self,
+        closing: crate::module_runtime::ModuleClosing,
+    ) {
         let mut access = self.access();
         self.install_module_closing_locked(&mut access, closing);
     }
 
-    pub(crate) fn install_module_closing_locked(
+    pub(in crate::lifecycle) fn install_module_closing_locked(
         &self,
         access: &mut LifecycleAccess<'_, A>,
         closing: crate::module_runtime::ModuleClosing,
     ) {
-        access.core.install_closing_authority(closing);
-        self.notify_all();
+        access.transition(|core| {
+            core.install_closing_authority(closing);
+            ((), TransitionEffect::Keep)
+        });
     }
 
-    pub(crate) fn clear_certified_retirement(&self, access: &mut LifecycleAccess<'_, A>) -> bool {
-        let Some(retirement) = access.core.generation.state.take_retirement() else {
-            return false;
-        };
-        drop(retirement.services);
-        self.clear_publication();
-        true
+    pub(in crate::lifecycle) fn clear_certified_retirement(
+        &self,
+        access: &mut LifecycleAccess<'_, A>,
+    ) -> bool {
+        access.transition(|core| {
+            let Some(retirement) = core.generation.state.take_retirement() else {
+                return (false, TransitionEffect::Keep);
+            };
+            drop(retirement.services);
+            (true, TransitionEffect::ClearPublication)
+        })
     }
 
     pub(crate) fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
@@ -924,10 +960,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         }
     }
 
-    pub(crate) fn set_host_intent(&self, intent: HostLifecycleIntent) {
+    pub(in crate::lifecycle) fn set_host_intent(&self, intent: HostLifecycleIntent) {
         let mut access = self.access();
-        access.core.host_intent = intent;
-        self.refresh_projection(&access);
+        access.transition(|core| {
+            core.host_intent = intent;
+            ((), TransitionEffect::Keep)
+        });
     }
 
     fn set_removal_attempt(
@@ -935,78 +973,110 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         access: &mut LifecycleAccess<'_, A>,
         attempt: Option<RemovalAttemptId>,
     ) {
-        access.core.removal_attempt = attempt;
-        self.refresh_projection(access);
+        access.transition(|core| {
+            core.removal_attempt = attempt;
+            ((), TransitionEffect::Keep)
+        });
     }
 
     fn advance_removal_epoch(&self, access: &mut LifecycleAccess<'_, A>) {
-        access.core.removal_epoch = access.core.removal_epoch.checked_add(1).unwrap_or_else(|| {
-            tracing::error!("lifecycle close epoch exhausted; fail-stopping");
-            std::process::abort();
+        access.transition(|core| {
+            core.removal_epoch = core.removal_epoch.checked_add(1).unwrap_or_else(|| {
+                tracing::error!("lifecycle close epoch exhausted; fail-stopping");
+                std::process::abort();
+            });
+            ((), TransitionEffect::Keep)
         });
-        self.refresh_projection(access);
     }
 
     fn next_lifecycle_attempt_id(
         &self,
         access: &mut LifecycleAccess<'_, A>,
     ) -> crate::XllResult<OpenAttemptId> {
-        let attempt_id = access.core.next_lifecycle_attempt;
-        let next = attempt_id.checked_add(1).ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
-        })?;
-        let attempt = OpenAttemptId::new(attempt_id).ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
-        })?;
-        access.core.next_lifecycle_attempt = next;
-        Ok(attempt)
-    }
-
-    fn next_removal_attempt_id(&self, access: &mut LifecycleAccess<'_, A>) -> RemovalAttemptId {
-        let attempt_id = access.core.next_removal_attempt;
-        access.core.next_removal_attempt = attempt_id.checked_add(1).unwrap_or_else(|| {
-            tracing::error!("lifecycle removal-attempt identity exhausted; fail-stopping");
-            std::process::abort();
-        });
-        RemovalAttemptId::new(attempt_id).unwrap_or_else(|| {
-            tracing::error!("lifecycle removal-attempt identity reached zero; fail-stopping");
-            std::process::abort();
+        access.transition(|core| {
+            let attempt_id = core.next_lifecycle_attempt;
+            let Some(next) = attempt_id.checked_add(1) else {
+                return (
+                    Err(crate::XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            let Some(attempt) = OpenAttemptId::new(attempt_id) else {
+                return (
+                    Err(crate::XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            core.next_lifecycle_attempt = next;
+            (Ok(attempt), TransitionEffect::Keep)
         })
     }
 
-    fn refresh_projection(&self, access: &LifecycleAccess<'_, A>) {
+    fn next_removal_attempt_id(&self, access: &mut LifecycleAccess<'_, A>) -> RemovalAttemptId {
+        access.transition(|core| {
+            let attempt_id = core.next_removal_attempt;
+            let next = attempt_id.checked_add(1).unwrap_or_else(|| {
+                tracing::error!("lifecycle removal-attempt identity exhausted; fail-stopping");
+                std::process::abort();
+            });
+            core.next_removal_attempt = next;
+            let attempt = RemovalAttemptId::new(attempt_id).unwrap_or_else(|| {
+                tracing::error!("lifecycle removal-attempt identity reached zero; fail-stopping");
+                std::process::abort();
+            });
+            (attempt, TransitionEffect::Keep)
+        })
+    }
+
+    /// Commits the read-side projection for a canonical transition.
+    ///
+    /// The ordering is part of the lifecycle protocol: publication is
+    /// changed before the phase projection, and waiters are notified only
+    /// after both projections describe the new canonical state. In
+    /// particular, closing clears admission before `Closing` becomes visible,
+    /// while opening publishes the coherent root/services pair before
+    /// `Open` becomes visible.
+    fn commit_transition(&self, access: &LifecycleAccess<'_, A>, effect: TransitionEffect<A>) {
+        match effect {
+            TransitionEffect::Keep => {}
+            TransitionEffect::ClearPublication => self.publication.store(None),
+            TransitionEffect::Publish(publication) => self.publication.store(Some(publication)),
+        }
         self.phase.store(access.phase() as u8, Ordering::Release);
+        self.changed.notify_all();
     }
 
-    fn clear_publication(&self) {
-        self.publication.store(None);
-    }
-
-    fn publish_publication(&self, bundle: &OpenGeneration<A>) {
-        self.publication.store(Some(Arc::new(PublishedGeneration {
+    fn publish_effect(bundle: &OpenGeneration<A>) -> TransitionEffect<A> {
+        TransitionEffect::Publish(Arc::new(PublishedGeneration {
             root: Arc::clone(&bundle.generation),
             services: Arc::clone(&bundle.services),
-        })));
+        }))
     }
 
     /// Clears host intent before the external module-open protocol is started.
-    pub(crate) fn prepare_open(&self, access: &mut LifecycleAccess<'_, A>) {
+    pub(in crate::lifecycle) fn prepare_open(&self, access: &mut LifecycleAccess<'_, A>) {
         require_lifecycle_invariant(
             access.phase() == LifecyclePhase::Closed,
             "open preparation requires the closed lifecycle phase",
         );
-        access.core.host_intent = HostLifecycleIntent::None;
-        self.refresh_projection(access);
+        access.transition(|core| {
+            core.host_intent = HostLifecycleIntent::None;
+            ((), TransitionEffect::Keep)
+        });
     }
 
-    pub(crate) fn allocate_open_attempt(
+    pub(in crate::lifecycle) fn allocate_open_attempt(
         &self,
         access: &mut LifecycleAccess<'_, A>,
     ) -> crate::XllResult<OpenAttemptId> {
         self.next_lifecycle_attempt_id(access)
     }
 
-    pub(crate) fn begin_opening(
+    pub(in crate::lifecycle) fn begin_opening(
         &self,
         access: &mut LifecycleAccess<'_, A>,
         attempt: OpenAttemptId,
@@ -1019,150 +1089,166 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             access.removal_attempt().is_none(),
             "opening cannot begin while removal owns the lifecycle",
         );
-        access.core.generation.state = LifecycleState::Opening {
-            attempt,
-            payload: OpeningPayload::Empty,
-        };
-        self.refresh_projection(access);
+        access.transition(|core| {
+            core.generation.state = LifecycleState::Opening {
+                attempt,
+                payload: OpeningPayload::Empty,
+            };
+            ((), TransitionEffect::Keep)
+        });
     }
 
     /// Publishes a successfully assembled generation while retaining the
     /// opening attempt until `commit_open` completes the lifecycle transition.
-    pub(crate) fn commit_open(
+    pub(in crate::lifecycle) fn commit_open(
         &self,
         core: &mut LifecycleAccess<'_, A>,
         generation: RuntimeGeneration,
     ) -> crate::XllResult<()> {
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        match state {
-            LifecycleState::Opening {
-                attempt,
-                payload: OpeningPayload::Published(bundle),
-            } => {
-                if attempt.into_runtime_generation() != generation
-                    || bundle.generation.id() != generation
-                {
-                    core.core.generation.state = LifecycleState::Opening {
-                        attempt,
-                        payload: OpeningPayload::Published(bundle),
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            match state {
+                LifecycleState::Opening {
+                    attempt,
+                    payload: OpeningPayload::Published(bundle),
+                } => {
+                    if attempt.into_runtime_generation() != generation
+                        || bundle.generation.id() != generation
+                    {
+                        core.generation.state = LifecycleState::Opening {
+                            attempt,
+                            payload: OpeningPayload::Published(bundle),
+                        };
+                        return (
+                            Err(crate::XllError::Internal {
+                                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                            }),
+                            TransitionEffect::Keep,
+                        );
+                    }
+                    core.last_committed_generation = Some(generation);
+                    core.generation.state = LifecycleState::Open { bundle };
+                    let effect = if let LifecycleState::Open { bundle } = core.canonical_state() {
+                        Self::publish_effect(bundle)
+                    } else {
+                        unreachable!("open bundle was just installed");
                     };
-                    return Err(crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                    });
+                    (Ok(()), effect)
                 }
-                core.core.last_committed_generation = Some(generation);
-                core.core.generation.state = LifecycleState::Open { bundle };
-                if let LifecycleState::Open { bundle } = core.core.canonical_state() {
-                    self.publish_publication(bundle);
-                } else {
-                    unreachable!("open bundle was just installed");
+                other => {
+                    core.generation.state = other;
+                    (
+                        Err(crate::XllError::Internal {
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                        }),
+                        TransitionEffect::Keep,
+                    )
                 }
-                self.refresh_projection(core);
-                Ok(())
             }
-            other => {
-                core.core.generation.state = other;
-                Err(crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                })
-            }
-        }
+        })
     }
 
-    pub(crate) fn reject_open_attempt(&self, core: &mut LifecycleAccess<'_, A>) {
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        core.core.generation.state = match state {
-            LifecycleState::Closing { payload, .. } => LifecycleState::Closing {
-                payload,
-                open_attempt: None,
-            },
-            LifecycleState::OpenRollbackPending { payload } => {
-                LifecycleState::OpenRollbackPending { payload }
-            }
-            LifecycleState::Quarantined { payload } => LifecycleState::Quarantined { payload },
-            other => other,
-        };
-        self.refresh_projection(core);
+    pub(in crate::lifecycle) fn reject_open_attempt(&self, core: &mut LifecycleAccess<'_, A>) {
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            core.generation.state = match state {
+                LifecycleState::Closing { payload, .. } => LifecycleState::Closing {
+                    payload,
+                    open_attempt: None,
+                },
+                LifecycleState::OpenRollbackPending { payload } => {
+                    LifecycleState::OpenRollbackPending { payload }
+                }
+                LifecycleState::Quarantined { payload } => LifecycleState::Quarantined { payload },
+                other => other,
+            };
+            ((), TransitionEffect::Keep)
+        });
     }
 
     /// Records an open failure without discarding the owned staged/published
     /// payload. The rollback pipeline can then take that payload explicitly.
-    pub(crate) fn record_open_failure(
+    pub(in crate::lifecycle) fn record_open_failure(
         &self,
         core: &mut LifecycleAccess<'_, A>,
     ) -> OpenFailureDisposition {
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        let (state, disposition) = match state {
-            LifecycleState::Opening { payload, .. } => (
-                LifecycleState::OpenRollbackPending {
-                    payload: payload.into_closing(),
-                },
-                OpenFailureDisposition::RollbackRequired,
-            ),
-            LifecycleState::OpenRollbackPending { payload } => (
-                LifecycleState::OpenRollbackPending { payload },
-                OpenFailureDisposition::RollbackRequired,
-            ),
-            LifecycleState::Closing { payload, .. } => (
-                LifecycleState::Closing {
-                    payload,
-                    open_attempt: None,
-                },
-                OpenFailureDisposition::ClosingOwnsCleanup,
-            ),
-            other => (other, OpenFailureDisposition::ClosingOwnsCleanup),
-        };
-        core.core.generation.state = state;
-        self.refresh_projection(core);
-        disposition
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            let (state, disposition) = match state {
+                LifecycleState::Opening { payload, .. } => (
+                    LifecycleState::OpenRollbackPending {
+                        payload: payload.into_closing(),
+                    },
+                    OpenFailureDisposition::RollbackRequired,
+                ),
+                LifecycleState::OpenRollbackPending { payload } => (
+                    LifecycleState::OpenRollbackPending { payload },
+                    OpenFailureDisposition::RollbackRequired,
+                ),
+                LifecycleState::Closing { payload, .. } => (
+                    LifecycleState::Closing {
+                        payload,
+                        open_attempt: None,
+                    },
+                    OpenFailureDisposition::ClosingOwnsCleanup,
+                ),
+                other => (other, OpenFailureDisposition::ClosingOwnsCleanup),
+            };
+            core.generation.state = state;
+            (disposition, TransitionEffect::Keep)
+        })
     }
 
     /// Requests closing while moving the active generation payload under the
     /// closing phase. No payload remains in a separate core field.
-    pub(crate) fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) {
+    pub(in crate::lifecycle) fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) {
         if core.core.canonical_state().phase() == LifecyclePhase::Closed
             && core.core.removal_attempt().is_some()
         {
             return;
         }
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        core.core.generation.state = match state {
-            LifecycleState::Closed => LifecycleState::Closing {
-                open_attempt: None,
-                payload: ClosingPayload::Empty,
-            },
-            LifecycleState::Opening { attempt, payload } => LifecycleState::Closing {
-                open_attempt: Some(attempt),
-                payload: payload.into_closing(),
-            },
-            LifecycleState::Open { bundle } => LifecycleState::Closing {
-                open_attempt: None,
-                payload: ClosingPayload::Published(bundle),
-            },
-            LifecycleState::Closing {
-                open_attempt,
-                payload,
-            } => LifecycleState::Closing {
-                open_attempt,
-                payload,
-            },
-            LifecycleState::OpenRollbackPending { payload } => LifecycleState::Closing {
-                open_attempt: None,
-                payload,
-            },
-            LifecycleState::Quarantined { payload } => LifecycleState::Quarantined { payload },
-        };
-        if matches!(core.core.canonical_state(), LifecycleState::Closing { .. }) {
-            self.clear_publication();
-        }
-        self.refresh_projection(core);
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            core.generation.state = match state {
+                LifecycleState::Closed => LifecycleState::Closing {
+                    open_attempt: None,
+                    payload: ClosingPayload::Empty,
+                },
+                LifecycleState::Opening { attempt, payload } => LifecycleState::Closing {
+                    open_attempt: Some(attempt),
+                    payload: payload.into_closing(),
+                },
+                LifecycleState::Open { bundle } => LifecycleState::Closing {
+                    open_attempt: None,
+                    payload: ClosingPayload::Published(bundle),
+                },
+                LifecycleState::Closing {
+                    open_attempt,
+                    payload,
+                } => LifecycleState::Closing {
+                    open_attempt,
+                    payload,
+                },
+                LifecycleState::OpenRollbackPending { payload } => LifecycleState::Closing {
+                    open_attempt: None,
+                    payload,
+                },
+                LifecycleState::Quarantined { payload } => LifecycleState::Quarantined { payload },
+            };
+            let effect = if matches!(core.canonical_state(), LifecycleState::Closing { .. }) {
+                TransitionEffect::ClearPublication
+            } else {
+                TransitionEffect::Keep
+            };
+            ((), effect)
+        });
     }
 
-    pub(crate) fn begin_removal_request(&self, core: &mut LifecycleAccess<'_, A>) {
+    pub(in crate::lifecycle) fn begin_removal_request(&self, core: &mut LifecycleAccess<'_, A>) {
         self.advance_removal_epoch(core);
     }
 
-    pub(crate) fn claim_removal_owner(
+    pub(in crate::lifecycle) fn claim_removal_owner(
         &self,
         core: &mut LifecycleAccess<'_, A>,
     ) -> Option<RemovalAttemptId> {
@@ -1179,7 +1265,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         Some(attempt)
     }
 
-    pub(crate) fn release_removal_owner(
+    pub(in crate::lifecycle) fn release_removal_owner(
         &self,
         core: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
@@ -1191,7 +1277,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.set_removal_attempt(core, None);
     }
 
-    pub(crate) fn finish_closed(&self, core: &mut LifecycleAccess<'_, A>) {
+    pub(in crate::lifecycle) fn finish_closed(&self, core: &mut LifecycleAccess<'_, A>) {
         require_lifecycle_invariant(
             matches!(
                 core.core.canonical_state(),
@@ -1206,106 +1292,120 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             ),
             "closed publication requires an empty lifecycle payload",
         );
-        core.core.generation.state = LifecycleState::Closed;
-        self.refresh_projection(core);
+        core.transition(|core| {
+            core.generation.state = LifecycleState::Closed;
+            ((), TransitionEffect::ClearPublication)
+        });
     }
 
-    pub(crate) fn quarantine_core(&self, core: &mut LifecycleAccess<'_, A>) {
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        core.core.generation.state = LifecycleState::Quarantined {
-            payload: state.into_payload(),
-        };
-        self.refresh_projection(core);
+    pub(in crate::lifecycle) fn quarantine_core(&self, core: &mut LifecycleAccess<'_, A>) {
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            core.generation.state = LifecycleState::Quarantined {
+                payload: state.into_payload(),
+            };
+            ((), TransitionEffect::ClearPublication)
+        });
     }
 
-    pub(crate) fn stage_opening_generation_locked(
+    pub(in crate::lifecycle) fn stage_opening_generation_locked(
         &self,
         core: &mut LifecycleAccess<'_, A>,
         opening: OpeningGeneration<A>,
     ) -> Result<(), (crate::XllError, OpeningGeneration<A>)> {
-        let state = mem::replace(&mut core.core.generation.state, LifecycleState::Closed);
-        match state {
-            LifecycleState::Opening {
-                attempt,
-                payload: OpeningPayload::Empty,
-            } => {
-                core.core.generation.state = LifecycleState::Opening {
+        core.transition(|core| {
+            let state = mem::replace(&mut core.generation.state, LifecycleState::Closed);
+            match state {
+                LifecycleState::Opening {
                     attempt,
-                    payload: OpeningPayload::Staged(opening),
-                };
-                Ok(())
+                    payload: OpeningPayload::Empty,
+                } => {
+                    core.generation.state = LifecycleState::Opening {
+                        attempt,
+                        payload: OpeningPayload::Staged(opening),
+                    };
+                    (Ok(()), TransitionEffect::Keep)
+                }
+                other => {
+                    core.generation.state = other;
+                    (
+                        Err((
+                            crate::XllError::Internal {
+                                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                            },
+                            opening,
+                        )),
+                        TransitionEffect::Keep,
+                    )
+                }
             }
-            other => {
-                core.core.generation.state = other;
-                Err((
-                    crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                    },
-                    opening,
-                ))
-            }
-        }
+        })
     }
 
-    pub(crate) fn publish_opening_generation_locked(
+    pub(in crate::lifecycle) fn publish_opening_generation_locked(
         &self,
         core: &mut LifecycleAccess<'_, A>,
         generation: RuntimeGeneration,
         services: Arc<GenerationServices>,
         module_epoch: ModuleEpochLease,
     ) -> Result<(), PublishOpeningError<A>> {
-        if core.core.has_current_generation() {
-            return Err(PublishOpeningError {
-                error: crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                },
-                opening: core.core.generation.state.take_opening(),
-            });
-        }
-        let attempt = match core.core.canonical_state() {
-            LifecycleState::Opening { attempt, .. } => *attempt,
-            _ => {
-                return Err(PublishOpeningError {
-                    error: crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                    },
-                    opening: core.core.generation.state.take_opening(),
-                });
+        core.transition(|core| {
+            let open_state_error = || crate::XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+            };
+            if core.has_current_generation() {
+                return (
+                    Err(PublishOpeningError {
+                        error: open_state_error(),
+                        opening: core.generation.state.take_opening(),
+                    }),
+                    TransitionEffect::Keep,
+                );
             }
-        };
-        let opening = core
-            .core
-            .generation
-            .state
-            .take_opening()
-            .ok_or(PublishOpeningError {
-                error: crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                },
-                opening: None,
-            })?;
-        let OpeningGeneration {
-            shared_state,
-            layers,
-            init_config: _,
-        } = opening;
-        let published = Arc::new(ExecutionGeneration {
-            id: generation,
-            shared_state,
-            layers,
-        });
-        let module_epoch_id = module_epoch.id();
-        core.core.install_open_authority(module_epoch);
-        let bundle = OpenGeneration {
-            generation: Arc::clone(&published),
-            services,
-            module_epoch: ModuleEpochIdentity::new(module_epoch_id),
-        };
-        core.core.generation.state = LifecycleState::Opening {
-            attempt,
-            payload: OpeningPayload::Published(bundle),
-        };
-        Ok(())
+            let Some(attempt) = (match core.canonical_state() {
+                LifecycleState::Opening { attempt, .. } => Some(*attempt),
+                _ => None,
+            }) else {
+                return (
+                    Err(PublishOpeningError {
+                        error: open_state_error(),
+                        opening: core.generation.state.take_opening(),
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            let Some(opening) = core.generation.state.take_opening() else {
+                return (
+                    Err(PublishOpeningError {
+                        error: open_state_error(),
+                        opening: None,
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            let OpeningGeneration {
+                shared_state,
+                layers,
+                init_config: _,
+            } = opening;
+            let published = Arc::new(ExecutionGeneration {
+                id: generation,
+                shared_state,
+                layers,
+            });
+            let module_epoch_id = module_epoch.id();
+            core.install_open_authority(module_epoch);
+            let bundle = OpenGeneration {
+                generation: Arc::clone(&published),
+                services,
+                module_epoch: ModuleEpochIdentity::new(module_epoch_id),
+            };
+            core.generation.state = LifecycleState::Opening {
+                attempt,
+                payload: OpeningPayload::Published(bundle),
+            };
+            (Ok(()), TransitionEffect::Keep)
+        })
     }
 
     #[cfg(test)]
@@ -1334,30 +1434,30 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         None
     }
 
-    pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
+    pub(in crate::lifecycle) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
         let mut access = self.access();
-        access.core.generation.state.take_opening()
+        access.transition(|core| (core.generation.state.take_opening(), TransitionEffect::Keep))
     }
 
     fn take_current_bundle(
         &self,
         core: &mut LifecycleAccess<'_, A>,
     ) -> Option<Arc<ExecutionGeneration<A>>> {
-        let bundle = core.core.generation.state.take_open_bundle()?;
-        let OpenGeneration {
-            generation,
-            services,
-            module_epoch,
-        } = bundle;
-        core.core
-            .generation
-            .state
-            .install_retirement(OpenRetirement {
+        core.transition(|core| {
+            let Some(bundle) = core.generation.state.take_open_bundle() else {
+                return (None, TransitionEffect::Keep);
+            };
+            let OpenGeneration {
+                generation,
+                services,
+                module_epoch,
+            } = bundle;
+            core.generation.state.install_retirement(OpenRetirement {
                 services,
                 module_epoch,
             });
-        self.clear_publication();
-        Some(generation)
+            (Some(generation), TransitionEffect::ClearPublication)
+        })
     }
 
     #[cfg(test)]
@@ -1371,17 +1471,19 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         *self.test_services.lock() = Some(services);
     }
 
-    pub(crate) fn take_generation_for_shutdown(
-        &self,
-    ) -> Option<crate::runtime::ShutdownGeneration<A>> {
+    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {
         let mut core = self.access();
         if let Some(generation) = self.take_current_bundle(&mut core) {
-            return Some(crate::runtime::ShutdownGeneration::Open(generation));
+            return Some(ShutdownGeneration::Open(generation));
         }
-        core.core
-            .generation
-            .state
-            .take_opening()
-            .map(crate::runtime::ShutdownGeneration::Opening)
+        core.transition(|core| {
+            (
+                core.generation
+                    .state
+                    .take_opening()
+                    .map(ShutdownGeneration::Opening),
+                TransitionEffect::Keep,
+            )
+        })
     }
 }

@@ -42,7 +42,7 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) ghost: Mutex<Option<crate::shutdown_refinement::GhostHandle>>,
+    pub(crate) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
@@ -94,7 +94,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: Mutex::new(None),
+            trace: Mutex::new(None),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -106,14 +106,14 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        *self.ghost.lock() = Some(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        *self.trace.lock() = Some(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.lock().as_ref().cloned() {
-            ghost.record_event(event);
+    pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            trace.record(event);
         }
     }
 
@@ -258,10 +258,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             .sources
             .reserve(source.id, self.limits.max_source_ids.get())?;
 
-        if let Err(error) = catalog.identities.insert(identity, key) {
-            catalog.sources.release(source_reservation);
-            return Err(error);
-        }
+        catalog.identities.insert(identity, key)?;
         source_reservation.commit();
 
         catalog.pending_topic_bytes = new_total;
@@ -531,20 +528,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     .is_some_and(|u| u.sequence <= obs)
                 {
                     shard.pending[0].remove(&topic_id);
-                    server
-                        .publish
-                        .pending_updates
-                        .fetch_sub(1, Ordering::Relaxed);
+                    let _ =
+                        xlfn_kernel::invariant::checked_atomic_dec(&server.publish.pending_updates);
                 }
                 if shard.pending[1]
                     .get(&topic_id)
                     .is_some_and(|u| u.sequence <= obs)
                 {
                     shard.pending[1].remove(&topic_id);
-                    server
-                        .publish
-                        .pending_updates
-                        .fetch_sub(1, Ordering::Relaxed);
+                    let _ =
+                        xlfn_kernel::invariant::checked_atomic_dec(&server.publish.pending_updates);
                 }
             }
 
@@ -595,7 +588,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
 
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::AddSubscription);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddSubscription);
 
         Ok(())
     }
@@ -706,7 +699,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         };
 
         #[cfg(any(test, feature = "refinement"))]
-        self.record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
@@ -807,8 +800,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     .filter(|entry| entry.is_connected())
                     .count()
                 {
-                    self.record_ghost_event(
-                        crate::shutdown_refinement::GhostEvent::RemoveSubscription,
+                    self.record_shutdown_event(
+                        crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
                     );
                 }
             }

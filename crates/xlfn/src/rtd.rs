@@ -7,7 +7,6 @@
     )
 )]
 
-use crate::handle::FormulaHandleService;
 use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
 #[cfg(any(feature = "rtd", test))]
@@ -20,6 +19,53 @@ pub use crate::subscription::{
 use crate::{XllError, XllResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Handle-owned RTD backend exposed to the Windows RTD adapter.
+///
+/// The adapter owns COM/server orchestration; the handle subsystem owns the
+/// formula-topic state. Keeping this boundary trait-based prevents the RTD
+/// implementation from depending on `FormulaHandleService` directly.
+pub(crate) trait HandleRtdBackend: Send + Sync {
+    #[cfg(target_os = "windows")]
+    fn identity(&self) -> usize;
+
+    fn terminate_all_topics(&self);
+
+    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
+    fn rtd_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle>;
+
+    #[cfg(target_os = "windows")]
+    fn claim_server(
+        &self,
+        rtd_key: &str,
+        server_generation: crate::generation::ServerGeneration,
+    ) -> XllResult<()>;
+
+    #[cfg(target_os = "windows")]
+    fn connect_transaction<'a>(
+        &'a self,
+        server_generation: crate::generation::ServerGeneration,
+        excel_topic_id: i32,
+        rtd_key: &str,
+    ) -> XllResult<Box<dyn HandleRtdConnection + 'a>>;
+
+    #[cfg(target_os = "windows")]
+    fn disconnect(
+        &self,
+        server_generation: crate::generation::ServerGeneration,
+        excel_topic_id: i32,
+    );
+
+    #[cfg(target_os = "windows")]
+    fn terminate_topics(&self, server_generation: crate::generation::ServerGeneration);
+}
+
+/// One provisional handle-topic connection owned by an RTD ConnectData call.
+#[cfg(target_os = "windows")]
+pub(crate) trait HandleRtdConnection {
+    fn token(&self) -> &str;
+    fn commit(self: Box<Self>) -> XllResult<()>;
+}
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -40,7 +86,6 @@ pub(crate) use windows::{ComModuleLifetime, RtdNotifier};
 pub(crate) use host::RtdSubscriptionHost;
 #[cfg(any(feature = "rtd", test))]
 pub(crate) use service::SubscriptionServiceSlot;
-pub(crate) use service::SubscriptionsStopped;
 
 /// Call-scoped RTD capability borrowed from one coherent generation
 /// publication.
@@ -103,8 +148,10 @@ impl<'call> RtdCallContext<'call> {
 }
 
 #[cfg(any(not(feature = "rtd"), test))]
-pub(crate) const fn stopped_subscriptions() -> SubscriptionsStopped {
-    service::SubscriptionsStopped::issue()
+pub(crate) const fn stopped_subscriptions(
+    generation: Option<crate::generation::RuntimeGeneration>,
+) -> crate::shutdown::SubscriptionsStopped {
+    crate::shutdown::SubscriptionsStopped::issue(generation)
 }
 
 #[cfg(all(not(test), any(not(feature = "rtd"), not(target_os = "windows"))))]
@@ -175,32 +222,32 @@ impl RtdModuleState {
 pub(crate) struct RtdOperationGuard {
     ingress_guard: crate::ingress::AdmittedExport<'static>,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: Option<crate::shutdown_refinement::GhostHandle>,
+    trace: Option<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 #[cfg(all(target_os = "windows", feature = "rtd"))]
 impl Drop for RtdOperationGuard {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(ghost) = self.ghost.as_ref() {
-            ghost.record_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+        if let Some(trace) = self.trace.as_ref() {
+            trace.record(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
         let _ = &self.ingress_guard;
     }
 }
 
 #[cfg(all(target_os = "windows", feature = "rtd"))]
-pub(crate) fn begin_operation(
-    _handles: &FormulaHandleService,
+pub(crate) fn begin_operation<H: HandleRtdBackend + ?Sized>(
+    handles: &H,
     ingress: &'static ExportIngress,
 ) -> XllResult<RtdOperationGuard> {
     #[cfg(any(test, feature = "refinement"))]
-    let ghost = _handles.rtd_ghost();
+    let trace = handles.rtd_trace();
     let ingress_guard = match ingress
         .enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]
-            if let Some(ghost) = ghost.as_ref() {
-                ghost.record_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+            if let Some(trace) = trace.as_ref() {
+                trace.record(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
             }
         })
         .into_admitted()
@@ -211,16 +258,16 @@ pub(crate) fn begin_operation(
     Ok(RtdOperationGuard {
         ingress_guard,
         #[cfg(any(test, feature = "refinement"))]
-        ghost,
+        trace,
     })
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(crate) fn set_ghost(ghost: crate::shutdown_refinement::GhostHandle) {
+pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
-    windows::set_ghost(ghost);
+    windows::set_trace_sink(trace);
     #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
-    let _ = ghost;
+    let _ = trace;
 }
 
 pub(crate) fn logical_quiescence_certified() -> bool {
@@ -240,27 +287,32 @@ pub(crate) struct RtdQuiescenceError {
     pub(crate) revocation_debt: usize,
 }
 
-pub(crate) fn observe(
-    handles: &Arc<FormulaHandleService>,
+#[cfg(all(target_os = "windows", feature = "rtd"))]
+pub(crate) fn observe<H: HandleRtdBackend + 'static>(
+    handles: Arc<H>,
     ingress: &'static ExportIngress,
     key: &str,
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    #[cfg(all(target_os = "windows", feature = "rtd"))]
-    {
-        windows::observe(handles, ingress, key, token, host)
-    }
-    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
-    {
-        let _ = (handles, ingress, key, token, host);
-        Err(XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::Rtd,
-            failure: crate::error::ExcelApiFailure::Status(
-                crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
-            ),
-        })
-    }
+    windows::observe(handles, ingress, key, token, host)
+}
+
+#[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
+pub(crate) fn observe<H>(
+    handles: Arc<H>,
+    ingress: &'static ExportIngress,
+    key: &str,
+    token: &str,
+    host: ExcelHost<'_>,
+) -> XllResult<()> {
+    let _ = (handles, ingress, key, token, host);
+    Err(XllError::ExcelApi {
+        function: crate::error::ExcelApiFunction::Rtd,
+        failure: crate::error::ExcelApiFailure::Status(
+            crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+        ),
+    })
 }
 
 pub(crate) fn observe_subscription(
@@ -289,16 +341,17 @@ pub(crate) fn observe_subscription(
 /// This is deliberately named after the handle-side bridge: subscription
 /// shutdown is a separate operation below, and the RTD adapter must not make
 /// the handle service's ownership boundary look like a generic RTD shutdown.
-pub(crate) fn shutdown_handle_topics(handles: Arc<FormulaHandleService>) -> XllResult<()> {
-    #[cfg(all(target_os = "windows", feature = "rtd"))]
-    {
-        windows::shutdown(handles)
-    }
-    #[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
-    {
-        handles.terminate_all_topics();
-        Ok(())
-    }
+#[cfg(all(target_os = "windows", feature = "rtd"))]
+pub(crate) fn shutdown_handle_topics<H: HandleRtdBackend + 'static>(
+    handles: Arc<H>,
+) -> XllResult<()> {
+    windows::shutdown(handles)
+}
+
+#[cfg(any(not(target_os = "windows"), not(feature = "rtd")))]
+pub(crate) fn shutdown_handle_topics<H: HandleRtdBackend>(handles: Arc<H>) -> XllResult<()> {
+    handles.terminate_all_topics();
+    Ok(())
 }
 
 pub(crate) fn shutdown_subscriptions(

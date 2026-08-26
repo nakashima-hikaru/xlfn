@@ -7,7 +7,8 @@
 //! unload-safety ordering.
 
 use crate::addin::Addin;
-use crate::runtime::{RemovalOwner, Runtime};
+use crate::lifecycle::{QuiescenceProof, RemovalOwner, TerminalCertificateKind};
+use crate::runtime::Runtime;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -209,7 +210,7 @@ pub(super) struct ServicesQuiescent {
     returns: crate::shutdown::ReturnsQuiescent,
     async_stopped: crate::shutdown::AsyncStopped,
     subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    handle_store: crate::shutdown::HandleStoreQuiescent,
+    handles: crate::shutdown::HandlesQuiescent,
     addin: crate::shutdown::AddinQuiesced,
     generation: crate::shutdown::GenerationReclaimed,
 }
@@ -268,19 +269,19 @@ impl ExecutionDrained {
     pub(super) fn begin<A: Addin>(
         runtime: &Runtime<A>,
         module: crate::module_runtime::ModuleClosing,
-        _record_ghost: bool,
+        _record_trace: bool,
     ) -> crate::XllResult<Self> {
         let module = module.seal_and_drain();
 
         #[cfg(any(test, feature = "refinement"))]
-        if _record_ghost {
+        if _record_trace {
             runtime.refinement_hooks().calls_drained(runtime);
         }
 
         let returns = runtime.wait_for_return_quiescence()?;
 
         #[cfg(any(test, feature = "refinement"))]
-        if _record_ghost {
+        if _record_trace {
             runtime.refinement_hooks().returns_drained(runtime);
         }
 
@@ -301,6 +302,8 @@ impl ExecutionDrained {
         #[cfg(not(feature = "async"))]
         let _ = report_issue;
 
+        #[cfg(all(feature = "async", any(test, feature = "refinement")))]
+        let async_was_running = runtime.async_manager().is_running();
         #[cfg(feature = "async")]
         let async_stopped = {
             runtime.cancel_async();
@@ -310,6 +313,10 @@ impl ExecutionDrained {
             }
             outcome.certificate
         };
+        #[cfg(all(feature = "async", any(test, feature = "refinement")))]
+        if async_was_running {
+            runtime.refinement_hooks().async_stopped(runtime);
+        }
         #[cfg(not(feature = "async"))]
         let async_stopped = crate::shutdown::AsyncStopped::issue();
 
@@ -374,13 +381,13 @@ impl ServicesCleaned {
             sealed,
             addin,
         } = self;
-        let (handle_store, subscriptions_stopped) = sealed.finish()?;
+        let (handles, subscriptions_stopped) = sealed.finish()?;
         Ok(ServicesQuiescent {
             module: execution.module,
             returns: execution.returns,
             async_stopped,
             subscriptions_stopped,
-            handle_store,
+            handles,
             addin: addin.addin_quiesced,
             generation: addin.generation_reclaimed,
         })
@@ -395,7 +402,7 @@ impl ServicesQuiescent {
         crate::shutdown::ReturnsQuiescent,
         crate::shutdown::AsyncStopped,
         crate::shutdown::SubscriptionsStopped,
-        crate::shutdown::HandleStoreQuiescent,
+        crate::shutdown::HandlesQuiescent,
         crate::shutdown::AddinQuiesced,
         crate::shutdown::GenerationReclaimed,
     ) {
@@ -404,7 +411,7 @@ impl ServicesQuiescent {
             self.returns,
             self.async_stopped,
             self.subscriptions_stopped,
-            self.handle_store,
+            self.handles,
             self.addin,
             self.generation,
         )
@@ -426,25 +433,18 @@ impl ResourcesReclaimed {
         }
     }
 
-    pub(super) fn into_proof(self) -> crate::runtime::QuiescenceProof {
-        let (
-            module,
-            returns,
-            async_stopped,
-            subscriptions_stopped,
-            handle_store,
-            addin,
-            generation,
-        ) = self.services.into_parts();
+    pub(super) fn into_proof(self) -> QuiescenceProof {
+        let (module, returns, async_stopped, subscriptions_stopped, handles, addin, generation) =
+            self.services.into_parts();
         let (module_quiescent, exports) = module.certify();
-        crate::runtime::QuiescenceProof {
+        QuiescenceProof {
             exports,
             returns,
             rtd: self.rtd,
             host_callbacks: self.host_callbacks,
             async_stopped,
             subscriptions_stopped,
-            handle_store_quiescent: handle_store,
+            handles_quiescent: handles,
             diagnostics_stopped: self.diagnostics,
             addin_quiesced: addin,
             generation_reclaimed: generation,
@@ -605,9 +605,9 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     pub(super) fn certify(
         mut self,
-    ) -> crate::XllResult<<K as crate::runtime::TerminalCertificateKind>::Certificate<'runtime, A>>
+    ) -> crate::XllResult<<K as TerminalCertificateKind>::Certificate<'runtime, A>>
     where
-        K: crate::runtime::TerminalCertificateKind,
+        K: TerminalCertificateKind,
     {
         let proof = self.stage.into_proof();
         let owner = self.owner.take();
@@ -624,7 +624,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
 pub(super) fn drain_execution<A: Addin>(
     runtime: &Runtime<A>,
     module: crate::module_runtime::ModuleClosing,
-    record_ghost: bool,
+    record_trace: bool,
 ) -> crate::XllResult<ExecutionDrained> {
-    ExecutionDrained::begin(runtime, module, record_ghost)
+    ExecutionDrained::begin(runtime, module, record_trace)
 }

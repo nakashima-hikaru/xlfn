@@ -7,6 +7,8 @@ use rustc_hash::FxHashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use xlfn_kernel::invariant::checked_sub_or_abort;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PendingCommitment {
     Uncommitted,
@@ -418,7 +420,8 @@ impl SubscriptionCatalog {
                     .expect("pending topic byte accounting overflow");
             }
             (true, false) => {
-                self.pending_topic_bytes = self.pending_topic_bytes.saturating_sub(topic_bytes);
+                self.pending_topic_bytes =
+                    checked_sub_or_abort(self.pending_topic_bytes, topic_bytes);
             }
             _ => {}
         }
@@ -429,9 +432,8 @@ impl SubscriptionCatalog {
     pub(crate) fn remove_entry(&mut self, key: &SubscriptionKey) -> Option<SubscriptionEntry> {
         let removed = self.entries.remove(key)?;
         if removed.tracks_pending_bytes() {
-            self.pending_topic_bytes = self
-                .pending_topic_bytes
-                .saturating_sub(removed.topic.byte_len());
+            self.pending_topic_bytes =
+                checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
         }
         if let Some(identity) = self.identities.remove_by_key(key) {
             self.sources.release_source(identity.source_id.0);
@@ -458,10 +460,11 @@ impl SubscriptionCatalog {
                 .entry(identity.source_id.0)
                 .or_insert(0) += 1;
         }
-        assert_eq!(expected_source_refs.len(), self.sources.refs.len());
+        assert_eq!(expected_source_refs.len(), self.sources.distinct_count());
+        let source_refs = self.sources.snapshot();
         for (source_id, refs) in expected_source_refs {
             assert_eq!(
-                self.sources.refs.get(&source_id).map(|value| value.get()),
+                source_refs.get(&source_id).map(|value| value.get()),
                 Some(refs),
             );
         }

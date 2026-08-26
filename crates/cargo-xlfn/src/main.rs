@@ -7,7 +7,6 @@
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
 use fs_err as fs;
-use serde_json::json;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::io;
@@ -17,13 +16,6 @@ use usage::{Args, Cli, Subcommands, ValueEnum};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
 #[cfg(test)]
 use xlfn_package::{DirectoryIdentity, directory_identity};
-
-#[cfg(target_os = "windows")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "FFI bindings in win32 module"
-)]
-mod win32;
 
 mod crt;
 

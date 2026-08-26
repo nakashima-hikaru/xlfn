@@ -96,7 +96,7 @@ pub(crate) struct ReturnTracker {
     wait_lock: Mutex<()>,
     quiescent: Condvar,
     #[cfg(any(test, feature = "refinement"))]
-    ghost: std::sync::OnceLock<crate::shutdown_refinement::GhostHandle>,
+    trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 pub(crate) struct ReturnObligation<'tracker> {
@@ -130,19 +130,19 @@ impl ReturnTracker {
             wait_lock: Mutex::new(()),
             quiescent: Condvar::new(),
             #[cfg(any(test, feature = "refinement"))]
-            ghost: std::sync::OnceLock::new(),
+            trace: std::sync::OnceLock::new(),
         }
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_ghost(&self, ghost: crate::shutdown_refinement::GhostHandle) {
-        let _ = self.ghost.set(ghost);
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        let _ = self.trace.set(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn record_ghost_event(&self, event: crate::shutdown_refinement::GhostEvent) {
-        if let Some(ghost) = self.ghost.get() {
-            ghost.record_event(event);
+    pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        if let Some(trace) = self.trace.get() {
+            trace.record(event);
         }
     }
 
@@ -221,7 +221,7 @@ impl ReturnProducerGuard<'static> {
 
             _obligation
                 .tracker()
-                .record_ghost_event(crate::shutdown_refinement::GhostEvent::CreateReturnBlock);
+                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::CreateReturnBlock);
         }
 
         self.obligation
@@ -249,6 +249,6 @@ impl Drop for ReturnFreeGuard {
         #[cfg(any(test, feature = "refinement"))]
         self.obligation
             .tracker()
-            .record_ghost_event(crate::shutdown_refinement::GhostEvent::EndReturnFree);
+            .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndReturnFree);
     }
 }

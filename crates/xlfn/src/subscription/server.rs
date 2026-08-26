@@ -140,7 +140,7 @@ pub(crate) struct ScopedServerOperation<'a, H: SubscriptionHost> {
 impl<H: SubscriptionHost> Drop for ScopedServerOperation<'_, H> {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.upgrade() {
-            parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
     }
 }
@@ -157,7 +157,7 @@ impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
         self.server.publish.server_gate.release();
         #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.parent.upgrade() {
-            parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndRtdOperation);
+            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
     }
 }
@@ -220,7 +220,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
-                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
             }
             Ok(())
         })?;
@@ -246,7 +246,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
                 parent
-                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginRtdOperation);
+                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
             }
             Ok(())
         })?;
@@ -328,12 +328,12 @@ impl<H: SubscriptionHost> PublishCore<H> {
         loop {
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
-                parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::BeginCallback);
+                parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginCallback);
             }
             let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));
             #[cfg(any(test, feature = "refinement"))]
             if let Some(parent) = self.parent.upgrade() {
-                parent.record_ghost_event(crate::shutdown_refinement::GhostEvent::EndCallback);
+                parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndCallback);
             }
             let completion = match res {
                 Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
@@ -450,14 +450,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
                         .is_some_and(|u| u.sequence == update.sequence)
                     {
                         shard.pending[0].remove(&topic_id);
-                        self.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
                     }
                     if shard.pending[1]
                         .get(&topic_id)
                         .is_some_and(|u| u.sequence == update.sequence)
                     {
                         shard.pending[1].remove(&topic_id);
-                        self.pending_updates.fetch_sub(1, Ordering::Relaxed);
+                        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
                     }
                 }
             }
@@ -925,8 +925,9 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
         #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.server.parent.upgrade() {
             for _ in 0..self.initial_subscriptions.len() {
-                parent
-                    .record_ghost_event(crate::shutdown_refinement::GhostEvent::RemoveSubscription);
+                parent.record_shutdown_event(
+                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+                );
             }
         }
 

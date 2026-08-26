@@ -209,18 +209,23 @@ pub(crate) fn stage_package_target(
     validate_bundle_output_names(&bundle, &metadata.artifact_name)?;
     let bundle_sources = bundle
         .resolved_files()
-        .map(|(configured_path, staged_source)| -> Result<_> {
-            let staged_relative_path = staged_source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("bundle file basename is not valid UTF-8")?;
-            Ok(json!({
-                "configured_path": configured_path,
-                "staged_relative_path": staged_relative_path,
-            }))
-        })
+        .map(
+            |(configured_path, staged_source)| -> Result<xlfn_package::BundleSource> {
+                let staged_relative_path = staged_source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("bundle file basename is not valid UTF-8")?;
+                Ok(xlfn_package::BundleSource {
+                    configured_path: configured_path.to_owned(),
+                    staged_relative_path: staged_relative_path.to_owned(),
+                })
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
-    let external_imports = bundle.external_imports().collect::<Vec<_>>();
+    let external_imports = bundle
+        .external_imports()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
 
     let validation_staging = xlfn_package::PrivateStagingDirectory::create(
         &staging.path().with_added_extension("validation"),
@@ -247,51 +252,34 @@ pub(crate) fn stage_package_target(
     // below and become the committed distribution directory.
     let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
 
-    let files = verified
-        .artifacts()
-        .iter()
-        .map(|artifact| {
-            json!({
-                "relative_path": artifact.relative_path().to_string_lossy(),
-                "size": artifact.size(),
-                "sha256": artifact.sha256_hex(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let manifest = json!({
-        "schema": 6,
-        "package": metadata.package_name,
-        "package_version": metadata.package_version,
-        "artifact": metadata.artifact_name,
-        "target": target.triple(),
-        "profile": profile,
-        "feature_selection": {
-            "explicit": &build.features,
-            "default_features": !build.no_default_features,
-            "all_features": build.all_features,
-            "resolved": &metadata.resolved_features,
+    let manifest = xlfn_package::BuildManifestInput {
+        package: metadata.package_name.clone(),
+        package_version: metadata.package_version.clone(),
+        artifact: metadata.artifact_name.clone(),
+        target: target.triple().to_owned(),
+        profile: profile.to_owned(),
+        feature_selection: xlfn_package::FeatureSelection {
+            explicit: build.features.clone(),
+            default_features: !build.no_default_features,
+            all_features: build.all_features,
+            resolved: metadata.resolved_features.clone(),
         },
-        "cargo_constraints": {
-            "locked": build.locked,
-            "frozen": build.frozen,
-            "offline": build.offline,
-            "lockfile_sha256": &metadata.lockfile_sha256,
+        cargo_constraints: xlfn_package::CargoConstraints {
+            locked: build.locked,
+            frozen: build.frozen,
+            offline: build.offline,
+            lockfile_sha256: metadata.lockfile_sha256.clone(),
         },
-        "crt": observation.manifest(metadata.crt),
-        "bundle_sources": bundle_sources,
-        "bundle_policy": {
-            "strict_paths": strict_paths,
-            "system_import_policy": xlfn_package::SYSTEM_IMPORT_POLICY_VERSION,
-            "external_imports": external_imports,
+        crt: observation.manifest(metadata.crt),
+        bundle_sources,
+        bundle_policy: xlfn_package::BundlePolicy {
+            strict_paths,
+            system_import_policy: xlfn_package::SYSTEM_IMPORT_POLICY_VERSION.to_owned(),
+            external_imports,
         },
-        "integrity": {
-            "purpose": "audit-metadata-only",
-            "runtime_verified": false,
-            "trust_boundary": "protected-install-location-and-native-code-signing",
-        },
-        "files": files,
-    });
-    let verified = verified.with_manifest_bytes(serde_json::to_vec_pretty(&manifest)?)?;
+        integrity: xlfn_package::IntegrityMetadata::default(),
+    };
+    let verified = verified.with_build_manifest(manifest)?;
     verified.materialize(staging)?;
     fs::remove_dir_all(validation_staging.path())?;
     Ok(verified)

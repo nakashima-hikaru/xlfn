@@ -1313,7 +1313,7 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
         Err(XllError::Overloaded)
     ));
 
-    assert!(runtime.catalog.lock().sources.refs.is_empty());
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
 }
 
 #[test]
@@ -1323,12 +1323,12 @@ fn reserve_live_source_tracks_each_identity_reference() {
     let first = registry.reserve(source.id, 16).unwrap();
     let second = registry.reserve(source.id, 16).unwrap();
     assert_eq!(
-        registry.refs.get(&source.id).map(|refs| refs.get()),
+        registry.ref_count(source.id).map(|refs| refs.get()),
         Some(2)
     );
-    registry.release(second);
-    registry.release(first);
-    assert!(registry.refs.is_empty());
+    drop(second);
+    drop(first);
+    assert_eq!(registry.distinct_count(), 0);
 }
 
 #[test]
@@ -1347,16 +1347,16 @@ fn source_limit_counts_distinct_live_sources_not_topics() {
         .unwrap();
 
     let catalog = runtime.catalog.lock();
-    assert_eq!(catalog.sources.refs.len(), 1);
+    assert_eq!(catalog.sources.distinct_count(), 1);
     assert_eq!(
-        catalog.sources.refs.get(&source.id).map(|refs| refs.get()),
+        catalog.sources.ref_count(source.id).map(|refs| refs.get()),
         Some(2)
     );
     drop(catalog);
 
     first.rollback();
     second.rollback();
-    assert!(runtime.catalog.lock().sources.refs.is_empty());
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
 }
 
 #[test]
@@ -1814,17 +1814,17 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("warm-path-strong-count").unwrap();
 
-    assert!(runtime.catalog.lock().sources.refs.is_empty());
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
 
     // 1. Initial prepare registers the handle identity and creates the pending subscription.
     let first = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(first.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.refs.len(), 1);
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
 
     // 2. ExistingPending prepare reuses the same handle identity and pending entry.
     let second_pending = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(second_pending.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.refs.len(), 1);
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
     second_pending.rollback();
 
     // Commit and connect transaction to activate subscription.
@@ -1839,7 +1839,7 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     // 3. ExistingActive prepare is a warm lookup without a new source identity.
     let warm_prepared = runtime.prepare(&source, topic).unwrap();
     assert!(!warm_prepared.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.refs.len(), 1);
+    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
     warm_prepared.rollback();
 }
 

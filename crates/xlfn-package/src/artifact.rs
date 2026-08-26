@@ -43,12 +43,14 @@ impl VerifiedPackage {
         &self.artifacts
     }
 
-    /// Adds the serialized build manifest to the closed-world package.
+    /// Adds a package-owned build manifest to the closed-world package.
     ///
     /// The manifest is deliberately part of the package's verified artifact
-    /// set. A package cannot become commit-ready until its manifest describes
-    /// the exact non-manifest artifacts that will be installed.
-    pub fn with_manifest_bytes(mut self, bytes: Vec<u8>) -> PackageResult<Self> {
+    /// set. Its file inventory is derived from the verified artifacts, so a
+    /// caller cannot provide metadata for bytes that were not verified by this
+    /// package.
+    pub fn with_build_manifest(mut self, input: BuildManifestInput) -> PackageResult<Self> {
+        let bytes = BuildManifest::from_input(input, &self.artifacts)?.to_bytes()?;
         let relative_path = PathBuf::from("build-manifest.json");
         let name_key = windows_name_key("build manifest", "build-manifest.json")?;
         if !self.expected_names.insert(name_key) {

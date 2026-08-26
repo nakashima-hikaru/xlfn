@@ -76,3 +76,14 @@ impl Drop for HandleConnection<'_> {
         self.finish();
     }
 }
+
+#[cfg(target_os = "windows")]
+impl crate::rtd::HandleRtdConnection for HandleConnection<'_> {
+    fn token(&self) -> &str {
+        self.token()
+    }
+
+    fn commit(self: Box<Self>) -> crate::XllResult<()> {
+        HandleConnection::commit(*self)
+    }
+}

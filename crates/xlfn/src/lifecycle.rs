@@ -8,16 +8,31 @@ use crate::{XllError, XllResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use xlfn_kernel::thread_affine::ThreadAffineError;
 
+mod authority;
 mod boundary;
 mod open;
+mod open_txn;
 mod orchestration;
+mod phase;
+mod removal_txn;
 mod rollback;
+mod state;
 mod teardown;
 
-pub(crate) use crate::runtime_components::{HostLifecycleIntent, LifecyclePhase};
+pub(crate) use authority::LifecycleAuthority;
 pub(crate) use boundary::{host_auto_close, host_auto_open, host_auto_remove};
 pub(super) use open::open_addin_boundary as open_addin;
+pub(crate) use open_txn::{HostOpeningState, OpenAttemptBegun, OpenGenerationStaged, OpeningTxn};
+pub(crate) use phase::{HostLifecycleIntent, LifecyclePhase};
+pub(crate) use removal_txn::{
+    ClosedWitness, FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner,
+    TerminalCertificateKind,
+};
 use rollback::{active_runtime_generation, rollback_open};
+pub(crate) use state::{
+    GenerationAdmission, LifecycleAccess, LifecycleCoordinator, LifecycleRemovalState,
+    OpenFailureDisposition,
+};
 use teardown::drain_execution;
 
 macro_rules! private_lifecycle_token {
@@ -136,7 +151,7 @@ fn handle_unload_hazard<A: Addin>(
         #[cfg(any(test, feature = "refinement"))]
         _runtime
             .refinement_hooks()
-            .fail_stop(_runtime, hazard.ghost_failure());
+            .fail_stop(_runtime, hazard.shutdown_failure());
         fail_stop_invariant(boundary, error);
     }
 
@@ -169,7 +184,7 @@ fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
     #[cfg(any(test, feature = "refinement"))]
     runtime.refinement_hooks().quarantine(
         runtime,
-        crate::shutdown_refinement::GhostFailure::BoundaryPanic,
+        crate::shutdown_trace::ShutdownFailure::BoundaryPanic,
     );
     quarantine_runtime_resources(runtime);
 }
@@ -179,13 +194,15 @@ fn quarantine_for_hazard<A: Addin>(runtime: &Runtime<A>, _hazard: crate::shutdow
     #[cfg(any(test, feature = "refinement"))]
     runtime
         .refinement_hooks()
-        .quarantine(runtime, _hazard.ghost_failure());
+        .quarantine(runtime, _hazard.shutdown_failure());
     quarantine_runtime_resources(runtime);
 }
 
 fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        let module_closing = runtime.take_module_closing_for_quarantine();
+        let module_closing = runtime
+            .lifecycle_runtime()
+            .take_module_closing_for_quarantine();
         let _ = module_closing.seal_and_drain();
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
@@ -403,7 +420,7 @@ mod tests {
         let mut owner = runtime.lifecycle_runtime().begin_open().unwrap();
         let lifecycle = lifecycle_access(&runtime);
 
-        rollback_active_open::<LayersPanic, crate::runtime::OpenAttemptBegun>(&lifecycle, None);
+        rollback_active_open::<LayersPanic, crate::lifecycle::OpenAttemptBegun>(&lifecycle, None);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         runtime.publish((), ());
@@ -995,7 +1012,7 @@ mod tests {
         }
 
         assert_eq!(host_auto_remove::<TraceCleanup>(runtime), 1);
-        let trace = runtime.ghost_trace_json();
+        let trace = runtime.shutdown_trace_json();
         for event in [
             "enterExternal",
             "leaveExternal",
@@ -1043,7 +1060,7 @@ mod tests {
         clean_runtime.publish((), ());
         clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
         assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
-        check("clean", clean_runtime.ghost_trace_json());
+        check("clean", clean_runtime.shutdown_trace_json());
 
         let failure_runtime = Runtime::<QuiesceFailure>::new();
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1057,7 +1074,7 @@ mod tests {
             failure_runtime.phase(),
             crate::lifecycle::LifecyclePhase::Quarantined
         );
-        let failure_trace = failure_runtime.ghost_trace_json();
+        let failure_trace = failure_runtime.shutdown_trace_json();
         assert!(failure_trace.contains("quarantined"));
         check("quarantine", failure_trace);
     }
@@ -1812,7 +1829,7 @@ mod tests {
         let lifecycle = lifecycle_access(runtime);
         assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         let mut open_attempt = open_attempt
-            .stage(crate::runtime::OpeningGeneration {
+            .stage(crate::generation::OpeningGeneration {
                 shared_state: (),
                 layers: (),
                 init_config: crate::addin::RuntimeConfig::new(),
@@ -1913,7 +1930,7 @@ mod tests {
         let lifecycle = lifecycle_access(&runtime);
         assert!(runtime.install_addin_lifecycle(&lifecycle, state).is_ok());
         let mut open_attempt = open_attempt
-            .stage(crate::runtime::OpeningGeneration {
+            .stage(crate::generation::OpeningGeneration {
                 shared_state: (),
                 layers: (),
                 init_config: crate::addin::RuntimeConfig::new(),

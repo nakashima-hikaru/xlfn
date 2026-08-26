@@ -1,8 +1,11 @@
 use super::registration::TemporaryRegistration;
-use super::server::{RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server};
-use crate::handle::FormulaHandleService;
+use super::server::{
+    RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server,
+    ensure_server_without_handles,
+};
 use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
+use crate::rtd::HandleRtdBackend;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
 use crate::{XllError, XllResult};
@@ -11,15 +14,15 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
-pub(crate) fn observe(
-    handles: &Arc<FormulaHandleService>,
+pub(crate) fn observe<H: HandleRtdBackend + 'static>(
+    handles: Arc<H>,
     ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    let _rtd_operation = crate::rtd::begin_operation(handles, ingress)?;
-    let ensured = ensure_server(Some(handles), None)?;
+    let _rtd_operation = crate::rtd::begin_operation(handles.as_ref(), ingress)?;
+    let ensured = ensure_server(Some(&handles), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 
@@ -98,7 +101,7 @@ pub(crate) fn observe_subscription(
     host: ExcelHost<'_>,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
-    let ensured = ensure_server(None, Some(subscriptions))?;
+    let ensured = ensure_server_without_handles(Some(subscriptions))?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 

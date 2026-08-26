@@ -1,4 +1,4 @@
-use crate::shutdown_refinement::{GhostEvent, GhostResources};
+use crate::shutdown_trace::{ShutdownEvent, ShutdownResources};
 use parking_lot::Mutex;
 use serde::Serialize;
 
@@ -23,14 +23,14 @@ pub(crate) enum CompositionEvent {
     AcquireOpenRollbackOwner,
     CommitOpen {
         attempt: u64,
-        resources: GhostResources,
+        resources: ShutdownResources,
     },
-    LiftShutdown(GhostEvent),
+    LiftShutdown(ShutdownEvent),
     FinishCommittedShutdown,
     PublishCommittedClosed,
     RetireCommittedShutdown,
-    FinishUncommittedFinalClose(GhostResources),
-    FinishOpenRollback(GhostResources),
+    FinishUncommittedFinalClose(ShutdownResources),
+    FinishOpenRollback(ShutdownResources),
     ReleaseCleanupOwner,
 }
 
@@ -122,11 +122,6 @@ impl CompositionTrace {
     pub(crate) fn mark_terminal_pending(&self) {
         let mut machine = self.inner.lock();
         machine.terminal_pending = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn events(&self) -> Vec<CompositionEvent> {
-        self.inner.lock().events.clone()
     }
 
     #[cfg(test)]

@@ -76,9 +76,7 @@ where
         };
     };
     #[cfg(any(test, feature = "refinement"))]
-    if runtime.refinement_hooks().generation_active(runtime) {
-        runtime.refinement_hooks().begin_close(runtime);
-    }
+    runtime.refinement_hooks().begin_close(runtime);
 
     let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
@@ -102,7 +100,7 @@ where
     let teardown: teardown::TeardownTxn<
         '_,
         A,
-        crate::runtime::OpenRollback,
+        crate::lifecycle::OpenRollback,
         teardown::ExecutionDrained,
     > = teardown::TeardownTxn::new(rollback_attempt, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
@@ -189,7 +187,7 @@ where
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
     // are call-scoped borrows and cannot be stored in state.
-    let addin = if let Some(opening) = runtime.take_opening_for_rollback() {
+    let addin = if let Some(opening) = runtime.lifecycle_runtime().take_opening_for_rollback() {
         let (mut shared_state, layers, _config) = opening.into_parts();
         let quiesce = catch_unwind(AssertUnwindSafe(|| {
             runtime
