@@ -1,14 +1,14 @@
-error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: value::output::ExcelReturn` is not satisfied
+error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::call_return::traits::ExcelReturn` is not satisfied
  --> tests/ui/fail/nested_return_array.rs:7:13
   |
 7 | fn bad() -> Matrix<Matrix<f64>> {
-  |             ^^^^^^^^^^^^^^^^^^^ the trait `value::output::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
+  |             ^^^^^^^^^^^^^^^^^^^ the trait `xlfn::call_return::traits::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
   |
-help: the trait `value::output::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
- --> src/value.rs
+help: the trait `xlfn::call_return::traits::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
+ --> src/call_return/collections.rs
   |
-  | impl<T: IntoExcel> ExcelReturn for Matrix<T> {
-  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | impl<T: IntoExcel> crate::call_return::ExcelReturn for Matrix<T> {
+  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
   |         unsatisfied requirement introduced here: `xlfn::value::Matrix<f64>: IntoExcel`
 note: required by a bound in `xlfn::__private::v1::sync_udf`
@@ -23,32 +23,32 @@ error[E0277]: `xlfn::value::Matrix<xlfn::value::Matrix<f64>>` cannot be returned
 7 | fn bad() -> Matrix<Matrix<f64>> {
   |             ^^^^^^^^^^^^^^^^^^^ `xlfn::value::Matrix<xlfn::value::Matrix<f64>>` is not a valid return type for a main-thread UDF
   |
-  = help: the trait `value::output::MainThreadReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
+  = help: the trait `xlfn::call_return::traits::MainThreadReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
   = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
-help: the trait `value::output::MainThreadReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
- --> src/value.rs
+help: the trait `xlfn::call_return::traits::MainThreadReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
+ --> src/call_return/collections.rs
   |
-  | impl<T: IntoExcel> MainThreadReturn for Matrix<T> {}
-  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | impl<T: IntoExcel> crate::call_return::MainThreadReturn for Matrix<T> {}
+  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
   |         unsatisfied requirement introduced here: `xlfn::value::Matrix<f64>: IntoExcel`
-note: required by a bound in `value::output::assert_main_thread_return`
- --> src/value/output.rs
+note: required by a bound in `xlfn::call_return::traits::assert_main_thread_return`
+ --> src/call_return/traits.rs
   |
   | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
   |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`
 
-error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: value::output::ExcelReturn` is not satisfied
+error[E0277]: the trait bound `xlfn::value::Matrix<xlfn::value::Matrix<f64>>: xlfn::call_return::traits::ExcelReturn` is not satisfied
  --> tests/ui/fail/nested_return_array.rs:6:1
   |
 6 | #[excel_function(name = "FAIL.NESTED.ARRAY")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `value::output::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::call_return::traits::ExcelReturn` is not implemented for `xlfn::value::Matrix<xlfn::value::Matrix<f64>>`
   |
-help: the trait `value::output::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
- --> src/value.rs
+help: the trait `xlfn::call_return::traits::ExcelReturn` is conditionally implemented for `xlfn::value::Matrix<T>`
+ --> src/call_return/collections.rs
   |
-  | impl<T: IntoExcel> ExcelReturn for Matrix<T> {
-  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | impl<T: IntoExcel> crate::call_return::ExcelReturn for Matrix<T> {
+  | ^^^^^^^^---------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
   |         unsatisfied requirement introduced here: `xlfn::value::Matrix<f64>: IntoExcel`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

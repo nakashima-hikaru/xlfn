@@ -44,6 +44,7 @@ mod boundary;
 #[cfg(feature = "unstable-cache")]
 mod cache;
 mod call;
+mod call_return;
 mod callback_gate;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(
@@ -88,14 +89,15 @@ mod module_runtime;
 pub mod reference;
 mod registration;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-mod return_array;
-mod return_storage;
-#[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(
     dead_code,
     reason = "Return protocol types are consumed only at FFI boundaries"
 )]
-mod return_value;
+#[allow(
+    unreachable_pub,
+    reason = "ABI array builders are exposed only through the unstable façade"
+)]
+mod return_abi;
 #[cfg(feature = "rtd")]
 pub mod rtd;
 mod runtime;
@@ -541,7 +543,7 @@ pub mod unstable {
     /// Explicit low-level array output construction.
     #[cfg(feature = "unstable-output")]
     pub mod output {
-        pub use crate::return_array::{XlArrayBuilder, XlArrayOutput};
+        pub use crate::return_abi::{XlArrayBuilder, XlArrayOutput};
     }
 }
 

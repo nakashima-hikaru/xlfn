@@ -215,7 +215,7 @@ pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
         Err(crate::XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(
-                crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
             ),
         })
     }
@@ -236,7 +236,7 @@ pub(crate) fn observe_subscription(
         Err(crate::XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(
-                crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
             ),
         })
     }

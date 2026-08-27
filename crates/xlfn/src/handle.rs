@@ -38,11 +38,13 @@ mod topic;
 mod typed;
 
 #[cfg(test)]
+use crate::call_return::ReturnContext;
+#[cfg(test)]
 use crate::error::DomainErrorCode;
 #[cfg(test)]
 pub(crate) use crate::generation::{BindingGeneration, TopicGeneration};
 #[cfg(test)]
-use crate::return_value::{ExcelCallbackStatus, ReturnContext};
+use crate::return_abi::ExcelCallbackStatus;
 #[cfg(test)]
 use crate::{XllError, XllResult};
 #[cfg(test)]

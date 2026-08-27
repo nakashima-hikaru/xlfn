@@ -2,8 +2,6 @@ use super::binding::BindingReadLease;
 use super::object::{ObjectLeaseGuard, SharedObject, TypedObjectProjection};
 use super::token::ObjectId;
 use crate::XllResult;
-#[cfg(feature = "handles")]
-use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
@@ -153,32 +151,3 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
         self.binding.object().id()
     }
 }
-
-#[cfg(feature = "handles")]
-impl<T: ExcelHandleObject> crate::value::output::ExcelReturnSealed for HandleAlias<'_, T> {}
-
-#[cfg(feature = "handles")]
-impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'call, T> {
-    type InputMode = crate::value::FormulaInputMode;
-
-    fn into_excel(
-        self,
-        context: &mut ReturnContext<'_, '_>,
-    ) -> XllResult<crate::value::ExcelOutput> {
-        context.publish_existing_alias(|| Ok(self)).map(|token| {
-            crate::value::ExcelOutput::Scalar(crate::value::ExcelCellOutput::String(token))
-        })
-    }
-
-    fn invoke(
-        context: &mut ReturnContext<'_, '_>,
-        operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<crate::value::ExcelOutput> {
-        context.publish_existing_alias(operation).map(|token| {
-            crate::value::ExcelOutput::Scalar(crate::value::ExcelCellOutput::String(token))
-        })
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<T: ExcelHandleObject> crate::value::MainThreadReturn for HandleAlias<'_, T> {}

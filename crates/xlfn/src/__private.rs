@@ -21,8 +21,8 @@ pub mod v1 {
     use crate::reference::{ExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
-    use crate::return_value::ffi_boundary_void;
-    use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
+    use crate::return_abi::ffi_boundary_void;
+    use crate::return_abi::{ffi_boundary, free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
     #[cfg(feature = "handles")]
     use crate::value::ExcelCellOutput;
@@ -56,11 +56,11 @@ pub mod v1 {
     pub use inventory::submit as submit_registration;
 
     #[doc(hidden)]
+    pub use crate::call_return::ReturnContext;
+    #[doc(hidden)]
     pub use crate::input_identity::InputIdentityEncoder;
     #[doc(hidden)]
     pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
-    #[doc(hidden)]
-    pub use crate::return_value::ReturnContext;
     /// Forwards the generated COM export to the private Excel RTD transport.
     #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
@@ -89,23 +89,23 @@ pub mod v1 {
     pub use crate::__xlfn_private_async_only as __xlfn_async_only;
     #[doc(hidden)]
     pub use crate::__xlfn_private_excel_rtd_exports as __xlfn_excel_rtd_exports;
+    pub use crate::call_return::ReturnPayload as ExcelOutput;
     #[doc(hidden)]
-    pub use crate::utf16::utf16_eq_ignore_ascii_case;
-    pub use crate::value::ExcelOutput;
+    pub use crate::call_return::assert_async_parameter;
     #[doc(hidden)]
-    pub use crate::value::input::CellPresence;
-    #[doc(hidden)]
-    pub use crate::value::input::assert_async_parameter;
-    #[doc(hidden)]
-    pub use crate::value::output::{
+    pub use crate::call_return::{
         AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,
         ThreadSafeReturn, VolatileReturn,
     };
     #[doc(hidden)]
-    pub use crate::value::output::{
+    pub use crate::call_return::{
         assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
         assert_thread_safe_return, assert_volatile_return,
     };
+    #[doc(hidden)]
+    pub use crate::utf16::utf16_eq_ignore_ascii_case;
+    #[doc(hidden)]
+    pub use crate::value::input::CellPresence;
     pub use xlfn_common::{ExecutionKind, FunctionVisibility};
 
     /// Asserts at compile-time that `T` implements `ExcelParameter`.

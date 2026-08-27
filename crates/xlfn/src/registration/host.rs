@@ -9,7 +9,7 @@ use crate::callback_value::ExcelCallbackValue;
 use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
-use crate::return_value::ExcelCallbackStatus;
+use crate::return_abi::ExcelCallbackStatus;
 use crate::value::input::sealed::ExcelParameterSealed;
 use crate::value::{CallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType};
 use crate::{XllError, XllResult};

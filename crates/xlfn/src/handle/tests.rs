@@ -1898,7 +1898,7 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
             Err(XllError::ExcelApi {
                 function: crate::error::ExcelApiFunction::Rtd,
                 failure: crate::error::ExcelApiFailure::Status(
-                    crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
             })
         },
@@ -1940,7 +1940,7 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
             Err(XllError::ExcelApi {
                 function: crate::error::ExcelApiFunction::Rtd,
                 failure: crate::error::ExcelApiFailure::Status(
-                    crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
             })
         },
@@ -1977,7 +1977,7 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
             Err(XllError::ExcelApi {
                 function: crate::error::ExcelApiFunction::Rtd,
                 failure: crate::error::ExcelApiFailure::Status(
-                    crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
             })
         },
@@ -2222,7 +2222,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
                 Err(XllError::ExcelApi {
                     function: crate::error::ExcelApiFunction::Rtd,
                     failure: crate::error::ExcelApiFailure::Status(
-                        crate::return_value::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                        crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                     ),
                 })
             },

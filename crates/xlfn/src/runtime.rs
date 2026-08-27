@@ -419,14 +419,14 @@ impl<A: crate::Addin> Runtime<A> {
             reason = "Method used in test suite and internal diagnostics"
         )
     )]
-    pub(crate) const fn return_tracker(&self) -> &crate::return_value::ReturnTracker {
+    pub(crate) const fn return_tracker(&self) -> &crate::return_abi::ReturnTracker {
         &self.return_protocol.returns
     }
 
     #[inline]
     pub(crate) fn enter_return_producer(
         &'static self,
-    ) -> Option<crate::return_value::ReturnProducerGuard<'static>> {
+    ) -> Option<crate::return_abi::ReturnProducerGuard<'static>> {
         self.return_protocol.enter_producer()
     }
 

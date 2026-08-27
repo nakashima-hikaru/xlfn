@@ -10,8 +10,8 @@ help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not imp
    |
    | impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -34,8 +34,8 @@ help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not imp
    | |     M: InputMode,
    | |     T: ExcelParameter<'call, M> + Copy,
    | |_______________________________________^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -55,8 +55,8 @@ help: the trait `ExcelParameter<'call, value::input::PlainInputMode>` is not imp
    |
    | impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function

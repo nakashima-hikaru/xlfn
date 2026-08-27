@@ -1275,7 +1275,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     // owns the module test lease and callback state has been reset. A
     // concurrent return-value test may otherwise free its own block after
     // this test samples the baseline.
-    let before = crate::return_value::live_return_blocks();
+    let before = crate::return_abi::live_return_blocks();
     let (reached_tx, reached_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     *EVALUATION_BARRIER.lock() = Some((reached_tx, release_rx));
@@ -1310,7 +1310,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     assert_eq!(wait_for_async_callback(), -1);
     assert!(runtime.close_async().issues.is_empty());
 
-    assert_eq!(crate::return_value::live_return_blocks(), before);
+    assert_eq!(crate::return_abi::live_return_blocks(), before);
     *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;
     *EVALUATION_BARRIER.lock() = None;
 }

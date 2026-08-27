@@ -1,199 +1,31 @@
+use crate::call_return::{ExcelReturn, ReturnContext, ReturnPayload};
 use crate::execution::{CallId, CallMetadata, CallOutcome};
 #[cfg(test)]
 use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
-#[cfg(feature = "handles")]
-use crate::host_api::ExcelHost;
-#[cfg(feature = "handles")]
-use crate::input_identity::InputFingerprint;
-use crate::return_array::XlArrayOutput;
-use crate::return_storage::ReturnStorage;
 use crate::runtime::Runtime;
-#[cfg(feature = "handles")]
-use crate::value::input::HandleCallAccess;
-use crate::value::{ExcelCellOutput, ExcelOutput, ExcelReturn};
+use crate::value::ExcelCellOutput;
 use crate::{XllError, XllResult};
 use std::cell::{Cell, UnsafeCell};
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-use std::rc::Rc;
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
+pub(crate) mod array;
 pub(crate) mod boundary;
 pub(crate) mod conversion;
 pub(crate) mod ownership;
+pub(crate) mod storage;
 
 pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
 pub(crate) use ownership::ReturnFreeBoundaryGuard;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
-/// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
-#[doc(hidden)]
-pub struct ReturnContext<'call, 'scope> {
-    #[cfg(feature = "handles")]
-    publisher: Option<FormulaPublisher<'call, 'scope>>,
-    lifetime: PhantomData<(Rc<()>, &'call (), &'scope ())>,
-}
-
-/// Capability for publishing a handle result for one formula revision.
-///
-/// Formula identity, RTD observation, and single-flight publication belong to
-/// this capability. [`ReturnContext`] only carries it when the return type
-/// actually needs formula-owned handle publication.
-#[cfg(feature = "handles")]
-pub(crate) struct FormulaPublisher<'call, 'scope> {
-    pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
-    pub(crate) udf_id: &'static str,
-    pub(crate) inputs: InputFingerprint,
-    pub(crate) host: ExcelHost<'scope>,
-}
-
-impl<'call, 'scope> ReturnContext<'call, 'scope> {
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            #[cfg(feature = "handles")]
-            publisher: None,
-            lifetime: PhantomData,
-        }
-    }
-
-    #[doc(hidden)]
-    /// Creates return services for one generated synchronous UDF call.
-    ///
-    pub fn for_call<A: crate::Addin>(
-        call: &'call crate::runtime::CallGuard<'_, A>,
-        udf_id: &'static str,
-        inputs: Option<[u8; 32]>,
-        scope: &'scope crate::call::CallScope<'scope>,
-    ) -> Self {
-        #[cfg(feature = "handles")]
-        let publisher = inputs.map(|inputs| FormulaPublisher {
-            runtime: call.handle_call_access(),
-            udf_id,
-            inputs: InputFingerprint::from_bytes(inputs),
-            host: ExcelHost::new(scope.callbacks()),
-        });
-        #[cfg(not(feature = "handles"))]
-        let _ = (call, udf_id, inputs, scope);
-        Self {
-            #[cfg(feature = "handles")]
-            publisher,
-            lifetime: PhantomData,
-        }
-    }
-
-    #[cfg(feature = "handles")]
-    fn publisher(&self) -> XllResult<&FormulaPublisher<'call, 'scope>> {
-        self.publisher.as_ref().ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_CONTEXT,
-        })
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<'call> ReturnContext<'call, 'call> {
-    pub(crate) fn for_frame(
-        handles: HandleCallAccess<'call>,
-        udf_id: &'static str,
-        inputs: Option<[u8; 32]>,
-    ) -> Self {
-        let publisher = inputs.map(|inputs| FormulaPublisher {
-            runtime: handles.runtime,
-            udf_id,
-            inputs: InputFingerprint::from_bytes(inputs),
-            host: ExcelHost::new(handles.scope.callbacks()),
-        });
-        Self {
-            publisher,
-            lifetime: PhantomData,
-        }
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<'call, 'scope> ReturnContext<'call, 'scope> {
-    #[doc(hidden)]
-    pub fn publish_existing_alias<'handle, T>(
-        &mut self,
-        operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        let publisher = self.publisher()?;
-        publisher.publish_existing_alias(operation)
-    }
-
-    #[doc(hidden)]
-    pub fn publish_new_handle<T>(
-        &mut self,
-        operation: impl FnOnce() -> XllResult<T>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        self.publisher()?.publish_new_handle(operation)
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
-    fn publish_existing_alias<'handle, T>(
-        &self,
-        operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        let access = self;
-        let handles = access.runtime.get()?;
-        let arc_handles = std::sync::Arc::clone(access.runtime.get_arc()?);
-        let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
-        let preparation =
-            handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
-                crate::excel_rtd::observe_handle(
-                    arc_handles,
-                    crate::module_runtime::ingress(),
-                    key,
-                    token,
-                    access.host,
-                )
-            })?;
-        Ok(preparation.into_token())
-    }
-
-    fn publish_new_handle<T>(&self, operation: impl FnOnce() -> XllResult<T>) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        let access = self;
-        let handles = access.runtime.get()?;
-        let arc_handles = std::sync::Arc::clone(access.runtime.get_arc()?);
-        let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
-        let preparation = handles.prepare_observed(key, operation, |key, token| {
-            crate::excel_rtd::observe_handle(
-                arc_handles,
-                crate::module_runtime::ingress(),
-                key,
-                token,
-                access.host,
-            )
-        })?;
-        Ok(preparation.into_token())
-    }
-}
-
-impl Default for ReturnContext<'_, '_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use array::{XlArrayBuilder, XlArrayOutput};
+pub(crate) use storage::ReturnStorage;
 
 const RETURN_MAGIC: u64 = 0x584c_4c52_4554_3132;
 const MAX_RETURN_BYTES: usize = core::cfg_select! {
@@ -297,10 +129,10 @@ struct PreparedReturn {
 }
 
 impl PreparedReturn {
-    fn encode(value: ExcelOutput) -> XllResult<Self> {
+    fn encode(value: ReturnPayload) -> XllResult<Self> {
         match value {
-            ExcelOutput::Array(encoded) => Self::from_array_output(encoded),
-            ExcelOutput::Scalar(cell) => {
+            ReturnPayload::Array(encoded) => Self::from_array_output(encoded),
+            ReturnPayload::Scalar(cell) => {
                 let mut storage = None;
                 let mut allocation_bytes = base_allocation_payload_bytes(0)?;
                 let oper = encode_scalar(cell, &mut storage, &mut allocation_bytes)?;
@@ -513,7 +345,7 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 }
 
 fn allocate_excel_owned(
-    value: ExcelOutput,
+    value: ReturnPayload,
     producer: &mut ReturnProducerGuard<'static>,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
@@ -521,7 +353,7 @@ fn allocate_excel_owned(
 }
 
 #[cfg(feature = "async")]
-pub(crate) fn allocate_local_async_return(value: ExcelOutput) -> XllResult<NonNull<XLOPER12>> {
+pub(crate) fn allocate_local_async_return(value: ReturnPayload) -> XllResult<NonNull<XLOPER12>> {
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
 
@@ -552,7 +384,7 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
 pub(crate) fn allocate_local_async_error(error: &XllError) -> NonNull<XLOPER12> {
     // Encoding a scalar Excel error cannot fail except for process-wide OOM,
     // which Rust defines as aborting.
-    allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Error(
+    allocate_local_async_return(ReturnPayload::Scalar(ExcelCellOutput::Error(
         error.excel_error(),
     )))
     .expect("scalar Excel error return allocation is infallible")
@@ -565,7 +397,7 @@ pub(crate) struct AsyncReturnPointer {
 
 #[cfg(feature = "async")]
 impl AsyncReturnPointer {
-    pub(crate) fn from_value(value: ExcelOutput) -> XllResult<Self> {
+    pub(crate) fn from_value(value: ReturnPayload) -> XllResult<Self> {
         allocate_local_async_return(value).map(|pointer| Self { pointer })
     }
 
@@ -685,7 +517,7 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
 #[must_use]
-pub(crate) fn udf_boundary_named<A, F, T>(
+pub(crate) fn udf_boundary_named<A, F>(
     runtime: &'static Runtime<A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -696,8 +528,7 @@ where
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<T>,
-    T: ExcelReturn,
+    ) -> XllResult<ReturnPayload>,
 {
     let ingress = match crate::module_runtime::ingress()
         .enter_udf_with(|| {})
@@ -747,7 +578,7 @@ where
     result
 }
 
-fn udf_boundary_named_inner<A, F, T>(
+fn udf_boundary_named_inner<A, F>(
     runtime: &Runtime<A>,
     guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard<'static>,
@@ -760,8 +591,7 @@ where
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<T>,
-    T: ExcelReturn,
+    ) -> XllResult<ReturnPayload>,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
 
@@ -786,7 +616,7 @@ where
 }
 
 #[inline]
-fn udf_boundary_uninstrumented<A, F, T>(
+fn udf_boundary_uninstrumented<A, F>(
     guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard<'static>,
     udf_id: &'static str,
@@ -797,13 +627,10 @@ where
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<T>,
-    T: ExcelReturn,
+    ) -> XllResult<ReturnPayload>,
 {
     let prepared = catch_unwind(AssertUnwindSafe(|| {
-        let mut context = ReturnContext::new();
-        let value = T::invoke(&mut context, || operation(guard.state(), guard))?;
-        PreparedReturn::encode(value)
+        PreparedReturn::encode(operation(guard.state(), guard)?)
     }))
     .unwrap_or(Err(XllError::Panic));
 
@@ -821,7 +648,7 @@ struct InstrumentedUdfContext<A: crate::Addin> {
     concurrent_calls: usize,
 }
 
-fn udf_boundary_instrumented<A, F, T>(
+fn udf_boundary_instrumented<A, F>(
     runtime: &Runtime<A>,
     guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard<'static>,
@@ -835,8 +662,7 @@ where
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<T>,
-    T: ExcelReturn,
+    ) -> XllResult<ReturnPayload>,
 {
     let InstrumentedUdfContext {
         instrumentation,
@@ -879,9 +705,7 @@ where
     };
 
     let prepared = catch_unwind(AssertUnwindSafe(|| {
-        let mut return_context = ReturnContext::new();
-        let value = T::invoke(&mut return_context, || operation(guard.state(), guard))?;
-        PreparedReturn::encode(value)
+        PreparedReturn::encode(operation(guard.state(), guard)?)
     }))
     .unwrap_or(Err(XllError::Panic));
 
@@ -1108,7 +932,7 @@ mod tests {
 
     fn allocate_excel_for_test(
         runtime: &'static crate::runtime::Runtime<()>,
-        value: ExcelOutput,
+        value: ReturnPayload,
     ) -> XllResult<*mut XLOPER12> {
         let ingress = crate::module_runtime::ingress()
             .enter_with(|| {})
@@ -1278,7 +1102,7 @@ mod tests {
         let runtime = fixture.runtime();
         let pointer = allocate_excel_for_test(
             runtime,
-            ExcelOutput::Scalar(ExcelCellOutput::String("日本語".to_owned())),
+            ReturnPayload::Scalar(ExcelCellOutput::String("日本語".to_owned())),
         )
         .unwrap();
         // SAFETY: pointer is live and non-null.
@@ -1299,7 +1123,8 @@ mod tests {
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
         let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
-        let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
+        let value =
+            <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
         let pointer = allocate_excel_for_test(runtime, value).unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
@@ -1320,12 +1145,12 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        let mut builder = crate::return_array::XlArrayBuilder::new(1, 2).unwrap();
+        let mut builder = crate::return_abi::XlArrayBuilder::new(1, 2).unwrap();
         builder.push_f64(10.0).unwrap();
         builder.push_f64(20.0).unwrap();
         let encoded = builder.finish().unwrap();
         let original_cells = encoded.cells.as_ptr();
-        let pointer = allocate_excel_for_test(runtime, ExcelOutput::Array(encoded)).unwrap();
+        let pointer = allocate_excel_for_test(runtime, ReturnPayload::Array(encoded)).unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
         // SAFETY: pointer is a live encoded array return.
@@ -1355,7 +1180,7 @@ mod tests {
         let runtime = fixture.runtime();
         let pointer = allocate_excel_for_test(
             runtime,
-            ExcelOutput::Scalar(ExcelCellOutput::Error(ExcelError::NotAvailable)),
+            ReturnPayload::Scalar(ExcelCellOutput::Error(ExcelError::NotAvailable)),
         )
         .unwrap();
         // SAFETY: pointer is a live encoded return value.
@@ -1396,12 +1221,12 @@ mod tests {
     fn panicking_return_conversion_does_not_cross_ffi() {
         struct PanickingReturn;
 
-        impl crate::value::output::ExcelReturnSealed for PanickingReturn {}
+        impl crate::call_return::ExcelReturnSealed for PanickingReturn {}
 
         impl ExcelReturn for PanickingReturn {
             type InputMode = crate::value::PlainInputMode;
 
-            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
                 panic!("injected return conversion panic")
             }
         }
@@ -1423,15 +1248,15 @@ mod tests {
             release: mpsc::Receiver<()>,
         }
 
-        impl crate::value::output::ExcelReturnSealed for BlockingReturn {}
+        impl crate::call_return::ExcelReturnSealed for BlockingReturn {}
 
         impl ExcelReturn for BlockingReturn {
             type InputMode = crate::value::PlainInputMode;
 
-            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
+            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
                 self.converting.send(()).unwrap();
                 self.release.recv().unwrap();
-                Ok(ExcelOutput::Scalar(ExcelCellOutput::Number(1.0)))
+                Ok(ReturnPayload::Scalar(ExcelCellOutput::Number(1.0)))
             }
         }
 
@@ -1442,7 +1267,7 @@ mod tests {
         let (converting_tx, converting_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let caller = std::thread::spawn(move || {
-            let pointer = udf_boundary_named(runtime, "test", "TEST", |_, _| {
+            let pointer = ffi_boundary(runtime, || {
                 Ok(BlockingReturn {
                     converting: converting_tx,
                     release: release_rx,
@@ -1581,7 +1406,7 @@ mod tests {
         drop(open_attempt);
 
         let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_, _| {
-            Err::<f64, _>(XllError::input(
+            Err::<ReturnPayload, _>(XllError::input(
                 "value",
                 crate::error::InputError::NonFinite,
             ))
@@ -1601,7 +1426,7 @@ mod tests {
             runtime,
             "test_panic",
             "TEST.PANIC",
-            |_, _| -> XllResult<f64> { panic!("injected UDF panic") },
+            |_, _| -> XllResult<ReturnPayload> { panic!("injected UDF panic") },
         );
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(panic_pointer) };
@@ -1636,10 +1461,10 @@ mod tests {
         crate::value::with_excel_call_scope(|scope| {
             let mut context = ReturnContext::for_call(&call, "scalar", None, scope);
             let value =
-                <f64 as crate::value::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
+                <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
             assert!(matches!(
                 value,
-                ExcelOutput::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
+            ReturnPayload::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
             ));
         });
     }
@@ -1652,7 +1477,7 @@ mod tests {
         let runtime = fixture.runtime();
         let excel_ptr = ffi_boundary(runtime, || Ok(42.0));
         let async_ptr =
-            allocate_local_async_return(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
+            allocate_local_async_return(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
                 .unwrap();
 
         // SAFETY: excel_ptr is a valid ReturnBlock pointer.
@@ -1752,7 +1577,7 @@ mod tests {
         let mut producer = tracker.try_enter_producer().unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let ptr = PreparedReturn::encode(ExcelOutput::Scalar(ExcelCellOutput::Number(42.0)))
+        let ptr = PreparedReturn::encode(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
             .unwrap()
             .publish_excel(&mut producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
@@ -1798,7 +1623,7 @@ mod tests {
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         let err_res =
-            PreparedReturn::encode(ExcelOutput::Scalar(ExcelCellOutput::Number(f64::NAN)));
+            PreparedReturn::encode(ReturnPayload::Scalar(ExcelCellOutput::Number(f64::NAN)));
         let err = match err_res {
             Ok(_) => panic!("expected encoding failure"),
             Err(e) => e,
@@ -1825,7 +1650,7 @@ mod tests {
             runtime,
             "test_panic_obligation",
             "TEST.PANIC_OBLIGATION",
-            |_, _| -> XllResult<f64> { panic!("injected UDF panic") },
+            |_, _| -> XllResult<ReturnPayload> { panic!("injected UDF panic") },
         );
 
         let tracker = runtime.return_tracker();
@@ -1841,8 +1666,9 @@ mod tests {
     #[test]
     fn string_backing_survives_in_matrix_return() {
         let matrix = Matrix::new(1, 2, vec!["hello".to_string(), "world".to_string()]).unwrap();
-        let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
-        assert!(matches!(value, ExcelOutput::Array(_)));
+        let value =
+            <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
+        assert!(matches!(value, ReturnPayload::Array(_)));
 
         let prepared = PreparedReturn::encode(value).unwrap();
         let cells = prepared.array.as_ref().unwrap();
@@ -1877,8 +1703,9 @@ mod tests {
         let before = runtime.peek_next_call_id();
 
         for _ in 0..100 {
-            let ptr =
-                udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| Ok(42.0));
+            let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| {
+                Ok(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
+            });
             // SAFETY: ptr is a live ReturnBlock produced above.
             let free_guard = unsafe { free_return_boundary(ptr) };
             drop(free_guard);

@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicU64;
 
 /// Excel return ownership and call/calculation identity state.
 pub(crate) struct ReturnProtocol {
-    pub(crate) returns: crate::return_value::ReturnTracker,
+    pub(crate) returns: crate::return_abi::ReturnTracker,
     pub(crate) next_call_id: AtomicU64,
     #[cfg(not(feature = "async"))]
     pub(crate) calculation_id: AtomicU64,
@@ -13,7 +13,7 @@ pub(crate) struct ReturnProtocol {
 impl ReturnProtocol {
     pub(crate) const fn new() -> Self {
         Self {
-            returns: crate::return_value::ReturnTracker::new_closed(),
+            returns: crate::return_abi::ReturnTracker::new_closed(),
             next_call_id: AtomicU64::new(1),
             #[cfg(not(feature = "async"))]
             calculation_id: AtomicU64::new(1),
@@ -30,7 +30,7 @@ impl ReturnProtocol {
 
     pub(crate) fn enter_producer(
         &'static self,
-    ) -> Option<crate::return_value::ReturnProducerGuard<'static>> {
+    ) -> Option<crate::return_abi::ReturnProducerGuard<'static>> {
         self.returns.try_enter_producer()
     }
 

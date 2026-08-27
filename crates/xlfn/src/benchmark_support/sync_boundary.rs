@@ -103,11 +103,15 @@ impl SyncBoundaryWorkerPool {
                         SyncBenchKind::ScalarReturnNoSubscriber
                         | SyncBenchKind::ScalarReturnUdfTraceEnabled => {
                             for _ in 0..iterations_per_thread {
-                                let ptr = crate::return_value::udf_boundary_named(
+                                let ptr = crate::return_abi::udf_boundary_named(
                                     r,
                                     "bench_udf",
                                     "BENCH.UDF",
-                                    |_, _| Ok(42.0),
+                                    |_, _| {
+                                        Ok(crate::call_return::ReturnPayload::Scalar(
+                                            crate::value::ExcelCellOutput::Number(42.0),
+                                        ))
+                                    },
                                 );
                                 #[allow(
                                     unsafe_code,
@@ -115,7 +119,7 @@ impl SyncBoundaryWorkerPool {
                                 )]
                                 // SAFETY: ptr is a valid return block pointer produced by udf_boundary_named for this benchmark.
                                 unsafe {
-                                    let _ = crate::return_value::free_return_boundary(ptr);
+                                    let _ = crate::return_abi::free_return_boundary(ptr);
                                 }
                             }
                         }

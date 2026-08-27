@@ -20,7 +20,7 @@ help: the trait `IntoExcel` is not implemented for `Handle`
             i32
             i64
             std::string::String
-  = note: required for `Handle` to implement `value::output::ExcelReturn`
+  = note: required for `Handle` to implement `xlfn::call_return::traits::ExcelReturn`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Handle` cannot be returned from a main-thread Excel worksheet function
@@ -45,9 +45,9 @@ help: the trait `IntoExcel` is not implemented for `Handle`
             i32
             i64
             std::string::String
-  = note: required for `Handle` to implement `value::output::MainThreadReturn`
-note: required by a bound in `value::output::assert_main_thread_return`
- --> src/value/output.rs
+  = note: required for `Handle` to implement `xlfn::call_return::traits::MainThreadReturn`
+note: required by a bound in `xlfn::call_return::traits::assert_main_thread_return`
+ --> src/call_return/traits.rs
   |
   | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
   |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`

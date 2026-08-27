@@ -1,6 +1,4 @@
 use crate::error::{DomainErrorCode, InputError, Shape};
-use crate::return_array::{XlArrayBuilder, XlArrayOutput};
-use crate::return_value::ReturnContext;
 use crate::{ExcelError, XllError, XllResult};
 use xlfn_sys::XLOPER12;
 #[cfg(test)]
@@ -42,9 +40,6 @@ pub(crate) use input::{CallContext, ExcelParameter};
 pub use input::{ExcelInputIdentity, FromExcel};
 pub(crate) use input::{InputMode, PlainInputMode};
 pub use output::IntoExcel;
-pub(crate) use output::{
-    AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ThreadSafeReturn, VolatileReturn,
-};
 
 pub use date::{ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
@@ -107,16 +102,6 @@ pub enum ExcelCellOutput {
     Boolean(bool),
     String(String),
     Error(ExcelError),
-}
-
-/// The complete semantic representation of a worksheet return value.
-///
-/// Array returns contain an already encoded [`XlArrayOutput`] buffer; input
-/// values and ABI transport forms never appear as variants here.
-#[doc(hidden)]
-pub enum ExcelOutput {
-    Scalar(ExcelCellOutput),
-    Array(XlArrayOutput),
 }
 
 /// An input-only distinction between an omitted and a blank Excel argument.
@@ -1148,8 +1133,8 @@ impl IntoExcel for ExcelCellOutput {
         Ok(self)
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_cell(self)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_cell(self)
     }
 }
 
@@ -1164,8 +1149,8 @@ impl IntoExcel for f64 {
         }
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_f64(self)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_f64(self)
     }
 }
 
@@ -1174,8 +1159,8 @@ impl IntoExcel for bool {
         Ok(ExcelCellOutput::Boolean(self))
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_bool(self)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_bool(self)
     }
 }
 
@@ -1184,8 +1169,8 @@ impl IntoExcel for i32 {
         Ok(ExcelCellOutput::Number(self as f64))
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_f64(self as f64)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_f64(self as f64)
     }
 }
 
@@ -1201,10 +1186,10 @@ impl IntoExcel for i64 {
         }
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
         const EXACT_LIMIT: i64 = 1_i64 << 53;
         if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
-            builder.push_f64(self as f64)
+            sink.push_f64(self as f64)
         } else {
             Err(XllError::Domain {
                 code: DomainErrorCode::Overflow,
@@ -1218,8 +1203,8 @@ impl IntoExcel for ExcelSerialDate {
         IntoExcel::into_excel(self.serial)
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_f64(self.serial)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_f64(self.serial)
     }
 }
 
@@ -1228,8 +1213,8 @@ impl IntoExcel for String {
         Ok(ExcelCellOutput::String(self))
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_string(self)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_string(self)
     }
 }
 
@@ -1238,8 +1223,8 @@ impl IntoExcel for &str {
         Ok(ExcelCellOutput::String(self.to_owned()))
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_string(self.to_owned())
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_string(self.to_owned())
     }
 }
 
@@ -1248,86 +1233,10 @@ impl IntoExcel for ExcelErrorValue {
         Ok(ExcelCellOutput::Error(self.0))
     }
 
-    fn push_into(self, builder: &mut XlArrayBuilder) -> XllResult<()> {
-        builder.push_error(self.0)
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        sink.push_error(self.0)
     }
 }
-
-impl crate::value::output::ExcelReturnSealed for ExcelOutput {}
-
-impl ExcelReturn for ExcelOutput {
-    type InputMode = PlainInputMode;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
-        Ok(self)
-    }
-}
-
-impl MainThreadReturn for ExcelOutput {}
-impl ThreadSafeReturn for ExcelOutput {}
-impl MacroSheetReturn for ExcelOutput {}
-impl AsyncReturn for ExcelOutput {}
-impl VolatileReturn for ExcelOutput {}
-
-impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Matrix<T> {}
-
-impl<T: IntoExcel> ExcelReturn for Matrix<T> {
-    type InputMode = PlainInputMode;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
-        let mut builder = XlArrayBuilder::new(self.rows, self.columns)?;
-        for value in self.data {
-            builder.push(value)?;
-        }
-        builder.finish().map(ExcelOutput::Array)
-    }
-}
-
-impl<T: IntoExcel> MainThreadReturn for Matrix<T> {}
-impl<T: IntoExcel> ThreadSafeReturn for Matrix<T> {}
-impl<T: IntoExcel> MacroSheetReturn for Matrix<T> {}
-impl<T: IntoExcel> AsyncReturn for Matrix<T> {}
-impl<T: IntoExcel> VolatileReturn for Matrix<T> {}
-
-impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Row<T> {}
-
-impl<T: IntoExcel> ExcelReturn for Row<T> {
-    type InputMode = PlainInputMode;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
-        let mut builder = XlArrayBuilder::new(1, self.0.len())?;
-        for value in self.0 {
-            builder.push(value)?;
-        }
-        builder.finish().map(ExcelOutput::Array)
-    }
-}
-
-impl<T: IntoExcel> MainThreadReturn for Row<T> {}
-impl<T: IntoExcel> ThreadSafeReturn for Row<T> {}
-impl<T: IntoExcel> MacroSheetReturn for Row<T> {}
-impl<T: IntoExcel> AsyncReturn for Row<T> {}
-impl<T: IntoExcel> VolatileReturn for Row<T> {}
-
-impl<T: IntoExcel> crate::value::output::ExcelReturnSealed for Column<T> {}
-
-impl<T: IntoExcel> ExcelReturn for Column<T> {
-    type InputMode = PlainInputMode;
-
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ExcelOutput> {
-        let mut builder = XlArrayBuilder::new(self.0.len(), 1)?;
-        for value in self.0 {
-            builder.push(value)?;
-        }
-        builder.finish().map(ExcelOutput::Array)
-    }
-}
-
-impl<T: IntoExcel> MainThreadReturn for Column<T> {}
-impl<T: IntoExcel> ThreadSafeReturn for Column<T> {}
-impl<T: IntoExcel> MacroSheetReturn for Column<T> {}
-impl<T: IntoExcel> AsyncReturn for Column<T> {}
-impl<T: IntoExcel> VolatileReturn for Column<T> {}
 
 #[cfg(test)]
 #[allow(
@@ -1336,6 +1245,11 @@ impl<T: IntoExcel> VolatileReturn for Column<T> {}
 )]
 mod tests {
     use super::*;
+    use crate::call_return::{
+        AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ReturnContext, ReturnPayload,
+        ThreadSafeReturn, VolatileReturn,
+    };
+    use crate::return_abi::XlArrayBuilder;
     use proptest::prelude::*;
     use static_assertions::assert_impl_all;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
@@ -1487,13 +1401,13 @@ mod tests {
     #[test]
     fn return_trait_resolves_result_aliases_without_name_matching() {
         type AliasedReturn = Result<f64, XllError>;
-        let mut context = crate::return_value::ReturnContext::new();
+        let mut context = ReturnContext::new();
         let value =
             <AliasedReturn as ExcelReturn>::into_excel(Ok::<_, XllError>(4.5), &mut context)
                 .unwrap();
         assert!(matches!(
             value,
-            ExcelOutput::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
+            ReturnPayload::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
         ));
     }
 
@@ -2069,7 +1983,7 @@ mod tests {
         let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
         let value =
             <Matrix<f64> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
-        assert!(matches!(value, ExcelOutput::Array(_)));
+        assert!(matches!(value, ReturnPayload::Array(_)));
     }
 
     #[test]

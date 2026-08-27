@@ -5,7 +5,7 @@ use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
 use crate::{XllError, XllResult};
 use xlfn_sys::XLOPER12;
 
-use super::{ExcelReturn, XlValueRef, XlValueType};
+use super::{XlValueRef, XlValueType};
 
 pub(crate) mod sealed {
     pub trait InputModeSealed {}
@@ -547,12 +547,4 @@ pub unsafe fn cell_presence_from_raw(
         XlValueType::Missing => CellPresence::Missing,
         _ => CellPresence::Value,
     })
-}
-
-#[doc(hidden)]
-pub fn assert_async_parameter<R, T>()
-where
-    R: ExcelReturn,
-    T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
-{
 }

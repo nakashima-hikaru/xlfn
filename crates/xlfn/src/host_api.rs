@@ -10,7 +10,7 @@ use crate::callback_value::ExcelCallbackValue;
 use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
-use crate::return_value::ExcelCallbackStatus;
+use crate::return_abi::ExcelCallbackStatus;
 use crate::value::{ExcelValue, FromExcel, Matrix, XlValueType, decode_owned_matrix};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;

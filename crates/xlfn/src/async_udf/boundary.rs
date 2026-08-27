@@ -3,10 +3,10 @@ use super::completion::{
 };
 use super::excel_handle::ExcelAsyncResponder;
 use super::instrumentation::AsyncObservation;
+use crate::call_return::ExcelReturn;
 use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
 use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
 use crate::runtime::Runtime;
-use crate::value::ExcelReturn;
 use crate::{XllError, XllResult};
 use futures_util::Future;
 #[cfg(test)]

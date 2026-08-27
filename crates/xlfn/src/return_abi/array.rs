@@ -1,5 +1,5 @@
+use super::storage::ReturnStorage;
 use crate::error::{DomainErrorCode, InputError};
-use crate::return_storage::ReturnStorage;
 use crate::value::{ExcelCellOutput, IntoExcel, MAX_ARRAY_BYTES, validate_matrix_dimensions};
 use crate::{XllError, XllResult};
 use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
@@ -169,7 +169,7 @@ impl XlArrayBuilder {
     }
 
     pub fn push<T: IntoExcel>(&mut self, value: T) -> XllResult<()> {
-        value.push_into(self)
+        value.write_into(self)
     }
 
     pub fn finish(self) -> XllResult<XlArrayOutput> {
@@ -197,21 +197,24 @@ impl XlArrayBuilder {
     }
 }
 
-impl crate::value::output::ExcelReturnSealed for XlArrayOutput {}
+impl crate::value::output::ExcelCellSink for XlArrayBuilder {
+    fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
+        Self::push_cell(self, value)
+    }
 
-impl crate::value::ExcelReturn for XlArrayOutput {
-    type InputMode = crate::value::PlainInputMode;
+    fn push_f64(&mut self, value: f64) -> XllResult<()> {
+        Self::push_f64(self, value)
+    }
 
-    fn into_excel(
-        self,
-        _: &mut crate::return_value::ReturnContext<'_, '_>,
-    ) -> XllResult<crate::value::ExcelOutput> {
-        Ok(crate::value::ExcelOutput::Array(self))
+    fn push_bool(&mut self, value: bool) -> XllResult<()> {
+        Self::push_bool(self, value)
+    }
+
+    fn push_string(&mut self, value: String) -> XllResult<()> {
+        Self::push_string(self, value)
+    }
+
+    fn push_error(&mut self, value: crate::ExcelError) -> XllResult<()> {
+        Self::push_error(self, value)
     }
 }
-
-impl crate::value::MainThreadReturn for XlArrayOutput {}
-impl crate::value::ThreadSafeReturn for XlArrayOutput {}
-impl crate::value::MacroSheetReturn for XlArrayOutput {}
-impl crate::value::AsyncReturn for XlArrayOutput {}
-impl crate::value::VolatileReturn for XlArrayOutput {}

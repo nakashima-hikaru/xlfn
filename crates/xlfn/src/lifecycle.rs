@@ -697,10 +697,10 @@ mod tests {
             crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
             crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
 
-            let pointer = crate::return_value::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
+            let pointer = crate::return_abi::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
             // SAFETY: `pointer` is the live DLL-owned block returned by the
             // framework boundary above and is freed exactly once here.
-            let free = unsafe { crate::return_value::free_return_boundary(pointer) };
+            let free = unsafe { crate::return_abi::free_return_boundary(pointer) };
             drop(free);
 
             let handles = runtime.formula_handle_service().unwrap();

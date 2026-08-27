@@ -441,7 +441,7 @@ mod tests {
     use crate::registration::ledger::CleanupSeverity;
     use crate::registration::preflight::preflight_registration;
     use crate::registration::schema::{ArgumentAbi, RegistrationDescriptor, RegistrationSignature};
-    use crate::return_value::ExcelCallbackStatus;
+    use crate::return_abi::ExcelCallbackStatus;
     use std::cell::{Cell, RefCell};
     use xlfn_common::{ExecutionKind, FunctionVisibility};
 

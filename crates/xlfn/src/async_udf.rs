@@ -27,6 +27,8 @@ pub(crate) use manager::{AsyncManager, AsyncStopped};
 // Test modules exercise the protocol pieces directly. Keep these imports
 // scoped to tests so the production module has no ambient prelude.
 #[cfg(test)]
+use crate::call_return::{ExcelReturn, ReturnContext};
+#[cfg(test)]
 use crate::cancellation::CancellationSource;
 #[cfg(test)]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
@@ -35,11 +37,10 @@ use crate::execution::{
     CallId, CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
 };
 #[cfg(test)]
-use crate::return_value::{AsyncReturnPointer, ReturnContext};
+use crate::return_abi::AsyncReturnPointer;
 #[cfg(test)]
 use crate::runtime::Runtime;
 #[cfg(test)]
-use crate::value::ExcelReturn;
 #[cfg(test)]
 use crate::{XllError, XllResult};
 #[cfg(test)]

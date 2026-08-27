@@ -15,8 +15,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -48,8 +48,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -86,8 +86,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -124,8 +124,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -167,8 +167,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function
@@ -210,8 +210,8 @@ note: required because it appears within the type `XlArrayRef<'_>`
    |
    | pub struct XlArrayRef<'call> {
    |            ^^^^^^^^^^
-note: required by a bound in `value::input::assert_async_parameter`
-  --> src/value/input.rs
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
    |        ---------------------- required by a bound in this function

@@ -1,7 +1,7 @@
 use super::completion::{OwnedDeliveryOutcome, return_error};
 use super::manager::MAX_ASYNC_HANDLE_BYTES;
 use crate::error::InputError;
-use crate::return_value::AsyncReturnPointer;
+use crate::return_abi::AsyncReturnPointer;
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};

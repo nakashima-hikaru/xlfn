@@ -80,34 +80,6 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
     }
 }
 
-impl crate::value::output::ExcelReturnSealed for RtdValue {}
-
-impl crate::value::ExcelReturn for RtdValue {
-    type InputMode = crate::value::PlainInputMode;
-
-    fn into_excel(
-        self,
-        _: &mut crate::return_value::ReturnContext<'_, '_>,
-    ) -> XllResult<crate::value::ExcelOutput> {
-        self.validate()?;
-        let cell = match self {
-            Self::Number(value) => crate::value::ExcelCellOutput::Number(value),
-            Self::Boolean(value) => crate::value::ExcelCellOutput::Boolean(value),
-            Self::Integer(value) => crate::value::ExcelCellOutput::Number(value as f64),
-            Self::String(value) => crate::value::ExcelCellOutput::String(value),
-            Self::Error(value) => crate::value::ExcelCellOutput::Error(value.0),
-            Self::Empty => crate::value::ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
-        };
-        Ok(crate::value::ExcelOutput::Scalar(cell))
-    }
-}
-
-impl crate::value::MainThreadReturn for RtdValue {}
-impl crate::value::ThreadSafeReturn for RtdValue {}
-impl crate::value::MacroSheetReturn for RtdValue {}
-impl crate::value::AsyncReturn for RtdValue {}
-impl crate::value::VolatileReturn for RtdValue {}
-
 pub trait IntoRtdValue {
     fn into_rtd_value(self) -> XllResult<RtdValue>;
 }

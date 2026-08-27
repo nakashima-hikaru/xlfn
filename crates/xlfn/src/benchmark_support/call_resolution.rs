@@ -54,7 +54,7 @@ impl MultiHandleCallBenchmark {
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut frame = crate::__private::v1::CallFrame::<
-                <f64 as crate::value::ExcelReturn>::InputMode,
+                <f64 as crate::call_return::ExcelReturn>::InputMode,
             >::new(call, scope, 1);
             for raw in &mut self.raw_tokens {
                 // SAFETY: raw points to valid benchmark storage.
