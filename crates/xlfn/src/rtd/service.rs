@@ -38,13 +38,13 @@ impl SubscriptionServiceSlot {
     ) -> crate::XllResult<()> {
         self.service
             .arm(SubscriptionRuntimeConfig { generation, limits })
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     pub(crate) fn disarm(&self) -> crate::XllResult<()> {
         self.service
             .disarm()
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     #[inline]
@@ -68,7 +68,7 @@ impl SubscriptionServiceSlot {
                     }
                 },
             )
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     #[inline]
@@ -96,7 +96,7 @@ impl SubscriptionServiceSlot {
                         .map(|()| SubscriptionsStopped::issue(Some(runtime.generation)))
                 },
             )
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     #[cfg(any(test, feature = "refinement"))]

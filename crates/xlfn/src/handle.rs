@@ -71,14 +71,18 @@ pub(crate) use connection::{FormulaBinding, FormulaObserverId, Topic};
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
 pub(crate) use formula::FormulaRevisionKey;
+pub(crate) use formula::HandleTopicKey;
+#[cfg(feature = "handles")]
+pub(crate) use formula::formula_revision_key;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
-pub(crate) use formula::{HandleTopicKey, formula_revision_key};
+#[cfg(any(feature = "handles", target_os = "windows"))]
+pub(crate) use lifetime::FormulaLifetimeBackend;
 #[cfg(target_os = "windows")]
 pub(crate) use lifetime::FormulaLifetimeConnection;
-pub(crate) use lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
+pub(crate) use lifetime::FormulaLifetimeGeneration;
 pub(crate) use object::SharedObject;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
@@ -89,23 +93,23 @@ pub(crate) use registry::HandleRegistryPhase;
 pub(crate) use registry::{HandleRegistry, PendingHandleValue};
 #[cfg(any(test, feature = "bench-internals", target_os = "windows"))]
 pub(crate) use runtime::FormulaHandleService;
-pub(crate) use runtime::FormulaHandleServiceRead;
+#[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceResolver;
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceSlot;
 pub(crate) use store::HandleStore;
 pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
     Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
 };
-#[cfg(all(not(feature = "handles"), not(test)))]
+#[cfg(not(feature = "handles"))]
 pub(crate) use typed::{ExcelHandleObject, Handle, HandleAlias};
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "handles"))]
 mod refinement_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "handles"))]
 #[allow(
     unsafe_code,
     reason = "Unsafe handle fixtures exercise the audited pointer boundary"

@@ -3,9 +3,9 @@
 use crate::call::CallScope;
 use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
 use crate::{XllError, XllResult};
-use xlfn_sys::{XLOPER12, XLTYPE_MISSING, XLTYPE_NIL};
+use xlfn_sys::XLOPER12;
 
-use super::{ExcelReturn, XlValueRef};
+use super::{ExcelReturn, XlValueRef, XlValueType};
 
 pub(crate) mod sealed {
     pub trait InputModeSealed {}
@@ -215,9 +215,23 @@ where
 }
 
 /// Runtime services that travel together through one Excel-visible call.
+#[cfg(feature = "handles")]
 pub(crate) struct HandleCallAccess<'call> {
     pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
     pub(crate) scope: &'call CallScope<'call>,
+}
+
+/// Runtime services available to one admitted Excel-visible call.
+///
+/// Generation services are independent from the optional formula-handle
+/// capability. Keeping them as separate fields means RTD access does not
+/// acquire a handle resolver, and a core-only build has no handle access path.
+struct RuntimeCallAccess<'call> {
+    scope: &'call CallScope<'call>,
+    #[cfg(feature = "handles")]
+    handles: crate::handle::FormulaHandleServiceResolver<'call>,
+    #[cfg(feature = "rtd")]
+    rtd: crate::rtd::RtdGenerationAccess<'call>,
 }
 
 /// Runtime services available while converting one Excel-visible argument.
@@ -226,12 +240,16 @@ pub struct CallContext<'call> {
     access: CallAccess<'call>,
 }
 
-/// The call either has plain conversion access or the complete handle access
-/// bundle. Keeping the scope and resolver in one variant prevents a malformed
-/// half-configured handle context from being constructed.
+/// The call either has plain conversion access or the runtime services for an
+/// admitted generation.
 enum CallAccess<'call> {
     Plain(&'call CallScope<'call>),
-    Handles(HandleCallAccess<'call>),
+    Runtime(RuntimeCallAccess<'call>),
+    #[cfg(all(test, feature = "handles"))]
+    HandleOnly {
+        scope: &'call CallScope<'call>,
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
+    },
 }
 
 impl<'call> CallContext<'call> {
@@ -245,24 +263,47 @@ impl<'call> CallContext<'call> {
         call: &'call crate::runtime::CallGuard<'_, A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
+        #[cfg(all(not(feature = "handles"), not(feature = "rtd")))]
+        let _ = call;
         Self {
-            access: CallAccess::Handles(HandleCallAccess {
-                runtime: crate::handle::FormulaHandleServiceResolver::new(call.services()),
+            access: CallAccess::Runtime(RuntimeCallAccess {
                 scope,
+                #[cfg(feature = "handles")]
+                handles: call.handle_call_access(),
+                #[cfg(feature = "rtd")]
+                rtd: call.rtd_call_access(),
             }),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_services(
-        services: &'call crate::runtime_components::GenerationServices,
+    #[cfg(all(test, feature = "handles"))]
+    pub(crate) fn from_handle_access(
         scope: &'call CallScope<'call>,
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
     ) -> Self {
         Self {
-            access: CallAccess::Handles(HandleCallAccess {
-                runtime: crate::handle::FormulaHandleServiceResolver::new(services),
-                scope,
-            }),
+            access: CallAccess::HandleOnly { scope, handles },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self {
+        Self {
+            access: CallAccess::Plain(scope),
+        }
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
+        match &self.access {
+            CallAccess::Runtime(access) => access.rtd,
+            CallAccess::Plain(_) => {
+                panic!("plain conversion context has no RTD access")
+            }
+            #[cfg(all(test, feature = "handles"))]
+            CallAccess::HandleOnly { .. } => {
+                panic!("handle-only conversion context has no RTD access")
+            }
         }
     }
 
@@ -273,52 +314,50 @@ impl<'call> CallContext<'call> {
     fn scope(&self) -> &'call CallScope<'call> {
         match &self.access {
             CallAccess::Plain(scope) => scope,
-            CallAccess::Handles(access) => access.scope,
+            CallAccess::Runtime(access) => access.scope,
+            #[cfg(all(test, feature = "handles"))]
+            CallAccess::HandleOnly { scope, .. } => scope,
         }
     }
 
-    #[cfg(any(feature = "rtd", test))]
-    fn services(&self) -> &'call crate::runtime_components::GenerationServices {
-        match &self.access {
-            CallAccess::Handles(access) => access.runtime.services(),
-            CallAccess::Plain(_) => {
-                panic!("plain conversion context has no generation services")
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_access(
-        scope: &'call CallScope<'call>,
-        handle_runtime: Option<crate::handle::FormulaHandleServiceResolver<'call>>,
-    ) -> Self {
-        Self {
-            access: match handle_runtime {
-                Some(runtime) => CallAccess::Handles(HandleCallAccess { runtime, scope }),
-                None => CallAccess::Plain(scope),
-            },
-        }
-    }
-
+    #[cfg(feature = "handles")]
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
-        let scope = self.scope();
+        let scope = match &self.access {
+            CallAccess::Plain(scope) => *scope,
+            CallAccess::Runtime(access) => access.scope,
+            #[cfg(all(test, feature = "handles"))]
+            CallAccess::HandleOnly { scope, .. } => *scope,
+        };
         match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
-            CallAccess::Handles(access) => Some(access),
+            CallAccess::Runtime(access) => Some(HandleCallAccess {
+                runtime: access.handles,
+                scope: access.scope,
+            }),
+            #[cfg(all(test, feature = "handles"))]
+            CallAccess::HandleOnly { scope, handles } => Some(HandleCallAccess {
+                runtime: handles,
+                scope,
+            }),
             CallAccess::Plain(_) => None,
         }
     }
 
-    #[cfg(any(feature = "handles", test))]
+    #[cfg(feature = "handles")]
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        let CallAccess::Handles(access) = &self.access else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
-            });
+        let (handles, scope) = match &self.access {
+            CallAccess::Runtime(access) => (&access.handles, access.scope),
+            #[cfg(all(test, feature = "handles"))]
+            CallAccess::HandleOnly { handles, scope } => (handles, *scope),
+            CallAccess::Plain(_) => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
+                });
+            }
         };
-        access.runtime.get()?.lookup(access.scope, token)
+        handles.get()?.lookup(scope, token)
     }
 }
 
@@ -342,22 +381,31 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_services(
-        services: &'call crate::runtime_components::GenerationServices,
-        scope: &'call CallScope<'call>,
-        argument_count: usize,
-    ) -> Self {
+    pub(crate) fn from_scope(scope: &'call CallScope<'call>, argument_count: usize) -> Self {
         Self {
-            call: CallContext::with_services(services, scope),
+            call: CallContext::from_scope(scope),
             inputs: Some(M::new_fingerprint(argument_count)),
         }
     }
 
-    #[cfg(any(feature = "rtd", test))]
-    pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
-        self.call.services()
+    #[cfg(all(test, feature = "handles"))]
+    pub(crate) fn from_handle_access(
+        scope: &'call CallScope<'call>,
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
+        argument_count: usize,
+    ) -> Self {
+        Self {
+            call: CallContext::from_handle_access(scope, handles),
+            inputs: Some(M::new_fingerprint(argument_count)),
+        }
     }
 
+    #[cfg(feature = "rtd")]
+    pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
+        self.call.rtd_access()
+    }
+
+    #[cfg(feature = "handles")]
     pub(crate) fn take_handle_access(&mut self) -> HandleCallAccess<'call> {
         self.call
             .take_handle_access()
@@ -429,10 +477,10 @@ where
 }
 
 #[doc(hidden)]
-#[cfg(test)]
+#[cfg(all(test, feature = "handles"))]
 pub(crate) unsafe fn argument_from_raw_with_context<'call, T>(
     scope: &'call CallScope<'call>,
-    services: &'call crate::runtime_components::GenerationServices,
+    slot: &'call crate::handle::FormulaHandleServiceSlot,
     argument: &'static str,
     raw: *mut XLOPER12,
 ) -> XllResult<T>
@@ -447,7 +495,10 @@ where
     T::decode(
         borrowed,
         argument,
-        &CallContext::with_services(services, scope),
+        &CallContext::from_handle_access(
+            scope,
+            crate::handle::FormulaHandleServiceResolver::new(slot),
+        ),
         &mut (),
     )
 }
@@ -491,9 +542,9 @@ pub unsafe fn cell_presence_from_raw(
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    Ok(match value.base_type() {
-        XLTYPE_NIL => CellPresence::Blank,
-        XLTYPE_MISSING => CellPresence::Missing,
+    Ok(match value.value_type() {
+        XlValueType::Nil => CellPresence::Blank,
+        XlValueType::Missing => CellPresence::Missing,
         _ => CellPresence::Value,
     })
 }

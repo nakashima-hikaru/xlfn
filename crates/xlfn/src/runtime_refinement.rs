@@ -8,9 +8,9 @@
 #[cfg(any(test, feature = "refinement"))]
 use crate::XllError;
 use crate::generation::OpenAttemptId;
-#[cfg(any(test, feature = "refinement"))]
-use crate::lifecycle::ClosedWitness;
 use crate::runtime::Runtime;
+#[cfg(any(test, feature = "refinement"))]
+use crate::runtime::shutdown::ClosedWitness;
 use crate::{Addin, XllResult};
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::Arc;
@@ -239,16 +239,14 @@ impl RuntimeRefinementHooks {
                 .return_protocol
                 .returns
                 .set_trace_sink(Arc::clone(&trace));
+            #[cfg(any(feature = "handles", feature = "rtd"))]
             let services = runtime
                 .generation_services()
                 .expect("committed open generation publishes its services");
-            services
-                .formula_handle_slot()
-                .set_trace_sink(Arc::clone(&trace));
-            #[cfg(any(feature = "rtd", test))]
-            services
-                .subscriptions_slot()
-                .set_trace_sink(Arc::clone(&trace));
+            #[cfg(feature = "handles")]
+            services.set_handle_trace_sink(Arc::clone(&trace));
+            #[cfg(feature = "rtd")]
+            services.set_subscription_trace_sink(Arc::clone(&trace));
             #[cfg(feature = "async")]
             runtime
                 .executors

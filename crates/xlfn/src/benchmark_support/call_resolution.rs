@@ -102,8 +102,7 @@ impl ConcurrentHandleResolutionBenchmark {
             let handle = std::thread::spawn(move || {
                 while s_rx.recv().is_ok() {
                     for _ in 0..iterations_per_thread {
-                        let resolver =
-                            crate::handle::FormulaHandleServiceResolver::new(services.as_ref());
+                        let resolver = services.handle_call_access();
                         let rt = resolver.get().expect("handle runtime must resolve");
                         std::hint::black_box(rt);
                     }

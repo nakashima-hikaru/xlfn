@@ -2,6 +2,7 @@ use super::binding::BindingReadLease;
 use super::object::{ObjectLeaseGuard, SharedObject, TypedObjectProjection};
 use super::token::ObjectId;
 use crate::XllResult;
+#[cfg(feature = "handles")]
 use crate::return_value::ReturnContext;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -153,8 +154,10 @@ impl<T: ExcelHandleObject> HandleAlias<'_, T> {
     }
 }
 
+#[cfg(feature = "handles")]
 impl<T: ExcelHandleObject> crate::value::output::ExcelReturnSealed for HandleAlias<'_, T> {}
 
+#[cfg(feature = "handles")]
 impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'call, T> {
     type InputMode = crate::value::FormulaInputMode;
 
@@ -177,4 +180,5 @@ impl<'call, T: ExcelHandleObject> crate::value::ExcelReturn for HandleAlias<'cal
     }
 }
 
+#[cfg(feature = "handles")]
 impl<T: ExcelHandleObject> crate::value::MainThreadReturn for HandleAlias<'_, T> {}

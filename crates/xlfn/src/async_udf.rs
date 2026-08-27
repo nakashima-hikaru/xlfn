@@ -9,10 +9,13 @@
 #![cfg(feature = "async")]
 
 mod boundary;
+mod completion;
 mod excel_handle;
 mod executor;
 mod generation;
+mod instrumentation;
 mod manager;
+mod queue;
 mod task;
 mod worker;
 
@@ -28,7 +31,9 @@ use crate::cancellation::CancellationSource;
 #[cfg(test)]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 #[cfg(test)]
-use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
+use crate::execution::{
+    CallId, CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
+};
 #[cfg(test)]
 use crate::return_value::{AsyncReturnPointer, ReturnContext};
 #[cfg(test)]
@@ -40,13 +45,11 @@ use crate::{XllError, XllResult};
 #[cfg(test)]
 use arc_swap::{ArcSwapAny, ArcSwapOption};
 #[cfg(test)]
-use async_channel::{Receiver, Sender};
-#[cfg(test)]
 use async_task::Runnable;
 #[cfg(test)]
 pub(crate) use boundary::AFTER_ASYNC_EVALUATION_HOOK;
 #[cfg(test)]
-pub(crate) use excel_handle::{AsyncCompletionTracker, OwnedAsyncHandle};
+pub(crate) use excel_handle::ExcelAsyncResponder;
 #[cfg(test)]
 pub(crate) use executor::{Executor, ExecutorShared};
 #[cfg(test)]
@@ -61,6 +64,8 @@ pub(crate) use generation::{
 pub(crate) use manager::{ExecutorState, MAX_ASYNC_HANDLE_BYTES, MAX_PENDING};
 #[cfg(test)]
 use parking_lot::{Condvar, Mutex};
+#[cfg(test)]
+pub(crate) use queue::RunnableQueue;
 #[cfg(test)]
 use rustc_hash::FxHashMap;
 #[cfg(test)]

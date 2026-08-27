@@ -13,22 +13,24 @@
 )]
 
 use crate::XllResult;
+#[cfg(feature = "handles")]
 use crate::handle::FormulaLifetimeBackend;
 use crate::host_api::ExcelHost;
+#[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[path = "rtd/host.rs"]
 mod host;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 #[path = "rtd/service.rs"]
 mod service;
 
 pub(crate) use host::RtdSubscriptionHost;
-#[cfg(test)]
+#[cfg(feature = "rtd")]
 pub(crate) use service::SubscriptionRuntimeRead;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub(crate) use service::SubscriptionServiceSlot;
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
@@ -47,14 +49,14 @@ pub(crate) use windows::RtdNotifier;
 
 #[cfg(all(
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))),
-    not(test)
+    not(all(test, feature = "rtd"))
 ))]
 #[derive(Clone)]
 pub(crate) enum RtdNotifier {}
 
 #[cfg(all(
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))),
-    not(test)
+    not(all(test, feature = "rtd"))
 ))]
 impl RtdNotifier {
     pub(crate) fn notify(&self) -> XllResult<()> {
@@ -64,7 +66,7 @@ impl RtdNotifier {
 
 #[cfg(all(
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))),
-    test
+    all(test, feature = "rtd")
 ))]
 #[derive(Clone)]
 pub(crate) struct RtdNotifier {
@@ -73,7 +75,7 @@ pub(crate) struct RtdNotifier {
 
 #[cfg(all(
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))),
-    test
+    all(test, feature = "rtd")
 ))]
 impl RtdNotifier {
     pub(crate) fn for_test(state: Arc<crate::rtd::test_support::TestNotifierState>) -> Self {
@@ -141,6 +143,7 @@ pub(crate) struct RtdQuiescenceError {
 }
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+#[cfg(feature = "handles")]
 pub(crate) struct RtdOperationGuard {
     ingress_guard: crate::ingress::AdmittedExport<'static>,
     #[cfg(any(test, feature = "refinement"))]
@@ -148,6 +151,7 @@ pub(crate) struct RtdOperationGuard {
 }
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+#[cfg(feature = "handles")]
 impl Drop for RtdOperationGuard {
     fn drop(&mut self) {
         #[cfg(any(test, feature = "refinement"))]
@@ -159,6 +163,7 @@ impl Drop for RtdOperationGuard {
 }
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+#[cfg(feature = "handles")]
 pub(crate) fn begin_operation<H: FormulaLifetimeBackend + ?Sized>(
     handles: &H,
     ingress: &'static ExportIngress,
@@ -192,6 +197,7 @@ pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) 
     let _ = trace;
 }
 
+#[cfg(feature = "handles")]
 pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
     handles: Arc<H>,
     ingress: &'static ExportIngress,
@@ -236,6 +242,7 @@ pub(crate) fn observe_subscription(
     }
 }
 
+#[cfg(feature = "handles")]
 pub(crate) fn shutdown_handle_topics<H: FormulaLifetimeBackend + 'static>(
     handles: Arc<H>,
 ) -> XllResult<()> {

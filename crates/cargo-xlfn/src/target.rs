@@ -3,20 +3,13 @@ use super::*;
 pub(crate) fn built_library_path(
     metadata: &ProjectMetadata,
     target: &str,
-    build: &BuildSelectionArgs,
-    default_profile: Option<&str>,
+    profile: &ResolvedBuildProfile,
     target_directory: &Path,
 ) -> PathBuf {
-    let profile = build
-        .profile
-        .as_deref()
-        .or(default_profile)
-        .unwrap_or("dev");
-    let profile_directory = if profile == "dev" { "debug" } else { profile };
     target_directory
         .to_path_buf()
         .join(target)
-        .join(profile_directory)
+        .join(profile.output_directory())
         .join(format!("{}.dll", metadata.lib_name.replace('-', "_")))
 }
 

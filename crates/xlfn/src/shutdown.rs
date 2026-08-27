@@ -19,11 +19,6 @@ mod non_async_tokens {
                 pub(crate) const fn issue() -> Self {
                     Self { _private: () }
                 }
-
-                #[cfg(test)]
-                pub(crate) const fn for_test() -> Self {
-                    Self { _private: () }
-                }
             }
         };
     }
@@ -45,11 +40,6 @@ mod certificate_tokens {
                 // Issuance stays in the shutdown domain; callers can only
                 // consume the resulting proof values.
                 pub(crate) const fn issue() -> Self {
-                    Self { _private: () }
-                }
-
-                #[cfg(test)]
-                pub(crate) const fn for_test() -> Self {
                     Self { _private: () }
                 }
             }
@@ -88,7 +78,7 @@ impl HandlesSealed {
         }
     }
 
-    #[cfg(any(feature = "handles", test))]
+    #[cfg(feature = "handles")]
     pub(crate) fn from_teardown<T>(generation: Option<RuntimeGeneration>, teardown: T) -> Self
     where
         T: HandleStoreTeardown + 'static,
@@ -119,11 +109,6 @@ impl HandlesQuiescent {
         Self { generation }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn for_test(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
     pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
         self.generation
     }
@@ -142,11 +127,6 @@ impl SubscriptionsStopped {
         Self { generation }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn for_test(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
     pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
         self.generation
     }
@@ -159,11 +139,6 @@ pub(crate) struct ReturnsQuiescent {
 
 impl ReturnsQuiescent {
     fn issue() -> Self {
-        Self { _private: () }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test() -> Self {
         Self { _private: () }
     }
 }

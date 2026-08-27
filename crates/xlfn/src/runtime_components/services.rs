@@ -6,157 +6,16 @@ use crate::generation::RuntimeGeneration;
 /// Generation-specific policy is consumed from [`crate::generation::OpeningGeneration`]
 /// while these slots carry the service state owned by the open bundle.
 pub(crate) struct GenerationServices {
-    formula_handles: FormulaHandleServices,
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "handles")]
+    formula_handles: crate::handle::FormulaHandleServiceSlot,
+    #[cfg(feature = "rtd")]
     rtd: RtdGenerationServices,
 }
 
-enum FormulaHandleServices {
-    #[cfg(any(feature = "handles", test))]
-    Active(crate::handle::FormulaHandleServiceSlot),
-    #[cfg(not(any(feature = "handles", test)))]
-    Absent,
-}
-
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 struct RtdGenerationServices {
     subscriptions: crate::excel_rtd::SubscriptionServiceSlot,
     subscription_host: crate::excel_rtd::RtdSubscriptionHost,
-}
-
-/// Access to the optional formula-handle capability in one generation.
-pub(crate) struct FormulaHandleSlotAccess<'a> {
-    #[cfg(any(feature = "handles", test))]
-    services: &'a FormulaHandleServices,
-    #[cfg(not(any(feature = "handles", test)))]
-    _marker: std::marker::PhantomData<&'a ()>,
-}
-
-impl FormulaHandleServices {
-    const fn new() -> Self {
-        #[cfg(any(feature = "handles", test))]
-        {
-            Self::Active(crate::handle::FormulaHandleServiceSlot::new())
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        Self::Absent
-    }
-
-    #[cfg(any(feature = "handles", test))]
-    fn arm(&self, config: crate::addin::HandleConfig) -> crate::XllResult<()> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let Self::Active(slot) = self;
-            slot.arm(config)
-        }
-    }
-
-    #[cfg(not(any(feature = "handles", test)))]
-    fn arm(&self) -> crate::XllResult<()> {
-        Ok(())
-    }
-
-    fn initialize(&self) -> crate::XllResult<()> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let Self::Active(slot) = self;
-            slot.initialize()
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        Ok(())
-    }
-
-    fn access(&self) -> FormulaHandleSlotAccess<'_> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            FormulaHandleSlotAccess { services: self }
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        FormulaHandleSlotAccess {
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    fn seal(
-        &self,
-        generation: Option<RuntimeGeneration>,
-    ) -> crate::XllResult<crate::shutdown::HandlesSealed> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let Self::Active(slot) = self;
-            slot.seal(generation)
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        Ok(crate::shutdown::HandlesSealed::empty(generation))
-    }
-
-    fn is_none(&self) -> bool {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let Self::Active(slot) = self;
-            slot.is_none()
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        true
-    }
-
-    fn disarm(&self) -> crate::XllResult<()> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let Self::Active(slot) = self;
-            slot.disarm()
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        Ok(())
-    }
-}
-
-impl FormulaHandleSlotAccess<'_> {
-    #[cfg(test)]
-    pub(crate) fn is_none(&self) -> bool {
-        self.services.is_none()
-    }
-
-    pub(crate) fn read(&self) -> crate::XllResult<crate::handle::FormulaHandleServiceRead> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let FormulaHandleServices::Active(slot) = self.services;
-            slot.read()
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        Err(crate::XllError::Closing)
-    }
-
-    pub(crate) fn read_if_ready(&self) -> Option<crate::handle::FormulaHandleServiceRead> {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let FormulaHandleServices::Active(slot) = self.services;
-            slot.read_if_ready()
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        None
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn get_owned(
-        &self,
-    ) -> crate::XllResult<std::sync::Arc<crate::handle::FormulaHandleService>> {
-        {
-            let FormulaHandleServices::Active(slot) = self.services;
-            slot.get_owned()
-        }
-    }
-
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        #[cfg(any(feature = "handles", test))]
-        {
-            let FormulaHandleServices::Active(slot) = self.services;
-            slot.set_trace_sink(trace);
-        }
-        #[cfg(not(any(feature = "handles", test)))]
-        let _ = trace;
-    }
 }
 
 /// Linear teardown token for the generation-scoped service bundle.
@@ -210,38 +69,26 @@ impl Drop for ArmedServices {
 }
 
 impl GenerationServices {
-    #[cfg(test)]
-    pub(crate) const fn new() -> Self {
-        Self {
-            formula_handles: FormulaHandleServices::new(),
-            rtd: RtdGenerationServices {
-                subscriptions: crate::excel_rtd::SubscriptionServiceSlot::new(),
-                subscription_host: crate::excel_rtd::RtdSubscriptionHost::detached(),
-            },
-        }
-    }
-
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
         _config: crate::addin::RuntimeConfig,
         subscription_host: Option<crate::excel_rtd::RtdSubscriptionHost>,
     ) -> crate::XllResult<ArmedServices> {
-        #[cfg(not(any(feature = "rtd", test)))]
+        #[cfg(not(feature = "rtd"))]
         let _ = (generation, subscription_host);
         let services = Self {
-            formula_handles: FormulaHandleServices::new(),
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(feature = "handles")]
+            formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
+            #[cfg(feature = "rtd")]
             rtd: RtdGenerationServices {
                 subscriptions: crate::excel_rtd::SubscriptionServiceSlot::new(),
                 subscription_host: subscription_host
                     .expect("RTD generation services require an RTD host capability"),
             },
         };
-        #[cfg(any(feature = "handles", test))]
+        #[cfg(feature = "handles")]
         services.formula_handles.arm(_config.handle_config())?;
-        #[cfg(not(any(feature = "handles", test)))]
-        services.formula_handles.arm()?;
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(feature = "rtd")]
         if let Err(error) = services
             .rtd
             .subscriptions
@@ -250,6 +97,7 @@ impl GenerationServices {
             services.disarm_or_abort();
             return Err(error);
         }
+        #[cfg(feature = "handles")]
         if let Err(error) = services.formula_handles.initialize() {
             services.disarm_or_abort();
             return Err(error);
@@ -260,27 +108,58 @@ impl GenerationServices {
         })
     }
 
-    pub(crate) fn formula_handle_slot(&self) -> FormulaHandleSlotAccess<'_> {
-        self.formula_handles.access()
+    #[cfg(feature = "handles")]
+    pub(crate) fn handle_call_access(&self) -> crate::handle::FormulaHandleServiceResolver<'_> {
+        crate::handle::FormulaHandleServiceResolver::new(&self.formula_handles)
     }
 
-    #[cfg(any(feature = "rtd", test))]
-    pub(crate) fn subscriptions_slot(&self) -> &crate::excel_rtd::SubscriptionServiceSlot {
-        &self.rtd.subscriptions
+    #[cfg(feature = "rtd")]
+    pub(crate) const fn rtd_call_access(&self) -> crate::rtd::RtdGenerationAccess<'_> {
+        crate::rtd::RtdGenerationAccess::new(&self.rtd.subscriptions, self.rtd.subscription_host)
     }
 
-    #[cfg(any(feature = "rtd", test))]
-    pub(crate) fn subscription_host(&self) -> crate::excel_rtd::RtdSubscriptionHost {
-        self.rtd.subscription_host
+    #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
+    pub(crate) fn formula_handle_service(
+        &self,
+    ) -> crate::XllResult<std::sync::Arc<crate::handle::FormulaHandleService>> {
+        self.formula_handles.get_owned()
     }
 
     /// Stop the RTD producer associated with this generation without making
     /// the formula-handle service depend on the RTD adapter.
     pub(crate) fn shutdown_handle_topics(&self) -> crate::XllResult<()> {
-        let Some(handles) = self.formula_handles.access().read_if_ready() else {
-            return Ok(());
-        };
-        crate::excel_rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
+        #[cfg(feature = "handles")]
+        {
+            let Some(handles) = self.formula_handles.read_if_ready() else {
+                return Ok(());
+            };
+            crate::excel_rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
+        }
+        #[cfg(not(feature = "handles"))]
+        Ok(())
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(crate) fn close_subscriptions(
+        &self,
+        generation: Option<RuntimeGeneration>,
+    ) -> crate::XllResult<crate::shutdown::SubscriptionsStopped> {
+        self.rtd.subscriptions.seal(generation)
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    #[cfg(feature = "handles")]
+    pub(crate) fn set_handle_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.formula_handles.set_trace_sink(trace);
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    #[cfg(feature = "rtd")]
+    pub(crate) fn set_subscription_trace_sink(
+        &self,
+        trace: crate::shutdown_trace::ShutdownTraceHandle,
+    ) {
+        self.rtd.subscriptions.set_trace_sink(trace);
     }
 
     pub(crate) fn seal(
@@ -288,7 +167,10 @@ impl GenerationServices {
         generation: Option<RuntimeGeneration>,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<SealedGenerationServices> {
+        #[cfg(feature = "handles")]
         let handles = self.formula_handles.seal(generation)?;
+        #[cfg(not(feature = "handles"))]
+        let handles = crate::shutdown::HandlesSealed::empty(generation);
         Ok(SealedGenerationServices {
             handles,
             subscriptions_stopped,
@@ -296,16 +178,15 @@ impl GenerationServices {
     }
 
     pub(crate) fn is_none(&self) -> bool {
-        self.formula_handles.is_none() && {
-            #[cfg(any(feature = "rtd", test))]
-            {
-                self.rtd.subscriptions.is_none()
-            }
-            #[cfg(not(any(feature = "rtd", test)))]
-            {
-                true
-            }
-        }
+        #[cfg(feature = "handles")]
+        let handles_none = self.formula_handles.is_none();
+        #[cfg(not(feature = "handles"))]
+        let handles_none = true;
+        #[cfg(feature = "rtd")]
+        let subscriptions_none = self.rtd.subscriptions.is_none();
+        #[cfg(not(feature = "rtd"))]
+        let subscriptions_none = true;
+        handles_none && subscriptions_none
     }
 
     pub(crate) fn disarm_or_abort(&self) {
@@ -316,10 +197,13 @@ impl GenerationServices {
     }
 
     pub(crate) fn disarm_generation(&self) -> crate::XllResult<()> {
+        #[cfg(feature = "handles")]
         let handle_result = self.formula_handles.disarm();
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(not(feature = "handles"))]
+        let handle_result: crate::XllResult<()> = Ok(());
+        #[cfg(feature = "rtd")]
         let subscription_result = self.rtd.subscriptions.disarm();
-        #[cfg(not(any(feature = "rtd", test)))]
+        #[cfg(not(feature = "rtd"))]
         let subscription_result = Ok(());
         handle_result.and(subscription_result)
     }

@@ -9,9 +9,9 @@ use super::{
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
 use crate::generation::RuntimeGeneration;
 use crate::generation::TopicGeneration;
-use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
+#[cfg(feature = "handles")]
 use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -728,7 +728,7 @@ impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
         crate::addin::HandleConfig,
@@ -742,10 +742,11 @@ pub(crate) struct FormulaHandleServiceSlot {
 /// A read capability that holds an `arc_swap::Guard` over a published
 /// `FormulaHandleService`.  The warm path acquires this without any `Mutex` or
 /// `Arc::clone`.
+#[cfg(feature = "handles")]
 pub(crate) type FormulaHandleServiceRead =
     xlfn_kernel::service_slot::GenerationServiceRead<FormulaHandleService>;
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl FormulaHandleServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
@@ -758,7 +759,7 @@ impl FormulaHandleServiceSlot {
     pub(crate) fn arm(&self, config: crate::addin::HandleConfig) -> XllResult<()> {
         self.service
             .arm(config)
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     /// Construct and publish the handle service as part of generation open.
@@ -776,7 +777,7 @@ impl FormulaHandleServiceSlot {
     pub(crate) fn disarm(&self) -> XllResult<()> {
         self.service
             .disarm()
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -816,7 +817,7 @@ impl FormulaHandleServiceSlot {
                     }
                 },
             )
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 
     /// Read an already-published service without initializing a cold slot.
@@ -855,30 +856,24 @@ impl FormulaHandleServiceSlot {
                     })
                 },
             )
-            .map_err(crate::runtime_components::map_service_error)
+            .map_err(crate::error::map_service_slot_error)
     }
 }
 
+#[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceResolver<'call> {
-    services: &'call GenerationServices,
-    _call: std::marker::PhantomData<&'call ()>,
+    slot: &'call FormulaHandleServiceSlot,
     resolved: OnceCell<XllResult<FormulaHandleServiceRead>>,
 }
 
+#[cfg(feature = "handles")]
 impl<'call> FormulaHandleServiceResolver<'call> {
     #[inline]
-    pub(crate) fn new(services: &'call GenerationServices) -> Self {
+    pub(crate) fn new(slot: &'call FormulaHandleServiceSlot) -> Self {
         Self {
-            services,
-            _call: std::marker::PhantomData,
+            slot,
             resolved: OnceCell::new(),
         }
-    }
-
-    #[cfg(any(feature = "rtd", test))]
-    #[inline]
-    pub(crate) fn services(&self) -> &'call GenerationServices {
-        self.services
     }
 
     /// Returns a shared reference to the `FormulaHandleService`.
@@ -887,10 +882,7 @@ impl<'call> FormulaHandleServiceResolver<'call> {
     /// same UDF invocation return the cached guard with zero atomic operations.
     #[inline]
     pub(crate) fn get(&self) -> XllResult<&FormulaHandleService> {
-        match self
-            .resolved
-            .get_or_init(|| self.services.formula_handle_slot().read())
-        {
+        match self.resolved.get_or_init(|| self.slot.read()) {
             Ok(runtime) => Ok(runtime),
             Err(error) => Err(error.clone()),
         }
@@ -900,10 +892,7 @@ impl<'call> FormulaHandleServiceResolver<'call> {
     /// ownership escape (RTD observation, `ensure_server`).
     #[inline]
     pub(crate) fn get_arc(&self) -> XllResult<&Arc<FormulaHandleService>> {
-        match self
-            .resolved
-            .get_or_init(|| self.services.formula_handle_slot().read())
-        {
+        match self.resolved.get_or_init(|| self.slot.read()) {
             Ok(runtime) => Ok(runtime.as_arc()),
             Err(error) => Err(error.clone()),
         }

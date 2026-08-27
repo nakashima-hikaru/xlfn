@@ -3,6 +3,19 @@ use super::*;
 fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
     crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
 }
+
+fn armed_handle_slot() -> (&'static FormulaHandleServiceSlot, Arc<FormulaHandleService>) {
+    let slot: &'static FormulaHandleServiceSlot =
+        Box::leak(Box::new(FormulaHandleServiceSlot::new()));
+    slot.arm(crate::RuntimeConfig::new().handle_config())
+        .expect("test handle slot should arm");
+    slot.initialize()
+        .expect("test handle slot should initialize");
+    let runtime = slot
+        .get_owned()
+        .expect("test handle slot should publish its runtime");
+    (slot, runtime)
+}
 use crate::input_identity::InputFingerprint;
 use crate::input_identity::InputFingerprintBuilder;
 
@@ -838,21 +851,17 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
 
 #[test]
 fn explicit_handle_argument_conversion_resolves_a_typed_token() {
-    let runtime: &'static crate::runtime::Runtime<()> =
-        Box::leak(Box::new(crate::runtime::Runtime::new()));
-    runtime.arm_test_generation();
-    let handles = runtime.formula_handle_service().unwrap();
-    let services = runtime.generation_services().unwrap();
+    let (slot, handles) = armed_handle_slot();
     let token = handles
         .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
         .unwrap()
         .into_token();
     let (_encoded, mut raw) = token_value(&token);
 
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
         let resolved: Handle<'_, DataRecord> = unsafe {
-            crate::value::argument_from_raw_with_context(scope, services, "dataset", &mut raw)
+            crate::value::argument_from_raw_with_context(scope, slot, "dataset", &mut raw)
         }
         .unwrap();
         assert_eq!(resolved.0, 19);
@@ -861,25 +870,18 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 
 #[test]
 fn explicit_handle_lease_argument_conversion_leases_the_payload() {
-    let runtime: &'static crate::runtime::Runtime<()> =
-        Box::leak(Box::new(crate::runtime::Runtime::new()));
-    runtime.arm_test_generation();
-    let handles = runtime.formula_handle_service().unwrap();
-    let services = runtime.generation_services().unwrap();
+    let (slot, handles) = armed_handle_slot();
     let token = handles
         .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
         .unwrap()
         .into_token();
     let (_encoded, mut raw) = token_value(&token);
 
-    let resolved: HandleLease<DataRecord> =
-        crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
-            // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
-            unsafe {
-                crate::value::argument_from_raw_with_context(scope, services, "dataset", &mut raw)
-            }
+    let resolved: HandleLease<DataRecord> = crate::call::with_excel_call_scope(|scope| {
+        // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
+        unsafe { crate::value::argument_from_raw_with_context(scope, slot, "dataset", &mut raw) }
             .unwrap()
-        });
+    });
     handles
         .store
         .registry
@@ -890,13 +892,9 @@ fn explicit_handle_lease_argument_conversion_leases_the_payload() {
 
 #[test]
 fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
-    let runtime: &'static crate::runtime::Runtime<()> =
-        Box::leak(Box::new(crate::runtime::Runtime::new()));
-    runtime.arm_test_generation();
-    let handles = runtime.formula_handle_service().unwrap();
+    let (slot, handles) = armed_handle_slot();
     let key = test_topic_key("argument-errors");
     let lifetime_key = key.format_lifetime_key();
-    let services = runtime.generation_services().unwrap();
     let token = handles
         .prepare(key, || Ok(DataRecord(23)))
         .unwrap()
@@ -907,12 +905,12 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
 
     let (_wrong_encoded, mut wrong_raw) = token_value(&token);
     // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `wrong_raw` remains live for the duration of this conversion.
         let wrong = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, SimpleResource>>(
                 scope,
-                services,
+                slot,
                 "curve",
                 &mut wrong_raw,
             )
@@ -920,39 +918,33 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         assert!(matches!(wrong, Err(XllError::InvalidHandle)));
     });
 
-    let foreign_runtime: &'static crate::runtime::Runtime<()> =
-        Box::leak(Box::new(crate::runtime::Runtime::new()));
-    foreign_runtime.arm_test_generation();
-    let foreign_services = foreign_runtime.generation_services().unwrap();
+    let (foreign_slot, _foreign_handles) = armed_handle_slot();
     let (_foreign_encoded, mut foreign_raw) = token_value(&token);
     // SAFETY: `foreign_raw` and its counted UTF-16 storage remain live for conversion.
-    crate::call::with_excel_call_scope_and_services(
-        foreign_services.as_ref(),
-        |foreign_services, scope| {
-            // SAFETY: `foreign_raw` remains live for the duration of this conversion.
-            let foreign = unsafe {
-                crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
-                    scope,
-                    foreign_services,
-                    "dataset",
-                    &mut foreign_raw,
-                )
-            };
-            assert!(matches!(foreign, Err(XllError::InvalidHandle)));
-        },
-    );
+    crate::call::with_excel_call_scope(|scope| {
+        // SAFETY: `foreign_raw` remains live for the duration of this conversion.
+        let foreign = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
+                scope,
+                foreign_slot,
+                "dataset",
+                &mut foreign_raw,
+            )
+        };
+        assert!(matches!(foreign, Err(XllError::InvalidHandle)));
+    });
 
     let mut tampered = token.clone();
     let last = tampered.pop().unwrap();
     tampered.push(if last == '0' { '1' } else { '0' });
     let (_tampered_encoded, mut tampered_raw) = token_value(&tampered);
     // SAFETY: `tampered_raw` and its counted UTF-16 storage remain live for conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `tampered_raw` remains live for the duration of this conversion.
         let tampered = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
                 scope,
-                services,
+                slot,
                 "dataset",
                 &mut tampered_raw,
             )
@@ -963,12 +955,12 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     handles.disconnect(lifetime_generation(1), 91);
     let (_stale_encoded, mut stale_raw) = token_value(&token);
     // SAFETY: `stale_raw` and its counted UTF-16 storage remain live for conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `stale_raw` remains live for the duration of this conversion.
         let stale = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
                 scope,
-                services,
+                slot,
                 "dataset",
                 &mut stale_raw,
             )
@@ -979,27 +971,27 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
 
 #[test]
 fn optional_handle_conversion_preserves_blank_and_missing_policy() {
-    let services = Arc::new(crate::runtime_components::GenerationServices::new());
+    let (slot, _handles) = armed_handle_slot();
     let mut blank = xlfn_sys::XLOPER12::nil();
     let mut missing = xlfn_sys::XLOPER12::missing();
     // SAFETY: `blank` remains live for the duration of conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `blank` remains live for the duration of this conversion.
         let blank_value = unsafe {
             crate::value::argument_from_raw_with_context::<Option<Handle<'_, DataRecord>>>(
-                scope, services, "dataset", &mut blank,
+                scope, slot, "dataset", &mut blank,
             )
         }
         .unwrap();
         assert!(blank_value.is_none());
     });
     // SAFETY: `missing` remains live for the duration of conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `missing` remains live for the duration of this conversion.
         let missing_value = unsafe {
             crate::value::argument_from_raw_with_context::<Option<Handle<'_, DataRecord>>>(
                 scope,
-                services,
+                slot,
                 "dataset",
                 &mut missing,
             )
@@ -1009,11 +1001,11 @@ fn optional_handle_conversion_preserves_blank_and_missing_policy() {
     });
 
     // SAFETY: `blank` remains live for the duration of conversion.
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
+    crate::call::with_excel_call_scope(|scope| {
         // SAFETY: `blank` remains live for the duration of this conversion.
         let direct_blank = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
-                scope, services, "dataset", &mut blank,
+                scope, slot, "dataset", &mut blank,
             )
         };
         assert!(direct_blank.is_err());
@@ -2921,13 +2913,13 @@ fn alias_capability_does_not_extend_object_lifetime() {
 
 #[test]
 fn resolver_does_not_initialize_slot_when_unused() {
-    let services = Arc::new(crate::runtime_components::GenerationServices::new());
-    assert!(services.formula_handle_slot().is_none());
+    let slot = FormulaHandleServiceSlot::new();
+    assert!(slot.is_none());
 
-    let resolver = FormulaHandleServiceResolver::new(services.as_ref());
-    assert!(services.formula_handle_slot().is_none());
+    let resolver = FormulaHandleServiceResolver::new(&slot);
+    assert!(slot.is_none());
     drop(resolver);
-    assert!(services.formula_handle_slot().is_none());
+    assert!(slot.is_none());
 }
 
 #[test]
@@ -2939,23 +2931,16 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     struct TestObj(u32);
     impl ExcelHandleObject for TestObj {}
 
-    let services = crate::runtime_components::GenerationServices::arm_generation(
-        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        crate::RuntimeConfig::new(),
-        Some(crate::excel_rtd::RtdSubscriptionHost::detached()),
-    )
-    .unwrap()
-    .commit();
-    let handle_rt = services.formula_handle_slot().get_owned().unwrap();
+    let (slot, handle_rt) = armed_handle_slot();
     let key = test_topic_key("resolver_test");
     let token = handle_rt
         .prepare_observed(key, || Ok(TestObj(123)), |_, _| Ok(()))
         .unwrap()
         .into_token();
 
-    crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
-        let resolver = FormulaHandleServiceResolver::new(services);
-        let mut call_ctx = crate::value::CallContext::from_access(scope, Some(resolver));
+    crate::call::with_excel_call_scope(|scope| {
+        let resolver = FormulaHandleServiceResolver::new(slot);
+        let mut call_ctx = crate::value::CallContext::from_handle_access(scope, resolver);
 
         // First handle resolution initializes resolver OnceCell
         let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();

@@ -7,9 +7,10 @@
 use crate::addin::Addin;
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{
-    HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator, OpenFailureDisposition,
+    FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
+    OpenFailureDisposition, OpenRollbackReady, RemovalClaim,
 };
-use crate::module_runtime::{ModuleCleanupAuthority, ModuleClosing};
+use crate::module_runtime::{ModuleAuthority, ModuleCleanupAuthority, ModuleClosing};
 use crate::{XllError, XllResult};
 use std::sync::Arc;
 
@@ -31,6 +32,26 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
 
     pub(crate) fn access(&self) -> LifecycleAccess<'_, A> {
         self.coordinator.access()
+    }
+
+    pub(crate) fn final_removal_ready(
+        &self,
+        control: &LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> Option<FinalRemovalReady> {
+        control.final_removal_ready(attempt)
+    }
+
+    pub(crate) fn open_rollback_ready(
+        &self,
+        control: &LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> Option<OpenRollbackReady> {
+        control.open_rollback_ready(attempt)
+    }
+
+    pub(crate) fn clear_certified_retirement(&self, control: &mut LifecycleAccess<'_, A>) -> bool {
+        self.coordinator.clear_certified_retirement(control)
     }
 
     pub(crate) fn begin_open_state(
@@ -68,11 +89,11 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.request_closing(control);
     }
 
-    pub(crate) fn claim_removal_owner(
+    pub(crate) fn claim_removal(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-    ) -> Option<RemovalAttemptId> {
-        self.coordinator.claim_removal_owner(control)
+    ) -> Option<RemovalClaim> {
+        self.coordinator.claim_removal(control)
     }
 
     pub(crate) fn wait(&self, control: &mut LifecycleAccess<'_, A>) {
@@ -83,12 +104,34 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.notify_all();
     }
 
-    pub(crate) fn install_module_closing(&self, closing: ModuleClosing) {
-        self.coordinator.install_module_closing(closing);
+    pub(crate) fn release_removal_claim(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+        returned: Option<ModuleAuthority>,
+    ) {
+        self.coordinator
+            .release_removal_claim(control, attempt, returned);
     }
 
-    pub(crate) fn install_module_cleanup_authority(&self, authority: ModuleCleanupAuthority) {
-        self.coordinator.install_module_cleanup(authority);
+    pub(crate) fn finish_final_removal(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> XllResult<()> {
+        self.coordinator.finish_final_removal(control, attempt)
+    }
+
+    pub(crate) fn finish_open_rollback(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> XllResult<()> {
+        self.coordinator.finish_open_rollback(control, attempt)
+    }
+
+    pub(crate) fn complete_open_abort(&self, closing: ModuleClosing) {
+        self.coordinator.complete_open_abort(closing);
     }
 
     pub(crate) fn stage_opening_generation(
@@ -138,17 +181,13 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.commit_open(control, generation)
     }
 
-    pub(crate) fn reject_open_state(&self, control: &mut LifecycleAccess<'_, A>) {
-        self.coordinator.reject_open_attempt(control);
-    }
-
-    pub(crate) fn install_module_closing_locked(
+    pub(crate) fn complete_open_abort_locked(
         &self,
         control: &mut LifecycleAccess<'_, A>,
         closing: ModuleClosing,
     ) {
         self.coordinator
-            .install_module_closing_locked(control, closing);
+            .complete_open_abort_locked(control, closing);
     }
 
     pub(crate) fn request_explicit_removal(&self) {
@@ -167,13 +206,6 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
 
     pub(crate) fn quarantine_state(&self, control: &mut LifecycleAccess<'_, A>) {
         self.coordinator.quarantine_core(control);
-    }
-
-    pub(crate) fn take_module_closing_for_owner(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-    ) -> Option<ModuleClosing> {
-        self.coordinator.take_module_closing_for_close(control)
     }
 
     #[cfg(test)]

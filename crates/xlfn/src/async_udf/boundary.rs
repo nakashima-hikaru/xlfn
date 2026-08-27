@@ -1,17 +1,18 @@
-use super::excel_handle::{AsyncCompletionTracker, OwnedAsyncHandle};
+use super::completion::{
+    AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome, execute_async_udf, return_error,
+};
+use super::excel_handle::ExcelAsyncResponder;
+use super::instrumentation::AsyncObservation;
 use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
-use crate::error::InputError;
-use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
-use crate::return_value::{AsyncReturnPointer, ExcelCallbackStatus, ReturnContext};
+use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
 use crate::runtime::Runtime;
 use crate::value::ExcelReturn;
 use crate::{XllError, XllResult};
-use futures_util::{Future, FutureExt};
+use futures_util::Future;
+#[cfg(test)]
 use parking_lot::Mutex;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::NonNull;
-use std::sync::Arc;
-use xlfn_sys::{XLOPER12, XLTYPE_BOOL};
+use xlfn_sys::XLOPER12;
 
 /// Runs the synchronous launch portion of a native Excel async UDF.
 ///
@@ -95,49 +96,98 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
-    use crate::execution::UdfLayers;
+    let instrumentation = InstrumentationPlan::for_call(guard);
+    if instrumentation.enabled() {
+        // SAFETY: forwarded from this function's raw-handle contract.
+        unsafe {
+            async_udf_boundary_instrumented(
+                runtime,
+                guard,
+                udf_id,
+                excel_name,
+                raw_handle,
+                start,
+                instrumentation,
+            );
+        }
+    } else {
+        // SAFETY: forwarded from this function's raw-handle contract.
+        unsafe {
+            async_udf_boundary_uninstrumented(runtime, guard, udf_id, raw_handle, start);
+        }
+    }
+}
 
-    let call_id = runtime.next_call_id();
+unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
+    runtime: &'static Runtime<A>,
+    guard: &crate::runtime::CallGuard<'_, A>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    raw_handle: *mut XLOPER12,
+    start: Start,
+    instrumentation: InstrumentationPlan<A>,
+) where
+    A: crate::Addin,
+    Start: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::generation::ExecutionLease<A>,
+        CancellationToken,
+    ) -> XllResult<Fut>,
+    Fut: Future<Output = XllResult<T>> + Send + 'static,
+    T: ExcelReturn + Send + 'static,
+{
+    let call_id = CallId::new(runtime.next_call_id());
     let timer = crate::execution::CallTimer::start();
-    let started_at = std::time::SystemTime::now();
-
+    let calculation_id = runtime.calculation_id();
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
     let metadata = CallMetadata {
         udf_id,
         excel_name,
-        call_id: CallId::new(call_id),
-        calculation_id: runtime.calculation_id(),
-        started_at,
+        call_id,
+        calculation_id,
+        started_at: std::time::SystemTime::now(),
         concurrent_calls,
     };
-    let layers = if <A::Layers as UdfLayers>::HAS_LAYERS {
-        match guard.layers().enter(&metadata) {
+    let layers = if instrumentation.has_layers() {
+        match crate::execution::enter_layers(guard.layers(), &metadata) {
             Ok(layers) => Some(layers),
             Err(error) => {
-                crate::diagnostics::report_no_unwind(udf_id, &error);
                 // SAFETY: forwarded from this function's raw-handle contract.
-                unsafe { return_error(udf_id, raw_handle, &error) };
+                let delivery = unsafe { return_error(raw_handle, &error) };
+                let completion = AsyncCompletion {
+                    completion: OwnedCompletionOutcome::Error(error),
+                    delivery,
+                };
+                report_completion(udf_id, &completion);
                 return;
             }
         }
     } else {
         None
     };
-    let tracker = Arc::new(Mutex::new(AsyncCompletionTracker::new(
-        &metadata, timer, layers,
-    )));
-
     // Excel does not raise CalculationEnded/CalculationCanceled for every
     // programmatic recalculation, so the public token cannot promise complete
     // calculation scoping even though event-driven generations are linearized.
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let observation = AsyncObservation::new(
+        &metadata,
+        timer,
+        layers,
+        instrumentation.trace_enabled(),
+        token.clone(),
+    );
     // SAFETY: forwarded from this function's raw-handle contract.
-    let mut handle = match unsafe { OwnedAsyncHandle::from_raw(udf_id, raw_handle) } {
-        Ok(handle) => handle,
+    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+        Ok(responder) => responder,
         Err(error) => {
-            tracker.lock().finish_error(&error);
             // SAFETY: forwarded from this function's raw-handle contract.
-            unsafe { return_error(udf_id, raw_handle, &error) };
+            let delivery = unsafe { return_error(raw_handle, &error) };
+            let completion = AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery,
+            };
+            report_completion(udf_id, &completion);
+            observation.finish(&completion);
             return;
         }
     };
@@ -147,125 +197,111 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
-            let tracker_task = Arc::clone(&tracker);
+            let observation_task = observation.clone();
             let task = async move {
-                let evaluated = AssertUnwindSafe(future).catch_unwind().await;
-                #[cfg(test)]
-                if let Some(hook) = *AFTER_ASYNC_EVALUATION_HOOK.lock() {
-                    hook();
-                }
-
-                // Linearize delivery vs cancellation using CAS on the delivery state machine.
-                if !token.try_start_delivery() {
-                    let cancel_error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
-                    handle.set_error(cancel_error.clone());
-                    tracker_task.lock().finish_error(&cancel_error);
-                    return;
-                }
-
-                let result = match evaluated {
-                    Ok(Ok(value)) => catch_unwind(AssertUnwindSafe(|| {
-                        let mut return_context = ReturnContext::new();
-                        let value = T::invoke(&mut return_context, || Ok(value))?;
-                        AsyncReturnPointer::from_value(value)
-                    }))
-                    .unwrap_or(Err(XllError::Panic)),
-                    Ok(Err(error)) => Err(error),
-                    Err(_) => Err(XllError::Panic),
-                };
-                let (pointer, computation_error) = match result {
-                    Ok(pointer) => (pointer, None),
-                    Err(error) => (AsyncReturnPointer::error(&error), Some(error)),
-                };
-                // SAFETY: both pointers are owned and live for the callback.
-                let delivery = unsafe {
-                    let delivery = async_return(handle.pointer(), pointer.as_non_null());
-                    handle.complete();
-                    delivery
-                };
-                token.finish_delivery();
-                match delivery {
-                    Ok(()) => match computation_error {
-                        Some(error) => tracker_task.lock().finish_error(&error),
-                        None => {
-                            let outcome = CallOutcome {
-                                result: UdfResultKind::Success,
-                                error: None,
-                                vendor_code: None,
-                                duration: timer.elapsed(),
-                            };
-                            tracker_task.lock().finish(&outcome);
-                        }
-                    },
-                    Err(error) => tracker_task.lock().finish_error(&error),
-                }
+                let completion = execute_async_udf(responder, token, future).await;
+                report_completion(udf_id, &completion);
+                observation_task.finish(&completion);
             };
             if let Err(error) =
                 runtime
                     .async_manager()
-                    .spawn(metadata.calculation_id.get(), task, cancellation)
+                    .spawn(calculation_id.get(), task, cancellation)
             {
-                tracker.lock().finish_error(&error);
+                let completion = AsyncCompletion {
+                    completion: OwnedCompletionOutcome::Error(error),
+                    delivery: OwnedDeliveryOutcome::Unobserved,
+                };
+                report_completion(udf_id, &completion);
+                observation.finish(&completion);
             }
         }
         Err(error) => {
-            handle.set_error(error.clone());
-            tracker.lock().finish_error(&error);
+            responder.set_fallback_error(error.clone());
+            drop(responder);
+            let completion = AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery: OwnedDeliveryOutcome::Unobserved,
+            };
+            report_completion(udf_id, &completion);
+            observation.finish(&completion);
         }
     }
 }
 
-pub(crate) unsafe fn return_error(udf_id: &'static str, handle: *mut XLOPER12, error: &XllError) {
-    let Some(handle) = NonNull::new(handle) else {
-        crate::diagnostics::report_no_unwind(
-            udf_id,
-            &XllError::input("async_handle", InputError::Malformed("null async handle")),
-        );
-        return;
+unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
+    runtime: &'static Runtime<A>,
+    guard: &crate::runtime::CallGuard<'_, A>,
+    udf_id: &'static str,
+    raw_handle: *mut XLOPER12,
+    start: Start,
+) where
+    A: crate::Addin,
+    Start: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::generation::ExecutionLease<A>,
+        CancellationToken,
+    ) -> XllResult<Fut>,
+    Fut: Future<Output = XllResult<T>> + Send + 'static,
+    T: ExcelReturn + Send + 'static,
+{
+    let calculation_id = runtime.calculation_id();
+    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    // SAFETY: forwarded from this function's raw-handle contract.
+    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+        Ok(responder) => responder,
+        Err(error) => {
+            // SAFETY: forwarded from this function's raw-handle contract.
+            let delivery = unsafe { return_error(raw_handle, &error) };
+            let completion = AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery,
+            };
+            report_completion(udf_id, &completion);
+            return;
+        }
     };
-    let pointer = AsyncReturnPointer::error(error);
-    // SAFETY: the RAII-owned return is live for the callback.
-    unsafe {
-        if let Err(delivery_error) = async_return(handle, pointer.as_non_null()) {
-            crate::diagnostics::report_no_unwind(udf_id, &delivery_error);
+    let future = catch_unwind(AssertUnwindSafe(|| {
+        start(guard, guard.lease(), token.clone())
+    }))
+    .unwrap_or(Err(XllError::Panic));
+    match future {
+        Ok(future) => {
+            let task = async move {
+                let completion = execute_async_udf(responder, token, future).await;
+                report_completion(udf_id, &completion);
+            };
+            if let Err(error) =
+                runtime
+                    .async_manager()
+                    .spawn(calculation_id.get(), task, cancellation)
+            {
+                let completion = AsyncCompletion {
+                    completion: OwnedCompletionOutcome::Error(error),
+                    delivery: OwnedDeliveryOutcome::Unobserved,
+                };
+                report_completion(udf_id, &completion);
+            }
+        }
+        Err(error) => {
+            responder.set_fallback_error(error.clone());
+            drop(responder);
+            let completion = AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery: OwnedDeliveryOutcome::Unobserved,
+            };
+            report_completion(udf_id, &completion);
         }
     }
 }
 
-pub(crate) unsafe fn async_return(
-    handle: NonNull<XLOPER12>,
-    result: NonNull<XLOPER12>,
-) -> XllResult<()> {
-    let callback_admission =
-        crate::callback_gate::enter_callback().map_err(|suppressed| XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::AsyncReturn,
-            failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-        })?;
-    // SAFETY: both XLOPER12 pointers are live for this call. The specialized
-    // raw wrapper intentionally does not expose the worker-thread-forbidden
-    // xlFree cleanup path.
-    let (raw_status, callback_result, invoked) =
-        unsafe { xlfn_sys::excel12_async_return(handle, result) };
-    let status = ExcelCallbackStatus::from_raw(raw_status);
-    drop(callback_admission);
-    let accepted = invoked
-        && status == ExcelCallbackStatus::Success
-        && callback_result.base_type() == XLTYPE_BOOL
-        // SAFETY: XLTYPE_BOOL selects the boolean union field.
-        && unsafe { callback_result.value.boolean != 0 };
-    if !accepted {
-        let failure = if !invoked || status == ExcelCallbackStatus::Success {
-            crate::error::ExcelApiFailure::UnexpectedResult
-        } else {
-            crate::error::ExcelApiFailure::Status(status)
-        };
-        let error = XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::AsyncReturn,
-            failure,
-        };
-        return Err(error);
+fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {
+    if let OwnedCompletionOutcome::Error(error) = &completion.completion {
+        crate::diagnostics::report_no_unwind(udf_id, error);
     }
-    Ok(())
+    if let OwnedDeliveryOutcome::Failed(error) = &completion.delivery {
+        crate::diagnostics::report_no_unwind(udf_id, error);
+    }
 }
 #[cfg(test)]
 pub(crate) static AFTER_ASYNC_EVALUATION_HOOK: Mutex<Option<fn()>> = Mutex::new(None);

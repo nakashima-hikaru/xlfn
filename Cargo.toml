@@ -33,13 +33,13 @@ xlfn-sys = { version = "=0.2.0", path = "crates/xlfn-sys" }
 # Third-party dependencies
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
-async-channel = "2.5.0"
 async-task = "4.7.1"
 blake3 = "1.8.7"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 cargo_metadata = "0.23.1"
 usage = { package = "usage-rs", version = "6" }
 constant_time_eq = "0.5.0"
+crossbeam-deque = "0.8.6"
 crossbeam-utils = "0.8.22"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 fs-err = "3.3.1"

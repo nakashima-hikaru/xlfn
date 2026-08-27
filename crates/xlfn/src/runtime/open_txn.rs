@@ -54,7 +54,7 @@ impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host
         if let Some(module_opening) = self.module_opening.take() {
             self.runtime
                 .lifecycle_control()
-                .install_module_closing(module_opening.rollback(|| {}));
+                .complete_open_abort(module_opening.rollback(|| {}));
         }
         disposition
     }
@@ -281,8 +281,7 @@ fn commit_inner<'runtime, A: crate::Addin, Stage, Host>(
         }
     } else {
         let authority = runtime.lifecycle_control();
-        authority.reject_open_state(&mut control);
-        authority.install_module_closing_locked(&mut control, module_opening.rollback(|| {}));
+        authority.complete_open_abort_locked(&mut control, module_opening.rollback(|| {}));
         runtime.lifecycle.notify_all();
         drop(control);
         runtime.refinement.reject_open(runtime, attempt_id);
@@ -300,11 +299,11 @@ fn publish_generation<A: crate::Addin>(
     let config = control.opening_config().ok_or(XllError::Internal {
         diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     })?;
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     let subscription_host = Some(crate::excel_rtd::RtdSubscriptionHost::production(
         crate::module_runtime::ingress(),
     ));
-    #[cfg(not(any(feature = "rtd", test)))]
+    #[cfg(not(feature = "rtd"))]
     let subscription_host = None;
     let services =
         GenerationServices::arm_generation(generation, config, subscription_host)?.commit();
@@ -334,7 +333,7 @@ fn publish_generation<A: crate::Addin>(
             let closing = module_epoch.begin_close(|| {});
             runtime
                 .lifecycle_control()
-                .install_module_closing_locked(control, closing);
+                .complete_open_abort_locked(control, closing);
             Err(error)
         }
     }
@@ -348,7 +347,7 @@ fn recover_uncommitted_module<A: crate::Addin>(
     if let Some(module_opening) = module_opening.take() {
         runtime
             .lifecycle_control()
-            .install_module_closing_locked(control, module_opening.rollback(|| {}));
+            .complete_open_abort_locked(control, module_opening.rollback(|| {}));
     }
 }
 
@@ -397,7 +396,7 @@ impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
         if let Some(module_opening) = self.module_opening.take() {
             self.runtime
                 .lifecycle_control()
-                .install_module_closing(module_opening.rollback(|| {}));
+                .complete_open_abort(module_opening.rollback(|| {}));
         } else {
             if let Some(lifecycle_state) = self.lifecycle_state.take() {
                 #[allow(

@@ -8,6 +8,7 @@ use std::thread::ThreadId;
 #[cfg(test)]
 use std::time::Duration;
 
+use crossbeam_utils::CachePadded;
 use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
 
 pub(crate) const PHASE_OPENING: u8 = 0;
@@ -34,7 +35,6 @@ fn current_ingress_stripe() -> usize {
 static NEXT_INGRESS_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
-#[repr(C, align(128))]
 struct UdfStripe {
     active: AtomicUsize,
 }
@@ -162,7 +162,7 @@ pub(crate) struct ExportIngress {
     phase: AtomicU8,
     epoch: AtomicU64,
     exports: StripedDrainGate<INGRESS_STRIPE_COUNT>,
-    udf_stripes: [UdfStripe; INGRESS_STRIPE_COUNT],
+    udf_stripes: [CachePadded<UdfStripe>; INGRESS_STRIPE_COUNT],
     // Opening entries are rejected by the caller but counted until their
     // guards leave. Publication takes this lock so the zero-active check and
     // the final OPEN transition cannot be overtaken by a new entry.
@@ -244,7 +244,7 @@ impl ExportIngress {
             phase: AtomicU8::new(PHASE_CLOSED),
             epoch: AtomicU64::new(0),
             exports: StripedDrainGate::new_sealed(),
-            udf_stripes: [const { UdfStripe::new() }; INGRESS_STRIPE_COUNT],
+            udf_stripes: [const { CachePadded::new(UdfStripe::new()) }; INGRESS_STRIPE_COUNT],
             opening_lock: Mutex::new(()),
             #[cfg(test)]
             test_epoch_active: AtomicUsize::new(0),
@@ -560,7 +560,7 @@ impl ExportIngress {
     }
 
     pub(crate) fn active_udfs(&self) -> usize {
-        self.udf_stripes.iter().map(UdfStripe::active).sum()
+        self.udf_stripes.iter().map(|stripe| stripe.active()).sum()
     }
 
     fn rejected_guard(&self) -> RejectedExport<'_> {

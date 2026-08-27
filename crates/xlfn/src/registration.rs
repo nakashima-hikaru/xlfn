@@ -1,14 +1,15 @@
+#[allow(
+    unsafe_code,
+    reason = "Excel registration ABI is isolated in this host facade"
+)]
 pub(crate) mod host;
 pub(crate) mod ledger;
 pub(crate) mod preflight;
 pub(crate) mod recovery;
-#[allow(
-    unsafe_code,
-    reason = "Excel registration ABI is isolated in this leaf module"
-)]
 pub(crate) mod registrar;
 pub(crate) mod schema;
 
+pub(crate) use host::RegistrationHost;
 pub(crate) use ledger::{
     EventRegistration, ExcelNameKey, HostMutationJournal, MetadataDebt, MetadataDebtRetryResult,
     PendingRegistration, RegistrationCertainty, RegistrationCleanupState,

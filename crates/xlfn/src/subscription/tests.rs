@@ -1313,22 +1313,40 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
         Err(XllError::Overloaded)
     ));
 
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
 }
 
 #[test]
-fn reserve_live_source_tracks_each_identity_reference() {
-    let mut registry = SourceIdentityRegistry::new();
+fn source_refcount_tracks_live_subscription_identities() {
+    let mut index = SubscriptionIdentityIndex::default();
     let (source, _, _) = publishing_source::<f64>(None);
-    let first = registry.reserve(source.id, 16).unwrap();
-    let second = registry.reserve(source.id, 16).unwrap();
+    let first_identity = SubscriptionIdentity {
+        source_id: SourceId(source.id),
+        topic: RtdTopic::single("first").unwrap(),
+    };
+    let second_identity = SubscriptionIdentity {
+        source_id: SourceId(source.id),
+        topic: RtdTopic::single("second").unwrap(),
+    };
+    let first_key = SubscriptionKey::from_allocated_id(1, 1);
+    let second_key = SubscriptionKey::from_allocated_id(1, 2);
+
+    index.insert(first_identity, first_key, 16).unwrap();
+    index.insert(second_identity, second_key, 16).unwrap();
     assert_eq!(
-        registry.ref_count(source.id).map(|refs| refs.get()),
+        index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(2)
     );
-    drop(second);
-    drop(first);
-    assert_eq!(registry.distinct_count(), 0);
+    assert_eq!(index.distinct_source_count(), 1);
+
+    index.remove_by_key(&first_key);
+    assert_eq!(
+        index.source_ref_count(source.id).map(|refs| refs.get()),
+        Some(1)
+    );
+    index.remove_by_key(&second_key);
+    assert_eq!(index.distinct_source_count(), 0);
+    index.assert_invariants();
 }
 
 #[test]
@@ -1347,16 +1365,76 @@ fn source_limit_counts_distinct_live_sources_not_topics() {
         .unwrap();
 
     let catalog = runtime.catalog.lock();
-    assert_eq!(catalog.sources.distinct_count(), 1);
+    assert_eq!(catalog.identities.distinct_source_count(), 1);
     assert_eq!(
-        catalog.sources.ref_count(source.id).map(|refs| refs.get()),
+        catalog
+            .identities
+            .source_ref_count(source.id)
+            .map(|refs| refs.get()),
         Some(2)
     );
     drop(catalog);
 
     first.rollback();
     second.rollback();
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+}
+
+#[test]
+fn source_limit_rejects_a_second_live_source() {
+    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
+        max_source_ids: RtdCapacity::from_usize(1),
+        ..RtdLimits::standard()
+    }));
+    let (source_a, _, _) = publishing_source::<f64>(None);
+    let (source_b, _, _) = publishing_source::<f64>(None);
+
+    let first = runtime
+        .prepare(&source_a, RtdTopic::single("first-source").unwrap())
+        .unwrap();
+    assert!(matches!(
+        runtime.prepare(&source_b, RtdTopic::single("second-source").unwrap()),
+        Err(XllError::Overloaded)
+    ));
+
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.identities.distinct_source_count(), 1);
+    assert_eq!(
+        catalog
+            .identities
+            .source_ref_count(source_a.id)
+            .map(|n| n.get()),
+        Some(1)
+    );
+    assert_eq!(catalog.identities.source_ref_count(source_b.id), None);
+    drop(catalog);
+
+    first.rollback();
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+}
+
+#[test]
+fn duplicate_identity_does_not_change_source_refcount() {
+    let mut index = SubscriptionIdentityIndex::default();
+    let (source, _, _) = publishing_source::<f64>(None);
+    let identity = SubscriptionIdentity {
+        source_id: SourceId(source.id),
+        topic: RtdTopic::single("duplicate").unwrap(),
+    };
+    let first_key = SubscriptionKey::from_allocated_id(1, 1);
+    let second_key = SubscriptionKey::from_allocated_id(1, 2);
+
+    index.insert(identity.clone(), first_key, 1).unwrap();
+    assert!(matches!(
+        index.insert(identity, second_key, 1),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
+        })
+    ));
+    assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
+    assert_eq!(index.key_by_identity.len(), 1);
+    assert_eq!(index.identity_by_key.len(), 1);
+    index.assert_invariants();
 }
 
 #[test]
@@ -1814,17 +1892,17 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("warm-path-strong-count").unwrap();
 
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 0);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
 
     // 1. Initial prepare registers the handle identity and creates the pending subscription.
     let first = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(first.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
 
     // 2. ExistingPending prepare reuses the same handle identity and pending entry.
     let second_pending = runtime.prepare(&source, topic.clone()).unwrap();
     assert!(second_pending.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
     second_pending.rollback();
 
     // Commit and connect transaction to activate subscription.
@@ -1839,7 +1917,7 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     // 3. ExistingActive prepare is a warm lookup without a new source identity.
     let warm_prepared = runtime.prepare(&source, topic).unwrap();
     assert!(!warm_prepared.has_reservation());
-    assert_eq!(runtime.catalog.lock().sources.distinct_count(), 1);
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
     warm_prepared.rollback();
 }
 

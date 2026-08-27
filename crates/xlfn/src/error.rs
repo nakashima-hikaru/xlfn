@@ -2,8 +2,22 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::diagnostics::id::DiagnosticId;
+use crate::value::XlValueType;
 
 pub type XllResult<T> = Result<T, XllError>;
+
+#[cfg(any(feature = "handles", feature = "rtd"))]
+pub(crate) fn map_service_slot_error(
+    error: xlfn_kernel::service_slot::ServiceSlotError<XllError>,
+) -> XllError {
+    match error {
+        xlfn_kernel::service_slot::ServiceSlotError::Closed => XllError::Closing,
+        xlfn_kernel::service_slot::ServiceSlotError::Fault(fault) => match fault {
+            xlfn_kernel::service_slot::ServiceFault::Error(error) => error,
+            xlfn_kernel::service_slot::ServiceFault::Panicked => XllError::Panic,
+        },
+    }
+}
 
 /// Converts an application-local error at the single Excel boundary.
 pub trait IntoXllError {
@@ -54,14 +68,20 @@ impl ExcelError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputError {
     NullPointer,
-    WrongType { expected: &'static str, actual: u32 },
+    WrongType {
+        expected: &'static str,
+        actual: XlValueType,
+    },
     NonFinite,
     NotInteger,
     NumericOverflow,
     OutOfRange,
     InvalidUtf16,
     Malformed(&'static str),
-    TooLarge { limit: usize, actual: usize },
+    TooLarge {
+        limit: usize,
+        actual: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

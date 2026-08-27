@@ -12,8 +12,8 @@ readme = "README.md"
 [features]
 default = []
 async = [
-    "dep:async-channel",
     "dep:async-task",
+    "dep:crossbeam-deque",
     "dep:futures-util",
 ]
 # Enables the RTD/COM subsystem and its add-in capability surface.
@@ -86,11 +86,11 @@ xlfn-macros.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true
 arc-swap.workspace = true
-async-channel = { workspace = true, optional = true }
 async-task = { workspace = true, optional = true }
 blake3.workspace = true
 bumpalo.workspace = true
 constant_time_eq.workspace = true
+crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true

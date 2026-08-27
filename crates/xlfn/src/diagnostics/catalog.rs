@@ -10,6 +10,8 @@ use super::id::DiagnosticId;
 impl DiagnosticId {
     pub(crate) const ASYNC_SPAWN: Self = Self::from_ascii8(*b"ASYNCSPN");
     pub(crate) const ASYNC_TIME: Self = Self::from_ascii8(*b"ASYNTIME");
+    pub(crate) const ASYNC_DELIVERY: Self = Self::from_ascii8(*b"ASYNCRET");
+    pub(crate) const ASYNC_COMPLETION: Self = Self::from_ascii8(*b"ASYNCCMP");
     pub(crate) const CACHE_REENTRANT: Self = Self::from_ascii8(*b"CACHEREC");
     pub(crate) const CACHE_TYPE: Self = Self::from_ascii8(*b"CACHETYP");
     pub(crate) const DIAGNOSTICS_CLOSE: Self = Self::from_ascii8(*b"DIAGCLOS");

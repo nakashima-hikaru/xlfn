@@ -51,7 +51,7 @@ mod callback_gate;
     reason = "Callback release state is an internal protocol witness"
 )]
 mod callback_value;
-#[cfg(any(feature = "async", test))]
+#[cfg(feature = "async")]
 mod cancellation;
 #[cfg(any(test, feature = "refinement"))]
 mod composition_refinement;
@@ -63,9 +63,9 @@ mod excel_rtd;
 /// Stable execution-layer contracts and per-call metadata.
 pub mod execution;
 mod generation;
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub mod handle;
-#[cfg(all(not(feature = "handles"), not(test)))]
+#[cfg(not(feature = "handles"))]
 mod handle;
 #[allow(
     unsafe_code,
@@ -96,7 +96,7 @@ mod return_storage;
     reason = "Return protocol types are consumed only at FFI boundaries"
 )]
 mod return_value;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub mod rtd;
 mod runtime;
 mod runtime_components;
@@ -109,8 +109,6 @@ mod runtime_recovery;
 mod runtime_refinement;
 #[path = "runtime/rollback.rs"]
 mod runtime_rollback;
-#[path = "runtime/shutdown/pipeline.rs"]
-mod runtime_shutdown;
 #[path = "runtime/transactions.rs"]
 mod runtime_transactions;
 mod shutdown;
@@ -126,9 +124,9 @@ pub use addin::{
 };
 #[cfg(feature = "async")]
 pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub use addin::{HandleBindingLimit, HandleConfig};
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use addin::{RtdConfig, RtdOpenContext};
 #[cfg(feature = "async")]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
@@ -138,6 +136,7 @@ pub use error::{
 #[cfg(feature = "rtd")]
 pub use rtd::RtdCallContext;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
+pub use value::XlValueType;
 
 mod ingress;
 
@@ -177,6 +176,10 @@ pub(crate) mod test_callback {
     };
     static FORMULA_SHEET_NAME: [u16; 6] = [5, 83, 104, 101, 101, 116];
 
+    #[allow(
+        dead_code,
+        reason = "test callback helpers used in specific feature configurations"
+    )]
     pub(crate) enum FormulaCallerKind {
         Ref = 1,
         SRef = 2,
@@ -256,6 +259,10 @@ pub(crate) mod test_callback {
         ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
     }
 
+    #[allow(
+        dead_code,
+        reason = "test callback helpers used in specific feature configurations"
+    )]
     pub(crate) fn set_formula_caller(kind: FormulaCallerKind) {
         FORMULA_CALLER_KIND.store(kind as i32, Ordering::Relaxed);
     }
@@ -287,6 +294,10 @@ pub(crate) mod test_callback {
             .clone()
     }
 
+    #[allow(
+        dead_code,
+        reason = "test callback helpers used in specific feature configurations"
+    )]
     pub(crate) fn calls_for(function: i32) -> usize {
         CALLBACK_ORDER
             .lock()
@@ -534,10 +545,14 @@ pub mod unstable {
     }
 }
 
-pub use xlfn_macros::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
+#[cfg(feature = "handles")]
+pub use xlfn_macros::ExcelHandleObject;
+pub use xlfn_macros::{ExcelEnum, excel_addin, excel_function};
 
 /// Common imports for authoring an add-in.
 pub mod prelude {
+    #[cfg(feature = "handles")]
+    pub use crate::ExcelHandleObject;
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
     #[cfg(feature = "rtd")]
@@ -558,5 +573,5 @@ pub mod prelude {
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
         OptionalExcelValue, Row,
     };
-    pub use crate::{ExcelEnum, ExcelHandleObject, excel_addin, excel_function};
+    pub use crate::{ExcelEnum, excel_addin, excel_function};
 }

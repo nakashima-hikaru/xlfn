@@ -70,12 +70,12 @@ impl<A: crate::Addin> InstrumentationPlan<A> {
         }
     }
 
-    pub(crate) const fn enabled(&self) -> bool {
-        A::Layers::HAS_LAYERS || self.trace_enabled
+    pub(crate) fn enabled(&self) -> bool {
+        layers_enabled::<A::Layers>() || self.trace_enabled
     }
 
-    pub(crate) const fn has_layers(&self) -> bool {
-        A::Layers::HAS_LAYERS
+    pub(crate) fn has_layers(&self) -> bool {
+        layers_enabled::<A::Layers>()
     }
 
     pub(crate) const fn trace_enabled(&self) -> bool {
@@ -109,24 +109,106 @@ impl CallTimer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UdfResultKind {
-    Success,
-    InputError,
-    DomainError,
-    VendorError,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum UdfErrorKind {
+    Input,
+    Domain,
+    Vendor,
     Panic,
     Closing,
-    InternalError,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum UdfCompletionOutcome<'call> {
+    Success,
+    Error {
+        kind: UdfErrorKind,
+        error: &'call XllError,
+        vendor_code: Option<i32>,
+    },
+    Cancelled,
+}
+
+impl<'call> UdfCompletionOutcome<'call> {
+    pub const fn vendor_code(self) -> Option<i32> {
+        match self {
+            Self::Error { vendor_code, .. } => vendor_code,
+            Self::Success | Self::Cancelled => None,
+        }
+    }
+
+    pub(crate) const fn trace_label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error { kind, .. } => match kind {
+                UdfErrorKind::Input => "input",
+                UdfErrorKind::Domain => "domain",
+                UdfErrorKind::Vendor => "vendor",
+                UdfErrorKind::Panic => "panic",
+                UdfErrorKind::Closing => "closing",
+                UdfErrorKind::Internal => "internal",
+            },
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub(crate) fn from_error(error: &'call XllError) -> Self {
+        let (kind, vendor_code) = classify_error(error);
+        Self::Error {
+            kind,
+            error,
+            vendor_code,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum UdfDeliveryOutcome<'call> {
+    NotApplicable,
+    Delivered,
+    Failed { error: &'call XllError },
+    Unobserved,
+}
+
+impl UdfDeliveryOutcome<'_> {
+    pub(crate) const fn trace_label(self) -> &'static str {
+        match self {
+            Self::NotApplicable => "notApplicable",
+            Self::Delivered => "delivered",
+            Self::Failed { .. } => "failed",
+            Self::Unobserved => "unobserved",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct CallOutcome<'call> {
-    pub result: UdfResultKind,
-    pub error: Option<&'call XllError>,
-    pub vendor_code: Option<i32>,
+    pub completion: UdfCompletionOutcome<'call>,
+    pub delivery: UdfDeliveryOutcome<'call>,
     pub duration: Duration,
+}
+
+impl<'call> CallOutcome<'call> {
+    pub(crate) fn success(duration: Duration) -> Self {
+        Self {
+            completion: UdfCompletionOutcome::Success,
+            delivery: UdfDeliveryOutcome::NotApplicable,
+            duration,
+        }
+    }
+
+    pub(crate) fn from_error(error: &'call XllError, duration: Duration) -> Self {
+        Self {
+            completion: UdfCompletionOutcome::from_error(error),
+            delivery: UdfDeliveryOutcome::NotApplicable,
+            duration,
+        }
+    }
 }
 
 pub trait UdfLayerGuard: Send + 'static {
@@ -142,11 +224,45 @@ pub trait UdfLayer: Send + Sync + 'static {
     fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guard>;
 }
 
-pub trait UdfLayers: Send + Sync + 'static {
-    type Guards: UdfLayerGuard;
-    const HAS_LAYERS: bool;
+mod private {
+    use super::{CallMetadata, UdfLayerGuard};
+    use crate::XllResult;
 
-    fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guards>;
+    pub trait UdfLayersImpl: Send + Sync + 'static {
+        type Guards: UdfLayerGuard;
+        const HAS_LAYERS: bool;
+
+        fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards>;
+    }
+}
+
+#[doc(hidden)]
+#[allow(
+    private_bounds,
+    reason = "Layer composition is framework-owned; users compose UdfLayer values"
+)]
+pub trait UdfLayers: private::UdfLayersImpl {}
+
+impl<T> UdfLayers for T where T: private::UdfLayersImpl {}
+
+pub(crate) fn layers_enabled<L: UdfLayers>() -> bool {
+    <L as private::UdfLayersImpl>::HAS_LAYERS
+}
+
+#[allow(
+    private_bounds,
+    private_interfaces,
+    reason = "The execution facade exposes only the sealed layer composition"
+)]
+pub(crate) fn enter_layers<L: UdfLayers>(
+    layers: &L,
+    metadata: &CallMetadata,
+) -> XllResult<<L as private::UdfLayersImpl>::Guards> {
+    <L as private::UdfLayersImpl>::enter_layers(layers, metadata)
+}
+
+pub(crate) fn exit_layers<G: UdfLayerGuard>(guards: G, outcome: &CallOutcome<'_>) {
+    safe_exit(guards, outcome);
 }
 
 pub(crate) fn safe_enter<L: UdfLayer>(layer: &L, metadata: &CallMetadata) -> XllResult<L::Guard> {
@@ -157,11 +273,11 @@ pub(crate) fn safe_exit<G: UdfLayerGuard>(guard: G, outcome: &CallOutcome<'_>) {
     drop(catch_unwind(AssertUnwindSafe(|| guard.exit(outcome))));
 }
 
-impl UdfLayers for () {
+impl private::UdfLayersImpl for () {
     type Guards = ();
     const HAS_LAYERS: bool = false;
 
-    fn enter(&self, _metadata: &CallMetadata) -> XllResult<()> {
+    fn enter_layers(&self, _metadata: &CallMetadata) -> XllResult<()> {
         Ok(())
     }
 }
@@ -172,7 +288,7 @@ impl UdfLayerGuard for () {
 
 macro_rules! impl_udf_layers {
     ($($T:ident),+ ; $($idx:tt),+ ; $($prev:ident),* ; $last:ident) => {
-        impl<$($T: UdfLayer),+> UdfLayers for ($($T,)+) {
+        impl<$($T: UdfLayer),+> private::UdfLayersImpl for ($($T,)+) {
             type Guards = ($($T::Guard,)+);
             const HAS_LAYERS: bool = true;
 
@@ -181,7 +297,7 @@ macro_rules! impl_udf_layers {
                 unused_variables,
                 reason = "Variables used for unwinding earlier guards"
             )]
-            fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guards> {
+            fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards> {
                 impl_udf_layers_enter!(@step self, metadata; $($T, $idx);+)
             }
         }
@@ -214,7 +330,7 @@ macro_rules! impl_udf_layers_enter {
             let $curr = match safe_enter(&$self.$idx, $metadata) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    let outcome = outcome_for_error(&error, Duration::ZERO);
+                    let outcome = CallOutcome::from_error(&error, Duration::ZERO);
                     impl_udf_layers_exit!(&outcome; $($prev),+);
                     return Err(error);
                 }
@@ -227,7 +343,7 @@ macro_rules! impl_udf_layers_enter {
             let $curr = match safe_enter(&$self.$idx, $metadata) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    let outcome = outcome_for_error(&error, Duration::ZERO);
+                    let outcome = CallOutcome::from_error(&error, Duration::ZERO);
                     impl_udf_layers_exit!(&outcome; $($prev),+);
                     return Err(error);
                 }
@@ -264,24 +380,14 @@ impl_udf_layers!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13; 0, 
 impl_udf_layers!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14; T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13; T14);
 impl_udf_layers!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15; T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14; T15);
 
-pub(crate) fn classify(error: &XllError) -> (UdfResultKind, Option<i32>) {
+pub(crate) fn classify_error(error: &XllError) -> (UdfErrorKind, Option<i32>) {
     match error {
-        XllError::Input { .. } => (UdfResultKind::InputError, None),
-        XllError::Domain { .. } => (UdfResultKind::DomainError, None),
-        XllError::Native { code, .. } => (UdfResultKind::VendorError, Some(*code)),
-        XllError::Panic => (UdfResultKind::Panic, None),
-        XllError::Closing => (UdfResultKind::Closing, None),
-        _ => (UdfResultKind::InternalError, None),
-    }
-}
-
-pub(crate) fn outcome_for_error(error: &XllError, duration: Duration) -> CallOutcome<'_> {
-    let (result, vendor_code) = classify(error);
-    CallOutcome {
-        result,
-        error: Some(error),
-        vendor_code,
-        duration,
+        XllError::Input { .. } => (UdfErrorKind::Input, None),
+        XllError::Domain { .. } => (UdfErrorKind::Domain, None),
+        XllError::Native { code, .. } => (UdfErrorKind::Vendor, Some(*code)),
+        XllError::Panic => (UdfErrorKind::Panic, None),
+        XllError::Closing => (UdfErrorKind::Closing, None),
+        _ => (UdfErrorKind::Internal, None),
     }
 }
 
@@ -295,8 +401,9 @@ pub(crate) fn trace(metadata: &UdfTraceMetadata, outcome: &CallOutcome<'_>) {
             call_id = metadata.call_id.get(),
             calculation_id = metadata.calculation_id.get(),
             duration_ns = outcome.duration.as_nanos().min(u64::MAX as u128) as u64,
-            result = ?outcome.result,
-            vendor_code = outcome.vendor_code,
+            completion = outcome.completion.trace_label(),
+            delivery = outcome.delivery.trace_label(),
+            vendor_code = outcome.completion.vendor_code(),
             concurrent_calls = metadata.concurrent_calls,
             "UDF invocation completed"
         );
@@ -405,13 +512,15 @@ mod tests {
                 reject: false,
             },
         );
-        let guards = layers.enter(&metadata()).unwrap();
-        guards.exit(&CallOutcome {
-            result: UdfResultKind::Success,
-            error: None,
-            vendor_code: None,
-            duration: Duration::ZERO,
-        });
+        let guards = crate::execution::enter_layers(&layers, &metadata()).unwrap();
+        crate::execution::exit_layers(
+            guards,
+            &CallOutcome {
+                completion: UdfCompletionOutcome::Success,
+                delivery: UdfDeliveryOutcome::NotApplicable,
+                duration: Duration::ZERO,
+            },
+        );
         assert_eq!(
             order.lock().as_slice(),
             ["enter-a", "enter-b", "exit-b", "exit-a"]
@@ -434,7 +543,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            layers.enter(&metadata()),
+            crate::execution::enter_layers(&layers, &metadata()),
             Err(XllError::Overloaded)
         ));
         assert_eq!(order.lock().as_slice(), ["enter-a", "reject", "exit-a"]);
@@ -455,14 +564,16 @@ mod tests {
                 panic_on_exit: true,
             },
         );
-        let guards = layers.enter(&metadata()).unwrap();
+        let guards = crate::execution::enter_layers(&layers, &metadata()).unwrap();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            guards.exit(&CallOutcome {
-                result: UdfResultKind::Success,
-                error: None,
-                vendor_code: None,
-                duration: Duration::ZERO,
-            });
+            crate::execution::exit_layers(
+                guards,
+                &CallOutcome {
+                    completion: UdfCompletionOutcome::Success,
+                    delivery: UdfDeliveryOutcome::NotApplicable,
+                    duration: Duration::ZERO,
+                },
+            );
         }));
         assert!(result.is_ok());
         assert_eq!(order.lock().as_slice(), ["inner", "outer"]);

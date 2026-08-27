@@ -45,6 +45,7 @@ mod cli;
 mod distribution;
 mod metadata;
 mod package;
+mod pipeline;
 mod target;
 
 pub(crate) use cargo::*;
@@ -53,6 +54,7 @@ pub(crate) use cli::*;
 pub(crate) use distribution::*;
 pub(crate) use metadata::*;
 pub(crate) use package::*;
+pub(crate) use pipeline::*;
 pub(crate) use target::*;
 #[cfg(test)]
 mod tests;

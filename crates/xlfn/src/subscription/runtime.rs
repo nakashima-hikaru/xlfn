@@ -1,6 +1,4 @@
-use super::catalog::{
-    PreparationFinish, SubscriptionCatalog, SubscriptionEntry, SubscriptionPhase,
-};
+use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::delivery::{
     ActiveSubscription, ErasedSink, RefreshState, SERVER_LIFECYCLE_OPEN, TOPIC_SHARDS, TopicShard,
     shard_index,
@@ -83,7 +81,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             catalog: Mutex::new(SubscriptionCatalog {
                 entries: FxHashMap::default(),
                 pending_topic_bytes: 0,
-                sources: super::identity::SourceIdentityRegistry::new(),
                 identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
@@ -243,38 +240,14 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        if catalog.pending_len() >= self.limits.max_pending.get() {
-            return Err(XllError::Overloaded);
-        }
-
-        let new_total = match catalog.pending_topic_bytes.checked_add(topic.byte_len()) {
-            Some(total) if total <= self.limits.max_total_topic_bytes.get() => total,
-            _ => return Err(XllError::Overloaded),
-        };
-
-        let key = catalog.allocate_key(self.runtime_id)?;
-
-        let source_reservation = catalog
-            .sources
-            .reserve(source.id, self.limits.max_source_ids.get())?;
-
-        catalog.identities.insert(identity, key)?;
-        source_reservation.commit();
-
-        catalog.pending_topic_bytes = new_total;
         let erased_source: Arc<dyn ErasedRtdSource> = Arc::clone(&source.source) as _;
-        catalog.entries.insert(
-            key,
-            SubscriptionEntry {
-                topic,
-                phase: SubscriptionPhase::Pending {
-                    source: erased_source,
-                    reservations: Some(std::num::NonZeroUsize::new(1).expect("one is non-zero")),
-                    server: None,
-                    commitment: super::catalog::PendingCommitment::Uncommitted,
-                },
-            },
-        );
+        let key = catalog.insert_pending(
+            self.runtime_id,
+            source.id,
+            erased_source,
+            topic,
+            self.limits,
+        )?;
 
         Ok(PreparedSubscription {
             key,
@@ -805,7 +778,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     );
                 }
             }
-            catalog.sources.clear();
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
             catalog

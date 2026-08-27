@@ -1,6 +1,6 @@
 use crate::host_callback::{HostCallbackShared, HostCallbackState, observe_shared};
 use crate::return_value::{CallbackCleanupDebt, ExcelCallbackStatus};
-use crate::value::XlValueRef;
+use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -171,9 +171,14 @@ impl ExcelCallbackValue {
         Ok(&self.raw)
     }
 
-    pub(crate) fn base_type(&self) -> XllResult<u32> {
+    pub(crate) fn value_type(&self) -> XllResult<XlValueType> {
         self.ensure_live()?;
-        Ok(self.raw.base_type())
+        XlValueType::from_raw(self.raw.base_type()).ok_or_else(|| {
+            XllError::input(
+                "<callback>",
+                crate::error::InputError::Malformed("unknown base xltype"),
+            )
+        })
     }
 
     #[must_use]
@@ -348,7 +353,7 @@ mod tests {
         assert!(value.borrow().is_err());
         assert!(value.raw().is_err());
         assert!(value.raw_pointer().is_err());
-        assert!(value.base_type().is_err());
+        assert!(value.value_type().is_err());
         assert!(value.try_release().is_err());
         drop(value);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);

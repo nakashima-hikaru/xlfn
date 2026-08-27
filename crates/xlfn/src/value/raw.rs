@@ -7,13 +7,87 @@ use crate::{ExcelError, XllError, XllResult};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::slice;
-use xlfn_sys::{
-    XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT,
-    XLTYPE_MASK, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_STR,
-};
+use xlfn_sys::{XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_MASK};
 
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;
+
+/// The validated semantic value type of an Excel `XLOPER12`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum XlValueType {
+    Number,
+    String,
+    Boolean,
+    Reference,
+    Error,
+    Flow,
+    Multi,
+    Missing,
+    Nil,
+    SimpleReference,
+    Integer,
+    BigData,
+}
+
+impl XlValueType {
+    /// Decodes a raw base xltype mask into a validated [`XlValueType`].
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            xlfn_sys::XLTYPE_NUM => Some(Self::Number),
+            xlfn_sys::XLTYPE_STR => Some(Self::String),
+            xlfn_sys::XLTYPE_BOOL => Some(Self::Boolean),
+            xlfn_sys::XLTYPE_REF => Some(Self::Reference),
+            xlfn_sys::XLTYPE_ERR => Some(Self::Error),
+            xlfn_sys::XLTYPE_FLOW => Some(Self::Flow),
+            xlfn_sys::XLTYPE_MULTI => Some(Self::Multi),
+            xlfn_sys::XLTYPE_MISSING => Some(Self::Missing),
+            xlfn_sys::XLTYPE_NIL => Some(Self::Nil),
+            xlfn_sys::XLTYPE_SREF => Some(Self::SimpleReference),
+            xlfn_sys::XLTYPE_INT => Some(Self::Integer),
+            xlfn_sys::XLTYPE_BIG_DATA => Some(Self::BigData),
+            _ => None,
+        }
+    }
+
+    /// Returns the underlying raw Excel `xltype` constant for this value type.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Number => xlfn_sys::XLTYPE_NUM,
+            Self::String => xlfn_sys::XLTYPE_STR,
+            Self::Boolean => xlfn_sys::XLTYPE_BOOL,
+            Self::Reference => xlfn_sys::XLTYPE_REF,
+            Self::Error => xlfn_sys::XLTYPE_ERR,
+            Self::Flow => xlfn_sys::XLTYPE_FLOW,
+            Self::Multi => xlfn_sys::XLTYPE_MULTI,
+            Self::Missing => xlfn_sys::XLTYPE_MISSING,
+            Self::Nil => xlfn_sys::XLTYPE_NIL,
+            Self::SimpleReference => xlfn_sys::XLTYPE_SREF,
+            Self::Integer => xlfn_sys::XLTYPE_INT,
+            Self::BigData => xlfn_sys::XLTYPE_BIG_DATA,
+        }
+    }
+}
+
+impl std::fmt::Display for XlValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number => write!(f, "Number"),
+            Self::String => write!(f, "String"),
+            Self::Boolean => write!(f, "Boolean"),
+            Self::Reference => write!(f, "Reference"),
+            Self::Error => write!(f, "Error"),
+            Self::Flow => write!(f, "Flow"),
+            Self::Multi => write!(f, "Multi"),
+            Self::Missing => write!(f, "Missing"),
+            Self::Nil => write!(f, "Nil"),
+            Self::SimpleReference => write!(f, "SimpleReference"),
+            Self::Integer => write!(f, "Integer"),
+            Self::BigData => write!(f, "BigData"),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct XlValueRef<'call> {
@@ -32,7 +106,7 @@ pub(crate) enum GridView<'call> {
 
 impl<'call> GridView<'call> {
     pub(crate) fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        if value.base_type() == XLTYPE_MULTI {
+        if value.value_type() == XlValueType::Multi {
             let array = value.array(argument)?;
             let len = (array.rows as usize) * (array.columns as usize);
             let values = if len == 0 {
@@ -89,6 +163,12 @@ impl<'call> XlValueRef<'call> {
                 InputError::Malformed("unknown xltype flag"),
             ));
         }
+        if XlValueType::from_raw(raw.base_type()).is_none() {
+            return Err(XllError::input(
+                "<raw>",
+                InputError::Malformed("unknown base xltype"),
+            ));
+        }
         Ok(Self {
             raw,
             _not_send_or_sync: PhantomData,
@@ -97,14 +177,24 @@ impl<'call> XlValueRef<'call> {
 
     #[must_use]
     #[inline]
-    pub const fn base_type(&self) -> u32 {
-        self.raw.base_type()
+    pub const fn value_type(self) -> XlValueType {
+        match XlValueType::from_raw(self.raw.base_type()) {
+            Some(value_type) => value_type,
+            None => unreachable!(),
+        }
     }
 
     #[must_use]
     #[inline]
     pub const fn raw(&self) -> &'call XLOPER12 {
         self.raw
+    }
+
+    /// Returns the raw `xltype` field value of the underlying `XLOPER12`.
+    #[must_use]
+    #[inline]
+    pub const fn raw_xltype(self) -> u32 {
+        self.raw.xltype
     }
 
     #[inline]
@@ -133,11 +223,11 @@ impl<'call> XlValueRef<'call> {
     #[must_use]
     #[inline]
     pub const fn is_blank(self) -> bool {
-        self.base_type() == XLTYPE_NIL
+        matches!(self.value_type(), XlValueType::Nil)
     }
 
-    pub(crate) fn wrong_type(&self, argument: &'static str, expected: &'static str) -> XllError {
-        if self.base_type() == XLTYPE_ERR {
+    pub(crate) fn wrong_type(self, argument: &'static str, expected: &'static str) -> XllError {
+        if self.value_type() == XlValueType::Error {
             // SAFETY: XLTYPE_ERR selects the error union member.
             let code = unsafe { self.raw.value.error };
             return ExcelError::from_code(code).map_or_else(
@@ -149,13 +239,13 @@ impl<'call> XlValueRef<'call> {
             argument,
             InputError::WrongType {
                 expected,
-                actual: self.base_type(),
+                actual: self.value_type(),
             },
         )
     }
 
     pub(crate) fn utf16(&self, argument: &'static str) -> XllResult<&'call [u16]> {
-        if self.base_type() != XLTYPE_STR {
+        if self.value_type() != XlValueType::String {
             return Err(self.wrong_type(argument, "string"));
         }
         // SAFETY: XLTYPE_STR selects the string union member.
@@ -181,7 +271,7 @@ impl<'call> XlValueRef<'call> {
     }
 
     pub(crate) fn array(&self, argument: &'static str) -> XllResult<XLOPER12Array> {
-        if self.base_type() != XLTYPE_MULTI {
+        if self.value_type() != XlValueType::Multi {
             return Err(self.wrong_type(argument, "array"));
         }
         // SAFETY: XLTYPE_MULTI selects the array union member.
@@ -370,23 +460,23 @@ pub(crate) fn encode_raw_value(
     nested: bool,
     encoder: &mut InputIdentityEncoder,
 ) {
-    match value.base_type() {
-        XLTYPE_NUM => {
+    match value.value_type() {
+        XlValueType::Number => {
             encoder.tag(RawValueKind::Number as u8);
             // SAFETY: XLTYPE_NUM selects the number union member.
             encoder.u64(unsafe { value.raw.value.number }.to_bits());
         }
-        XLTYPE_BOOL => {
+        XlValueType::Boolean => {
             encoder.tag(RawValueKind::Boolean as u8);
             // SAFETY: XLTYPE_BOOL selects the boolean union member.
             encoder.u32(unsafe { value.raw.value.boolean } as u32);
         }
-        XLTYPE_INT => {
+        XlValueType::Integer => {
             encoder.tag(RawValueKind::Number as u8);
             // SAFETY: XLTYPE_INT selects the integer union member.
             encoder.f64(unsafe { value.raw.value.integer } as f64);
         }
-        XLTYPE_STR => {
+        XlValueType::String => {
             encoder.tag(RawValueKind::String as u8);
             match value.utf16(encoder.argument()) {
                 Ok(text) => {
@@ -398,14 +488,14 @@ pub(crate) fn encode_raw_value(
                 Err(error) => encoder.fail(error),
             }
         }
-        XLTYPE_ERR => {
+        XlValueType::Error => {
             encoder.tag(RawValueKind::Error as u8);
             // SAFETY: XLTYPE_ERR selects the error union member.
             encoder.i64(unsafe { value.raw.value.error } as i64);
         }
-        XLTYPE_MISSING => encoder.tag(RawValueKind::Missing as u8),
-        XLTYPE_NIL => encoder.tag(RawValueKind::Blank as u8),
-        XLTYPE_MULTI if !nested => match value.array(encoder.argument()) {
+        XlValueType::Missing => encoder.tag(RawValueKind::Missing as u8),
+        XlValueType::Nil => encoder.tag(RawValueKind::Blank as u8),
+        XlValueType::Multi if !nested => match value.array(encoder.argument()) {
             Ok(array) => {
                 encoder.tag(RawValueKind::Array as u8);
                 encoder.u64(array.rows as u64);
@@ -424,12 +514,103 @@ pub(crate) fn encode_raw_value(
             }
             Err(error) => encoder.fail(error),
         },
-        XLTYPE_MULTI => {
+        XlValueType::Multi => {
             encoder.fail_input(InputError::Malformed("nested arrays are not supported"))
         }
         actual => encoder.fail_input(InputError::WrongType {
             expected: "worksheet value",
             actual,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlfn_sys::{
+        XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL, XLTYPE_ERR,
+        XLTYPE_FLOW, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_REF,
+        XLTYPE_SREF, XLTYPE_STR,
+    };
+
+    #[test]
+    fn xl_value_type_from_raw_and_raw_round_trip() {
+        let cases = [
+            (XLTYPE_NUM, XlValueType::Number),
+            (XLTYPE_STR, XlValueType::String),
+            (XLTYPE_BOOL, XlValueType::Boolean),
+            (XLTYPE_REF, XlValueType::Reference),
+            (XLTYPE_ERR, XlValueType::Error),
+            (XLTYPE_FLOW, XlValueType::Flow),
+            (XLTYPE_MULTI, XlValueType::Multi),
+            (XLTYPE_MISSING, XlValueType::Missing),
+            (XLTYPE_NIL, XlValueType::Nil),
+            (XLTYPE_SREF, XlValueType::SimpleReference),
+            (XLTYPE_INT, XlValueType::Integer),
+            (XLTYPE_BIG_DATA, XlValueType::BigData),
+        ];
+
+        for (raw, expected_type) in cases {
+            assert_eq!(XlValueType::from_raw(raw), Some(expected_type));
+            assert_eq!(expected_type.raw(), raw);
+        }
+
+        assert_eq!(XlValueType::from_raw(0), None);
+        assert_eq!(XlValueType::from_raw(0x0003), None);
+        assert_eq!(XlValueType::from_raw(0x0200), None);
+        assert_eq!(XlValueType::from_raw(0x1000), None);
+    }
+
+    #[test]
+    fn xl_value_type_display_matches_variant_names() {
+        assert_eq!(XlValueType::Number.to_string(), "Number");
+        assert_eq!(XlValueType::String.to_string(), "String");
+        assert_eq!(XlValueType::Boolean.to_string(), "Boolean");
+        assert_eq!(XlValueType::Reference.to_string(), "Reference");
+        assert_eq!(XlValueType::Error.to_string(), "Error");
+        assert_eq!(XlValueType::Flow.to_string(), "Flow");
+        assert_eq!(XlValueType::Multi.to_string(), "Multi");
+        assert_eq!(XlValueType::Missing.to_string(), "Missing");
+        assert_eq!(XlValueType::Nil.to_string(), "Nil");
+        assert_eq!(XlValueType::SimpleReference.to_string(), "SimpleReference");
+        assert_eq!(XlValueType::Integer.to_string(), "Integer");
+        assert_eq!(XlValueType::BigData.to_string(), "BigData");
+    }
+
+    #[test]
+    fn xl_value_ref_validates_raw_structure_and_extracts_type() {
+        let valid_oper = XLOPER12 {
+            value: XLOPER12Value { number: 42.0 },
+            xltype: XLTYPE_NUM | XLBIT_XL_FREE,
+        };
+        let value_ref = XlValueRef::from_array_cell(&valid_oper).unwrap();
+        assert_eq!(value_ref.value_type(), XlValueType::Number);
+        assert_eq!(value_ref.raw_xltype(), XLTYPE_NUM | XLBIT_XL_FREE);
+        assert!(!value_ref.is_blank());
+
+        let valid_dll_free_oper = XLOPER12 {
+            value: XLOPER12Value { number: 42.0 },
+            xltype: XLTYPE_NUM | XLBIT_DLL_FREE,
+        };
+        let dll_free_ref = XlValueRef::from_array_cell(&valid_dll_free_oper).unwrap();
+        assert_eq!(dll_free_ref.value_type(), XlValueType::Number);
+        assert_eq!(dll_free_ref.raw_xltype(), XLTYPE_NUM | XLBIT_DLL_FREE);
+
+        let invalid_flag_oper = XLOPER12 {
+            value: XLOPER12Value { integer: 0 },
+            xltype: XLTYPE_NUM | 0x2000,
+        };
+        assert!(XlValueRef::from_array_cell(&invalid_flag_oper).is_err());
+
+        let invalid_base_oper = XLOPER12 {
+            value: XLOPER12Value { integer: 0 },
+            xltype: 0x0003,
+        };
+        assert!(XlValueRef::from_array_cell(&invalid_base_oper).is_err());
+
+        let nil_oper = XLOPER12::nil();
+        let nil_ref = XlValueRef::from_array_cell(&nil_oper).unwrap();
+        assert_eq!(nil_ref.value_type(), XlValueType::Nil);
+        assert!(nil_ref.is_blank());
     }
 }

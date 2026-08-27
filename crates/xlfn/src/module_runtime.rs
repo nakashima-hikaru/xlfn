@@ -1,5 +1,5 @@
 use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
-#[cfg(any(feature = "rtd", feature = "handles", test))]
+#[cfg(any(feature = "rtd", feature = "handles"))]
 use crate::excel_rtd::RtdModuleState;
 use crate::ingress::{ExportIngress, ExportsDrained};
 use std::sync::LazyLock;
@@ -17,7 +17,7 @@ use crate::excel_rtd::ComModuleLifetime;
 pub(crate) struct ModuleRuntime {
     ingress: ExportIngress,
     callback_admission: ModuleCallbackAdmission,
-    #[cfg(any(feature = "rtd", feature = "handles", test))]
+    #[cfg(any(feature = "rtd", feature = "handles"))]
     rtd: RtdModuleState,
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     com: ComModuleLifetime,
@@ -195,6 +195,13 @@ impl ModuleAuthority {
 }
 
 impl ModuleCleanupAuthority {
+    pub(crate) fn into_authority(self) -> ModuleAuthority {
+        match self {
+            Self::Closing(closing) => ModuleAuthority::Closing(closing),
+            Self::Drained(drained) => ModuleAuthority::Drained(drained),
+        }
+    }
+
     /// Completes the module-side cleanup without minting a predecessor
     /// capability. A progressed `Drained` authority can only close callback
     /// admission; it cannot be converted back into `ModuleClosing`.
@@ -247,17 +254,6 @@ impl ModuleQuiescent {
     pub(crate) fn id(&self) -> ModuleEpochId {
         self.id
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        let module = global();
-        Self {
-            id: ModuleEpochId {
-                module,
-                epoch: module.ingress().epoch(),
-            },
-        }
-    }
 }
 
 impl ModuleRuntime {
@@ -265,7 +261,7 @@ impl ModuleRuntime {
         Self {
             ingress: ExportIngress::new(),
             callback_admission: ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Closed),
-            #[cfg(any(feature = "rtd", feature = "handles", test))]
+            #[cfg(any(feature = "rtd", feature = "handles"))]
             rtd: RtdModuleState::new(),
             #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
             com: ComModuleLifetime::new(),
@@ -285,11 +281,11 @@ impl ModuleRuntime {
     }
 
     pub(crate) fn rtd(&'static self) -> Option<&'static crate::excel_rtd::RtdModuleState> {
-        #[cfg(any(feature = "rtd", feature = "handles", test))]
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         {
             Some(&self.rtd)
         }
-        #[cfg(not(any(feature = "rtd", feature = "handles", test)))]
+        #[cfg(not(any(feature = "rtd", feature = "handles")))]
         None
     }
 
@@ -302,7 +298,7 @@ impl ModuleRuntime {
     /// order.  Runtime admission is reopened by `Runtime` immediately before
     /// this transition; this method owns the module-local portion.
     fn begin_open_internal(&'static self) -> ModuleOpening {
-        #[cfg(any(feature = "rtd", feature = "handles", test))]
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         self.rtd.begin_open();
         self.reset_callbacks();
         self.ingress.begin_opening();
@@ -327,7 +323,7 @@ impl ModuleRuntime {
             xlfn_kernel::invariant::fail_stop();
         }
         self.ingress.begin_close_with(on_closed);
-        #[cfg(any(feature = "rtd", feature = "handles", test))]
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         self.rtd.begin_close();
     }
 
@@ -340,7 +336,7 @@ impl ModuleRuntime {
     }
 
     fn certify_logical_quiescence_internal(&'static self) {
-        #[cfg(any(feature = "rtd", feature = "handles", test))]
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         self.rtd.certify_logical_quiescence();
     }
 }

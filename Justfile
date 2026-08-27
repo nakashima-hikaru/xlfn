@@ -38,6 +38,43 @@ test-libtest:
         -- \
         --test-threads=1
 
+test-all: test-libtest
+
+test-core:
+    cargo test \
+        --package xlfn \
+        --no-default-features \
+        --locked \
+        -- \
+        --test-threads=1
+
+test-handles:
+    cargo test \
+        --package xlfn \
+        --no-default-features \
+        --features handles \
+        --locked \
+        -- \
+        --test-threads=1
+
+test-rtd:
+    cargo test \
+        --package xlfn \
+        --no-default-features \
+        --features rtd \
+        --locked \
+        -- \
+        --test-threads=1
+
+test-async:
+    cargo test \
+        --package xlfn \
+        --no-default-features \
+        --features async \
+        --locked \
+        -- \
+        --test-threads=1
+
 features:
     cargo hack check \
         --package xlfn \

@@ -3,18 +3,13 @@ use xlfn_kernel::thread_affine::ThreadAffineError;
 
 mod authority;
 mod phase;
-mod removal_txn;
 mod state;
 
 pub(crate) use authority::LifecycleControl;
 pub(crate) use phase::{HostLifecycleIntent, LifecyclePhase};
-pub(crate) use removal_txn::{
-    ClosedWitness, FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner,
-    TerminalCertificateKind,
-};
 pub(crate) use state::{
-    GenerationAdmission, LifecycleAccess, LifecycleCoordinator, LifecycleRemovalState,
-    OpenFailureDisposition,
+    FinalRemovalReady, GenerationAdmission, LifecycleAccess, LifecycleCoordinator,
+    OpenFailureDisposition, OpenRollbackReady, RemovalClaim,
 };
 
 pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
@@ -43,7 +38,6 @@ pub(crate) fn lifecycle_invariant_violation(_message: &'static str) -> ! {
 )]
 mod tests {
     use super::*;
-    use crate::XllResult;
     use crate::addin::{Addin, BuildInfo, OpenContext};
     use crate::diagnostics::AddinId;
     use crate::generation::RuntimeGeneration;
@@ -581,279 +575,291 @@ mod tests {
     // SAFETY: this test Addin has no application-owned executable sources.
     unsafe impl crate::addin::PhysicallyUnloadableAddin for CleanClose {}
 
-    struct TraceCleanup;
-
-    impl Addin for TraceCleanup {
-        type SharedState = ();
-        type LifecycleState = ();
-        type Error = XllError;
-        type Layers = ();
-
-        fn open(
-            _context: &OpenContext,
-        ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
-            Self::Error,
-        > {
-            unreachable!()
-        }
-
-        fn cleanup(
-            _state: &mut Self::LifecycleState,
-            reporter: &mut crate::shutdown::CleanupReporter<'_>,
-        ) {
-            reporter.warn(
-                "Lean checker cleanup trace",
-                crate::shutdown::CleanupIssueKind::RegistryCleanup,
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LEAN_TRACE,
-                },
-            );
-        }
-    }
-
-    struct TraceHandle;
-
-    impl crate::handle::ExcelHandleObject for TraceHandle {}
-
-    struct TraceSubscription;
-
-    impl crate::subscription::RtdSubscription for TraceSubscription {
-        fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
-            std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
-        }
-
-        fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-            Ok(())
-        }
-    }
-
-    struct TraceSource {
-        sink: std::sync::Arc<std::sync::Mutex<Option<crate::subscription::RtdSink<f64>>>>,
-    }
-
-    impl crate::subscription::RtdSource for TraceSource {
-        type Value = f64;
-        type Subscription = TraceSubscription;
-
-        fn subscribe(
-            &self,
-            _topic: &crate::subscription::RtdTopic,
-            sink: crate::subscription::RtdSink<Self::Value>,
-        ) -> XllResult<Self::Subscription> {
-            self.sink.lock().unwrap().replace(sink);
-            Ok(TraceSubscription)
-        }
-    }
-
     struct TraceDiagnosticSink;
 
     impl crate::diagnostics::DiagnosticSink for TraceDiagnosticSink {
         fn report(&self, _event: &crate::diagnostics::DiagnosticEvent<'_>) {}
     }
 
-    #[test]
-    #[ignore = "requires XLFN_SHUTDOWN_CHECKER to point to the Lean executable"]
-    fn rust_shutdown_resource_traces_are_accepted_by_lean_checker() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+    #[cfg(all(feature = "rtd", feature = "handles"))]
+    mod lean_shutdown_trace_tests {
+        use super::*;
+        use crate::XllResult;
 
-        let checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER")
-            .expect("XLFN_SHUTDOWN_CHECKER must point to shutdown_trace_checker");
+        struct TraceCleanup;
 
-        let check = |label: &str, trace: String| {
-            let mut child = Command::new(&checker)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap_or_else(|error| {
-                    panic!("failed to start shutdown_trace_checker for {label}: {error}")
-                });
-            child
-                .stdin
-                .take()
-                .expect("checker stdin is piped")
-                .write_all(trace.as_bytes())
-                .unwrap_or_else(|error| panic!("failed to write {label} shutdown trace: {error}"));
-            let output = child.wait_with_output().unwrap_or_else(|error| {
-                panic!("failed to wait for {label} shutdown trace: {error}")
-            });
-            assert!(
-                output.status.success(),
-                "Lean checker rejected {label} Rust trace: {}\ntrace:\n{trace}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
+        impl Addin for TraceCleanup {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = ();
 
-        let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
-        let runtime = static_fixture.runtime();
-        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish((), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            fn open(
+                _context: &OpenContext,
+            ) -> Result<
+                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                Self::Error,
+            > {
+                unreachable!()
+            }
 
-        crate::diagnostics::reset_diagnostic_router().unwrap();
-        crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
-        crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
-
-        let pointer = crate::return_value::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
-        // SAFETY: `pointer` is the live DLL-owned block returned by the
-        // framework boundary above and is freed exactly once here.
-        let free = unsafe { crate::return_value::free_return_boundary(pointer) };
-        drop(free);
-
-        let handles = runtime.formula_handle_service().unwrap();
-        handles
-            .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
-                Ok(TraceHandle)
-            })
-            .unwrap();
-
-        let notifier_state =
-            std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
-        let subscriptions = runtime.subscriptions().unwrap();
-        let subscriptions = subscriptions.as_arc();
-        let server = subscriptions
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero test server generation"),
-            )
-            .unwrap();
-        server
-            .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
-                std::sync::Arc::clone(&notifier_state),
-            ))
-            .unwrap();
-        let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime
-                .last_committed_generation()
-                .expect("test runtime has a generation"),
-            TraceSource {
-                sink: std::sync::Arc::clone(&trace_sink),
-            },
-        )
-        .unwrap();
-        let prepared = subscriptions
-            .prepare(
-                &source,
-                crate::subscription::RtdTopic::single("lean-checker-subscription").unwrap(),
-            )
-            .unwrap();
-        let key = *prepared.key();
-        prepared.commit();
-        let conn = subscriptions
-            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
-            .unwrap();
-        conn.commit().unwrap();
-        trace_sink
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("trace source must retain its RTD sink")
-            .publish(1.0)
-            .unwrap();
-        assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
-
-        #[cfg(feature = "async")]
-        {
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let (cancellation, _token) = crate::cancellation::CancellationSource::new(
-                crate::cancellation::CancellationGuarantee::BestEffort,
-            );
-            runtime.start_async(1).unwrap();
-            let ingress = crate::module_runtime::ingress()
-                .enter_with(|| {})
-                .into_admitted()
-                .expect("test call enters during OPEN");
-            let call = runtime
-                .enter(&ingress)
-                .expect("async trace task must be spawned from an admitted call");
-            runtime
-                .async_manager()
-                .spawn(
-                    runtime
-                        .last_committed_generation()
-                        .expect("an open runtime has a published generation")
-                        .get(),
-                    async move {
-                        done_tx.send(()).unwrap();
+            fn cleanup(
+                _state: &mut Self::LifecycleState,
+                reporter: &mut crate::shutdown::CleanupReporter<'_>,
+            ) {
+                reporter.warn(
+                    "Lean checker cleanup trace",
+                    crate::shutdown::CleanupIssueKind::RegistryCleanup,
+                    XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::LEAN_TRACE,
                     },
-                    cancellation,
+                );
+            }
+        }
+
+        struct TraceHandle;
+
+        impl crate::handle::ExcelHandleObject for TraceHandle {}
+
+        struct TraceSubscription;
+
+        impl crate::subscription::RtdSubscription for TraceSubscription {
+            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
+                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
+            }
+
+            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+                Ok(())
+            }
+        }
+
+        struct TraceSource {
+            sink: std::sync::Arc<std::sync::Mutex<Option<crate::subscription::RtdSink<f64>>>>,
+        }
+
+        impl crate::subscription::RtdSource for TraceSource {
+            type Value = f64;
+            type Subscription = TraceSubscription;
+
+            fn subscribe(
+                &self,
+                _topic: &crate::subscription::RtdTopic,
+                sink: crate::subscription::RtdSink<Self::Value>,
+            ) -> XllResult<Self::Subscription> {
+                self.sink.lock().unwrap().replace(sink);
+                Ok(TraceSubscription)
+            }
+        }
+
+        #[test]
+        #[ignore = "requires XLFN_SHUTDOWN_CHECKER to point to the Lean executable"]
+        fn rust_shutdown_resource_traces_are_accepted_by_lean_checker() {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER")
+                .expect("XLFN_SHUTDOWN_CHECKER must point to shutdown_trace_checker");
+
+            let check = |label: &str, trace: String| {
+                let mut child = Command::new(&checker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap_or_else(|error| {
+                        panic!("failed to start shutdown_trace_checker for {label}: {error}")
+                    });
+                child
+                    .stdin
+                    .take()
+                    .expect("checker stdin is piped")
+                    .write_all(trace.as_bytes())
+                    .unwrap_or_else(|error| {
+                        panic!("failed to write {label} shutdown trace: {error}")
+                    });
+                let output = child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("failed to wait for {label} shutdown trace: {error}")
+                });
+                assert!(
+                    output.status.success(),
+                    "Lean checker rejected {label} Rust trace: {}\ntrace:\n{trace}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+
+            let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
+            let runtime = static_fixture.runtime();
+            let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
+            runtime.publish((), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+            crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
+
+            let pointer = crate::return_value::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
+            // SAFETY: `pointer` is the live DLL-owned block returned by the
+            // framework boundary above and is freed exactly once here.
+            let free = unsafe { crate::return_value::free_return_boundary(pointer) };
+            drop(free);
+
+            let handles = runtime.formula_handle_service().unwrap();
+            handles
+                .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
+                    Ok(TraceHandle)
+                })
+                .unwrap();
+
+            let notifier_state =
+                std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
+            let subscriptions = runtime.subscriptions().unwrap();
+            let subscriptions = subscriptions.as_arc();
+            let server = subscriptions
+                .register_server(
+                    crate::subscription::ServerGeneration::new(1)
+                        .expect("non-zero test server generation"),
                 )
                 .unwrap();
-            drop(call);
-            done_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("Lean checker async trace task did not complete");
-        }
-
-        assert_eq!(host_auto_remove::<TraceCleanup>(runtime), 1);
-        let trace = runtime.shutdown_trace_json();
-        for event in [
-            "enterExternal",
-            "leaveExternal",
-            "enterCall",
-            "leaveCall",
-            "createReturnBlock",
-            "beginReturnFree",
-            "releaseReturnBlock",
-            "endReturnFree",
-            "addHandle",
-            "removeHandle",
-            "beginRtdOperation",
-            "endRtdOperation",
-            "addSubscription",
-            "removeSubscription",
-            "beginCallback",
-            "endCallback",
-            "startDiagnostics",
-            "enqueueDiagnostic",
-            "flushDiagnostic",
-            "recordCleanupIssue",
-        ] {
-            assert!(
-                trace.contains(event),
-                "resource trace is missing {event}: {trace}"
-            );
-        }
-        #[cfg(feature = "async")]
-        for event in [
-            "startAsyncExecutor",
-            "startAsyncTask",
-            "endAsyncTask",
-            "stopAsyncExecutor",
-        ] {
-            assert!(
-                trace.contains(event),
-                "resource trace is missing {event}: {trace}"
-            );
-        }
-        check("resourceful", trace);
-
-        crate::diagnostics::reset_diagnostic_router().unwrap();
-        let clean_runtime = Runtime::<CleanClose>::new();
-        let mut opening = clean_runtime.runtime_orchestrator().begin_open().unwrap();
-        clean_runtime.publish((), ());
-        clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
-        check("clean", clean_runtime.shutdown_trace_json());
-
-        let failure_runtime = Runtime::<QuiesceFailure>::new();
-        let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut opening = failure_runtime.runtime_orchestrator().begin_open().unwrap();
-        failure_runtime.publish_with_lifecycle((), DropObserved(std::sync::Arc::clone(&drops)), ());
-        failure_runtime
-            .finish_open(&mut opening, Vec::new())
+            server
+                .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
+                    std::sync::Arc::clone(&notifier_state),
+                ))
+                .unwrap();
+            let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let source = crate::subscription::RtdSourceHandle::for_internal(
+                runtime
+                    .last_committed_generation()
+                    .expect("test runtime has a generation"),
+                TraceSource {
+                    sink: std::sync::Arc::clone(&trace_sink),
+                },
+            )
             .unwrap();
-        assert_eq!(host_auto_remove::<QuiesceFailure>(&failure_runtime), 1);
-        assert_eq!(
-            failure_runtime.phase(),
-            crate::lifecycle::LifecyclePhase::Quarantined
-        );
-        let failure_trace = failure_runtime.shutdown_trace_json();
-        assert!(failure_trace.contains("quarantined"));
-        check("quarantine", failure_trace);
+            let prepared = subscriptions
+                .prepare(
+                    &source,
+                    crate::subscription::RtdTopic::single("lean-checker-subscription").unwrap(),
+                )
+                .unwrap();
+            let key = *prepared.key();
+            prepared.commit();
+            let conn = subscriptions
+                .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+                .unwrap();
+            conn.commit().unwrap();
+            trace_sink
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("trace source must retain its RTD sink")
+                .publish(1.0)
+                .unwrap();
+            assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
+
+            #[cfg(feature = "async")]
+            {
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let (cancellation, _token) = crate::cancellation::CancellationSource::new(
+                    crate::cancellation::CancellationGuarantee::BestEffort,
+                );
+                runtime.start_async(1).unwrap();
+                let ingress = crate::module_runtime::ingress()
+                    .enter_with(|| {})
+                    .into_admitted()
+                    .expect("test call enters during OPEN");
+                let call = runtime
+                    .enter(&ingress)
+                    .expect("async trace task must be spawned from an admitted call");
+                runtime
+                    .async_manager()
+                    .spawn(
+                        runtime
+                            .last_committed_generation()
+                            .expect("an open runtime has a published generation")
+                            .get(),
+                        async move {
+                            done_tx.send(()).unwrap();
+                        },
+                        cancellation,
+                    )
+                    .unwrap();
+                drop(call);
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("Lean checker async trace task did not complete");
+            }
+
+            assert_eq!(host_auto_remove::<TraceCleanup>(runtime), 1);
+            let trace = runtime.shutdown_trace_json();
+            for event in [
+                "enterExternal",
+                "leaveExternal",
+                "enterCall",
+                "leaveCall",
+                "createReturnBlock",
+                "beginReturnFree",
+                "releaseReturnBlock",
+                "endReturnFree",
+                "addHandle",
+                "removeHandle",
+                "beginRtdOperation",
+                "endRtdOperation",
+                "addSubscription",
+                "removeSubscription",
+                "beginCallback",
+                "endCallback",
+                "startDiagnostics",
+                "enqueueDiagnostic",
+                "flushDiagnostic",
+                "recordCleanupIssue",
+            ] {
+                assert!(
+                    trace.contains(event),
+                    "resource trace is missing {event}: {trace}"
+                );
+            }
+            #[cfg(feature = "async")]
+            for event in [
+                "startAsyncExecutor",
+                "startAsyncTask",
+                "endAsyncTask",
+                "stopAsyncExecutor",
+            ] {
+                assert!(
+                    trace.contains(event),
+                    "resource trace is missing {event}: {trace}"
+                );
+            }
+            check("resourceful", trace);
+
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let clean_runtime = Runtime::<CleanClose>::new();
+            let mut opening = clean_runtime.runtime_orchestrator().begin_open().unwrap();
+            clean_runtime.publish((), ());
+            clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
+            check("clean", clean_runtime.shutdown_trace_json());
+
+            let failure_runtime = Runtime::<QuiesceFailure>::new();
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let mut opening = failure_runtime.runtime_orchestrator().begin_open().unwrap();
+            failure_runtime.publish_with_lifecycle(
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            failure_runtime
+                .finish_open(&mut opening, Vec::new())
+                .unwrap();
+            assert_eq!(host_auto_remove::<QuiesceFailure>(&failure_runtime), 1);
+            assert_eq!(
+                failure_runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            let failure_trace = failure_runtime.shutdown_trace_json();
+            assert!(failure_trace.contains("quarantined"));
+            check("quarantine", failure_trace);
+        }
     }
 
     #[test]
@@ -1406,140 +1412,149 @@ mod tests {
         // terminal unregister. Restore the RTD test epoch for later cases;
         // ingress is already sealed and must remain sealed until the next
         // Runtime::begin_open.
-        crate::module_runtime::global()
-            .rtd()
-            .expect("RTD test state")
-            .begin_open();
+        #[cfg(any(feature = "rtd", feature = "handles"))]
+        if let Some(rtd) = crate::module_runtime::global().rtd() {
+            rtd.begin_open();
+        }
         runtime.release_test_module_lease();
     }
 
-    struct OrderedClose;
+    #[cfg(all(feature = "rtd", feature = "handles"))]
+    mod rtd_handle_order_tests {
+        use super::*;
+        use crate::XllResult;
 
-    struct OrderedState {
-        events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-    }
+        struct OrderedClose;
 
-    struct OrderedHandle {
-        events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-    }
-
-    struct OrderedSubscription {
-        events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-    }
-
-    impl crate::subscription::RtdSubscription for OrderedSubscription {
-        fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
-            std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
+        struct OrderedState {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
 
-        fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-            self.events.lock().unwrap().push("subscription");
-            Ok(())
-        }
-    }
-
-    struct OrderedSource {
-        events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-    }
-
-    impl crate::subscription::RtdSource for OrderedSource {
-        type Value = f64;
-        type Subscription = OrderedSubscription;
-
-        fn subscribe(
-            &self,
-            _topic: &crate::subscription::RtdTopic,
-            _sink: crate::subscription::RtdSink<Self::Value>,
-        ) -> XllResult<Self::Subscription> {
-            Ok(OrderedSubscription {
-                events: std::sync::Arc::clone(&self.events),
-            })
-        }
-    }
-
-    impl Drop for OrderedHandle {
-        fn drop(&mut self) {
-            self.events.lock().unwrap().push("handle");
-        }
-    }
-
-    impl crate::handle::ExcelHandleObject for OrderedHandle {}
-
-    impl Addin for OrderedClose {
-        type SharedState = ();
-        type LifecycleState = OrderedState;
-        type Error = XllError;
-        type Layers = ();
-
-        fn open(
-            _context: &OpenContext,
-        ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
-            Self::Error,
-        > {
-            unreachable!()
+        struct OrderedHandle {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
 
-        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
-            state.events.lock().unwrap().push("state");
+        struct OrderedSubscription {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
-    }
 
-    #[test]
-    fn runtime_owned_subscriptions_and_handles_drop_before_addin_state_closes() {
-        let runtime = Runtime::<OrderedClose>::new();
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish_with_lifecycle(
-            (),
-            OrderedState {
-                events: std::sync::Arc::clone(&events),
-            },
-            (),
-        );
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        runtime
-            .formula_handle_service()
-            .unwrap()
-            .prepare(crate::handle::test_topic_key("ordered"), || {
-                Ok(OrderedHandle {
-                    events: std::sync::Arc::clone(&events),
+        impl crate::subscription::RtdSubscription for OrderedSubscription {
+            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
+                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
+            }
+
+            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+                self.events.lock().unwrap().push("subscription");
+                Ok(())
+            }
+        }
+
+        struct OrderedSource {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+
+        impl crate::subscription::RtdSource for OrderedSource {
+            type Value = f64;
+            type Subscription = OrderedSubscription;
+
+            fn subscribe(
+                &self,
+                _topic: &crate::subscription::RtdTopic,
+                _sink: crate::subscription::RtdSink<Self::Value>,
+            ) -> XllResult<Self::Subscription> {
+                Ok(OrderedSubscription {
+                    events: std::sync::Arc::clone(&self.events),
                 })
-            })
-            .unwrap();
-        let subscriptions = runtime.subscriptions().unwrap();
-        let subscriptions = subscriptions.as_arc();
-        let server = subscriptions
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero test server generation"),
-            )
-            .unwrap();
-        let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime
-                .last_committed_generation()
-                .expect("test runtime has a generation"),
-            OrderedSource {
-                events: std::sync::Arc::clone(&events),
-            },
-        )
-        .unwrap();
-        let prepared = subscriptions
-            .prepare(
-                &source,
-                crate::subscription::RtdTopic::single("ordered").unwrap(),
-            )
-            .unwrap();
-        let key = *prepared.key();
-        prepared.commit();
-        let conn = subscriptions
-            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
-            .unwrap();
-        conn.commit().unwrap();
-        drop(server);
+            }
+        }
 
-        assert_eq!(host_auto_remove::<OrderedClose>(&runtime), 1);
-        assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);
+        impl Drop for OrderedHandle {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push("handle");
+            }
+        }
+
+        impl crate::handle::ExcelHandleObject for OrderedHandle {}
+
+        impl Addin for OrderedClose {
+            type SharedState = ();
+            type LifecycleState = OrderedState;
+            type Error = XllError;
+            type Layers = ();
+
+            fn open(
+                _context: &OpenContext,
+            ) -> Result<
+                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                Self::Error,
+            > {
+                unreachable!()
+            }
+
+            fn cleanup(
+                state: &mut Self::LifecycleState,
+                _: &mut crate::shutdown::CleanupReporter<'_>,
+            ) {
+                state.events.lock().unwrap().push("state");
+            }
+        }
+
+        #[test]
+        fn runtime_owned_subscriptions_and_handles_drop_before_addin_state_closes() {
+            let runtime = Runtime::<OrderedClose>::new();
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
+            runtime.publish_with_lifecycle(
+                (),
+                OrderedState {
+                    events: std::sync::Arc::clone(&events),
+                },
+                (),
+            );
+            runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+            runtime
+                .formula_handle_service()
+                .unwrap()
+                .prepare(crate::handle::test_topic_key("ordered"), || {
+                    Ok(OrderedHandle {
+                        events: std::sync::Arc::clone(&events),
+                    })
+                })
+                .unwrap();
+            let subscriptions = runtime.subscriptions().unwrap();
+            let subscriptions = subscriptions.as_arc();
+            let server = subscriptions
+                .register_server(
+                    crate::subscription::ServerGeneration::new(1)
+                        .expect("non-zero test server generation"),
+                )
+                .unwrap();
+            let source = crate::subscription::RtdSourceHandle::for_internal(
+                runtime
+                    .last_committed_generation()
+                    .expect("test runtime has a generation"),
+                OrderedSource {
+                    events: std::sync::Arc::clone(&events),
+                },
+            )
+            .unwrap();
+            let prepared = subscriptions
+                .prepare(
+                    &source,
+                    crate::subscription::RtdTopic::single("ordered").unwrap(),
+                )
+                .unwrap();
+            let key = *prepared.key();
+            prepared.commit();
+            let conn = subscriptions
+                .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+                .unwrap();
+            conn.commit().unwrap();
+            drop(server);
+
+            assert_eq!(host_auto_remove::<OrderedClose>(&runtime), 1);
+            assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);
+        }
     }
 
     struct StagedRaceState {

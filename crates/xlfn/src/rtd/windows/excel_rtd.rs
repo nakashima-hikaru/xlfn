@@ -3,6 +3,7 @@ use super::server::{
     RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server,
     ensure_server_without_handles,
 };
+#[cfg(feature = "handles")]
 use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
+#[cfg(feature = "handles")]
 pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
     handles: Arc<H>,
     ingress: &'static ExportIngress,

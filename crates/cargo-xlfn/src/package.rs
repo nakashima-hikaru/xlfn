@@ -42,13 +42,14 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
                 &staging_root.path().join(target.directory()),
             )?;
             validate_output_destination(&args.out.join(target.directory()))?;
-            let verified = stage_package_target(
-                *target,
-                args,
-                &metadata,
-                &target_staging,
-                build_target_directory,
-            )?;
+            let verified = build_and_verify_target(TargetBuildRequest {
+                target: *target,
+                metadata: &metadata,
+                build: &build,
+                default_profile: DefaultBuildProfile::Release,
+                target_directory: build_target_directory,
+            })?;
+            verified.materialize(&target_staging)?;
             let prepared = verified.prepare_commit(target_staging.path(), target.triple())?;
             prepared_packages.push((*target, prepared));
         }
@@ -90,8 +91,14 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
         let staging = xlfn_package::PrivateStagingDirectory::create(
             &staging_guard.path().join("distribution"),
         )?;
-        let verified =
-            stage_package_target(target, args, &metadata, &staging, build_target_directory)?;
+        let verified = build_and_verify_target(TargetBuildRequest {
+            target,
+            metadata: &metadata,
+            build: &build,
+            default_profile: DefaultBuildProfile::Release,
+            target_directory: build_target_directory,
+        })?;
+        verified.materialize(&staging)?;
         let prepared = verified.prepare_commit(staging.path(), target.triple())?;
         let expected_names = verified
             .artifacts()
@@ -158,129 +165,4 @@ pub(crate) fn validate_transactional_output_root(destination: &Path) -> Result {
         }
     }
     Ok(())
-}
-
-pub(crate) fn stage_package_target(
-    target: WindowsTarget,
-    args: &PackageArgs,
-    metadata: &ProjectMetadata,
-    staging: &xlfn_package::PrivateStagingDirectory,
-    target_directory: &Path,
-) -> Result<xlfn_package::VerifiedPackage> {
-    let build = args.build();
-    let profile = build.profile.as_deref().unwrap_or("release");
-    let mut command = cargo_command();
-    command
-        .args(["build", "--manifest-path"])
-        .arg(&metadata.manifest_path)
-        .args([
-            "--package",
-            &metadata.package_name,
-            "--target",
-            target.triple(),
-        ]);
-    configure_build(&mut command, metadata, target.triple(), target_directory)?;
-    build.apply_to_command(&mut command, Some("release"));
-    if !command.status()?.success() {
-        bail!("cargo build failed for {}", target.triple());
-    }
-    let source = built_library_path(
-        metadata,
-        target.triple(),
-        &build,
-        Some("release"),
-        target_directory,
-    );
-    if !source.is_file() {
-        bail!("built XLL DLL was not found at {}", source.display());
-    }
-    let source_snapshot = xlfn_package::snapshot_file(target.triple(), &source)?;
-    let (bundle, strict_paths) = match &metadata.bundle {
-        Some(bundle_metadata) => (
-            xlfn_package::resolve_bundle_files_with_metadata(
-                &metadata.manifest_directory,
-                target.triple(),
-                bundle_metadata,
-            )?,
-            bundle_metadata.strict_paths,
-        ),
-        None => (xlfn_package::ResolvedBundle::empty(), true),
-    };
-    validate_bundle_output_names(&bundle, &metadata.artifact_name)?;
-    let bundle_sources = bundle
-        .resolved_files()
-        .map(
-            |(configured_path, staged_source)| -> Result<xlfn_package::BundleSource> {
-                let staged_relative_path = staged_source
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .context("bundle file basename is not valid UTF-8")?;
-                Ok(xlfn_package::BundleSource {
-                    configured_path: configured_path.to_owned(),
-                    staged_relative_path: staged_relative_path.to_owned(),
-                })
-            },
-        )
-        .collect::<Result<Vec<_>>>()?;
-    let external_imports = bundle
-        .external_imports()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-
-    let validation_staging = xlfn_package::PrivateStagingDirectory::create(
-        &staging.path().with_added_extension("validation"),
-    )?;
-    let mut staged_bundle = xlfn_package::stage_bundle(&bundle, &validation_staging)?;
-    let xll = validation_staging
-        .path()
-        .join(format!("{}.xll", metadata.artifact_name));
-    if fs::symlink_metadata(&xll).is_ok() {
-        bail!(
-            "bundle basename collides with generated XLL: {}",
-            xll.display()
-        );
-    }
-    fs::write(&xll, source_snapshot.as_ref())?;
-
-    let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
-    observation.warn_if_mixed();
-    // Keep the closed-world verifier strict for arbitrary imports while
-    // permitting only dynamic CRT names observed in this exact XLL image.
-    staged_bundle.try_add_external_imports(&observation.observed_dynamic_crt_imports)?;
-
-    // Inspect only the isolated files. These same staged bytes are hashed
-    // below and become the committed distribution directory.
-    let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
-
-    let manifest = xlfn_package::BuildManifestInput {
-        package: metadata.package_name.clone(),
-        package_version: metadata.package_version.clone(),
-        artifact: metadata.artifact_name.clone(),
-        target: target.triple().to_owned(),
-        profile: profile.to_owned(),
-        feature_selection: xlfn_package::FeatureSelection {
-            explicit: build.features.clone(),
-            default_features: !build.no_default_features,
-            all_features: build.all_features,
-            resolved: metadata.resolved_features.clone(),
-        },
-        cargo_constraints: xlfn_package::CargoConstraints {
-            locked: build.locked,
-            frozen: build.frozen,
-            offline: build.offline,
-            lockfile_sha256: metadata.lockfile_sha256.clone(),
-        },
-        crt: observation.manifest(metadata.crt),
-        bundle_sources,
-        bundle_policy: xlfn_package::BundlePolicy {
-            strict_paths,
-            system_import_policy: xlfn_package::SYSTEM_IMPORT_POLICY_VERSION.to_owned(),
-            external_imports,
-        },
-        integrity: xlfn_package::IntegrityMetadata::default(),
-    };
-    let verified = verified.with_build_manifest(manifest)?;
-    verified.materialize(staging)?;
-    fs::remove_dir_all(validation_staging.path())?;
-    Ok(verified)
 }

@@ -6,23 +6,55 @@
 //! Keeping that stage in the runtime shutdown domain prevents either pipeline
 //! from silently changing the unload-safety ordering.
 
+use super::certificate::TerminalCertificateKind;
+use super::owner::RemovalOwner;
 use crate::addin::Addin;
-use crate::lifecycle::{QuiescenceProof, RemovalOwner, TerminalCertificateKind};
 use crate::runtime::Runtime;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+/// The single terminal shutdown proof carried across the lifecycle boundary.
+///
+/// The concrete subsystem certificates are consumed while this value is
+/// assembled. Lifecycle code only needs the identity metadata that relates
+/// the proof to the generation and module epoch it retired.
+pub(crate) struct QuiescenceProof {
+    services_generation: Option<crate::generation::RuntimeGeneration>,
+    module_epoch: crate::module_runtime::ModuleEpochId,
+}
+
+impl QuiescenceProof {
+    pub(crate) const fn services_generation(&self) -> Option<crate::generation::RuntimeGeneration> {
+        self.services_generation
+    }
+
+    pub(crate) const fn module_epoch(&self) -> crate::module_runtime::ModuleEpochId {
+        self.module_epoch
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        services_generation: Option<crate::generation::RuntimeGeneration>,
+        module_epoch: crate::module_runtime::ModuleEpochId,
+    ) -> Self {
+        Self {
+            services_generation,
+            module_epoch,
+        }
+    }
+}
+
 /// Add-in state that has passed the quiesce boundary and is owned by the
 /// teardown transaction until best-effort cleanup completes.
-pub(super) struct QuiescedAddin<'runtime, A: Addin> {
+pub(crate) struct QuiescedAddin<'runtime, A: Addin> {
     runtime: &'runtime Runtime<A>,
     generation: Option<crate::generation::RuntimeGeneration>,
     shared_state: Option<A::SharedState>,
 }
 
-pub(super) struct CleanedAddin {
-    pub(super) addin_quiesced: crate::shutdown::AddinQuiesced,
-    pub(super) generation_reclaimed: crate::shutdown::GenerationReclaimed,
+pub(crate) struct CleanedAddin {
+    pub(crate) addin_quiesced: crate::shutdown::AddinQuiesced,
+    pub(crate) generation_reclaimed: crate::shutdown::GenerationReclaimed,
 }
 
 impl CleanedAddin {
@@ -35,7 +67,7 @@ impl CleanedAddin {
 }
 
 impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
-    pub(super) fn empty(
+    pub(crate) fn empty(
         runtime: &'runtime Runtime<A>,
         generation: Option<crate::generation::RuntimeGeneration>,
     ) -> Self {
@@ -46,7 +78,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
     }
 
-    pub(super) fn shared(
+    pub(crate) fn shared(
         runtime: &'runtime Runtime<A>,
         generation: Option<crate::generation::RuntimeGeneration>,
         shared_state: A::SharedState,
@@ -58,7 +90,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
     }
 
-    pub(super) fn cleanup(
+    pub(crate) fn cleanup(
         mut self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
@@ -166,7 +198,7 @@ impl<A: Addin> Drop for QuiescedAddin<'_, A> {
 /// terminal proof is assembled. Both rollback and final removal therefore
 /// carry the same execution-drained witness through their remaining cleanup
 /// stages instead of immediately unwrapping it at the call site.
-pub(super) struct ExecutionDrained {
+pub(crate) struct ExecutionDrained {
     module: crate::module_runtime::ModuleExportsDrained,
     returns: crate::shutdown::ReturnsQuiescent,
 }
@@ -175,7 +207,7 @@ pub(super) struct ExecutionDrained {
 /// subscription producers are stopped. Keeping these certificates together
 /// prevents one pipeline from accidentally assembling a terminal proof with
 /// only part of the producer shutdown sequence completed.
-pub(super) struct ProducersStopped {
+pub(crate) struct ProducersStopped {
     execution: ExecutionDrained,
     async_stopped: crate::shutdown::AsyncStopped,
     subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
@@ -186,14 +218,14 @@ pub(super) struct ProducersStopped {
 /// The subscription certificate is consumed by `Runtime::seal_generation_services`
 /// and cannot be separated from the corresponding sealed handle service. This
 /// is the close-side counterpart of `ArmedServices` on the open path.
-pub(super) struct ServicesSealed<'runtime, A: Addin> {
+pub(crate) struct ServicesSealed<'runtime, A: Addin> {
     execution: ExecutionDrained,
     async_stopped: crate::shutdown::AsyncStopped,
     sealed: crate::runtime_components::SealedGenerationServices,
     addin: QuiescedAddin<'runtime, A>,
 }
 
-pub(super) struct ServicesCleaned {
+pub(crate) struct ServicesCleaned {
     execution: ExecutionDrained,
     async_stopped: crate::shutdown::AsyncStopped,
     sealed: crate::runtime_components::SealedGenerationServices,
@@ -205,7 +237,7 @@ pub(super) struct ServicesCleaned {
 /// At this point the producer certificates and handle-store certificate are
 /// one value, so a caller cannot accidentally assemble a terminal proof from
 /// a handle certificate belonging to a different producer stage.
-pub(super) struct ServicesQuiescent {
+pub(crate) struct ServicesQuiescent {
     module: crate::module_runtime::ModuleExportsDrained,
     returns: crate::shutdown::ReturnsQuiescent,
     async_stopped: crate::shutdown::AsyncStopped,
@@ -218,14 +250,14 @@ pub(super) struct ServicesQuiescent {
 /// Owns every resource certificate after producers have stopped. The only
 /// operation that can expose the aggregate proof is `into_proof`, so callers
 /// cannot accidentally certify a partially assembled terminal transition.
-pub(super) struct ResourcesReclaimed {
+pub(crate) struct ResourcesReclaimed {
     services: ServicesQuiescent,
     rtd: crate::excel_rtd::RtdQuiescent,
     host_callbacks: crate::shutdown::HostCallbacksDetached,
     diagnostics: crate::diagnostics::DiagnosticsStopped,
 }
 
-pub(super) trait ModuleCloseStage {
+pub(crate) trait ModuleCloseStage {
     fn close_module_callbacks(&self);
 }
 
@@ -266,7 +298,7 @@ impl ModuleCloseStage for ResourcesReclaimed {
 }
 
 impl ExecutionDrained {
-    pub(super) fn begin<A: Addin>(
+    pub(crate) fn begin<A: Addin>(
         runtime: &Runtime<A>,
         module: crate::module_runtime::ModuleClosing,
         _record_trace: bool,
@@ -291,11 +323,11 @@ impl ExecutionDrained {
         Ok(Self { module, returns })
     }
 
-    pub(super) fn close_module_callbacks(&self) {
+    pub(crate) fn close_module_callbacks(&self) {
         self.module.close_callbacks();
     }
 
-    pub(super) fn stop_producers<A: Addin>(
+    pub(crate) fn stop_producers<A: Addin>(
         self,
         runtime: &Runtime<A>,
         report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
@@ -338,7 +370,7 @@ impl ExecutionDrained {
 }
 
 impl ProducersStopped {
-    pub(super) fn seal_services<'runtime, A: Addin>(
+    pub(crate) fn seal_services<'runtime, A: Addin>(
         self,
         runtime: &'runtime Runtime<A>,
         addin: QuiescedAddin<'runtime, A>,
@@ -364,7 +396,7 @@ impl ProducersStopped {
 }
 
 impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
-    pub(super) fn cleanup(
+    pub(crate) fn cleanup(
         self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
@@ -389,7 +421,7 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
 }
 
 impl ServicesCleaned {
-    pub(super) fn finish(
+    pub(crate) fn finish(
         self,
     ) -> Result<ServicesQuiescent, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
     {
@@ -439,7 +471,7 @@ impl ServicesQuiescent {
 }
 
 impl ResourcesReclaimed {
-    pub(super) fn new(
+    pub(crate) fn new(
         services: ServicesQuiescent,
         rtd: crate::excel_rtd::RtdQuiescent,
         host_callbacks: crate::shutdown::HostCallbacksDetached,
@@ -453,92 +485,106 @@ impl ResourcesReclaimed {
         }
     }
 
-    pub(super) fn into_proof(self) -> QuiescenceProof {
+    pub(crate) fn into_proof(self) -> crate::XllResult<QuiescenceProof> {
+        let Self {
+            services,
+            rtd,
+            host_callbacks,
+            diagnostics,
+        } = self;
         let (module, returns, async_stopped, subscriptions_stopped, handles, addin, generation) =
-            self.services.into_parts();
+            services.into_parts();
+        let services_generation = match (subscriptions_stopped.generation(), handles.generation()) {
+            (subscriptions_generation, handles_generation)
+                if subscriptions_generation == handles_generation =>
+            {
+                subscriptions_generation
+            }
+            _ => {
+                return Err(crate::XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                });
+            }
+        };
         let (module_quiescent, exports) = module.certify();
-        QuiescenceProof {
+        let module_epoch = module_quiescent.id();
+        let _terminal_resources = (
             exports,
+            module_quiescent,
             returns,
-            rtd: self.rtd,
-            host_callbacks: self.host_callbacks,
             async_stopped,
             subscriptions_stopped,
-            handles_quiescent: handles,
-            diagnostics_stopped: self.diagnostics,
-            addin_quiesced: addin,
-            generation_reclaimed: generation,
-            module_quiescent,
-        }
+            handles,
+            rtd,
+            host_callbacks,
+            diagnostics,
+            addin,
+            generation,
+        );
+        Ok(QuiescenceProof {
+            services_generation,
+            module_epoch,
+        })
     }
 }
 
-/// Retains the already-progressed module authority when an incomplete
-/// teardown is abandoned. The recovery path is deliberately one-way:
-/// `ModuleExportsDrained` is stored as a drained cleanup authority and is
-/// never converted back into `ModuleClosing`.
-pub(super) trait ModuleAuthorityRecovery<A: Addin> {
-    fn recover_module_authority(self, runtime: &Runtime<A>);
+/// Returns the already-progressed module authority to the teardown owner when
+/// an incomplete teardown is abandoned. The recovery path is deliberately
+/// one-way: `ModuleExportsDrained` is stored as a drained cleanup authority and
+/// is never converted back into `ModuleClosing`.
+pub(crate) trait ModuleAuthorityRecovery {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority;
 }
 
-fn retain_drained_module<A: Addin>(
-    runtime: &Runtime<A>,
-    module: crate::module_runtime::ModuleExportsDrained,
-) {
-    runtime
-        .lifecycle_control()
-        .install_module_cleanup_authority(crate::module_runtime::ModuleCleanupAuthority::Drained(
-            module,
-        ));
-}
-
-impl<A: Addin> ModuleAuthorityRecovery<A> for ExecutionDrained {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        retain_drained_module(runtime, self.module);
+impl ModuleAuthorityRecovery for ExecutionDrained {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        crate::module_runtime::ModuleCleanupAuthority::Drained(self.module)
     }
 }
 
-impl<A: Addin> ModuleAuthorityRecovery<A> for ProducersStopped {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        self.execution.recover_module_authority(runtime);
+impl ModuleAuthorityRecovery for ProducersStopped {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.execution.recover_module_authority()
     }
 }
 
-impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesSealed<'_, A> {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        self.execution.recover_module_authority(runtime);
+impl<A: Addin> ModuleAuthorityRecovery for ServicesSealed<'_, A> {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.execution.recover_module_authority()
     }
 }
 
-impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesCleaned {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        self.execution.recover_module_authority(runtime);
+impl ModuleAuthorityRecovery for ServicesCleaned {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.execution.recover_module_authority()
     }
 }
 
-impl<A: Addin> ModuleAuthorityRecovery<A> for ServicesQuiescent {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        retain_drained_module(runtime, self.module);
+impl ModuleAuthorityRecovery for ServicesQuiescent {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        crate::module_runtime::ModuleCleanupAuthority::Drained(self.module)
     }
 }
 
-impl<A: Addin> ModuleAuthorityRecovery<A> for ResourcesReclaimed {
-    fn recover_module_authority(self, runtime: &Runtime<A>) {
-        self.services.recover_module_authority(runtime);
+impl ModuleAuthorityRecovery for ResourcesReclaimed {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.services.recover_module_authority()
     }
 }
 
-fn recover_stage<A: Addin, S: ModuleAuthorityRecovery<A>>(stage: S, runtime: &Runtime<A>) {
-    stage.recover_module_authority(runtime);
+fn recover_stage<S: ModuleAuthorityRecovery>(
+    stage: S,
+) -> crate::module_runtime::ModuleCleanupAuthority {
+    stage.recover_module_authority()
 }
 
 /// A linear teardown transaction parameterized by its terminal policy and
 /// current stage. Dropping an incomplete transaction quarantines the runtime;
 /// successful transitions consume the old stage and return the next one.
-pub(super) struct TeardownTxn<'runtime, A: Addin, K, S> {
+pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S> {
     owner: TeardownOwner<'runtime, A>,
     stage: Option<S>,
-    recover: fn(S, &Runtime<A>),
+    recover: fn(S) -> crate::module_runtime::ModuleCleanupAuthority,
     _kind: PhantomData<K>,
 }
 
@@ -567,6 +613,16 @@ impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
             .expect("teardown transaction owns one removal owner")
             .runtime()
     }
+
+    fn return_module_authority(
+        &mut self,
+        authority: crate::module_runtime::ModuleCleanupAuthority,
+    ) {
+        self.owner
+            .as_mut()
+            .expect("teardown transaction owns one removal owner")
+            .return_module_authority(authority);
+    }
 }
 
 impl<A: Addin> Drop for TeardownOwner<'_, A> {
@@ -578,26 +634,26 @@ impl<A: Addin> Drop for TeardownOwner<'_, A> {
 }
 
 impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
-    pub(super) fn new(owner: RemovalOwner<'runtime, A>, stage: S) -> Self
+    pub(crate) fn new(owner: RemovalOwner<'runtime, A>, stage: S) -> Self
     where
-        S: ModuleAuthorityRecovery<A>,
+        S: ModuleAuthorityRecovery,
     {
         Self {
             owner: TeardownOwner::new(owner),
             stage: Some(stage),
-            recover: recover_stage::<A, S>,
+            recover: recover_stage::<S>,
             _kind: PhantomData,
         }
     }
 
     fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self
     where
-        S: ModuleAuthorityRecovery<A>,
+        S: ModuleAuthorityRecovery,
     {
         Self {
             owner,
             stage: Some(stage),
-            recover: recover_stage::<A, S>,
+            recover: recover_stage::<S>,
             _kind: PhantomData,
         }
     }
@@ -611,7 +667,7 @@ impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
         (owner, stage)
     }
 
-    pub(super) fn close_module_callbacks(&self)
+    pub(crate) fn close_module_callbacks(&self)
     where
         S: ModuleCloseStage,
     {
@@ -627,22 +683,24 @@ impl<A: Addin, K, S> Drop for TeardownTxn<'_, A, K, S> {
         let Some(stage) = self.stage.take() else {
             return;
         };
-        let runtime = self.owner.runtime();
-        (self.recover)(stage, runtime);
+        let authority = (self.recover)(stage);
+        self.owner.return_module_authority(authority);
     }
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ExecutionDrained> {
-    pub(super) fn stop_producers(
+    pub(crate) fn stop_producers(
         self,
         report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ProducersStopped>> {
-        let (owner, stage) = self.split();
+        let (mut owner, stage) = self.split();
         let runtime = owner.runtime();
         match stage.stop_producers(runtime, report_issue) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
-                retain_drained_module(runtime, module);
+                owner.return_module_authority(
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                );
                 drop(owner);
                 Err(error)
             }
@@ -651,16 +709,18 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ExecutionDrained> {
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ProducersStopped> {
-    pub(super) fn seal_services(
+    pub(crate) fn seal_services(
         self,
         addin: QuiescedAddin<'runtime, A>,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesSealed<'runtime, A>>> {
-        let (owner, stage) = self.split();
+        let (mut owner, stage) = self.split();
         let runtime = owner.runtime();
         match stage.seal_services(runtime, addin) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
-                retain_drained_module(runtime, module);
+                owner.return_module_authority(
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                );
                 drop(owner);
                 Err(error)
             }
@@ -669,17 +729,18 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ProducersStopped> {
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesSealed<'runtime, A>> {
-    pub(super) fn cleanup_addin(
+    pub(crate) fn cleanup_addin(
         self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesCleaned>> {
-        let (owner, stage) = self.split();
-        let runtime = owner.runtime();
+        let (mut owner, stage) = self.split();
         match stage.cleanup(lifecycle, report) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
-                retain_drained_module(runtime, module);
+                owner.return_module_authority(
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                );
                 drop(owner);
                 Err(error)
             }
@@ -688,15 +749,16 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesSealed<'runtime,
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesCleaned> {
-    pub(super) fn finish_services(
+    pub(crate) fn finish_services(
         self,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesQuiescent>> {
-        let (owner, stage) = self.split();
-        let runtime = owner.runtime();
+        let (mut owner, stage) = self.split();
         match stage.finish() {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
-                retain_drained_module(runtime, module);
+                owner.return_module_authority(
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                );
                 drop(owner);
                 Err(error)
             }
@@ -705,7 +767,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesCleaned> {
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
-    pub(super) fn reclaim(
+    pub(crate) fn reclaim(
         self,
         rtd: crate::excel_rtd::RtdQuiescent,
         host_callbacks: crate::shutdown::HostCallbacksDetached,
@@ -718,7 +780,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
-    pub(super) fn certify(
+    pub(crate) fn certify(
         mut self,
     ) -> crate::XllResult<<K as TerminalCertificateKind>::Certificate<'runtime, A>>
     where
@@ -728,7 +790,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
             .stage
             .take()
             .expect("teardown transaction owns one current stage")
-            .into_proof();
+            .into_proof()?;
         let owner = self.owner.take();
         match owner.certify::<K>(proof) {
             Ok(certificate) => Ok(certificate),
@@ -740,15 +802,18 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     }
 }
 
-pub(super) fn drain_execution<A: Addin>(
+pub(crate) fn drain_execution<A: Addin>(
     runtime: &Runtime<A>,
-    module: crate::module_runtime::ModuleClosing,
+    owner: &mut RemovalOwner<'_, A>,
     record_trace: bool,
 ) -> crate::XllResult<ExecutionDrained> {
+    let module = owner.take_module_closing();
     match ExecutionDrained::begin(runtime, module, record_trace) {
         Ok(stage) => Ok(stage),
         Err((error, module)) => {
-            retain_drained_module(runtime, module);
+            owner.return_module_authority(crate::module_runtime::ModuleCleanupAuthority::Drained(
+                module,
+            ));
             Err(error)
         }
     }

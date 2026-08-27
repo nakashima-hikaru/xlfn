@@ -3,9 +3,9 @@ use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
-use crate::lifecycle::{ClosedWitness, FinalRemoval, RemovalOwner};
-use crate::registration::HostRegistrar;
 use crate::registration::RegistrationDescriptor;
+use crate::registration::{HostRegistrar, RegistrationHost};
+use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 use crate::runtime_open_txn::{
     HostOpeningState, OpenAttemptBegun, OpenGenerationStaged, OpeningTxn,
@@ -14,10 +14,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
+use crate::runtime::shutdown::{self, drain_execution};
 use crate::runtime_open as open;
 use crate::runtime_recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
 use crate::runtime_rollback::{active_runtime_generation, rollback_open};
-use crate::runtime_shutdown::{self, drain_execution};
 
 type StagedOpenResult<'runtime, A> = Result<
     (
@@ -53,7 +53,11 @@ where
         Ok(prepared_set) => prepared_set,
         Err(error) => return Err(transaction.failure(error)),
     };
-    let registrar = match HostRegistrar::connect(transaction.callbacks_mut()) {
+    let registrar_result = {
+        let host = RegistrationHost::new(transaction.callbacks_mut());
+        HostRegistrar::connect(&host)
+    };
+    let registrar = match registrar_result {
         Ok(registrar) => registrar,
         Err(error) => {
             let error = retain_transaction_error(&mut transaction, error);
@@ -80,7 +84,11 @@ where
             if let Err(error) = runtime.start_async(runtime_config.async_worker_count()) {
                 return Err(transaction.failure(error));
             }
-            match registrar.register_async_events(transaction.callbacks_mut()) {
+            let event_result = {
+                let host = RegistrationHost::new(transaction.callbacks_mut());
+                registrar.register_async_events(&host)
+            };
+            match event_result {
                 Ok(events) => transaction.stage_events(events),
                 Err(error) => {
                     let error = retain_transaction_error(&mut transaction, error);
@@ -95,7 +103,11 @@ where
             }));
         }
     }
-    let registrations = match registrar.register_all(transaction.callbacks_mut(), &prepared_set) {
+    let registration_result = {
+        let host = RegistrationHost::new(transaction.callbacks_mut());
+        registrar.register_all(&host, &prepared_set)
+    };
+    let registrations = match registration_result {
         Ok(registrations) => registrations,
         Err(error) => {
             let error = retain_transaction_error(&mut transaction, error);
@@ -372,8 +384,7 @@ where
     };
 
     let mut owner = transaction.take_attempt();
-    let module_closing = owner.take_module_closing();
-    let execution_drained = match drain_execution(runtime, module_closing, true) {
+    let execution_drained = match drain_execution(runtime, &mut owner, true) {
         Ok(stage) => stage,
         Err(error) => {
             return Err(handle_unload_hazard(
@@ -384,12 +395,8 @@ where
             ));
         }
     };
-    let teardown: runtime_shutdown::TeardownTxn<
-        'runtime,
-        A,
-        FinalRemoval,
-        runtime_shutdown::ExecutionDrained,
-    > = runtime_shutdown::TeardownTxn::new(owner, execution_drained);
+    let teardown: shutdown::TeardownTxn<'runtime, A, FinalRemoval, shutdown::ExecutionDrained> =
+        shutdown::TeardownTxn::new(owner, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
@@ -412,7 +419,8 @@ where
 
     let registrations = runtime.host.registrations_snapshot();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_pending(transaction.callbacks_mut(), &registrations)
+        let host = RegistrationHost::new(transaction.callbacks_mut());
+        HostRegistrar::unregister_pending(&host, &registrations)
     })) {
         for (registration, error) in &outcome.failed {
             if registration.cleanup_severity().is_unload_unsafe() {
@@ -504,7 +512,8 @@ where
             }
         }
     } else if let Ok(event_outcome) = catch_unwind(AssertUnwindSafe(|| {
-        HostRegistrar::unregister_events_detailed(transaction.callbacks_mut(), &event_registrations)
+        let host = RegistrationHost::new(transaction.callbacks_mut());
+        HostRegistrar::unregister_events_detailed(&host, &event_registrations)
     })) {
         for (_, error) in &event_outcome.failed {
             report_boundary_error("xlAutoRemove event unregister", error);
@@ -596,7 +605,7 @@ where
                             ));
                         }
                         drop(generation.layers);
-                        runtime_shutdown::QuiescedAddin::shared(
+                        shutdown::QuiescedAddin::shared(
                             runtime,
                             active_runtime_generation(runtime),
                             generation.shared_state,
@@ -654,7 +663,7 @@ where
                     ));
                 }
                 drop(layers);
-                runtime_shutdown::QuiescedAddin::shared(
+                shutdown::QuiescedAddin::shared(
                     runtime,
                     active_runtime_generation(runtime),
                     shared_state,
@@ -673,7 +682,7 @@ where
                 &error,
             ));
         }
-        runtime_shutdown::QuiescedAddin::empty(runtime, active_runtime_generation(runtime))
+        shutdown::QuiescedAddin::empty(runtime, active_runtime_generation(runtime))
     };
 
     #[cfg(any(test, feature = "refinement"))]

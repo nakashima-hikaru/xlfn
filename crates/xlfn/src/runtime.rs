@@ -2,7 +2,7 @@
     test,
     feature = "rtd",
     feature = "bench-internals",
-    feature = "refinement"
+    all(feature = "refinement", any(feature = "handles", feature = "rtd")),
 ))]
 use crate::XllError;
 use crate::XllResult;
@@ -21,11 +21,11 @@ use std::sync::Arc;
 #[cfg(not(feature = "async"))]
 use std::sync::atomic::Ordering;
 
-#[cfg(any(test, feature = "refinement"))]
-use crate::lifecycle::ClosedWitness;
 use crate::lifecycle::{
     GenerationAdmission, HostLifecycleIntent, LifecycleCoordinator, LifecyclePhase,
 };
+#[cfg(any(test, feature = "refinement"))]
+use crate::runtime::shutdown::ClosedWitness;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
 use crate::runtime_components::{
@@ -38,6 +38,8 @@ use crate::runtime_refinement::RuntimeRefinementHooks;
 use xlfn_kernel::thread_affine::{
     ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
 };
+
+pub(crate) mod shutdown;
 
 type QuiesceOperation<A> = fn(
     &mut <A as crate::Addin>::SharedState,
@@ -357,7 +359,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.has_current_generation()
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(any(all(test, feature = "handles"), feature = "bench-internals"))]
     pub(crate) fn arm_test_generation(&self) {
         let services = GenerationServices::arm_generation(
             crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
@@ -458,7 +460,7 @@ impl<A: crate::Addin> Runtime<A> {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd", feature = "handles"))]
     pub(crate) fn shutdown_trace_json(&self) -> String {
         self.refinement_hooks()
             .trace_handle()
@@ -502,13 +504,11 @@ impl<A: crate::Addin> Runtime<A> {
         let _ = self.executors.async_manager.advance_generation();
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
     pub(crate) fn formula_handle_service(
         &self,
     ) -> XllResult<Arc<crate::handle::FormulaHandleService>> {
-        self.generation_services()?
-            .formula_handle_slot()
-            .get_owned()
+        self.generation_services()?.formula_handle_service()
     }
 
     fn generation_services_snapshot(&self) -> Option<Arc<GenerationServices>> {
@@ -518,7 +518,11 @@ impl<A: crate::Addin> Runtime<A> {
         })
     }
 
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
+    #[cfg(any(
+        feature = "bench-internals",
+        all(feature = "refinement", any(feature = "handles", feature = "rtd")),
+        all(test, any(feature = "handles", feature = "rtd")),
+    ))]
     pub(crate) fn generation_services(&self) -> XllResult<Arc<GenerationServices>> {
         let services = self.generation_services_snapshot();
         services.ok_or(XllError::Closing)
@@ -557,22 +561,20 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn subscriptions(&self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead> {
         let services = self.generation_services()?;
-        services
-            .subscriptions_slot()
-            .read(services.subscription_host())
+        services.rtd_call_access().read()
     }
 
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        #[cfg(not(any(feature = "rtd", test)))]
+        #[cfg(not(feature = "rtd"))]
         {
             Ok(crate::excel_rtd::stopped_subscriptions(
                 self.protocol_generation(),
             ))
         }
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(feature = "rtd")]
         {
             let Some(services) = self.generation_services_snapshot() else {
                 #[cfg(test)]
@@ -586,9 +588,7 @@ impl<A: crate::Addin> Runtime<A> {
                     return Err(XllError::Closing);
                 }
             };
-            services
-                .subscriptions_slot()
-                .seal(self.protocol_generation())
+            services.close_subscriptions(self.protocol_generation())
         }
     }
 
@@ -698,15 +698,16 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         &self.generation().layers
     }
 
-    /// Returns the generation services pinned by this call.
-    ///
-    /// A call must derive every generation-scoped service from the same
-    /// publication as its state and layers. Reloading the service projection
-    /// through `Runtime` would permit a call to observe a different
-    /// generation after it has already entered.
+    #[cfg(feature = "handles")]
     #[must_use]
-    pub(crate) fn services(&self) -> &GenerationServices {
-        self.admission.services()
+    pub(crate) fn handle_call_access(&self) -> crate::handle::FormulaHandleServiceResolver<'_> {
+        self.admission.services().handle_call_access()
+    }
+
+    #[cfg(feature = "rtd")]
+    #[must_use]
+    pub(crate) fn rtd_call_access(&self) -> crate::rtd::RtdGenerationAccess<'_> {
+        self.admission.services().rtd_call_access()
     }
 
     fn generation(&self) -> &ExecutionGeneration<A> {
@@ -736,7 +737,7 @@ impl<A: crate::Addin> Drop for CallGuard<'_, A> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::lifecycle::{FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner};
+    use crate::runtime::shutdown::{FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -773,7 +774,8 @@ pub(crate) mod tests {
     ) {
         let module_closing = removal_attempt.take_module_closing();
         let drained = module_closing.seal_and_drain();
-        let (module_quiescent, exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify();
+        let module_epoch = module_quiescent.id();
         let subscriptions_stopped = runtime
             .close_subscriptions()
             .expect("test subscriptions stop");
@@ -786,24 +788,10 @@ pub(crate) mod tests {
         // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
         runtime.disable_trace_for_test();
-        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
-            .certify::<FinalRemoval>(QuiescenceProof {
-                exports,
-                module_quiescent,
-                returns: crate::shutdown::ReturnsQuiescent::for_test(),
-                rtd,
-                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
-                async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(
-                    last_generation,
-                ),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(last_generation),
-                diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
-            })
+            .certify::<FinalRemoval>(QuiescenceProof::for_test(last_generation, module_epoch))
             .map_err(|(error, _owner)| error)
             .unwrap();
         let (_witness, _removal_attempt) = certificate
@@ -818,25 +806,13 @@ pub(crate) mod tests {
     ) -> RemovalOwner<'a, A> {
         let module_closing = rollback_attempt.take_module_closing();
         let drained = module_closing.seal_and_drain();
-        let (module_quiescent, exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify();
+        let module_epoch = module_quiescent.id();
         let certificate = rollback_attempt
-            .certify::<OpenRollback>(QuiescenceProof {
-                exports,
-                module_quiescent,
-                returns: crate::shutdown::ReturnsQuiescent::for_test(),
-                rtd: crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence"),
-                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
-                async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
-                    crate::generation::RuntimeGeneration::new(1).unwrap(),
-                )),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
-                    crate::generation::RuntimeGeneration::new(1).unwrap(),
-                )),
-                diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
-            })
+            .certify::<OpenRollback>(QuiescenceProof::for_test(
+                Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                module_epoch,
+            ))
             .map_err(|(error, _owner)| error)
             .unwrap();
         let rollback_attempt = certificate
@@ -848,6 +824,7 @@ pub(crate) mod tests {
 
     pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(feature = "handles")]
     #[test]
     fn runtime_can_open_close_and_reopen() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1037,7 +1014,7 @@ pub(crate) mod tests {
         runtime.publish((), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let removal_attempt = runtime
+        let mut removal_attempt = runtime
             .runtime_orchestrator()
             .begin_final_removal()
             .unwrap();
@@ -1050,32 +1027,17 @@ pub(crate) mod tests {
         runtime.finish_generation_services(sealed).unwrap();
         assert!(runtime.take_current_generation().is_some());
 
-        let ingress = crate::module_runtime::ingress();
-        ingress.begin_close_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().begin_close(&runtime);
-        });
-        let exports = ingress.seal_and_drain();
+        let module_closing = removal_attempt.take_module_closing();
+        let drained = module_closing.seal_and_drain();
+        let (module_quiescent, _exports) = drained.certify();
+        let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();
-        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = removal_attempt
-            .certify::<FinalRemoval>(QuiescenceProof {
-                exports,
-                module_quiescent: crate::module_runtime::ModuleQuiescent::for_test(),
-                returns: crate::shutdown::ReturnsQuiescent::for_test(),
-                rtd,
-                host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
-                async_stopped: crate::shutdown::AsyncStopped::for_test(),
-                subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
-                    crate::generation::RuntimeGeneration::new(1).unwrap(),
-                )),
-                handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
-                    crate::generation::RuntimeGeneration::new(1).unwrap(),
-                )),
-                diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-                addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
-                generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
-            })
+            .certify::<FinalRemoval>(QuiescenceProof::for_test(
+                Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                module_epoch,
+            ))
             .map_err(|(error, _owner)| error)
             .unwrap();
 
@@ -1201,33 +1163,20 @@ pub(crate) mod tests {
             .seal_generation_services(subscriptions_stopped)
             .unwrap();
         runtime.finish_generation_services(sealed).unwrap();
-        let ingress = crate::module_runtime::ingress();
-        ingress.begin_close_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().begin_close(&runtime);
-        });
-        let exports = ingress.seal_and_drain();
-        let rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
-        let removal_attempt = match removal_attempt.certify::<FinalRemoval>(QuiescenceProof {
-            exports,
-            module_quiescent: crate::module_runtime::ModuleQuiescent::for_test(),
-            returns: crate::shutdown::ReturnsQuiescent::for_test(),
-            rtd,
-            host_callbacks: crate::shutdown::HostCallbacksDetached::for_test(),
-            async_stopped: crate::shutdown::AsyncStopped::for_test(),
-            subscriptions_stopped: crate::shutdown::SubscriptionsStopped::for_test(Some(
-                crate::generation::RuntimeGeneration::new(1).unwrap(),
-            )),
-            handles_quiescent: crate::shutdown::HandlesQuiescent::for_test(Some(
-                crate::generation::RuntimeGeneration::new(1).unwrap(),
-            )),
-            diagnostics_stopped: crate::diagnostics::DiagnosticsStopped::for_test(),
-            addin_quiesced: crate::shutdown::AddinQuiesced::for_test(),
-            generation_reclaimed: crate::shutdown::GenerationReclaimed::for_test(),
-        }) {
-            Err((_error, owner)) => owner,
-            Ok(_certificate) => panic!("quiescence certificate must reject a live generation"),
-        };
+        let module_epoch = runtime
+            .lifecycle
+            .access()
+            .module_epoch_id()
+            .expect("open module epoch");
+        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let removal_attempt =
+            match removal_attempt.certify::<FinalRemoval>(QuiescenceProof::for_test(
+                Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                module_epoch,
+            )) {
+                Err((_error, owner)) => owner,
+                Ok(_certificate) => panic!("quiescence certificate must reject a live generation"),
+            };
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
         assert!(runtime.take_current_generation().is_some());

@@ -10,9 +10,9 @@ use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
-use crate::registration::HostRegistrar;
+use crate::registration::{HostRegistrar, RegistrationHost};
+use crate::runtime::shutdown::{self as teardown, OpenRollback, drain_execution};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use crate::runtime_shutdown::{self as teardown, drain_execution};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::lifecycle::lifecycle_access_error;
@@ -92,20 +92,15 @@ where
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
     let mut rollback_attempt = rollback_attempt;
-    let module_closing = rollback_attempt.take_module_closing();
-    let execution_drained = match drain_execution(runtime, module_closing, false) {
+    let execution_drained = match drain_execution(runtime, &mut rollback_attempt, false) {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen return quiescence", &error);
             return incomplete(runtime);
         }
     };
-    let teardown: teardown::TeardownTxn<
-        '_,
-        A,
-        crate::lifecycle::OpenRollback,
-        teardown::ExecutionDrained,
-    > = teardown::TeardownTxn::new(rollback_attempt, execution_drained);
+    let teardown: teardown::TeardownTxn<'_, A, OpenRollback, teardown::ExecutionDrained> =
+        teardown::TeardownTxn::new(rollback_attempt, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report_cleanup_issue(issue);
     }) {
@@ -117,7 +112,10 @@ where
     };
 
     let registrations = runtime.host.registrations_snapshot();
-    let outcome = HostRegistrar::unregister_pending(callbacks, &registrations);
+    let outcome = {
+        let host = RegistrationHost::new(callbacks);
+        HostRegistrar::unregister_pending(&host, &registrations)
+    };
     for (registration, error) in &outcome.failed {
         if registration.cleanup_severity().is_unload_unsafe() {
             report_boundary_error("xlAutoOpen registration rollback", error);
@@ -140,7 +138,10 @@ where
 
     let events = runtime.host.event_registrations_snapshot();
     if callbacks.permits_callbacks() {
-        let event_outcome = HostRegistrar::unregister_events_detailed(callbacks, &events);
+        let event_outcome = {
+            let host = RegistrationHost::new(callbacks);
+            HostRegistrar::unregister_events_detailed(&host, &events)
+        };
         for (_, error) in &event_outcome.failed {
             report_boundary_error("xlAutoOpen event rollback", error);
         }

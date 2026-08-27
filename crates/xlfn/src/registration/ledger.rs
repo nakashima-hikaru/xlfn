@@ -53,16 +53,6 @@ impl MetadataDebt {
     }
 
     #[cfg(test)]
-    pub(crate) fn excel_name(&self) -> &'static str {
-        self.registration.excel_name
-    }
-
-    #[cfg(test)]
-    pub(crate) fn attempts(&self) -> u32 {
-        self.attempts
-    }
-
-    #[cfg(test)]
     pub(crate) fn expected_registration_id(&self) -> f64 {
         self.registration.id
     }

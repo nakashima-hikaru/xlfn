@@ -15,17 +15,17 @@ use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_api::ExcelHost;
 use crate::reference::ExcelReference;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 use crate::rtd::RtdCallContext;
 use crate::shutdown::CleanupReporter;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 use crate::subscription::RtdLimits;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 use crate::subscription::{RtdSource, RtdSourceHandle};
 use crate::value::{ExcelValue, FromExcel, Matrix};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 use std::num::NonZeroU32;
 #[cfg(feature = "async")]
 use std::num::NonZeroUsize;
@@ -74,7 +74,7 @@ pub struct OpenContext {
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     source_allocator: crate::subscription::SourceHandleAllocator,
 }
 
@@ -88,13 +88,13 @@ impl OpenContext {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        #[cfg(not(any(feature = "rtd", test)))]
+        #[cfg(not(feature = "rtd"))]
         let _ = generation;
         Self {
             module_path,
             module_directory,
             build_info,
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(feature = "rtd")]
             source_allocator: crate::subscription::SourceHandleAllocator::new(generation),
         }
     }
@@ -120,7 +120,7 @@ impl OpenContext {
     }
 
     /// Provides the RTD source-registration capability for this open.
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     #[must_use]
     pub fn rtd(&self) -> RtdOpenContext<'_> {
         RtdOpenContext {
@@ -130,13 +130,13 @@ impl OpenContext {
 }
 
 /// Capability for registering opaque RTD source identities during open.
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 #[derive(Clone, Copy, Debug)]
 pub struct RtdOpenContext<'a> {
     allocator: &'a crate::subscription::SourceHandleAllocator,
 }
 
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 impl RtdOpenContext<'_> {
     /// Registers one source and returns the handle used by subscriptions.
     pub fn register_source<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
@@ -182,11 +182,11 @@ impl DiagnosticsSetup<'_> {
 }
 
 /// Handle-registry policy selected during one add-in open.
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleBindingLimit(NonZeroU32);
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl HandleBindingLimit {
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {
@@ -204,7 +204,7 @@ impl HandleBindingLimit {
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl TryFrom<u32> for HandleBindingLimit {
     type Error = crate::XllError;
 
@@ -215,13 +215,13 @@ impl TryFrom<u32> for HandleBindingLimit {
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HandleConfig {
     maximum_bindings: HandleBindingLimit,
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl HandleConfig {
     pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
     /// Upper bound for the dense immutable publication table.
@@ -250,7 +250,7 @@ impl HandleConfig {
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl Default for HandleConfig {
     fn default() -> Self {
         Self::new()
@@ -260,9 +260,9 @@ impl Default for HandleConfig {
 /// RTD, handle, and asynchronous runtime policy selected during one add-in open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     rtd: RtdConfig,
-    #[cfg(any(feature = "handles", test))]
+    #[cfg(feature = "handles")]
     handles: HandleConfig,
     #[cfg(feature = "async")]
     async_runtime: AsyncRuntimeConfig,
@@ -272,23 +272,23 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(feature = "rtd")]
             rtd: RtdConfig::new(),
-            #[cfg(any(feature = "handles", test))]
+            #[cfg(feature = "handles")]
             handles: HandleConfig::new(),
             #[cfg(feature = "async")]
             async_runtime: AsyncRuntimeConfig::new(),
         }
     }
 
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     #[must_use]
     pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
         self.rtd = self.rtd.with_limits(limits);
         self
     }
 
-    #[cfg(any(feature = "handles", test))]
+    #[cfg(feature = "handles")]
     #[must_use]
     pub const fn with_handle_config(mut self, handles: HandleConfig) -> Self {
         self.handles = handles;
@@ -302,12 +302,12 @@ impl RuntimeConfig {
         self
     }
 
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     pub(crate) const fn rtd_limits(self) -> RtdLimits {
         self.rtd.limits()
     }
 
-    #[cfg(any(feature = "handles", test))]
+    #[cfg(feature = "handles")]
     pub(crate) const fn handle_config(self) -> HandleConfig {
         self.handles
     }
@@ -325,13 +325,13 @@ impl Default for RuntimeConfig {
 }
 
 /// RTD-specific portion of [`RuntimeConfig`].
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtdConfig {
     limits: RtdLimits,
 }
 
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 impl RtdConfig {
     #[must_use]
     pub const fn new() -> Self {
@@ -351,7 +351,7 @@ impl RtdConfig {
     }
 }
 
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 impl Default for RtdConfig {
     fn default() -> Self {
         Self::new()
@@ -669,7 +669,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// second generation lease and makes the ownership relationship explicit.
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     rtd: RtdCallContext<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -678,7 +678,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
     fn clone(&self) -> Self {
         Self {
             state: self.state,
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(feature = "rtd")]
             rtd: self.rtd,
             _not_send_or_sync: PhantomData,
         }
@@ -752,14 +752,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
 impl<A: Addin> MainThreadContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
         rtd: RtdCallContext<'ctx>,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
-            #[cfg(any(feature = "rtd", test))]
+            #[cfg(feature = "rtd")]
             rtd,
             _not_send_or_sync: PhantomData,
         }
@@ -767,7 +767,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
 
     #[doc(hidden)]
     #[must_use]
-    #[cfg(all(not(feature = "rtd"), not(test)))]
+    #[cfg(not(feature = "rtd"))]
     pub(crate) fn new<'ctx>(state: &'ctx A::SharedState) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
@@ -782,7 +782,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
         self.state
     }
 
-    #[cfg(any(feature = "rtd", test))]
+    #[cfg(feature = "rtd")]
     #[must_use]
     pub fn rtd(&self) -> RtdCallContext<'call> {
         self.rtd
@@ -798,7 +798,7 @@ mod tests {
     };
     use static_assertions::{assert_impl_all, assert_not_impl_any};
     use std::rc::Rc;
-    #[cfg(any(feature = "async", not(target_os = "windows")))]
+    #[cfg(any(feature = "async", all(feature = "rtd", not(target_os = "windows"))))]
     use std::sync::Arc;
 
     assert_impl_all!(ThreadSafeContext<'static, ()>: Copy, Clone, Send, Sync);
@@ -850,16 +850,20 @@ mod tests {
         let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
         runtime.publish(state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        #[cfg(feature = "rtd")]
         let services = runtime.generation_services().unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
+            #[cfg(feature = "rtd")]
             let main_thread = MainThreadContext::<TestU32Addin>::new(
                 state,
                 crate::rtd::RtdCallContext::new(
-                    services.as_ref(),
+                    services.rtd_call_access(),
                     crate::host_api::ExcelHost::new(scope.callbacks()),
                 ),
             );
+            #[cfg(not(feature = "rtd"))]
+            let main_thread = MainThreadContext::<TestU32Addin>::new(state);
             let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
 
             assert_eq!(thread_safe.state(), &17);
@@ -919,7 +923,7 @@ mod tests {
         });
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(feature = "rtd", not(target_os = "windows")))]
     #[test]
     fn failed_rtd_observation_preserves_the_existing_shared_subscription() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1003,7 +1007,7 @@ mod tests {
             let context = MainThreadContext::<()>::new(
                 &_state,
                 crate::rtd::RtdCallContext::new(
-                    services.as_ref(),
+                    services.rtd_call_access(),
                     crate::host_api::ExcelHost::new(scope.callbacks()),
                 ),
             );

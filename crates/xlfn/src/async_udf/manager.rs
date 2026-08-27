@@ -25,11 +25,6 @@ impl AsyncStopped {
     fn new() -> Self {
         Self { _private: () }
     }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test() -> Self {
-        Self { _private: () }
-    }
 }
 
 pub(crate) struct AsyncManager {
@@ -119,6 +114,23 @@ impl AsyncManager {
 
     pub(crate) fn current_generation(&self) -> u64 {
         self.current_generation.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn wait_idle(&self) -> bool {
+        let Some(shared) = self.published_executor.load_full() else {
+            return true;
+        };
+        let mut guard = shared.wait_lock.lock();
+        while shared.active.load(Ordering::Acquire) != 0 {
+            if shared.fatal_worker_failure.load(Ordering::Acquire)
+                && shared.live_workers.load(Ordering::Acquire) == 0
+            {
+                return false;
+            }
+            shared.idle.wait(&mut guard);
+        }
+        true
     }
 
     #[cfg(test)]

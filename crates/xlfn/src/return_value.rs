@@ -1,9 +1,14 @@
-use crate::execution::{CallId, CallMetadata, CallOutcome, UdfResultKind};
+use crate::execution::{CallId, CallMetadata, CallOutcome};
+#[cfg(test)]
+use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
+#[cfg(feature = "handles")]
 use crate::host_api::ExcelHost;
+#[cfg(feature = "handles")]
 use crate::input_identity::InputFingerprint;
 use crate::return_array::XlArrayOutput;
 use crate::return_storage::ReturnStorage;
 use crate::runtime::Runtime;
+#[cfg(feature = "handles")]
 use crate::value::input::HandleCallAccess;
 use crate::value::{ExcelCellOutput, ExcelOutput, ExcelReturn};
 use crate::{XllError, XllResult};
@@ -29,8 +34,9 @@ pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuar
 /// Call-scoped services used by [`crate::value::ExcelReturn`] implementations.
 #[doc(hidden)]
 pub struct ReturnContext<'call, 'scope> {
+    #[cfg(feature = "handles")]
     publisher: Option<FormulaPublisher<'call, 'scope>>,
-    lifetime: PhantomData<Rc<()>>,
+    lifetime: PhantomData<(Rc<()>, &'call (), &'scope ())>,
 }
 
 /// Capability for publishing a handle result for one formula revision.
@@ -38,6 +44,7 @@ pub struct ReturnContext<'call, 'scope> {
 /// Formula identity, RTD observation, and single-flight publication belong to
 /// this capability. [`ReturnContext`] only carries it when the return type
 /// actually needs formula-owned handle publication.
+#[cfg(feature = "handles")]
 pub(crate) struct FormulaPublisher<'call, 'scope> {
     pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
     pub(crate) udf_id: &'static str,
@@ -50,6 +57,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            #[cfg(feature = "handles")]
             publisher: None,
             lifetime: PhantomData,
         }
@@ -64,17 +72,23 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         inputs: Option<[u8; 32]>,
         scope: &'scope crate::call::CallScope<'scope>,
     ) -> Self {
+        #[cfg(feature = "handles")]
+        let publisher = inputs.map(|inputs| FormulaPublisher {
+            runtime: call.handle_call_access(),
+            udf_id,
+            inputs: InputFingerprint::from_bytes(inputs),
+            host: ExcelHost::new(scope.callbacks()),
+        });
+        #[cfg(not(feature = "handles"))]
+        let _ = (call, udf_id, inputs, scope);
         Self {
-            publisher: inputs.map(|inputs| FormulaPublisher {
-                runtime: crate::handle::FormulaHandleServiceResolver::new(call.services()),
-                udf_id,
-                inputs: InputFingerprint::from_bytes(inputs),
-                host: ExcelHost::new(scope.callbacks()),
-            }),
+            #[cfg(feature = "handles")]
+            publisher,
             lifetime: PhantomData,
         }
     }
 
+    #[cfg(feature = "handles")]
     fn publisher(&self) -> XllResult<&FormulaPublisher<'call, 'scope>> {
         self.publisher.as_ref().ok_or(crate::XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_CONTEXT,
@@ -82,6 +96,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     }
 }
 
+#[cfg(feature = "handles")]
 impl<'call> ReturnContext<'call, 'call> {
     pub(crate) fn for_frame(
         handles: HandleCallAccess<'call>,
@@ -101,6 +116,7 @@ impl<'call> ReturnContext<'call, 'call> {
     }
 }
 
+#[cfg(feature = "handles")]
 impl<'call, 'scope> ReturnContext<'call, 'scope> {
     #[doc(hidden)]
     pub fn publish_existing_alias<'handle, T>(
@@ -126,6 +142,7 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
     }
 }
 
+#[cfg(feature = "handles")]
 impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
     fn publish_existing_alias<'handle, T>(
         &self,
@@ -186,7 +203,7 @@ const MAX_RETURN_BYTES: usize = core::cfg_select! {
 
 enum ReturnOwnership {
     Excel(Option<ReturnObligation<'static>>),
-    #[cfg(any(feature = "async", test))]
+    #[cfg(feature = "async")]
     Local,
 }
 
@@ -372,7 +389,7 @@ impl PreparedReturn {
         })
     }
 
-    #[cfg(any(feature = "async", test))]
+    #[cfg(feature = "async")]
     fn publish_local(self) -> NonNull<XLOPER12> {
         let block = Box::new(ReturnBlock {
             oper: self.oper,
@@ -503,7 +520,7 @@ fn allocate_excel_owned(
     Ok(prepared.publish_excel(producer))
 }
 
-#[cfg(any(feature = "async", test))]
+#[cfg(feature = "async")]
 pub(crate) fn allocate_local_async_return(value: ExcelOutput) -> XllResult<NonNull<XLOPER12>> {
     PreparedReturn::encode(value).map(PreparedReturn::publish_local)
 }
@@ -821,8 +838,6 @@ where
     ) -> XllResult<T>,
     T: ExcelReturn,
 {
-    use crate::execution::{UdfLayerGuard, UdfLayers};
-
     let InstrumentedUdfContext {
         instrumentation,
         concurrent_calls,
@@ -848,11 +863,11 @@ where
             started_at: std::time::SystemTime::now(),
             concurrent_calls,
         };
-        match guard.layers().enter(&layer_metadata) {
+        match crate::execution::enter_layers(guard.layers(), &layer_metadata) {
             Ok(layers) => Some(layers),
             Err(error) => {
                 crate::diagnostics::report_no_unwind(udf_id, &error);
-                let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+                let outcome = CallOutcome::from_error(&error, timer.elapsed());
                 if instrumentation.trace_enabled() {
                     crate::execution::trace(&trace_metadata, &outcome);
                 }
@@ -872,14 +887,9 @@ where
 
     match prepared {
         Ok(prepared) => {
-            let outcome = CallOutcome {
-                result: UdfResultKind::Success,
-                error: None,
-                vendor_code: None,
-                duration: timer.elapsed(),
-            };
+            let outcome = CallOutcome::success(timer.elapsed());
             if let Some(layers) = layers {
-                layers.exit(&outcome);
+                crate::execution::exit_layers(layers, &outcome);
             }
             if instrumentation.trace_enabled() {
                 crate::execution::trace(&trace_metadata, &outcome);
@@ -888,9 +898,9 @@ where
         }
         Err(error) => {
             crate::diagnostics::report_no_unwind(udf_id, &error);
-            let outcome = crate::execution::outcome_for_error(&error, timer.elapsed());
+            let outcome = CallOutcome::from_error(&error, timer.elapsed());
             if let Some(layers) = layers {
-                layers.exit(&outcome);
+                crate::execution::exit_layers(layers, &outcome);
             }
             if instrumentation.trace_enabled() {
                 crate::execution::trace(&trace_metadata, &outcome);
@@ -963,7 +973,7 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
                     .expect("Excel return obligation is taken exactly once"),
             })
         }
-        #[cfg(any(feature = "async", test))]
+        #[cfg(feature = "async")]
         ReturnOwnership::Local => None,
     }
 }
@@ -988,7 +998,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
                 .tracker()
                 .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::ReleaseReturnBlock);
         }
-        #[cfg(any(feature = "async", test))]
+        #[cfg(feature = "async")]
         ReturnOwnership::Local => {
             debug_assert!(operation.is_none());
         }
@@ -1096,8 +1106,17 @@ mod tests {
         fixture
     }
 
-    fn allocate_local_for_test(value: ExcelOutput) -> XllResult<*mut XLOPER12> {
-        PreparedReturn::encode(value).map(|prep| prep.publish_local().as_ptr())
+    fn allocate_excel_for_test(
+        runtime: &'static crate::runtime::Runtime<()>,
+        value: ExcelOutput,
+    ) -> XllResult<*mut XLOPER12> {
+        let ingress = crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .map_err(|_| XllError::Closing)?;
+        let _call = runtime.enter(&ingress)?;
+        let mut producer = runtime.enter_return_producer().ok_or(XllError::Closing)?;
+        allocate_excel_owned(value, &mut producer)
     }
 
     fn backing_of(pointer: *mut XLOPER12) -> ReturnBlockBacking {
@@ -1255,9 +1274,12 @@ mod tests {
     #[test]
     fn strings_use_counted_utf16_owned_by_block() {
         let _test = test_lock();
-        let pointer = allocate_local_for_test(ExcelOutput::Scalar(ExcelCellOutput::String(
-            "日本語".to_owned(),
-        )))
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let pointer = allocate_excel_for_test(
+            runtime,
+            ExcelOutput::Scalar(ExcelCellOutput::String("日本語".to_owned())),
+        )
         .unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
@@ -1274,9 +1296,11 @@ mod tests {
     #[test]
     fn arrays_hold_independent_cells() {
         let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
         let value = matrix.into_excel(&mut ReturnContext::new()).unwrap();
-        let pointer = allocate_local_for_test(value).unwrap();
+        let pointer = allocate_excel_for_test(runtime, value).unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
         // SAFETY: pointer is live and its root type is multi.
@@ -1294,12 +1318,14 @@ mod tests {
     #[test]
     fn encoded_array_buffer_is_adopted_without_copying_cells() {
         let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
         let mut builder = crate::return_array::XlArrayBuilder::new(1, 2).unwrap();
         builder.push_f64(10.0).unwrap();
         builder.push_f64(20.0).unwrap();
         let encoded = builder.finish().unwrap();
         let original_cells = encoded.cells.as_ptr();
-        let pointer = allocate_local_for_test(ExcelOutput::Array(encoded)).unwrap();
+        let pointer = allocate_excel_for_test(runtime, ExcelOutput::Array(encoded)).unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
         // SAFETY: pointer is a live encoded array return.
@@ -1325,9 +1351,12 @@ mod tests {
     #[test]
     fn explicit_output_errors_are_encoded_as_not_available_errors() {
         let _test = test_lock();
-        let pointer = allocate_local_for_test(ExcelOutput::Scalar(ExcelCellOutput::Error(
-            ExcelError::NotAvailable,
-        )))
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let pointer = allocate_excel_for_test(
+            runtime,
+            ExcelOutput::Scalar(ExcelCellOutput::Error(ExcelError::NotAvailable)),
+        )
         .unwrap();
         // SAFETY: pointer is a live encoded return value.
         let oper = unsafe { &*pointer };
@@ -1486,9 +1515,9 @@ mod tests {
 
     #[test]
     fn udf_layer_sees_failures_and_call_metadata() {
-        struct Recorder(Arc<std::sync::Mutex<Vec<(String, UdfResultKind, usize)>>>);
+        struct Recorder(Arc<std::sync::Mutex<Vec<(String, UdfErrorKind, usize)>>>);
         struct RecorderGuard {
-            events: Arc<std::sync::Mutex<Vec<(String, UdfResultKind, usize)>>>,
+            events: Arc<std::sync::Mutex<Vec<(String, UdfErrorKind, usize)>>>,
             udf_id: String,
             concurrent_calls: usize,
         }
@@ -1507,9 +1536,19 @@ mod tests {
 
         impl crate::execution::UdfLayerGuard for RecorderGuard {
             fn exit(self, outcome: &crate::execution::CallOutcome<'_>) {
+                assert!(matches!(
+                    outcome.delivery,
+                    UdfDeliveryOutcome::NotApplicable
+                ));
+                let kind = match outcome.completion {
+                    UdfCompletionOutcome::Error { kind, .. } => kind,
+                    UdfCompletionOutcome::Success | UdfCompletionOutcome::Cancelled => {
+                        panic!("expected synchronous UDF error")
+                    }
+                };
                 self.events.lock().unwrap().push((
                     self.udf_id.clone(),
-                    outcome.result,
+                    kind,
                     self.concurrent_calls,
                 ));
             }
@@ -1554,7 +1593,7 @@ mod tests {
             let recorded = events.lock().unwrap();
             assert_eq!(recorded.len(), 1);
             assert_eq!(recorded[0].0, "test_conversion");
-            assert_eq!(recorded[0].1, UdfResultKind::InputError);
+            assert_eq!(recorded[0].1, UdfErrorKind::Input);
             assert_eq!(recorded[0].2, 1);
         }
 
@@ -1570,7 +1609,7 @@ mod tests {
         let recorded = events.lock().unwrap();
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[1].0, "test_panic");
-        assert_eq!(recorded[1].1, UdfResultKind::Panic);
+        assert_eq!(recorded[1].1, UdfErrorKind::Panic);
     }
 
     #[test]
@@ -1605,6 +1644,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "async")]
     #[test]
     fn async_return_allocation_does_not_set_xlbit_dll_free() {
         let _test = test_lock();

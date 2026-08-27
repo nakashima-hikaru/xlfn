@@ -10,12 +10,11 @@ use crate::callback_value::ExcelCallbackValue;
 use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
-use crate::value::{ExcelValue, FromExcel, Matrix, decode_owned_matrix};
+use crate::return_value::ExcelCallbackStatus;
+use crate::value::{ExcelValue, FromExcel, Matrix, XlValueType, decode_owned_matrix};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
-use xlfn_sys::{
-    IDSHEET, XL_COERCE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLOPER12, XLTYPE_REF, XLTYPE_SREF,
-};
+use xlfn_sys::{IDSHEET, XL_COERCE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLOPER12};
 
 /// The single-cell caller identity returned by Excel's caller protocol.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -31,9 +30,66 @@ pub(crate) struct ExcelHost<'call> {
     callbacks: &'call HostCallbackSession,
 }
 
+/// Result of one host callback after admission, status observation, decoding,
+/// and result cleanup have been performed.
+///
+/// This preserves the evidence needed by mutation-oriented facades without
+/// making every ordinary host call understand callback-session details.
+pub(crate) enum HostInvocation<T> {
+    Suppressed {
+        status: ExcelCallbackStatus,
+    },
+    Completed {
+        status: ExcelCallbackStatus,
+        decoded: Option<XllResult<T>>,
+        cleanup: XllResult<()>,
+    },
+}
+
 impl<'call> ExcelHost<'call> {
     pub(crate) const fn new(callbacks: &'call HostCallbackSession) -> Self {
         Self { callbacks }
+    }
+
+    pub(crate) fn permits_callbacks(&self) -> bool {
+        self.callbacks.permits_callbacks()
+    }
+
+    pub(crate) fn terminal_status(&self) -> Option<ExcelCallbackStatus> {
+        self.callbacks.terminal_status()
+    }
+
+    /// Executes one callback while preserving status, decode, and cleanup
+    /// evidence for callers that need to distinguish rejected from
+    /// indeterminate host mutations.
+    pub(crate) fn invoke_protocol<T>(
+        &self,
+        function_id: i32,
+        arguments: &[NonNull<XLOPER12>],
+        decode: impl FnOnce(&mut ExcelCallbackValue) -> XllResult<T>,
+    ) -> HostInvocation<T> {
+        // SAFETY: callers provide argument pointers that remain live and
+        // stationary for the duration of this callback.
+        let (status, mut result) = match unsafe { self.callbacks.call(function_id, arguments) } {
+            Ok(call) => call,
+            Err(suppressed) => {
+                return HostInvocation::Suppressed {
+                    status: suppressed.status,
+                };
+            }
+        };
+
+        let decoded = if status == ExcelCallbackStatus::Success {
+            Some(decode(&mut result))
+        } else {
+            None
+        };
+        let cleanup = result.try_release();
+        HostInvocation::Completed {
+            status,
+            decoded,
+            cleanup,
+        }
     }
 
     /// Runs one callback and applies the common status/release protocol.
@@ -49,29 +105,38 @@ impl<'call> ExcelHost<'call> {
         arguments: &[NonNull<XLOPER12>],
         decode: impl FnOnce(&mut ExcelCallbackValue) -> XllResult<T>,
     ) -> XllResult<T> {
-        // SAFETY: callers provide argument pointers that remain live and
-        // stationary for the duration of this callback.
-        let (status, mut result) = unsafe {
-            self.callbacks
-                .call(function_id, arguments)
-                .map_err(|suppressed| XllError::ExcelApi {
-                    function,
-                    failure: ExcelApiFailure::Suppressed(suppressed.status),
-                })?
-        };
-
-        if status != crate::return_value::ExcelCallbackStatus::Success {
-            return Err(result.try_release().err().unwrap_or(XllError::ExcelApi {
+        match self.invoke_protocol(function_id, arguments, decode) {
+            HostInvocation::Suppressed { status } => Err(XllError::ExcelApi {
                 function,
-                failure: ExcelApiFailure::Status(status),
-            }));
-        }
-
-        let decoded = decode(&mut result);
-        let released = result.try_release();
-        match decoded {
-            Err(error) => Err(error),
-            Ok(value) => released.map(|()| value),
+                failure: ExcelApiFailure::Suppressed(status),
+            }),
+            HostInvocation::Completed {
+                status,
+                decoded: _,
+                cleanup,
+            } if status != ExcelCallbackStatus::Success => {
+                Err(cleanup.err().unwrap_or(XllError::ExcelApi {
+                    function,
+                    failure: ExcelApiFailure::Status(status),
+                }))
+            }
+            HostInvocation::Completed {
+                decoded: Some(Err(error)),
+                ..
+            } => Err(error),
+            HostInvocation::Completed {
+                decoded: Some(Ok(_value)),
+                cleanup: Err(error),
+                ..
+            } => Err(error),
+            HostInvocation::Completed {
+                decoded: Some(Ok(value)),
+                cleanup: Ok(()),
+                ..
+            } => Ok(value),
+            HostInvocation::Completed { decoded: None, .. } => {
+                unreachable!("successful host callbacks always run their decoder")
+            }
         }
     }
 
@@ -119,8 +184,8 @@ impl<'call> ExcelHost<'call> {
         self.invoke(XLF_CALLER, ExcelApiFunction::Caller, &[], |caller| {
             let location = {
                 let value = caller.borrow()?;
-                match value.base_type() {
-                    XLTYPE_SREF => {
+                match value.value_type() {
+                    XlValueType::SimpleReference => {
                         // SAFETY: the type selects the SRef member.
                         let reference = unsafe { value.raw().value.sref };
                         if reference.count != 1
@@ -134,7 +199,7 @@ impl<'call> ExcelHost<'call> {
                             column: reference.reference.col_first,
                         }
                     }
-                    XLTYPE_REF => {
+                    XlValueType::Reference => {
                         // SAFETY: the type selects the MRef member.
                         let reference = unsafe { value.raw().value.mref };
                         // SAFETY: Excel supplies a readable reference table
@@ -191,7 +256,7 @@ impl<'call> ExcelHost<'call> {
                                 &sheet_name_arguments,
                                 |sheet_id_value| {
                                     let value = sheet_id_value.borrow()?;
-                                    if value.base_type() != XLTYPE_REF {
+                                    if value.value_type() != XlValueType::Reference {
                                         return Err(XllError::input(
                                             "caller",
                                             InputError::Malformed(

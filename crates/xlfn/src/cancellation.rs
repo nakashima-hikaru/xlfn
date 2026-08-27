@@ -41,12 +41,12 @@ struct CancellationState {
     waiters: Mutex<HashMap<u64, std::task::Waker>>,
 }
 
-#[cfg(any(feature = "async", test))]
+#[cfg(feature = "async")]
 pub(crate) struct CancellationSource {
     inner: Arc<CancellationState>,
 }
 
-#[cfg(any(feature = "async", test))]
+#[cfg(feature = "async")]
 impl CancellationSource {
     pub(crate) fn new(guarantee: CancellationGuarantee) -> (Self, CancellationToken) {
         let inner = Arc::new(CancellationState {
@@ -93,7 +93,7 @@ impl CancellationToken {
     ///
     /// Transitions from RUNNING -> DELIVERING if cancellation has not claimed CANCELED.
     /// Returns true if this delivery caller won the right to deliver the result.
-    #[cfg(any(feature = "async", test))]
+    #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn try_start_delivery(&self) -> bool {
         self.inner

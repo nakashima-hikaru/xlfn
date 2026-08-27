@@ -1,6 +1,7 @@
 use super::generation::{ControlPhase, ExecutorControl, GenerationState, task_shard};
+use super::queue::RunnableQueue;
 use super::task::{ActiveReservation, SpawnRejection, TaskControl};
-use super::worker::{WorkerExitGuard, cancelled_calculation_error, run_executor};
+use super::worker::{cancelled_calculation_error, run_executor};
 use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
 use crate::diagnostics::id::DiagnosticId;
@@ -8,8 +9,7 @@ use crate::error::DomainErrorCode;
 use crate::shutdown::CleanupIssueKind;
 use crate::{XllError, XllResult};
 use arc_swap::ArcSwapAny;
-use async_channel::{Receiver, Sender};
-use async_task::Runnable;
+use crossbeam_utils::sync::Parker;
 use futures_util::future::{AbortHandle, Abortable};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 pub(crate) struct Executor {
     pub(crate) shared: Arc<ExecutorShared>,
-    pub(crate) receiver: Receiver<Runnable>,
     pub(crate) workers: Vec<JoinHandle<()>>,
 }
 
@@ -34,11 +33,9 @@ pub(crate) struct Executor {
 /// - Such stale snapshots cannot admit work after `closing` is published.
 /// - Workers and active tasks retain the shared state independently of
 ///   the unique `Executor` owner.
-/// - `Executor` exclusively owns the receiver and worker JoinHandles.
-/// - The runnable channel is terminated explicitly with `sender.close()`.
-/// - Shutdown must never rely on dropping the last `Sender`, because
-///   queued or active tasks may retain executor state containing a sender.
-/// - After closing the sender, workers drain normally; if no workers remain,
+/// - `Executor` exclusively owns the worker JoinHandles.
+/// - The runnable queue is terminated explicitly with `queue.seal_and_wake_all()`.
+/// - After sealing the queue, workers drain normally; if no workers remain,
 ///   `Executor::drain_after_worker_failure` explicitly drains queued runnables.
 ///
 /// Lifecycle invariants:
@@ -47,8 +44,17 @@ pub(crate) struct Executor {
 /// I3. When `control.phase == ControlPhase::Advancing { from, to }`, `current.id == from` and `current.admission` is closed.
 /// I4. After `control.phase == ControlPhase::Closing`, no new `GenerationState` is ever published to `current`.
 /// I5. A `GenerationState` may be removed from `control.generations` only when `generation != next` and `task_count == 0`.
+///
+/// Two-Stage Shutdown & Queue Invariants (Q1–Q5):
+/// - Q1: New `Runnable`s can only be enqueued while `queue.schedule_admission` is OPEN.
+/// - Q2: After `queue.seal_and_wake_all()` completes, no new `Runnable` can enter the injector or local queues.
+/// - Q3: `closing == true` terminates *spawn admission* for new tasks, but does NOT seal `schedule_admission`.
+///   Aborting/canceling active tasks may re-schedule `Runnable`s until all active tasks complete (`active == 0`).
+///   Only then is `finish_close()` or `drain_after_worker_failure()` allowed to seal `schedule_admission`.
+/// - Q4: Sleeping workers in `idle_workers` are woken whenever work is enqueued or batch-stolen.
+/// - Q5: Worker panic recovers all remaining tasks from its local queue back to the global injector.
 pub(crate) struct ExecutorShared {
-    pub(crate) sender: Sender<Runnable>,
+    pub(crate) queue: Arc<RunnableQueue>,
     pub(crate) next_id: AtomicU64,
     pub(crate) active: AtomicUsize,
     pub(crate) live_workers: AtomicUsize,
@@ -97,10 +103,25 @@ impl Executor {
                 code: DomainErrorCode::InvalidInput,
             });
         }
-        let (sender, receiver) = async_channel::unbounded::<Runnable>();
+        let mut workers_local = Vec::with_capacity(worker_count);
+        let mut stealers = Vec::with_capacity(worker_count);
+        let mut unparkers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let worker = crossbeam_deque::Worker::new_fifo();
+            stealers.push(worker.stealer());
+            let parker = Parker::new();
+            unparkers.push(parker.unparker().clone());
+            workers_local.push((worker, parker));
+        }
+
+        let queue = Arc::new(RunnableQueue::new(
+            stealers.into_boxed_slice(),
+            unparkers.into_boxed_slice(),
+        ));
         let initial_generation = triomphe::Arc::new(GenerationState::new(generation));
         let shared = Arc::new(ExecutorShared {
-            sender,
+            queue,
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             live_workers: AtomicUsize::new(0),
@@ -126,28 +147,24 @@ impl Executor {
         let mut workers = scopeguard::guard(
             Vec::<JoinHandle<()>>::with_capacity(worker_count),
             move |mut workers| {
-                rollback_shared.sender.close();
+                rollback_shared.queue.seal_and_wake_all();
                 while let Some(worker) = workers.pop() {
                     drop(worker.join());
                 }
             },
         );
-        for index in 0..worker_count {
+        for (index, (local_worker, parker)) in workers_local.into_iter().enumerate() {
             if fail_at == Some(index) {
                 return Err(XllError::Internal {
                     diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                 });
             }
-            let receiver = receiver.clone();
             let worker_shared = Arc::clone(&shared);
             shared.live_workers.fetch_add(1, Ordering::Release);
             let worker = thread::Builder::new()
                 .name(format!("xlfn-async-{index}"))
                 .spawn(move || {
-                    let _exit = WorkerExitGuard {
-                        shared: worker_shared,
-                    };
-                    run_executor(receiver);
+                    run_executor(index, worker_shared, local_worker, parker);
                 });
             let worker = match worker {
                 Ok(worker) => worker,
@@ -161,11 +178,7 @@ impl Executor {
             workers.push(worker);
         }
         let workers = scopeguard::ScopeGuard::into_inner(workers);
-        Ok(Self {
-            shared,
-            receiver,
-            workers,
-        })
+        Ok(Self { shared, workers })
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -206,15 +219,24 @@ impl Executor {
     }
 
     pub(crate) fn drain_after_worker_failure(&self) -> bool {
-        self.shared.sender.close();
-        while let Ok(runnable) = self.receiver.try_recv() {
+        debug_assert!(
+            self.shared.fatal_worker_failure.load(Ordering::Acquire),
+            "drain_after_worker_failure requires a fatal worker failure"
+        );
+        debug_assert_eq!(
+            self.shared.live_workers.load(Ordering::Acquire),
+            0,
+            "drain_after_worker_failure requires all workers to have exited"
+        );
+        self.shared.queue.seal_and_wake_all();
+        while let Some(runnable) = self.shared.queue.drain_abandoned() {
             drop(runnable);
         }
         self.shared.active.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
-        self.shared.sender.close();
+        self.shared.queue.seal_and_wake_all();
         let mut issues = Vec::new();
         for worker in self.workers.drain(..) {
             if worker.join().is_err() {
@@ -353,9 +375,11 @@ impl ExecutorShared {
                 hook();
             }
         }
-        let sender = self.sender.clone();
+        let queue = Arc::downgrade(&self.queue);
         let schedule = move |runnable| {
-            let _ = sender.try_send(runnable);
+            if let Some(queue) = queue.upgrade() {
+                queue.schedule(runnable);
+            }
         };
         let (runnable, task) = async_task::spawn(wrapped, schedule);
         task.detach();

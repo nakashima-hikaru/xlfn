@@ -6,6 +6,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/cfg_gating.rs");
     tests.pass("tests/ui/pass/excel_enum.rs");
     tests.pass("tests/ui/pass/physical_unload.rs");
+    tests.pass("tests/ui/pass/udf_layers_tuple.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/context_*.rs");
     tests.compile_fail("tests/ui/fail/lookalike_*.rs");
@@ -13,6 +14,7 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/sys_module_is_not_public.rs");
+    tests.compile_fail("tests/ui/fail/udf_layers_is_sealed.rs");
 
     #[cfg(feature = "handles")]
     {

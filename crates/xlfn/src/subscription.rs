@@ -36,19 +36,19 @@ pub(crate) type SubscriptionConnection =
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use source::{
     RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
 };
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use topic::RtdTopic;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use topic::{RtdCapacity, RtdLimits};
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use value::IntoRtdValue;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use value::RtdValue;
-#[cfg(all(not(feature = "rtd"), not(test)))]
+#[cfg(not(feature = "rtd"))]
 pub(crate) use value::RtdValue;
 
 #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
@@ -74,10 +74,7 @@ pub(crate) use delivery::{
 };
 pub(crate) use host::SubscriptionHost;
 #[cfg(test)]
-pub(crate) use identity::{
-    NEXT_RTD_RUNTIME_ID, SourceIdentityRegistry, SourceIdentityReservation,
-    SubscriptionIdentityIndex, allocate_runtime_id,
-};
+pub(crate) use identity::{NEXT_RTD_RUNTIME_ID, SubscriptionIdentityIndex, allocate_runtime_id};
 #[cfg(test)]
 use parking_lot::{Condvar, Mutex};
 #[cfg(test)]
@@ -91,7 +88,7 @@ pub(crate) use server::{
     cleanup_catalog_binding_and_pending, disconnect_all_no_unwind, disconnect_one_no_unwind,
     drop_notifier_no_unwind,
 };
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub(crate) use source::SourceHandleAllocator;
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};
@@ -116,5 +113,5 @@ pub(crate) use topic::{
 };
 #[cfg(any(all(target_os = "windows", feature = "rtd"), test))]
 pub(crate) use value::StoredRtdValue;
-#[cfg(test)]
+#[cfg(all(test, feature = "rtd"))]
 pub(crate) mod tests;

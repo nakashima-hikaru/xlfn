@@ -55,11 +55,6 @@ impl DiagnosticsStopped {
     fn new() -> Self {
         Self { _private: () }
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self::new()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -9,9 +9,7 @@
 
 use crate::XllResult;
 use crate::host_api::ExcelHost;
-#[cfg(any(feature = "rtd", test))]
-use crate::runtime_components::GenerationServices;
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 pub use crate::subscription::{
     IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdCapacity, RtdLimits, RtdSink,
     RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
@@ -27,26 +25,40 @@ pub(crate) mod test_support;
 /// The capability owns the RTD-side preparation/observation/commit protocol;
 /// [`crate::addin::MainThreadContext`] only exposes this narrow entry point and
 /// does not know how generation services are composed.
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 #[derive(Clone, Copy)]
 pub struct RtdCallContext<'call> {
     generation: RtdGenerationAccess<'call>,
     host: ExcelHost<'call>,
 }
 
-#[cfg(any(feature = "rtd", test))]
+#[cfg(feature = "rtd")]
 #[derive(Clone, Copy)]
-struct RtdGenerationAccess<'call> {
-    services: &'call GenerationServices,
+pub(crate) struct RtdGenerationAccess<'call> {
+    subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot,
+    subscription_host: crate::excel_rtd::RtdSubscriptionHost,
 }
 
-#[cfg(any(feature = "rtd", test))]
-impl<'call> RtdCallContext<'call> {
-    pub(crate) const fn new(services: &'call GenerationServices, host: ExcelHost<'call>) -> Self {
+#[cfg(feature = "rtd")]
+impl<'call> RtdGenerationAccess<'call> {
+    pub(crate) const fn new(
+        subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot,
+        subscription_host: crate::excel_rtd::RtdSubscriptionHost,
+    ) -> Self {
         Self {
-            generation: RtdGenerationAccess { services },
-            host,
+            subscriptions,
+            subscription_host,
         }
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl<'call> RtdCallContext<'call> {
+    pub(crate) const fn new(
+        generation: RtdGenerationAccess<'call>,
+        host: ExcelHost<'call>,
+    ) -> Self {
+        Self { generation, host }
     }
 
     /// Prepares, observes, and commits one RTD subscription transaction.
@@ -61,11 +73,7 @@ impl<'call> RtdCallContext<'call> {
     where
         Source: crate::subscription::RtdSource,
     {
-        let subscriptions = self
-            .generation
-            .services
-            .subscriptions_slot()
-            .read(self.generation.services.subscription_host())?;
+        let subscriptions = self.generation.read()?;
         let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
         match observe_subscription(subscriptions, prepared.key(), self.host) {
@@ -78,6 +86,13 @@ impl<'call> RtdCallContext<'call> {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl RtdGenerationAccess<'_> {
+    pub(crate) fn read(self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead> {
+        self.subscriptions.read(self.subscription_host)
     }
 }
 

@@ -78,7 +78,9 @@ use class_factory::{
 #[cfg(test)]
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
-pub(super) use excel_rtd::{observe, observe_subscription};
+#[cfg(feature = "handles")]
+pub(super) use excel_rtd::observe;
+pub(super) use excel_rtd::observe_subscription;
 pub(crate) use module_state::ComModuleLifetime;
 #[cfg(test)]
 use module_state::{ComObjectKind, ComObjectLease};

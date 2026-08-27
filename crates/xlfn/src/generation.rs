@@ -74,11 +74,6 @@ impl<A: crate::Addin> ExecutionLease<A> {
     pub fn state(&self) -> &A::SharedState {
         &self.generation.shared_state
     }
-
-    #[must_use]
-    pub fn layers(&self) -> &A::Layers {
-        &self.generation.layers
-    }
 }
 
 /// Identity of an in-flight open transaction. It is distinct from the

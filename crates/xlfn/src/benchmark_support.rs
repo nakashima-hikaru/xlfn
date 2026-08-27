@@ -42,7 +42,7 @@ mod rtd;
 mod sync_boundary;
 
 #[cfg(feature = "async")]
-pub use async_spawn::{AsyncSpawnBenchmark, SpawnBatchResult};
+pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};
 pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark};

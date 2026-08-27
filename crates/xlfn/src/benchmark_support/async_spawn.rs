@@ -1,5 +1,45 @@
 #[cfg(feature = "async")]
 use super::*;
+#[cfg(feature = "async")]
+use std::future::Future;
+#[cfg(feature = "async")]
+use std::pin::Pin;
+#[cfg(feature = "async")]
+use std::task::{Context, Poll};
+
+#[cfg(feature = "async")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsyncSpawnKind {
+    Noop,
+    Reschedule(usize),
+}
+
+#[cfg(feature = "async")]
+pub struct RescheduleFuture {
+    remaining: usize,
+}
+
+#[cfg(feature = "async")]
+impl RescheduleFuture {
+    pub const fn new(yields: usize) -> Self {
+        Self { remaining: yields }
+    }
+}
+
+#[cfg(feature = "async")]
+impl Future for RescheduleFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.remaining == 0 {
+            Poll::Ready(())
+        } else {
+            self.remaining -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
 
 #[cfg(feature = "async")]
 pub struct AsyncSpawnBenchmark {
@@ -10,7 +50,7 @@ pub struct AsyncSpawnBenchmark {
 }
 
 #[cfg(feature = "async")]
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SpawnBatchResult {
     pub accepted: usize,
     pub overloaded: usize,
@@ -20,6 +60,10 @@ pub struct SpawnBatchResult {
 #[cfg(feature = "async")]
 impl AsyncSpawnBenchmark {
     pub fn new(worker_count: usize, producer_count: usize) -> Self {
+        Self::new_with_kind(worker_count, producer_count, AsyncSpawnKind::Noop)
+    }
+
+    pub fn new_with_kind(worker_count: usize, producer_count: usize, kind: AsyncSpawnKind) -> Self {
         assert!(producer_count != 0);
 
         let manager = Arc::new(AsyncManager::new());
@@ -46,7 +90,14 @@ impl AsyncSpawnBenchmark {
                         let (source, _token) =
                             CancellationSource::new(CancellationGuarantee::BestEffort);
 
-                        match manager.spawn(generation, async {}, source) {
+                        let res = match kind {
+                            AsyncSpawnKind::Noop => manager.spawn(generation, async {}, source),
+                            AsyncSpawnKind::Reschedule(yields) => {
+                                manager.spawn(generation, RescheduleFuture::new(yields), source)
+                            }
+                        };
+
+                        match res {
                             Ok(()) => result.accepted += 1,
                             Err(XllError::Overloaded) => result.overloaded += 1,
                             Err(_) => result.other_errors += 1,
@@ -87,6 +138,15 @@ impl AsyncSpawnBenchmark {
         }
 
         total
+    }
+
+    pub fn run_and_drain(&self, iterations_per_thread: usize) -> SpawnBatchResult {
+        let result = self.run(iterations_per_thread);
+        assert!(
+            self.manager.wait_idle(),
+            "executor suffered fatal worker failure during benchmark"
+        );
+        result
     }
 }
 

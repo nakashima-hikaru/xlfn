@@ -1,6 +1,6 @@
-use super::identity::{SourceIdentityRegistry, SubscriptionIdentityIndex};
-use super::source::ErasedRtdSource;
-use super::topic::{RtdTopic, SubscriptionKey};
+use super::identity::SubscriptionIdentityIndex;
+use super::source::{ErasedRtdSource, SourceHandleId};
+use super::topic::{RtdLimits, RtdTopic, SourceId, SubscriptionIdentity, SubscriptionKey};
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
@@ -373,18 +373,99 @@ impl SubscriptionEntry {
 pub(crate) struct SubscriptionCatalog {
     pub(crate) entries: FxHashMap<SubscriptionKey, SubscriptionEntry>,
     pub(crate) pending_topic_bytes: usize,
-    pub(crate) sources: SourceIdentityRegistry,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
 }
 
+struct PendingInsertPlan {
+    key: SubscriptionKey,
+    next_subscription_id: u64,
+    identity: SubscriptionIdentity,
+    pending_topic_bytes: usize,
+}
+
 impl SubscriptionCatalog {
-    pub(crate) fn allocate_key(&mut self, runtime_id: u64) -> XllResult<SubscriptionKey> {
+    fn plan_pending_insert(
+        &self,
+        runtime_id: u64,
+        source_id: SourceHandleId,
+        topic: &RtdTopic,
+        limits: RtdLimits,
+    ) -> XllResult<PendingInsertPlan> {
+        if self.pending_len() >= limits.max_pending.get() {
+            return Err(XllError::Overloaded);
+        }
+
+        let pending_topic_bytes = self
+            .pending_topic_bytes
+            .checked_add(topic.byte_len())
+            .filter(|&total| total <= limits.max_total_topic_bytes.get())
+            .ok_or(XllError::Overloaded)?;
+
         let id = self.next_subscription_id;
-        self.next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
+        let next_subscription_id = id.checked_add(1).ok_or(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
-        Ok(SubscriptionKey::from_allocated_id(runtime_id, id))
+        let key = SubscriptionKey::from_allocated_id(runtime_id, id);
+        let identity = SubscriptionIdentity {
+            source_id: SourceId(source_id),
+            topic: topic.clone(),
+        };
+
+        Ok(PendingInsertPlan {
+            key,
+            next_subscription_id,
+            identity,
+            pending_topic_bytes,
+        })
+    }
+
+    fn commit_pending_insert(
+        &mut self,
+        plan: PendingInsertPlan,
+        source: Arc<dyn ErasedRtdSource>,
+        topic: RtdTopic,
+    ) -> SubscriptionKey {
+        let PendingInsertPlan {
+            key,
+            next_subscription_id,
+            identity: _,
+            pending_topic_bytes,
+        } = plan;
+
+        self.next_subscription_id = next_subscription_id;
+
+        let previous = self.entries.insert(
+            key,
+            SubscriptionEntry {
+                topic,
+                phase: SubscriptionPhase::Pending {
+                    source,
+                    reservations: Some(NonZeroUsize::new(1).expect("one is non-zero")),
+                    server: None,
+                    commitment: PendingCommitment::Uncommitted,
+                },
+            },
+        );
+        if previous.is_some() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.pending_topic_bytes = pending_topic_bytes;
+        key
+    }
+
+    pub(crate) fn insert_pending(
+        &mut self,
+        runtime_id: u64,
+        source_id: SourceHandleId,
+        source: Arc<dyn ErasedRtdSource>,
+        topic: RtdTopic,
+        limits: RtdLimits,
+    ) -> XllResult<SubscriptionKey> {
+        let plan = self.plan_pending_insert(runtime_id, source_id, &topic, limits)?;
+        self.identities
+            .insert(plan.identity.clone(), plan.key, limits.max_source_ids.get())?;
+        Ok(self.commit_pending_insert(plan, source, topic))
     }
 
     pub(crate) fn pending_len(&self) -> usize {
@@ -435,38 +516,20 @@ impl SubscriptionCatalog {
             self.pending_topic_bytes =
                 checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
         }
-        if let Some(identity) = self.identities.remove_by_key(key) {
-            self.sources.release_source(identity.source_id.0);
+        if self.identities.remove_by_key(key).is_none() {
+            xlfn_kernel::invariant::fail_stop();
         }
         Some(removed)
     }
 
     #[cfg(test)]
     pub(crate) fn assert_identity_invariants(&self) {
-        assert_eq!(
-            self.identities.key_by_identity.len(),
-            self.identities.identity_by_key.len(),
-        );
+        self.identities.assert_invariants();
 
         for (identity, key) in &self.identities.key_by_identity {
             assert_eq!(self.identities.identity_by_key.get(key), Some(identity),);
 
             assert!(self.entries.contains_key(key));
-        }
-
-        let mut expected_source_refs = FxHashMap::default();
-        for identity in self.identities.key_by_identity.keys() {
-            *expected_source_refs
-                .entry(identity.source_id.0)
-                .or_insert(0) += 1;
-        }
-        assert_eq!(expected_source_refs.len(), self.sources.distinct_count());
-        let source_refs = self.sources.snapshot();
-        for (source_id, refs) in expected_source_refs {
-            assert_eq!(
-                source_refs.get(&source_id).map(|value| value.get()),
-                Some(refs),
-            );
         }
 
         let expected_pending_bytes = self

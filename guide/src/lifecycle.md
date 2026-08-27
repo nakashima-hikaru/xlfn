@@ -7,7 +7,8 @@ pub trait Addin: Send + Sync + 'static {
     type SharedState: Send + Sync + 'static;
     type LifecycleState: 'static;
     type Error: IntoXllError;
-    type Layers: UdfLayers;
+    /// `()` or a tuple of one or more `UdfLayer` values.
+    type Layers;
 
     fn open(
         context: &OpenContext,

@@ -2,12 +2,9 @@ use crate::error::{DomainErrorCode, InputError, Shape};
 use crate::return_array::{XlArrayBuilder, XlArrayOutput};
 use crate::return_value::ReturnContext;
 use crate::{ExcelError, XllError, XllResult};
+use xlfn_sys::XLOPER12;
 #[cfg(test)]
 use xlfn_sys::XLOPER12Array;
-use xlfn_sys::{
-    XLOPER12, XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL,
-    XLTYPE_NUM, XLTYPE_STR,
-};
 
 /// Borrowed call-scoped views used while converting one worksheet call.
 pub mod borrowed;
@@ -33,13 +30,17 @@ pub mod raw;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use crate::call::with_excel_call_scope;
 pub use crate::input_identity::InputIdentityEncoder;
+#[cfg(any(test, feature = "handles", feature = "bench-internals"))]
+pub(crate) use input::FormulaInputMode;
+#[cfg(test)]
+pub(crate) use input::argument_from_raw;
+#[cfg(all(test, feature = "handles"))]
+pub(crate) use input::argument_from_raw_with_context;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
 pub(crate) use input::{CallContext, ExcelParameter};
 pub use input::{ExcelInputIdentity, FromExcel};
-pub(crate) use input::{FormulaInputMode, InputMode, PlainInputMode};
-#[cfg(test)]
-pub(crate) use input::{argument_from_raw, argument_from_raw_with_context};
+pub(crate) use input::{InputMode, PlainInputMode};
 pub use output::IntoExcel;
 pub(crate) use output::{
     AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ThreadSafeReturn, VolatileReturn,
@@ -49,7 +50,7 @@ pub use date::{ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
 pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub(crate) use raw::{GridView, encode_raw_value};
-pub use raw::{XlArrayRef, XlStrRef, XlValueRef};
+pub use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
 
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;
@@ -136,11 +137,11 @@ pub enum OptionalExcelValue<T> {
 )]
 impl<'call> FromExcel<'call> for f64 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        let number = match value.base_type() {
+        let number = match value.value_type() {
             // SAFETY: The root type selects the corresponding union member.
-            XLTYPE_NUM => unsafe { value.raw.value.number },
+            XlValueType::Number => unsafe { value.raw.value.number },
             // SAFETY: The root type selects the corresponding union member.
-            XLTYPE_INT => (unsafe { value.raw.value.integer }) as f64,
+            XlValueType::Integer => (unsafe { value.raw.value.integer }) as f64,
             _ => return Err(value.wrong_type(argument, "number")),
         };
         if !number.is_finite() {
@@ -162,7 +163,7 @@ impl ExcelInputIdentity for f64 {
 )]
 impl<'call> FromExcel<'call> for bool {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        if value.base_type() != XLTYPE_BOOL {
+        if value.value_type() != XlValueType::Boolean {
             return Err(value.wrong_type(argument, "boolean"));
         }
         // SAFETY: XLTYPE_BOOL selects the boolean member.
@@ -201,11 +202,11 @@ fn number_to_integer<T>(
 )]
 impl<'call> FromExcel<'call> for i32 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        match value.base_type() {
+        match value.value_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
-            XLTYPE_INT => Ok(unsafe { value.raw.value.integer }),
+            XlValueType::Integer => Ok(unsafe { value.raw.value.integer }),
             // SAFETY: XLTYPE_NUM selects the number member.
-            XLTYPE_NUM => number_to_integer(
+            XlValueType::Number => number_to_integer(
                 unsafe { value.raw.value.number },
                 argument,
                 i32::MIN as f64,
@@ -229,12 +230,12 @@ impl ExcelInputIdentity for i32 {
 )]
 impl<'call> FromExcel<'call> for i64 {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        match value.base_type() {
+        match value.value_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
-            XLTYPE_INT => Ok((unsafe { value.raw.value.integer }) as i64),
+            XlValueType::Integer => Ok((unsafe { value.raw.value.integer }) as i64),
             // Excel doubles can represent every integer only through 2^53.
             // SAFETY: XLTYPE_NUM selects the number member.
-            XLTYPE_NUM => number_to_integer(
+            XlValueType::Number => number_to_integer(
                 unsafe { value.raw.value.number },
                 argument,
                 -((1_u64 << 53) as f64),
@@ -292,7 +293,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
 )]
 impl<'call> FromExcel<'call> for ExcelErrorValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        if value.base_type() != XLTYPE_ERR {
+        if value.value_type() != XlValueType::Error {
             return Err(value.wrong_type(argument, "Excel error"));
         }
         // SAFETY: XLTYPE_ERR selects the error member.
@@ -369,13 +370,13 @@ where
     let mut data = Vec::with_capacity(element_count);
     for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
         let element = element?;
-        if element.base_type() == XLTYPE_MULTI {
+        if element.value_type() == XlValueType::Multi {
             return Err(XllError::input(
                 argument,
                 InputError::Malformed("nested arrays are not supported"),
             ));
         }
-        if element.base_type() == XLTYPE_STR {
+        if element.value_type() == XlValueType::String {
             let string_bytes = element
                 .utf16(argument)?
                 .len()
@@ -442,13 +443,13 @@ where
 
     context.scratch().collect_copy(element_count, |index| {
         let element = XlValueRef::from_array_cell(&grid.cells()[index])?;
-        if element.base_type() == XLTYPE_MULTI {
+        if element.value_type() == XlValueType::Multi {
             return Err(XllError::input(
                 argument,
                 InputError::Malformed("nested arrays are not supported"),
             ));
         }
-        if element.base_type() == XLTYPE_STR {
+        if element.value_type() == XlValueType::String {
             let string_bytes = element
                 .utf16(argument)?
                 .len()
@@ -494,12 +495,12 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.base_type() {
-            XLTYPE_MISSING => {
+        match value.value_type() {
+            XlValueType::Missing => {
                 M::tag(identity, 0);
                 Ok(Self::Missing)
             }
-            XLTYPE_NIL => {
+            XlValueType::Nil => {
                 M::tag(identity, 1);
                 Ok(Self::Blank)
             }
@@ -540,8 +541,8 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.base_type() {
-            XLTYPE_MISSING | XLTYPE_NIL => {
+        match value.value_type() {
+            XlValueType::Missing | XlValueType::Nil => {
                 M::bool(identity, false);
                 Ok(None)
             }
@@ -811,16 +812,18 @@ where
 
 impl<'call> FromExcel<'call> for ExcelCellValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        match value.base_type() {
-            XLTYPE_NUM | XLTYPE_INT => {
+        match value.value_type() {
+            XlValueType::Number | XlValueType::Integer => {
                 <f64 as FromExcel>::from_excel(value, argument).map(Self::Number)
             }
-            XLTYPE_BOOL => <bool as FromExcel>::from_excel(value, argument).map(Self::Boolean),
-            XLTYPE_STR => String::from_excel(value, argument).map(Self::String),
-            XLTYPE_ERR => {
+            XlValueType::Boolean => {
+                <bool as FromExcel>::from_excel(value, argument).map(Self::Boolean)
+            }
+            XlValueType::String => String::from_excel(value, argument).map(Self::String),
+            XlValueType::Error => {
                 ExcelErrorValue::from_excel(value, argument).map(|value| Self::Error(value.0))
             }
-            XLTYPE_NIL => Ok(Self::Blank),
+            XlValueType::Nil => Ok(Self::Blank),
             _ => Err(value.wrong_type(argument, "worksheet value")),
         }
     }
@@ -859,30 +862,30 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.base_type() {
-            XLTYPE_NUM | XLTYPE_INT => {
+        match value.value_type() {
+            XlValueType::Number | XlValueType::Integer => {
                 let number = <f64 as FromExcel>::from_excel(value, argument)?;
                 M::f64(identity, number);
                 Ok(Self::Number(number))
             }
-            XLTYPE_BOOL => {
+            XlValueType::Boolean => {
                 let boolean = <bool as FromExcel>::from_excel(value, argument)?;
                 M::bool(identity, boolean);
                 Ok(Self::Boolean(boolean))
             }
-            XLTYPE_STR => {
+            XlValueType::String => {
                 let text = context
                     .scratch()
                     .decode_utf16(value.utf16(argument)?, argument)?;
                 M::string(identity, text);
                 Ok(Self::String(text))
             }
-            XLTYPE_ERR => {
+            XlValueType::Error => {
                 let error = <ExcelErrorValue as FromExcel>::from_excel(value, argument)?.0;
                 M::i64(identity, i64::from(error.code()));
                 Ok(Self::Error(error))
             }
-            XLTYPE_NIL => {
+            XlValueType::Nil => {
                 M::tag(identity, 5);
                 Ok(Self::Blank)
             }
@@ -984,13 +987,13 @@ where
     let mut data = Vec::with_capacity(element_count);
     for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
         let element = element?;
-        if element.base_type() == XLTYPE_MULTI {
+        if element.value_type() == XlValueType::Multi {
             return Err(XllError::input(
                 argument,
                 InputError::Malformed("nested arrays are not supported"),
             ));
         }
-        if element.base_type() == XLTYPE_STR {
+        if element.value_type() == XlValueType::String {
             let string_bytes = element
                 .utf16(argument)?
                 .len()
@@ -1021,9 +1024,11 @@ where
 
 impl<'call> FromExcel<'call> for ExcelValue {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        match value.base_type() {
-            XLTYPE_MISSING => Ok(Self::Missing),
-            XLTYPE_MULTI => decode_owned_matrix::<ExcelCellValue>(value, argument).map(Self::Array),
+        match value.value_type() {
+            XlValueType::Missing => Ok(Self::Missing),
+            XlValueType::Multi => {
+                decode_owned_matrix::<ExcelCellValue>(value, argument).map(Self::Array)
+            }
             _ => ExcelCellValue::from_excel(value, argument).map(Self::Scalar),
         }
     }
@@ -1059,7 +1064,7 @@ impl<'call> ExcelInputIdentity for XlArrayRef<'call> {
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::Handle<'call, T>
 where
     M: InputMode,
@@ -1067,7 +1072,7 @@ where
 {
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::Handle<'call, T>
 where
     M: InputMode,
@@ -1096,7 +1101,7 @@ where
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::HandleLease<T>
 where
     M: InputMode,
@@ -1104,7 +1109,7 @@ where
 {
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::HandleLease<T>
 where
     M: InputMode,
@@ -1333,7 +1338,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use static_assertions::assert_impl_all;
-    use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value};
+    use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
     assert_impl_all!(ExcelValue: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
     assert_impl_all!(
@@ -1423,18 +1428,15 @@ mod tests {
 
     #[test]
     fn default_identity_matches_explicit_semantic_values() {
-        let services = std::sync::Arc::new(crate::runtime_components::GenerationServices::new());
-        crate::call::with_excel_call_scope_and_services(services.as_ref(), |services, scope| {
-            let mut defaults =
-                ArgumentContext::<FormulaInputMode>::from_services(services, scope, 2);
+        crate::call::with_excel_call_scope(|scope| {
+            let mut defaults = ArgumentContext::<FormulaInputMode>::from_scope(scope, 2);
             defaults.record_decoded(0, "first", &0.0_f64).unwrap();
             defaults.record_decoded(1, "second", &1.0_f64).unwrap();
             let default_identity = defaults.finish().unwrap().unwrap();
 
             let mut first = XLOPER12::number(0.0);
             let mut second = XLOPER12::number(1.0);
-            let mut explicit =
-                ArgumentContext::<FormulaInputMode>::from_services(services, scope, 2);
+            let mut explicit = ArgumentContext::<FormulaInputMode>::from_scope(scope, 2);
             // SAFETY: first raw value remains live for this call.
             unsafe {
                 argument_from_raw_with_arguments::<FormulaInputMode, f64>(
@@ -2008,7 +2010,7 @@ mod tests {
         assert_eq!((encoded.rows, encoded.columns), (2, 2));
         assert_eq!(encoded.cells.len(), 4);
         for (cell, expected) in encoded.cells.iter().zip([1.0, 2.0, 3.0, 4.0]) {
-            assert_eq!(cell.base_type(), XLTYPE_NUM);
+            assert_eq!(cell.base_type(), xlfn_sys::XLTYPE_NUM);
             // SAFETY: XLTYPE_NUM selects the number member.
             assert_eq!(unsafe { cell.value.number }, expected);
         }
@@ -2257,20 +2259,25 @@ mod tests {
         assert_ne!(id_val_m, id_val_b);
     }
 
+    #[cfg(feature = "handles")]
     #[derive(Debug, PartialEq)]
     struct SemanticHandleTestObj {
         data: i32,
     }
+    #[cfg(feature = "handles")]
     impl crate::handle::ExcelHandleObject for SemanticHandleTestObj {}
 
+    #[cfg(feature = "handles")]
     #[test]
     fn handle_semantic_identity_matches_across_distinct_alias_tokens() {
         use crate::handle::{FormulaCaller, FormulaRevisionKey, HandleTopicKey};
 
-        let runtime = Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
-        runtime.arm_test_generation();
-        let services = runtime.generation_services().unwrap();
-        let handle_rt = runtime.formula_handle_service().unwrap();
+        let slot: &'static crate::handle::FormulaHandleServiceSlot =
+            Box::leak(Box::new(crate::handle::FormulaHandleServiceSlot::new()));
+        slot.arm(crate::RuntimeConfig::new().handle_config())
+            .unwrap();
+        slot.initialize().unwrap();
+        let handle_rt = slot.get_owned().unwrap();
 
         let topic_a = HandleTopicKey::Formula(FormulaRevisionKey::new(
             FormulaCaller {
@@ -2331,41 +2338,41 @@ mod tests {
             xltype: XLTYPE_STR,
         };
 
-        let (handle_data_a, id_a, object_id_a) = crate::call::with_excel_call_scope_and_services(
-            services.as_ref(),
-            |services, scope| {
-                let mut arguments =
-                    ArgumentContext::<FormulaInputMode>::from_services(services, scope, 1);
-                // SAFETY: raw_a is live for this conversion.
-                let handle = unsafe {
-                    argument_from_raw_with_arguments::<
-                        FormulaInputMode,
-                        crate::handle::Handle<'_, SemanticHandleTestObj>,
-                    >(&mut arguments, 0, "arg", &mut raw_a)
-                }
-                .unwrap();
-                let id = arguments.finish().unwrap().unwrap();
-                (handle.data, id, handle.object_id())
-            },
-        );
+        let (handle_data_a, id_a, object_id_a) = crate::call::with_excel_call_scope(|scope| {
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                scope,
+                crate::handle::FormulaHandleServiceResolver::new(slot),
+                1,
+            );
+            // SAFETY: raw_a is live for this conversion.
+            let handle = unsafe {
+                argument_from_raw_with_arguments::<
+                    FormulaInputMode,
+                    crate::handle::Handle<'_, SemanticHandleTestObj>,
+                >(&mut arguments, 0, "arg", &mut raw_a)
+            }
+            .unwrap();
+            let id = arguments.finish().unwrap().unwrap();
+            (handle.data, id, handle.object_id())
+        });
 
-        let (handle_data_b, id_b, object_id_b) = crate::call::with_excel_call_scope_and_services(
-            services.as_ref(),
-            |services, scope| {
-                let mut arguments =
-                    ArgumentContext::<FormulaInputMode>::from_services(services, scope, 1);
-                // SAFETY: raw_b is live for this conversion.
-                let handle = unsafe {
-                    argument_from_raw_with_arguments::<
-                        FormulaInputMode,
-                        crate::handle::Handle<'_, SemanticHandleTestObj>,
-                    >(&mut arguments, 0, "arg", &mut raw_b)
-                }
-                .unwrap();
-                let id = arguments.finish().unwrap().unwrap();
-                (handle.data, id, handle.object_id())
-            },
-        );
+        let (handle_data_b, id_b, object_id_b) = crate::call::with_excel_call_scope(|scope| {
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                scope,
+                crate::handle::FormulaHandleServiceResolver::new(slot),
+                1,
+            );
+            // SAFETY: raw_b is live for this conversion.
+            let handle = unsafe {
+                argument_from_raw_with_arguments::<
+                    FormulaInputMode,
+                    crate::handle::Handle<'_, SemanticHandleTestObj>,
+                >(&mut arguments, 0, "arg", &mut raw_b)
+            }
+            .unwrap();
+            let id = arguments.finish().unwrap().unwrap();
+            (handle.data, id, handle.object_id())
+        });
 
         assert_eq!(handle_data_a, 99);
         assert_eq!(handle_data_b, 99);

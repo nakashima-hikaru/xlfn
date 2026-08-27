@@ -1,0 +1,37 @@
+error[E0277]: the trait bound `CustomLayers: execution::private::UdfLayersImpl` is not satisfied
+ --> tests/ui/fail/udf_layers_is_sealed.rs:5:20
+  |
+5 | impl UdfLayers for CustomLayers {}
+  |                    ^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `execution::private::UdfLayersImpl` is not implemented for `CustomLayers`
+ --> tests/ui/fail/udf_layers_is_sealed.rs:3:1
+  |
+3 | struct CustomLayers;
+  | ^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `execution::private::UdfLayersImpl`:
+            ()
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+            (T0, T1, T2, T3, T4)
+            (T0, T1, T2, T3, T4, T5)
+            (T0, T1, T2, T3, T4, T5, T6)
+            (T0, T1, T2, T3, T4, T5, T6, T7)
+          and $N others
+note: required by a bound in `xlfn::execution::UdfLayers`
+ --> src/execution.rs
+  |
+  | pub trait UdfLayers: private::UdfLayersImpl {}
+  |                      ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `UdfLayers`
+  = note: `UdfLayers` is a "sealed trait", because to implement it you also need to implement `xlfn::execution::private::UdfLayersImpl`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            ()
+            (T0,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+            (T0, T1, T2, T3, T4)
+            (T0, T1, T2, T3, T4, T5)
+            (T0, T1, T2, T3, T4, T5, T6)
+          and $N others

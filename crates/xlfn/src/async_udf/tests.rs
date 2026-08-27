@@ -79,12 +79,16 @@ fn reset_test_callback() -> crate::test_callback::CallbackTestGuard {
 }
 
 fn wait_for_async_callback() -> i32 {
+    wait_for_async_callback_count(1);
+    crate::test_callback::last_async_value()
+}
+
+fn wait_for_async_callback_count(expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(1);
-    while crate::test_callback::async_return_calls() == 0 {
+    while crate::test_callback::async_return_calls() < expected {
         assert!(Instant::now() < deadline, "async callback was not invoked");
         std::thread::yield_now();
     }
-    crate::test_callback::last_async_value()
 }
 
 #[test]
@@ -862,7 +866,9 @@ fn async_handle_payload_is_deep_copied() {
         xltype: XLTYPE_BIG_DATA,
     };
     // SAFETY: raw is a live, well-formed test async handle.
-    let mut owned = unsafe { OwnedAsyncHandle::from_raw("test_payload", &mut raw) }.unwrap();
+    let _callback_guard = reset_test_callback();
+    // SAFETY: raw is a live, well-formed test async handle.
+    let mut owned = unsafe { ExcelAsyncResponder::from_raw("test_payload", &mut raw) }.unwrap();
     // SAFETY: the owned value remains XLTYPE_BIG_DATA with a positive size.
     let big_data = unsafe { owned.raw.value.big_data };
     // SAFETY: the big_data union contains the raw byte pointer in `handle.data`.
@@ -874,7 +880,19 @@ fn async_handle_payload_is_deep_copied() {
         unsafe { std::slice::from_raw_parts(copied, 4) },
         &[1, 2, 3, 4]
     );
-    owned.complete();
+    let result = AsyncReturnPointer::error(&XllError::Closing);
+    // SAFETY: the test callback owns the async-return boundary and both
+    // pointers remain live for the duration of the call.
+    unsafe { owned.deliver(result) }.unwrap();
+    assert_eq!(crate::test_callback::async_return_calls(), 1);
+
+    let second = AsyncReturnPointer::error(&XllError::Closing);
+    let second_result = {
+        // SAFETY: the responder rejects a second delivery before touching Excel.
+        unsafe { owned.deliver(second) }
+    };
+    assert!(matches!(second_result, Err(XllError::Internal { .. })));
+    assert_eq!(crate::test_callback::async_return_calls(), 1);
 }
 
 #[test]
@@ -919,9 +937,9 @@ fn async_boundary_returns_completed_value_through_callback() {
 
 #[test]
 fn async_boundary_reports_handler_failures_to_layers() {
-    struct Recorder(std::sync::mpsc::Sender<(UdfResultKind, Option<i32>, usize)>);
+    struct Recorder(std::sync::mpsc::Sender<(UdfErrorKind, Option<i32>, usize)>);
     struct RecorderGuard {
-        sender: std::sync::mpsc::Sender<(UdfResultKind, Option<i32>, usize)>,
+        sender: std::sync::mpsc::Sender<(UdfErrorKind, Option<i32>, usize)>,
         concurrent_calls: usize,
     }
     impl crate::execution::UdfLayer for Recorder {
@@ -935,8 +953,17 @@ fn async_boundary_reports_handler_failures_to_layers() {
     }
     impl crate::execution::UdfLayerGuard for RecorderGuard {
         fn exit(self, outcome: &crate::execution::CallOutcome<'_>) {
+            assert!(matches!(outcome.delivery, UdfDeliveryOutcome::Delivered));
+            let (kind, vendor_code) = match outcome.completion {
+                UdfCompletionOutcome::Error {
+                    kind, vendor_code, ..
+                } => (kind, vendor_code),
+                UdfCompletionOutcome::Success | UdfCompletionOutcome::Cancelled => {
+                    panic!("expected async UDF error")
+                }
+            };
             self.sender
-                .send((outcome.result, outcome.vendor_code, self.concurrent_calls))
+                .send((kind, vendor_code, self.concurrent_calls))
                 .unwrap();
         }
     }
@@ -997,7 +1024,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
     }
     assert_eq!(wait_for_async_callback(), -1);
     let event = event_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert_eq!(event.0, UdfResultKind::VendorError);
+    assert_eq!(event.0, UdfErrorKind::Vendor);
     assert_eq!(event.1, Some(73));
     assert_eq!(event.2, 1);
 
@@ -1006,8 +1033,8 @@ fn async_boundary_reports_handler_failures_to_layers() {
 
 #[test]
 fn async_boundary_records_delivery_rejection_as_failure() {
-    struct Recorder(std::sync::mpsc::Sender<UdfResultKind>);
-    struct RecorderGuard(std::sync::mpsc::Sender<UdfResultKind>);
+    struct Recorder(std::sync::mpsc::Sender<(Option<UdfErrorKind>, Option<i32>, bool)>);
+    struct RecorderGuard(std::sync::mpsc::Sender<(Option<UdfErrorKind>, Option<i32>, bool)>);
 
     impl crate::execution::UdfLayer for Recorder {
         type Guard = RecorderGuard;
@@ -1018,7 +1045,22 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 
     impl crate::execution::UdfLayerGuard for RecorderGuard {
         fn exit(self, outcome: &crate::execution::CallOutcome<'_>) {
-            self.0.send(outcome.result).unwrap();
+            let (kind, vendor_code) = match outcome.completion {
+                UdfCompletionOutcome::Success => (None, None),
+                UdfCompletionOutcome::Error {
+                    kind, vendor_code, ..
+                } => (Some(kind), vendor_code),
+                UdfCompletionOutcome::Cancelled => {
+                    panic!("expected non-cancelled async completion")
+                }
+            };
+            self.0
+                .send((
+                    kind,
+                    vendor_code,
+                    matches!(outcome.delivery, UdfDeliveryOutcome::Failed { .. }),
+                ))
+                .unwrap();
         }
     }
 
@@ -1073,9 +1115,45 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 
     assert_eq!(
         event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-        UdfResultKind::InternalError
+        (None, None, true)
     );
-    assert_eq!(crate::test_callback::async_return_calls(), 1);
+
+    let callback_count = crate::test_callback::async_return_calls();
+    let mut bytes = vec![5_u8, 6, 7, 8];
+    let mut handle = XLOPER12 {
+        value: XLOPER12Value {
+            big_data: XLOPER12BigData {
+                handle: XLOPER12BigDataHandle {
+                    data: bytes.as_mut_ptr(),
+                },
+                byte_count: bytes.len() as i32,
+            },
+        },
+        xltype: XLTYPE_BIG_DATA,
+    };
+    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    unsafe {
+        async_udf_boundary_named(
+            runtime,
+            "test_async_combined_failure",
+            "TEST.ASYNC.COMBINED.FAILURE",
+            &mut handle,
+            |_, _, _| {
+                Ok(async {
+                    Err::<f64, _>(XllError::Native {
+                        code: 73,
+                        message: "injected computation failure".to_owned(),
+                    })
+                })
+            },
+        );
+    }
+    wait_for_async_callback_count(callback_count + 1);
+    assert_eq!(
+        event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (Some(UdfErrorKind::Vendor), Some(73), true)
+    );
+    assert_eq!(crate::test_callback::async_return_calls(), 2);
     assert!(runtime.close_async().issues.is_empty());
 }
 
@@ -1118,7 +1196,9 @@ fn async_boundary_returns_error_on_cancellation() {
             },
         );
     }
-    // Cancel all running async tasks. OwnedAsyncHandle::drop should fire and return error to hook.
+    // Cancel all running async tasks. Depending on the race with evaluation,
+    // cancellation either delivers explicitly or uses the responder's
+    // last-resort Drop fallback.
     cancel_async_calculation(runtime);
     drop(release_tx);
     assert_eq!(wait_for_async_callback(), -1);
@@ -1167,7 +1247,7 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     }
     // Ensure cancellation observes a task that has actually started. If
     // the task were still queued, dropping it would not exercise the
-    // OwnedAsyncHandle fallback that must be suppressed by the gate.
+    // ExcelAsyncResponder fallback that must be suppressed by the gate.
     started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("terminal-gate task did not start");
@@ -1913,4 +1993,300 @@ fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN
         })
     ));
+}
+
+#[test]
+fn test_lost_wakeup_interleaving_unpark_before_park() {
+    let parker = crossbeam_utils::sync::Parker::new();
+    let unparker = parker.unparker().clone();
+    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
+    let stealer = local.stealer();
+    let queue = Arc::new(RunnableQueue::new(
+        vec![stealer].into_boxed_slice(),
+        vec![unparker].into_boxed_slice(),
+    ));
+
+    // 1. Worker marks idle bit
+    queue.idle_workers.store(1 << 0, Ordering::Release);
+
+    // 2. Producer schedules a task
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_clone = Arc::clone(&ran);
+    let (runnable, task) = async_task::spawn(
+        async move {
+            ran_clone.store(true, Ordering::Release);
+        },
+        {
+            let queue = Arc::downgrade(&queue);
+            move |r| {
+                if let Some(q) = queue.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    task.detach();
+    queue.schedule(runnable);
+
+    // 3. wake_one() cleared idle bit and unparked
+    assert_eq!(queue.idle_workers.load(Ordering::Acquire), 0);
+
+    // 4. Worker calls park(). Parker's token ensures it returns immediately
+    let park_start = Instant::now();
+    parker.park();
+    assert!(park_start.elapsed() < Duration::from_millis(100));
+
+    // 5. Worker steals and executes task
+    let stolen = queue
+        .steal_injector_batch_and_pop(&local)
+        .expect("task must be in injector");
+    stolen.run();
+    assert!(ran.load(Ordering::Acquire));
+}
+
+#[test]
+fn test_lost_wakeup_interleaving_push_before_idle_mark() {
+    let parker = crossbeam_utils::sync::Parker::new();
+    let unparker = parker.unparker().clone();
+    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
+    let stealer = local.stealer();
+    let queue = Arc::new(RunnableQueue::new(
+        vec![stealer].into_boxed_slice(),
+        vec![unparker].into_boxed_slice(),
+    ));
+
+    // 1. Worker checked queue (empty) but has NOT set idle bit yet
+    assert_eq!(queue.idle_workers.load(Ordering::Acquire), 0);
+
+    // 2. Producer schedules task and calls wake_one() (which sees 0 idle workers)
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_clone = Arc::clone(&ran);
+    let (runnable, task) = async_task::spawn(
+        async move {
+            ran_clone.store(true, Ordering::Release);
+        },
+        {
+            let queue = Arc::downgrade(&queue);
+            move |r| {
+                if let Some(q) = queue.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    task.detach();
+    queue.schedule(runnable);
+
+    // 3. Worker now marks idle bit
+    queue.idle_workers.store(1 << 0, Ordering::Release);
+
+    // 4. Worker performs recheck before park and discovers the task
+    let discovered = queue
+        .steal_injector_batch_and_pop(&local)
+        .expect("task must be discovered");
+    queue.idle_workers.fetch_and(!(1 << 0), Ordering::AcqRel);
+    discovered.run();
+    assert!(ran.load(Ordering::Acquire));
+}
+
+#[test]
+fn test_scheduler_seal_linearization_and_rejection() {
+    let parker = crossbeam_utils::sync::Parker::new();
+    let unparker = parker.unparker().clone();
+    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
+    let stealer = local.stealer();
+    let queue = Arc::new(RunnableQueue::new(
+        vec![stealer].into_boxed_slice(),
+        vec![unparker].into_boxed_slice(),
+    ));
+
+    let ran1 = Arc::new(AtomicBool::new(false));
+    let ran1_clone = Arc::clone(&ran1);
+    let (runnable1, task1) = async_task::spawn(
+        async move {
+            ran1_clone.store(true, Ordering::Release);
+        },
+        {
+            let queue = Arc::downgrade(&queue);
+            move |r| {
+                if let Some(q) = queue.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    task1.detach();
+    queue.schedule(runnable1);
+
+    // Seal the queue
+    queue.seal_and_wake_all();
+    assert!(queue.is_sealed());
+
+    // Schedule another task after seal - must be rejected
+    let ran2 = Arc::new(AtomicBool::new(false));
+    let ran2_clone = Arc::clone(&ran2);
+    let (runnable2, task2) = async_task::spawn(
+        async move {
+            ran2_clone.store(true, Ordering::Release);
+        },
+        {
+            let queue = Arc::downgrade(&queue);
+            move |r| {
+                if let Some(q) = queue.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    task2.detach();
+    queue.schedule(runnable2);
+
+    // runnable1 is present in injector
+    let drained1 = queue
+        .steal_injector_batch_and_pop(&local)
+        .expect("task1 was scheduled before seal");
+    drained1.run();
+    assert!(ran1.load(Ordering::Acquire));
+
+    // runnable2 was never admitted to the injector
+    assert!(queue.steal_injector_batch_and_pop(&local).is_none());
+    assert!(!ran2.load(Ordering::Acquire));
+}
+
+#[test]
+fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(2).unwrap();
+
+    let task1_ran = Arc::new(AtomicBool::new(false));
+    let task1_ran_clone = Arc::clone(&task1_ran);
+    let task2_ran = Arc::new(AtomicBool::new(false));
+    let task2_ran_clone = Arc::clone(&task2_ran);
+    let task3_ran = Arc::new(AtomicBool::new(false));
+    let task3_ran_clone = Arc::clone(&task3_ran);
+
+    let executor = manager.snapshot_spawn_executor().unwrap();
+    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
+
+    // Enqueue 3 tasks directly into worker's local queue
+    let (r1, t1) = async_task::spawn(
+        async move {
+            task1_ran_clone.store(true, Ordering::Release);
+        },
+        {
+            let q = Arc::downgrade(&executor.queue);
+            move |r| {
+                if let Some(q) = q.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    t1.detach();
+    local.push(r1);
+
+    let (r2, t2) = async_task::spawn(
+        async move {
+            task2_ran_clone.store(true, Ordering::Release);
+        },
+        {
+            let q = Arc::downgrade(&executor.queue);
+            move |r| {
+                if let Some(q) = q.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    t2.detach();
+    local.push(r2);
+
+    let (r3, t3) = async_task::spawn(
+        async move {
+            task3_ran_clone.store(true, Ordering::Release);
+        },
+        {
+            let q = Arc::downgrade(&executor.queue);
+            move |r| {
+                if let Some(q) = q.upgrade() {
+                    q.schedule(r);
+                }
+            }
+        },
+    );
+    t3.detach();
+    local.push(r3);
+
+    // Simulate worker panic with WorkerExitGuard
+    executor.live_workers.fetch_add(1, Ordering::Release);
+    let shared = Arc::clone(&executor);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = WorkerExitGuard {
+            shared,
+            local: Some(local),
+        };
+        panic!("simulated infrastructure worker panic");
+    }));
+
+    // Verify fatal_worker_failure was recorded
+    assert!(executor.fatal_worker_failure.load(Ordering::Acquire));
+
+    // The remaining worker(s) in executor or drain_abandoned pick up all 3 tasks from injector
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !(task1_ran.load(Ordering::Acquire)
+        && task2_ran.load(Ordering::Acquire)
+        && task3_ran.load(Ordering::Acquire))
+    {
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Even if one worker panicked, all tasks left in its local queue were recovered and executed
+    assert!(task1_ran.load(Ordering::Acquire));
+    assert!(task2_ran.load(Ordering::Acquire));
+    assert!(task3_ran.load(Ordering::Acquire));
+
+    // Clean up
+    let _ = manager.close();
+}
+
+#[test]
+fn test_close_with_timeout_preserves_open_queue_and_resumes() {
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(1).unwrap();
+
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    // Timeout while task is still active
+    assert!(
+        manager
+            .close_with_timeout(Duration::from_millis(20))
+            .is_err()
+    );
+
+    // Invariant check: queue is NOT sealed during intermediate timeout
+    let executor = manager.snapshot_spawn_executor();
+    assert!(executor.is_err() || !executor.unwrap().queue.is_sealed());
+
+    // Release task so it completes
+    release_tx.send(()).unwrap();
+
+    // Second close succeeds cleanly
+    assert!(manager.close_with_timeout(Duration::from_secs(1)).is_ok());
 }

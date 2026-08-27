@@ -1,24 +1,35 @@
-use super::boundary::return_error;
+use super::completion::{OwnedDeliveryOutcome, return_error};
 use super::manager::MAX_ASYNC_HANDLE_BYTES;
 use crate::error::InputError;
-use crate::execution::{CallId, CallMetadata, CallOutcome};
+use crate::return_value::AsyncReturnPointer;
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
 
-pub(crate) struct OwnedAsyncHandle {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeliveryState {
+    Pending,
+    Attempted,
+}
+
+/// Owns the copied Excel async handle until its single delivery attempt.
+///
+/// The state is changed to `Attempted` before calling Excel. This makes the
+/// fallback in `Drop` a completion path for a still-pending handle, never a
+/// retry after an FFI call has started.
+pub(crate) struct ExcelAsyncResponder {
     pub(crate) udf_id: &'static str,
     pub(crate) raw: XLOPER12,
     pub(crate) bytes: Option<Box<[u8]>>,
-    pub(crate) completed: bool,
     pub(crate) fallback_error: Option<XllError>,
+    state: DeliveryState,
 }
 
 // SAFETY: construction owns any pointed-to bytes; an opaque zero-length handle
 // is only copied back to Excel and is never dereferenced by Rust.
-unsafe impl Send for OwnedAsyncHandle {}
+unsafe impl Send for ExcelAsyncResponder {}
 
-impl OwnedAsyncHandle {
+impl ExcelAsyncResponder {
     pub(crate) unsafe fn from_raw(udf_id: &'static str, raw: *mut XLOPER12) -> XllResult<Self> {
         // SAFETY: the caller guarantees a live Excel async-handle argument.
         let value = unsafe { raw.as_ref() }.ok_or_else(|| {
@@ -79,101 +90,56 @@ impl OwnedAsyncHandle {
                 xltype: XLTYPE_BIG_DATA,
             },
             bytes,
-            completed: false,
             fallback_error: None,
+            state: DeliveryState::Pending,
         })
     }
 
-    pub(crate) fn pointer(&mut self) -> NonNull<XLOPER12> {
+    fn pointer(&mut self) -> NonNull<XLOPER12> {
         let _ = &self.bytes;
         NonNull::from_mut(&mut self.raw)
     }
 
-    pub(crate) fn set_error(&mut self, error: XllError) {
+    pub(crate) fn set_fallback_error(&mut self, error: XllError) {
         self.fallback_error = Some(error);
     }
 
-    pub(crate) fn complete(&mut self) {
-        self.completed = true;
+    pub(crate) unsafe fn deliver(&mut self, value: AsyncReturnPointer) -> XllResult<()> {
+        if self.state != DeliveryState::Pending {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_DELIVERY,
+            });
+        }
+        // Mark the attempt before crossing the FFI boundary. A panic or error
+        // from Excel must not cause Drop to issue a second callback.
+        self.state = DeliveryState::Attempted;
+        // SAFETY: the responder owns a valid copied handle and `value` remains
+        // owned by the caller for the duration of this call.
+        unsafe { super::completion::async_return(self.pointer(), value.as_non_null()) }
+    }
+
+    /// Delivers an Excel error through the same single-attempt path as a
+    /// completed async result.
+    pub(crate) unsafe fn deliver_error(&mut self, error: &XllError) -> XllResult<()> {
+        // SAFETY: the returned pointer is owned by this call until `deliver`
+        // completes, which forwards the pointer to Excel synchronously.
+        unsafe { self.deliver(AsyncReturnPointer::error(error)) }
     }
 }
 
-impl Drop for OwnedAsyncHandle {
+impl Drop for ExcelAsyncResponder {
     fn drop(&mut self) {
-        if !self.completed {
-            self.completed = true;
+        if self.state == DeliveryState::Pending {
+            self.state = DeliveryState::Attempted;
             let error = self
                 .fallback_error
                 .take()
                 .unwrap_or(XllError::ExcelValue(crate::ExcelError::NotAvailable));
             // SAFETY: raw is live and owned by this handle.
-            unsafe {
-                return_error(self.udf_id, &mut self.raw, &error);
+            let delivery = unsafe { return_error(&mut self.raw, &error) };
+            if let OwnedDeliveryOutcome::Failed(delivery_error) = delivery {
+                crate::diagnostics::report_no_unwind(self.udf_id, &delivery_error);
             }
-        }
-    }
-}
-
-pub(crate) struct AsyncCompletionTracker<G: crate::execution::UdfLayerGuard> {
-    pub(crate) udf_id: &'static str,
-    pub(crate) excel_name: &'static str,
-    pub(crate) call_id: CallId,
-    pub(crate) calculation_id: crate::execution::CalculationId,
-    pub(crate) concurrent_calls: usize,
-    pub(crate) timer: crate::execution::CallTimer,
-    pub(crate) layers: Option<G>,
-    pub(crate) completed: bool,
-}
-
-impl<G: crate::execution::UdfLayerGuard> AsyncCompletionTracker<G> {
-    pub(crate) fn new(
-        metadata: &CallMetadata,
-        timer: crate::execution::CallTimer,
-        layers: Option<G>,
-    ) -> Self {
-        Self {
-            udf_id: metadata.udf_id,
-            excel_name: metadata.excel_name,
-            call_id: metadata.call_id,
-            calculation_id: metadata.calculation_id,
-            concurrent_calls: metadata.concurrent_calls,
-            timer,
-            layers,
-            completed: false,
-        }
-    }
-
-    pub(crate) fn finish(&mut self, outcome: &CallOutcome<'_>) {
-        if !self.completed {
-            self.completed = true;
-            if let Some(layers) = self.layers.take() {
-                layers.exit(outcome);
-            }
-            let trace_metadata = crate::execution::UdfTraceMetadata {
-                udf_id: self.udf_id,
-                excel_name: self.excel_name,
-                call_id: self.call_id,
-                calculation_id: self.calculation_id,
-                concurrent_calls: self.concurrent_calls,
-            };
-            crate::execution::trace(&trace_metadata, outcome);
-        }
-    }
-
-    pub(crate) fn finish_error(&mut self, error: &XllError) {
-        if !self.completed {
-            crate::diagnostics::report_no_unwind(self.udf_id, error);
-            let outcome = crate::execution::outcome_for_error(error, self.timer.elapsed());
-            self.finish(&outcome);
-        }
-    }
-}
-
-impl<G: crate::execution::UdfLayerGuard> Drop for AsyncCompletionTracker<G> {
-    fn drop(&mut self) {
-        if !self.completed {
-            let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
-            self.finish_error(&error);
         }
     }
 }

@@ -6,7 +6,8 @@ Import from:
 
 ```rust
 use xlfn::execution::{
-    CallMetadata, CallOutcome, UdfLayer, UdfLayerGuard, UdfLayers, UdfResultKind,
+    CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfLayer,
+    UdfLayerGuard,
 };
 ```
 
@@ -37,7 +38,8 @@ impl UdfLayerGuard for MetricsGuard {
     fn exit(self, outcome: &CallOutcome<'_>) {
         tracing::info!(
             udf = self.udf_id,
-            result = ?outcome.result,
+            completion = ?outcome.completion,
+            delivery = ?outcome.delivery,
             duration_ns = outcome.duration.as_nanos(),
             local_duration_ns = self.started.elapsed().as_nanos(),
             "instrumented UDF"
@@ -94,12 +96,19 @@ The calculation ID is a runtime correlation identifier, not a workbook persisten
 
 `CallOutcome` contains:
 
-- `UdfResultKind`: success, input, domain, vendor, panic, closing, or internal;
-- an optional borrowed `XllError`;
-- an optional vendor status code;
+- `completion`: success, a classified error, or cancellation;
+- `delivery`: not applicable, delivered, failed, or unobserved;
 - framework-measured duration.
 
-The borrowed error is valid only during `exit`. Copy a bounded classification or stable code into an asynchronous telemetry queue; do not retain the reference.
+Completion and delivery are independent. For example, an asynchronous UDF
+whose computation succeeds but whose `xlAsyncReturn` call is rejected reports
+`UdfCompletionOutcome::Success` together with
+`UdfDeliveryOutcome::Failed { .. }`. A computation error and a delivery error
+are both retained in the same outcome.
+
+Errors inside either outcome are borrowed and valid only during `exit`. Copy a
+bounded classification or stable code into an asynchronous telemetry queue; do
+not retain the references.
 
 ## Admission control
 

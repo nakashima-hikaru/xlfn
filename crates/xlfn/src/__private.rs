@@ -24,6 +24,7 @@ pub mod v1 {
     use crate::return_value::ffi_boundary_void;
     use crate::return_value::{ffi_boundary, free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
+    #[cfg(feature = "handles")]
     use crate::value::ExcelCellOutput;
     pub use crate::value::input::{
         ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
@@ -130,17 +131,17 @@ pub mod v1 {
         _frame: &CallFrame<'call, M>,
         state: &'call A::SharedState,
     ) -> crate::addin::MainThreadContext<'call, A> {
-        #[cfg(any(feature = "rtd", test))]
+        #[cfg(feature = "rtd")]
         {
             crate::addin::MainThreadContext::new(
                 state,
                 crate::rtd::RtdCallContext::new(
-                    _frame.services(),
+                    _frame.rtd_access(),
                     crate::host_api::ExcelHost::new(_frame.scope.callbacks()),
                 ),
             )
         }
-        #[cfg(all(not(feature = "rtd"), not(test)))]
+        #[cfg(not(feature = "rtd"))]
         crate::addin::MainThreadContext::new(state)
     }
 
@@ -404,9 +405,9 @@ pub mod v1 {
             }
         }
 
-        #[cfg(any(feature = "rtd", test))]
-        pub(crate) fn services(&self) -> &'call crate::runtime_components::GenerationServices {
-            self.arguments.services()
+        #[cfg(feature = "rtd")]
+        pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
+            self.arguments.rtd_access()
         }
 
         #[doc(hidden)]
@@ -415,8 +416,16 @@ pub mod v1 {
             udf_id: &'static str,
         ) -> XllResult<ReturnContext<'call, 'call>> {
             let inputs = self.arguments.finish()?;
-            let handles = self.arguments.take_handle_access();
-            Ok(ReturnContext::for_frame(handles, udf_id, inputs))
+            #[cfg(feature = "handles")]
+            {
+                let handles = self.arguments.take_handle_access();
+                Ok(ReturnContext::for_frame(handles, udf_id, inputs))
+            }
+            #[cfg(not(feature = "handles"))]
+            {
+                let _ = (udf_id, inputs);
+                Ok(ReturnContext::new())
+            }
         }
 
         #[doc(hidden)]
@@ -597,6 +606,7 @@ pub mod v1 {
     }
 
     /// Publishes a new handle instance inside a return context.
+    #[cfg(feature = "handles")]
     #[doc(hidden)]
     pub fn publish_new_handle<T>(
         context: &mut ReturnContext<'_, '_>,

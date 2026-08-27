@@ -1,11 +1,11 @@
 use crate::error::InputError;
-use crate::value::XlValueRef;
+use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::slice;
-use xlfn_sys::{IDSHEET, XLOPER12, XLREF12, XLTYPE_REF, XLTYPE_SREF};
+use xlfn_sys::{IDSHEET, XLOPER12, XLREF12};
 
 const EXCEL_MAX_ROW: i32 = 1_048_575;
 const EXCEL_MAX_COLUMN: i32 = 16_383;
@@ -152,8 +152,8 @@ pub trait FromExcelReference<'call>: Sized {
 
 impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
     fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        let kind = match value.base_type() {
-            XLTYPE_SREF => {
+        let kind = match value.value_type() {
+            XlValueType::SimpleReference => {
                 // SAFETY: xltypeSRef selects the sref union member.
                 let sref = unsafe { value.raw().value.sref };
                 if sref.count != 1 {
@@ -164,7 +164,7 @@ impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
                 }
                 ReferenceKind::SameSheet(ReferenceArea::parse(sref.reference, argument)?)
             }
-            XLTYPE_REF => {
+            XlValueType::Reference => {
                 // SAFETY: xltypeRef selects the mref union member.
                 let mref = unsafe { value.raw().value.mref };
                 // SAFETY: a valid xltypeRef contains a readable XLMREF12 table;
@@ -189,12 +189,12 @@ impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
                     areas,
                 }
             }
-            _ => {
+            actual => {
                 return Err(XllError::input(
                     argument,
                     InputError::WrongType {
                         expected: "reference",
-                        actual: value.base_type(),
+                        actual,
                     },
                 ));
             }
@@ -226,7 +226,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlfn_sys::{XLOPER12SRef, XLOPER12Value};
+    use xlfn_sys::{XLOPER12SRef, XLOPER12Value, XLTYPE_SREF};
 
     fn sref(area: XLREF12) -> XLOPER12 {
         XLOPER12 {

@@ -106,17 +106,3 @@ pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
     let scope = CallScope::new();
     operation(call, &scope)
 }
-
-/// Test-side equivalent for direct conversion helpers that already own a
-/// generation service bundle but do not need a full runtime call guard.
-#[cfg(test)]
-pub(crate) fn with_excel_call_scope_and_services<R>(
-    services: &crate::runtime_components::GenerationServices,
-    operation: impl for<'scope> FnOnce(
-        &'scope crate::runtime_components::GenerationServices,
-        &'scope CallScope<'scope>,
-    ) -> R,
-) -> R {
-    let scope = CallScope::new();
-    operation(services, &scope)
-}

@@ -9,8 +9,9 @@ use crate::addin::Addin;
 use crate::generation::{
     ExecutionGeneration, OpenAttemptId, OpeningGeneration, RemovalEpoch, RuntimeGeneration,
 };
-use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition, RemovalOwner};
+use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
 use crate::runtime::Runtime;
+use crate::runtime::shutdown::RemovalOwner;
 use crate::runtime_components::QuarantineReason;
 use crate::runtime_open_txn::{OpenAttemptBegun, OpeningTxn};
 use crate::{XllError, XllResult};
@@ -193,7 +194,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         self.runtime.return_protocol.close_admission();
         let mut request_recorded = false;
 
-        loop {
+        'retry: loop {
             let decision = 'decision: {
                 match wait_guard.phase() {
                     LifecyclePhase::Closed => {
@@ -206,7 +207,10 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
                             break 'decision Some(None);
                         }
                         if wait_guard.removal_attempt().is_none() {
-                            lifecycle.request_closing(&mut wait_guard);
+                            drop(wait_guard);
+                            self.runtime.return_protocol.wait_for_returns();
+                            wait_guard = lifecycle.access();
+                            continue 'retry;
                         }
                     }
                     LifecyclePhase::Closing => {}
@@ -237,32 +241,19 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
 
                 if wait_guard.phase() != LifecyclePhase::Closed
                     && wait_guard.open_attempt().is_none()
-                    && let Some(attempt) = lifecycle.claim_removal_owner(&mut wait_guard)
+                    && let Some(claim) = lifecycle.claim_removal(&mut wait_guard)
                 {
                     self.runtime
                         .refinement
                         .acquire_final_close_owner(self.runtime);
-                    Some(Some(attempt))
+                    Some(Some(claim))
                 } else {
                     None
                 }
             };
 
             match decision {
-                Some(Some(attempt)) => {
-                    let module_closing = lifecycle
-                        .take_module_closing_for_owner(&mut wait_guard)
-                        .unwrap_or_else(|| {
-                            crate::boundary::fail_stop_invariant(
-                                "removal owner lacks module close authority",
-                                &XllError::Internal {
-                                    diagnostic_id:
-                                        crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-                                },
-                            )
-                        });
-                    return Some(RemovalOwner::new(self.runtime, attempt, module_closing));
-                }
+                Some(Some(claim)) => return Some(RemovalOwner::new(self.runtime, claim)),
                 Some(None) => return None,
                 None => lifecycle.wait(&mut wait_guard),
             }
@@ -285,21 +276,11 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
                 | LifecyclePhase::Open
                 | LifecyclePhase::Quarantined => return None,
             }
-            if let Some(attempt) = lifecycle.claim_removal_owner(&mut wait_guard) {
+            if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
                 self.runtime
                     .refinement
                     .acquire_open_rollback_owner(self.runtime);
-                let module_closing = lifecycle
-                    .take_module_closing_for_owner(&mut wait_guard)
-                    .unwrap_or_else(|| {
-                        crate::boundary::fail_stop_invariant(
-                            "rollback owner lacks module close authority",
-                            &XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-                            },
-                        )
-                    });
-                return Some(RemovalOwner::new(self.runtime, attempt, module_closing));
+                return Some(RemovalOwner::new(self.runtime, claim));
             }
             lifecycle.wait(&mut wait_guard);
         }
