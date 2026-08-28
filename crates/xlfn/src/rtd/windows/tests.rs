@@ -2334,9 +2334,8 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
             RtdTopic::single("dispatch-refresh").unwrap(),
         )
         .unwrap();
-    let key_obj = *prepared.key();
     let conn = subscriptions
-        .connect_transaction(&handle, crate::subscription::TopicId(77), &key_obj)
+        .connect_transaction(&handle, crate::subscription::TopicId(77), prepared.id())
         .unwrap();
     assert_eq!(conn.value(), &StoredRtdValue::Number(12.5));
     conn.commit().unwrap();
@@ -2590,10 +2589,10 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let prepared = subscriptions
         .prepare(&source, RtdTopic::single("ensure-test").unwrap())
         .unwrap();
-    let key_obj = *prepared.key();
+    let id = prepared.id();
     prepared.commit();
     let conn = subscriptions
-        .connect_transaction(handle, crate::subscription::TopicId(1), &key_obj)
+        .connect_transaction(handle, crate::subscription::TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 

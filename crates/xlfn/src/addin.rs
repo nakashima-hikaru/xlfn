@@ -986,9 +986,10 @@ mod tests {
                     .expect("non-zero test server generation"),
             )
             .unwrap();
+        let id = prepared.id();
         let key_obj = *prepared.key();
         let conn = subscriptions
-            .connect_transaction(&server, crate::subscription::TopicId(7), &key_obj)
+            .connect_transaction(&server, crate::subscription::TopicId(7), id)
             .unwrap();
         assert_eq!(
             conn.value(),
@@ -998,6 +999,7 @@ mod tests {
 
         let services = runtime.generation_services().unwrap();
         let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
+        assert_eq!(repeated.id(), id);
         assert_eq!(repeated.key(), &key_obj);
         assert!(!repeated.has_reservation());
         repeated.rollback();

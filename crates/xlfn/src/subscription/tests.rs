@@ -118,17 +118,17 @@ fn server_publish_isolation() {
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
 
-    let key_a = *prep_a.key();
-    let key_b = *prep_b.key();
+    let id_a = prep_a.id();
+    let id_b = prep_b.id();
     prep_a.commit();
     prep_b.commit();
 
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key_a)
+        .connect_transaction(&server_a, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -184,17 +184,17 @@ fn notification_callback_isolation() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_a = *prep_a.key();
-    let key_b = *prep_b.key();
+    let id_a = prep_a.id();
+    let id_b = prep_b.id();
     prep_a.commit();
     prep_b.commit();
 
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key_a)
+        .connect_transaction(&server_a, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -231,10 +231,10 @@ fn server_locality_refresh_lock_independence() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -296,10 +296,10 @@ fn runtime_close_blocks_all_servers_immediately() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -318,10 +318,10 @@ fn runtime_close_blocks_all_servers_immediately() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
-    let key_a = *prep_a.key();
+    let id_a = prep_a.id();
     prep_a.commit();
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key_a)
+        .connect_transaction(&server_a, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
 
@@ -363,11 +363,11 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared-topic").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key)
+        .connect_transaction(&server_a, TopicId(1), id)
         .unwrap();
     conn_a.commit().unwrap();
 
@@ -382,15 +382,15 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let prep_b = runtime
         .prepare(&source, RtdTopic::single("shared-topic").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
 
     runtime
-        .claim_server_key(server_b.inner.generation, &key_b)
+        .claim_server(server_b.inner.generation, id_b)
         .unwrap();
 
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -419,10 +419,10 @@ fn uncommitted_update_does_not_trigger_notification() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
-    let key_a = *prep_a.key();
+    let id_a = prep_a.id();
     prep_a.commit();
     let conn_a = runtime
-        .connect_transaction(&server, TopicId(1), &key_a)
+        .connect_transaction(&server, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
 
@@ -430,10 +430,10 @@ fn uncommitted_update_does_not_trigger_notification() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
     let _conn_b = runtime
-        .connect_transaction(&server, TopicId(2), &key_b)
+        .connect_transaction(&server, TopicId(2), id_b)
         .unwrap();
 
     state.calls.store(0, Ordering::SeqCst);
@@ -460,10 +460,10 @@ fn server_standalone_termination() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -495,10 +495,10 @@ fn stale_sink_returns_closing() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
-    let key_a = *prep_a.key();
+    let id_a = prep_a.id();
     prep_a.commit();
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key_a)
+        .connect_transaction(&server_a, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
 
@@ -512,10 +512,10 @@ fn stale_sink_returns_closing() {
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
-    let key_b = *prep_b.key();
+    let id_b = prep_b.id();
     prep_b.commit();
     let conn_b = runtime
-        .connect_transaction(&server_b, TopicId(1), &key_b)
+        .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
     conn_b.commit().unwrap();
 
@@ -543,10 +543,10 @@ fn global_quota_enforcement() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("a-{}", i)).unwrap())
             .unwrap();
-        let key = *prep.key();
+        let id = prep.id();
         prep.commit();
         let conn = runtime
-            .connect_transaction(&server_a, TopicId(i), &key)
+            .connect_transaction(&server_a, TopicId(i), id)
             .unwrap();
         conn.commit().unwrap();
         sinks_a.push(sink.lock().clone().unwrap());
@@ -558,10 +558,10 @@ fn global_quota_enforcement() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("b-{}", i)).unwrap())
             .unwrap();
-        let key = *prep.key();
+        let id = prep.id();
         prep.commit();
         let conn = runtime
-            .connect_transaction(&server_b, TopicId(i), &key)
+            .connect_transaction(&server_b, TopicId(i), id)
             .unwrap();
         conn.commit().unwrap();
         sinks_b.push(sink.lock().clone().unwrap());
@@ -596,20 +596,20 @@ fn key_binding_concurrency_rejection() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key)
+        .connect_transaction(&server_a, TopicId(1), id)
         .unwrap();
     assert!(matches!(
-        runtime.connect_transaction(&server_b, TopicId(1), &key),
+        runtime.connect_transaction(&server_b, TopicId(1), id),
         Err(XllError::Internal { .. })
     ));
 
     conn_a.commit().unwrap();
     assert!(matches!(
-        runtime.connect_transaction(&server_b, TopicId(1), &key),
+        runtime.connect_transaction(&server_b, TopicId(1), id),
         Err(XllError::Internal { .. })
     ));
 }
@@ -639,10 +639,10 @@ fn runtime_close_waits_for_inflight() {
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
-    let key_a = *prep_a.key();
+    let id_a = prep_a.id();
     prep_a.commit();
     let conn_a = runtime
-        .connect_transaction(&server_a, TopicId(1), &key_a)
+        .connect_transaction(&server_a, TopicId(1), id_a)
         .unwrap();
     conn_a.commit().unwrap();
 
@@ -834,11 +834,11 @@ fn reentrant_drop_safety() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("reentrant").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -856,7 +856,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
 
     server
         .inner
@@ -873,7 +873,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
         Err(XllError::Closing)
     ));
     assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
-    assert!(matches!(server.claim(&key), Err(XllError::Closing)));
+    assert!(matches!(server.claim(id), Err(XllError::Closing)));
     assert!(matches!(
         server.disconnect(TopicId(1)),
         Err(XllError::Closing)
@@ -903,11 +903,11 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("test_err").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1004,11 +1004,11 @@ fn disconnect_propagates_subscription_cleanup_error() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("disc_err").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1040,11 +1040,11 @@ fn rollback_records_subscription_cleanup_error() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("roll_err").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let mut conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
 
     {
@@ -1088,11 +1088,11 @@ fn request_cancel_panic_propagates_to_termination() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("cancel_panic").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1149,15 +1149,15 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("delayed_fail").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let runtime_clone = Arc::clone(&runtime);
     let server_clone = server.clone();
-    let key_clone = key;
+    let id_clone = id;
 
     let handle = std::thread::spawn(move || {
-        runtime_clone.connect_transaction(&server_clone, TopicId(1), &key_clone)
+        runtime_clone.connect_transaction(&server_clone, TopicId(1), id_clone)
     });
 
     rx_enter.recv().unwrap();
@@ -1238,7 +1238,7 @@ fn same_handle_reuses_active_subscription_identity() {
     first.commit();
 
     let connection = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     connection.commit().unwrap();
 
@@ -1518,11 +1518,11 @@ fn identity_index_is_removed_after_final_unbind() {
     let prepared = runtime
         .prepare(&source, RtdTopic::single("unbind_test").unwrap())
         .unwrap();
-    let key = *prepared.key();
+    let id = prepared.id();
     prepared.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1640,11 +1640,11 @@ fn server_notification_retry_sequence_eventually_succeeds() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("retry_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1689,11 +1689,11 @@ fn server_notification_retry_suppressed_after_max_attempts() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("suppress_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1722,11 +1722,11 @@ fn server_notification_panic_records_cleanup_failure() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("panic_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1775,11 +1775,11 @@ fn runtime_close_and_publish_race() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("race_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
     let sink = sink.lock().clone().unwrap();
@@ -1833,11 +1833,11 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("quota_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
     let sink = sink_slot.lock().clone().unwrap();
@@ -1897,11 +1897,11 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
     let prep = runtime
         .prepare(&source, RtdTopic::single("cycle_test").unwrap())
         .unwrap();
-    let key = *prep.key();
+    let id = prep.id();
     prep.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1941,10 +1941,10 @@ fn prepare_warm_path_reuses_registered_source_identity() {
 
     // Commit and connect transaction to activate subscription.
     // The pending catalog entry is consumed/removed, so the runtime no longer retains Arc<Source>.
-    let key = *first.key();
+    let id = first.id();
     first.commit();
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1971,7 +1971,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     first.commit();
 
     let conn = runtime
-        .connect_transaction(&server, TopicId(1), &key)
+        .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
 
@@ -1981,6 +1981,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     // Prepare on existing active: must NOT downgrade runtime (no weak count bump)
     let warm = runtime.prepare(&source, topic).unwrap();
     assert_eq!(warm.id(), id);
+    assert_eq!(warm.key(), &key);
     assert!(!warm.has_reservation());
     assert_eq!(Arc::weak_count(&runtime), baseline_weak);
 
@@ -1995,4 +1996,32 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
             .is_some_and(|entry| entry.is_active())
     );
     assert_eq!(catalog.pending_len(), 0);
+}
+
+#[test]
+fn resolve_transport_key_validates_runtime_identity() {
+    let runtime_a = Arc::new(SubscriptionRuntime::new());
+    let runtime_b = Arc::new(SubscriptionRuntime::new());
+
+    let (source, _, _) = publishing_source::<f64>(None);
+    let prep = runtime_a
+        .prepare(&source, RtdTopic::single("resolve-test").unwrap())
+        .unwrap();
+
+    let id = prep.id();
+    let key = *prep.key();
+
+    // 1. Valid current-runtime key resolves to SubscriptionId
+    assert_eq!(runtime_a.resolve_transport_key(key).unwrap(), id);
+
+    // 2. Key from another runtime fails with StaleHandle
+    assert!(matches!(
+        runtime_b.resolve_transport_key(key),
+        Err(XllError::StaleHandle)
+    ));
+
+    // 3. Round-trip transport string
+    let transport = key.to_transport();
+    let parsed_key = SubscriptionKey::parse_transport(&transport).unwrap();
+    assert_eq!(runtime_a.resolve_transport_key(parsed_key).unwrap(), id);
 }

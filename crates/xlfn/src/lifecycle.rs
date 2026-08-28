@@ -767,10 +767,10 @@ mod tests {
                     crate::subscription::RtdTopic::single("lean-checker-subscription").unwrap(),
                 )
                 .unwrap();
-            let key = *prepared.key();
+            let id = prepared.id();
             prepared.commit();
             let conn = subscriptions
-                .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+                .connect_transaction(&server, crate::subscription::TopicId(1), id)
                 .unwrap();
             conn.commit().unwrap();
             trace_sink
@@ -1563,10 +1563,10 @@ mod tests {
                     crate::subscription::RtdTopic::single("ordered").unwrap(),
                 )
                 .unwrap();
-            let key = *prepared.key();
+            let id = prepared.id();
             prepared.commit();
             let conn = subscriptions
-                .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+                .connect_transaction(&server, crate::subscription::TopicId(1), id)
                 .unwrap();
             conn.commit().unwrap();
             drop(server);

@@ -991,11 +991,12 @@ unsafe fn connect_data_inner(
         return E_INVALIDARG;
     };
 
-    let (handles, subscription_server) = {
+    let (handles, subscriptions, subscription_server) = {
         // SAFETY: `this` was validated as non-null and COM retains the server during ConnectData.
         let backends = unsafe { (*this).backends.lock() };
         (
             backends.handles.clone(),
+            backends.subscriptions.clone(),
             backends.subscription_server.clone(),
         )
     };
@@ -1019,9 +1020,20 @@ unsafe fn connect_data_inner(
         let Some(subscription_server) = subscription_server.as_ref() else {
             return E_FAIL;
         };
+        let Some(subscriptions) = subscriptions.as_ref() else {
+            return E_FAIL;
+        };
+
+        let sub_id = match subscriptions.resolve_transport_key(sub_key) {
+            Ok(id) => id,
+            Err(error) => {
+                crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
+                return E_FAIL;
+            }
+        };
 
         match subscription_server
-            .connect_transaction(crate::subscription::TopicId(topic_id), &sub_key)
+            .connect_transaction(crate::subscription::TopicId(topic_id), sub_id)
         {
             Ok(connection) => ConnectDataTransaction::Subscription(connection),
             Err(error) => {

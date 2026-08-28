@@ -149,8 +149,9 @@ pub(crate) fn observe_subscription(
         }
     };
 
+    let id = subscriptions.resolve_transport_key(*key)?;
     if let Some(subscription_server) = &ensured.subscription_server
-        && let Err(error) = subscription_server.claim(key)
+        && let Err(error) = subscription_server.claim(id)
     {
         discard_unpublished_server(active.pointer, ensured.newly_created);
         return Err(error);

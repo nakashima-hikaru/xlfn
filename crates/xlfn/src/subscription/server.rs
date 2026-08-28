@@ -7,7 +7,7 @@ use super::delivery::{
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::{ErasedRtdSource, RtdSubscription};
-use super::topic::{SubscriptionId, SubscriptionKey, TopicId};
+use super::topic::{SubscriptionId, TopicId};
 use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -49,20 +49,20 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         self.inner.pending_update_count()
     }
 
-    pub(crate) fn claim(&self, key: &SubscriptionKey) -> XllResult<()> {
+    pub(crate) fn claim(&self, id: SubscriptionId) -> XllResult<()> {
         let _operation = self.inner.enter_operation()?;
         self.inner.ensure_open()?;
         let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
-        parent.claim_server_key(self.inner.generation, key)
+        parent.claim_server(self.inner.generation, id)
     }
 
     pub(crate) fn connect_transaction(
         &self,
         topic_id: TopicId,
-        key: &SubscriptionKey,
+        id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H>> {
         let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
-        parent.connect_transaction(self, topic_id, key)
+        parent.connect_transaction(self, topic_id, id)
     }
 
     pub(crate) fn disconnect(&self, topic_id: TopicId) -> XllResult<()> {

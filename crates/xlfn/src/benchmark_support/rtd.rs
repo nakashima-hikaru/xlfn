@@ -65,9 +65,9 @@ impl RtdPublishNumberBenchmark {
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");
-        let key = *prepared.key();
+        let id = prepared.id();
         let conn = runtime
-            .connect_transaction(&server, crate::subscription::TopicId(1), &key)
+            .connect_transaction(&server, crate::subscription::TopicId(1), id)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();
@@ -139,9 +139,9 @@ impl RtdPublishStringBenchmark {
         let prepared = runtime
             .prepare(&source, topic)
             .expect("prepare must succeed");
-        let key = *prepared.key();
+        let id = prepared.id();
         let conn = runtime
-            .connect_transaction(&server, crate::subscription::TopicId(2), &key)
+            .connect_transaction(&server, crate::subscription::TopicId(2), id)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();

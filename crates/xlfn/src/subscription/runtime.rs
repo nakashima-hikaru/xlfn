@@ -284,12 +284,23 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
     }
 
-    pub(crate) fn claim_server_key(
+    pub(crate) fn resolve_transport_key(
+        &self,
+        key: SubscriptionKey,
+    ) -> XllResult<SubscriptionId> {
+        key.validate_runtime(self.runtime_id)
+            .ok_or(XllError::StaleHandle)
+    }
+
+    pub(crate) fn transport_key(&self, id: SubscriptionId) -> SubscriptionKey {
+        SubscriptionKey::from_internal(self.runtime_id, id)
+    }
+
+    pub(crate) fn claim_server(
         &self,
         generation: ServerGeneration,
-        key: &SubscriptionKey,
+        id: SubscriptionId,
     ) -> XllResult<()> {
-        let id = key.validate_runtime(self.runtime_id).ok_or(XllError::Closing)?;
         let mut catalog = self.catalog.lock();
         catalog
             .with_entry(id, |entry| entry.claim_server(generation))
@@ -324,9 +335,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         self: &Arc<Self>,
         server_handle: &SubscriptionServerHandle<H>,
         topic_id: TopicId,
-        key: &SubscriptionKey,
+        id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H>> {
-        let id = key.validate_runtime(self.runtime_id).ok_or(XllError::Closing)?;
         let operation = server_handle.inner.enter_owned_operation()?;
         let conn_gen = ConnectionGeneration::new(
             self.next_connection_generation
@@ -472,7 +482,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             topic_id,
             generation: conn_gen,
             id,
-            key: *key,
             value: latest_value,
             observed_sequence,
             created: true,
@@ -864,7 +873,6 @@ pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
     pub(crate) topic_id: TopicId,
     pub(crate) generation: ConnectionGeneration,
     pub(crate) id: SubscriptionId,
-    pub(crate) key: SubscriptionKey,
     pub(crate) value: StoredRtdValue,
     pub(crate) observed_sequence: Option<u64>,
     pub(crate) created: bool,
