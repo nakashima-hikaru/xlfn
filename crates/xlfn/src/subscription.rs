@@ -109,7 +109,7 @@ pub(crate) use topic::TopicId;
 pub(crate) use topic::{
     DEFAULT_MAX_RTD_ACTIVE, DEFAULT_MAX_RTD_PENDING, DEFAULT_MAX_RTD_QUEUED_UPDATES,
     DEFAULT_MAX_RTD_SOURCE_IDS, DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES, MAX_RTD_TOPIC_BYTES,
-    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionIdentity,
+    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionId, SubscriptionIdentity,
 };
 #[cfg(any(all(target_os = "windows", feature = "rtd"), test))]
 pub(crate) use value::StoredRtdValue;

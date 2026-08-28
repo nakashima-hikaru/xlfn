@@ -33,7 +33,10 @@ mod rollback;
 mod shutdown;
 mod transactions;
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(
+    feature = "bench-internals",
+    all(test, any(feature = "handles", feature = "rtd")),
+))]
 use crate::runtime_components::GenerationServices;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;

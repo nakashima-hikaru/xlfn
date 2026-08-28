@@ -7,7 +7,7 @@ use super::delivery::{
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::{ErasedRtdSource, RtdSubscription};
-use super::topic::{SubscriptionKey, TopicId};
+use super::topic::{SubscriptionId, SubscriptionKey, TopicId};
 use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -870,7 +870,7 @@ pub(crate) fn drop_notifier_no_unwind<N>(notifier: Option<N>) -> XllResult<()> {
 }
 
 pub(crate) struct TerminatedTopic {
-    pub(crate) key: SubscriptionKey,
+    pub(crate) id: SubscriptionId,
     pub(crate) generation: ConnectionGeneration,
 }
 
@@ -932,11 +932,11 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
                 shard.pending[1].clear();
                 for (_, active) in shard.active_by_topic.drain() {
                     active_entries.push(TerminatedTopic {
-                        key: active.key,
+                        id: active.id,
                         generation: active.generation,
                     });
                 }
-                shard.topic_by_key.clear();
+                shard.topic_by_id.clear();
             }
             self.server
                 .publish
@@ -971,7 +971,7 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
             for topic in &active_entries {
                 if let Some(src) = cleanup_catalog_binding_and_pending(
                     &mut catalog,
-                    &topic.key,
+                    topic.id,
                     self.server.generation,
                     topic.generation,
                 ) {
@@ -986,25 +986,25 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
 
         if let Some(parent) = self.server.parent.upgrade() {
             let mut catalog = parent.catalog.lock();
-            let unactive_pending_keys: Vec<_> = catalog
+            let unactive_pending_ids: Vec<_> = catalog
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
                     !entry.is_active() && entry.server_generation() == Some(self.server.generation)
                 })
-                .map(|(k, _)| *k)
+                .map(|(id, _)| *id)
                 .collect();
 
             let mut extra_sources = Vec::new();
-            for key in unactive_pending_keys {
-                let Some(should_remove) = catalog.with_entry(&key, |entry| {
+            for id in unactive_pending_ids {
+                let Some(should_remove) = catalog.with_entry(id, |entry| {
                     entry.reset_for_server_termination(self.server.generation) && entry.can_remove()
                 }) else {
                     continue;
                 };
 
                 if should_remove
-                    && let Some(removed) = catalog.remove_entry(&key)
+                    && let Some(removed) = catalog.remove_entry(id)
                     && let Some(source) = removed.into_source()
                 {
                     extra_sources.push(source);
@@ -1105,11 +1105,11 @@ pub(crate) fn disconnect_all_no_unwind(
 
 pub(crate) fn cleanup_catalog_binding_and_pending(
     catalog: &mut SubscriptionCatalog,
-    key: &SubscriptionKey,
+    id: SubscriptionId,
     server_generation: ServerGeneration,
     conn_generation: ConnectionGeneration,
 ) -> Option<Arc<dyn ErasedRtdSource>> {
-    let (_, should_remove) = catalog.with_entry(key, |entry| {
+    let (_, should_remove) = catalog.with_entry(id, |entry| {
         if entry.connection_generation() != Some(conn_generation)
             || entry.server_generation() != Some(server_generation)
         {
@@ -1122,7 +1122,7 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
 
     if should_remove {
         return catalog
-            .remove_entry(key)
+            .remove_entry(id)
             .and_then(SubscriptionEntry::into_source);
     }
 

@@ -1,6 +1,6 @@
 use super::host::SubscriptionHost;
 use super::server::PublishCore;
-use super::topic::{SubscriptionKey, TopicId};
+use super::topic::{SubscriptionId, TopicId};
 #[cfg(test)]
 use super::value::RtdValue;
 use super::value::StoredRtdValue;
@@ -61,7 +61,7 @@ impl ErasedSink {
 }
 
 pub(crate) struct ActiveSubscription {
-    pub(crate) key: SubscriptionKey,
+    pub(crate) id: SubscriptionId,
     pub(crate) generation: ConnectionGeneration,
     pub(crate) committed: bool,
     pub(crate) latest: StoredRtdValue,
@@ -133,7 +133,7 @@ pub(crate) const SERVER_LIFECYCLE_TERMINATED: u8 = 2;
 #[derive(Default)]
 pub(crate) struct TopicShard {
     pub(crate) active_by_topic: FxHashMap<TopicId, ActiveSubscription>,
-    pub(crate) topic_by_key: FxHashMap<SubscriptionKey, TopicId>,
+    pub(crate) topic_by_id: FxHashMap<SubscriptionId, TopicId>,
     pub(crate) pending: [FxHashMap<TopicId, QueuedUpdate>; 2],
 }
 

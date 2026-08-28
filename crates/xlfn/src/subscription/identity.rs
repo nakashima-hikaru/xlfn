@@ -1,5 +1,5 @@
 use super::source::SourceHandleId;
-use super::topic::{SubscriptionIdentity, SubscriptionKey};
+use super::topic::{SubscriptionId, SubscriptionIdentity};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::num::NonZeroUsize;
@@ -24,23 +24,22 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
 
 #[derive(Default)]
 pub(crate) struct SubscriptionIdentityIndex {
-    pub(crate) key_by_identity: FxHashMap<SubscriptionIdentity, SubscriptionKey>,
-    pub(crate) identity_by_key: FxHashMap<SubscriptionKey, SubscriptionIdentity>,
+    pub(crate) id_by_identity: FxHashMap<SubscriptionIdentity, SubscriptionId>,
     source_refs: FxHashMap<SourceHandleId, NonZeroUsize>,
 }
 
 impl SubscriptionIdentityIndex {
-    pub(crate) fn get_key(&self, identity: &SubscriptionIdentity) -> Option<&SubscriptionKey> {
-        self.key_by_identity.get(identity)
+    pub(crate) fn get_id(&self, identity: &SubscriptionIdentity) -> Option<SubscriptionId> {
+        self.id_by_identity.get(identity).copied()
     }
 
     fn plan_insert(
         &self,
         identity: &SubscriptionIdentity,
-        key: &SubscriptionKey,
+        _id: SubscriptionId,
         max_source_ids: usize,
     ) -> XllResult<SourceRefUpdate> {
-        if self.key_by_identity.contains_key(identity) || self.identity_by_key.contains_key(key) {
+        if self.id_by_identity.contains_key(identity) {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
@@ -69,14 +68,11 @@ impl SubscriptionIdentityIndex {
     fn commit_insert(
         &mut self,
         identity: SubscriptionIdentity,
-        key: SubscriptionKey,
+        id: SubscriptionId,
         source_ref_update: SourceRefUpdate,
     ) {
         let source_id = identity.source_id.0;
-        if self.key_by_identity.insert(identity.clone(), key).is_some() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        if self.identity_by_key.insert(key, identity).is_some() {
+        if self.id_by_identity.insert(identity, id).is_some() {
             xlfn_kernel::invariant::fail_stop();
         }
 
@@ -103,30 +99,22 @@ impl SubscriptionIdentityIndex {
     pub(crate) fn insert(
         &mut self,
         identity: SubscriptionIdentity,
-        key: SubscriptionKey,
+        id: SubscriptionId,
         max_source_ids: usize,
     ) -> XllResult<()> {
-        let source_ref_update = self.plan_insert(&identity, &key, max_source_ids)?;
-        self.commit_insert(identity, key, source_ref_update);
+        let source_ref_update = self.plan_insert(&identity, id, max_source_ids)?;
+        self.commit_insert(identity, id, source_ref_update);
         Ok(())
     }
 
-    pub(crate) fn remove_by_key(&mut self, key: &SubscriptionKey) -> Option<SubscriptionIdentity> {
-        let identity = self.identity_by_key.remove(key)?;
-        let removed_key = self
-            .key_by_identity
-            .remove(&identity)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        if removed_key != *key {
-            xlfn_kernel::invariant::fail_stop();
-        }
+    pub(crate) fn remove(&mut self, identity: &SubscriptionIdentity) -> Option<SubscriptionId> {
+        let id = self.id_by_identity.remove(identity)?;
         release_ref(&mut self.source_refs, identity.source_id.0);
-        Some(identity)
+        Some(id)
     }
 
     pub(crate) fn clear(&mut self) {
-        self.key_by_identity.clear();
-        self.identity_by_key.clear();
+        self.id_by_identity.clear();
         self.source_refs.clear();
     }
 
@@ -142,14 +130,8 @@ impl SubscriptionIdentityIndex {
 
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
-        assert_eq!(self.key_by_identity.len(), self.identity_by_key.len());
-
-        for (identity, key) in &self.key_by_identity {
-            assert_eq!(self.identity_by_key.get(key), Some(identity));
-        }
-
         let mut expected_source_refs = FxHashMap::default();
-        for identity in self.key_by_identity.keys() {
+        for identity in self.id_by_identity.keys() {
             *expected_source_refs
                 .entry(identity.source_id.0)
                 .or_insert(0usize) += 1;

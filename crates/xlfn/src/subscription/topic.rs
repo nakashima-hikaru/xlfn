@@ -153,6 +153,21 @@ pub(crate) struct SubscriptionIdentity {
     pub(crate) topic: RtdTopic,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SubscriptionId(pub(crate) u64);
+
+impl SubscriptionId {
+    #[inline]
+    pub(crate) const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    #[inline]
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SubscriptionKey {
     runtime_id: u64,
@@ -160,10 +175,33 @@ pub(crate) struct SubscriptionKey {
 }
 
 impl SubscriptionKey {
+    pub(crate) const fn from_internal(runtime_id: u64, id: SubscriptionId) -> Self {
+        Self {
+            runtime_id,
+            subscription_id: id.0,
+        }
+    }
+
     pub(crate) const fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
         Self {
             runtime_id,
             subscription_id,
+        }
+    }
+
+    pub(crate) const fn runtime_id(self) -> u64 {
+        self.runtime_id
+    }
+
+    pub(crate) const fn subscription_id(self) -> u64 {
+        self.subscription_id
+    }
+
+    pub(crate) fn validate_runtime(self, expected_runtime_id: u64) -> Option<SubscriptionId> {
+        if self.runtime_id == expected_runtime_id {
+            Some(SubscriptionId(self.subscription_id))
+        } else {
+            None
         }
     }
 

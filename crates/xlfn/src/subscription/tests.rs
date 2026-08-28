@@ -1233,6 +1233,7 @@ fn same_handle_reuses_active_subscription_identity() {
     let topic = RtdTopic::single("shared-active").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let id = first.id();
     let key = *first.key();
     first.commit();
 
@@ -1243,6 +1244,7 @@ fn same_handle_reuses_active_subscription_identity() {
 
     let second = runtime.prepare(&source, topic).unwrap();
 
+    assert_eq!(second.id(), id);
     assert_eq!(second.key(), &key);
     assert!(!second.has_reservation());
 
@@ -1254,7 +1256,7 @@ fn same_handle_reuses_active_subscription_identity() {
             .catalog
             .lock()
             .entries
-            .get(&key)
+            .get(&id)
             .is_some_and(|entry| entry.is_active())
     );
 }
@@ -1328,23 +1330,23 @@ fn source_refcount_tracks_live_subscription_identities() {
         source_id: SourceId(source.id),
         topic: RtdTopic::single("second").unwrap(),
     };
-    let first_key = SubscriptionKey::from_allocated_id(1, 1);
-    let second_key = SubscriptionKey::from_allocated_id(1, 2);
+    let first_id = SubscriptionId(1);
+    let second_id = SubscriptionId(2);
 
-    index.insert(first_identity, first_key, 16).unwrap();
-    index.insert(second_identity, second_key, 16).unwrap();
+    index.insert(first_identity.clone(), first_id, 16).unwrap();
+    index.insert(second_identity.clone(), second_id, 16).unwrap();
     assert_eq!(
         index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(2)
     );
     assert_eq!(index.distinct_source_count(), 1);
 
-    index.remove_by_key(&first_key);
+    index.remove(&first_identity);
     assert_eq!(
         index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(1)
     );
-    index.remove_by_key(&second_key);
+    index.remove(&second_identity);
     assert_eq!(index.distinct_source_count(), 0);
     index.assert_invariants();
 }
@@ -1421,19 +1423,18 @@ fn duplicate_identity_does_not_change_source_refcount() {
         source_id: SourceId(source.id),
         topic: RtdTopic::single("duplicate").unwrap(),
     };
-    let first_key = SubscriptionKey::from_allocated_id(1, 1);
-    let second_key = SubscriptionKey::from_allocated_id(1, 2);
+    let first_id = SubscriptionId(1);
+    let second_id = SubscriptionId(2);
 
-    index.insert(identity.clone(), first_key, 1).unwrap();
+    index.insert(identity.clone(), first_id, 1).unwrap();
     assert!(matches!(
-        index.insert(identity, second_key, 1),
+        index.insert(identity, second_id, 1),
         Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
         })
     ));
     assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
-    assert_eq!(index.key_by_identity.len(), 1);
-    assert_eq!(index.identity_by_key.len(), 1);
+    assert_eq!(index.id_by_identity.len(), 1);
     index.assert_invariants();
 }
 
@@ -1529,8 +1530,41 @@ fn identity_index_is_removed_after_final_unbind() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.key_by_identity.is_empty());
-    assert!(catalog.identities.identity_by_key.is_empty());
+    assert!(catalog.identities.id_by_identity.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn catalog_entries_are_canonical_for_subscription_identity() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (source_a, _, _) = publishing_source::<f64>(None);
+    let (source_b, _, _) = publishing_source::<f64>(None);
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("topic-a").unwrap())
+        .unwrap();
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("topic-b").unwrap())
+        .unwrap();
+
+    let catalog = runtime.catalog.lock();
+    catalog.assert_identity_invariants();
+    assert_eq!(catalog.identities.id_by_identity.len(), 2);
+    assert_eq!(catalog.entries.len(), 2);
+
+    for (identity, id) in &catalog.identities.id_by_identity {
+        let entry = catalog.entries.get(id).unwrap();
+        assert_eq!(entry.source_id, identity.source_id);
+        assert_eq!(&entry.topic, &identity.topic);
+    }
+    drop(catalog);
+
+    prep_a.rollback();
+    prep_b.rollback();
+
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert!(catalog.identities.id_by_identity.is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -1932,6 +1966,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     let topic = RtdTopic::single("existing-active-noop").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let id = first.id();
     let key = *first.key();
     first.commit();
 
@@ -1945,6 +1980,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
 
     // Prepare on existing active: must NOT downgrade runtime (no weak count bump)
     let warm = runtime.prepare(&source, topic).unwrap();
+    assert_eq!(warm.id(), id);
     assert!(!warm.has_reservation());
     assert_eq!(Arc::weak_count(&runtime), baseline_weak);
 
@@ -1955,7 +1991,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     assert!(
         catalog
             .entries
-            .get(&key)
+            .get(&id)
             .is_some_and(|entry| entry.is_active())
     );
     assert_eq!(catalog.pending_len(), 0);
