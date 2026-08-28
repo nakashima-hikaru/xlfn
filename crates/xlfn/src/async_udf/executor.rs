@@ -69,8 +69,7 @@ pub(crate) struct ExecutorShared {
     pub(crate) control: Mutex<ExecutorControl>,
     pub(crate) wait_lock: Mutex<()>,
     pub(crate) idle: Condvar,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
+    pub(crate) observer: crate::shutdown_trace::ObservationSink,
     #[cfg(test)]
     pub(crate) before_task_schedule_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -134,8 +133,7 @@ impl Executor {
             }),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
-            #[cfg(any(test, feature = "refinement"))]
-            trace: Mutex::new(None),
+            observer: crate::shutdown_trace::ObservationSink::new(),
             #[cfg(test)]
             before_task_schedule_hook: Mutex::new(None),
             #[cfg(test)]
@@ -181,9 +179,8 @@ impl Executor {
         Ok(Self { shared, workers })
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        *self.shared.trace.lock() = Some(trace);
+        self.shared.observer.set_trace_sink(trace);
     }
 
     pub(crate) fn wait_for_idle(&self) -> bool {
@@ -339,34 +336,16 @@ impl ExecutorShared {
             current.task_count.fetch_add(1, Ordering::AcqRel);
         }
 
-        #[allow(
-            unused_mut,
-            reason = "completion.trace is mutated only when feature-gated trace recording is active"
-        )]
-        let mut completion = reservation.commit(self, triomphe::Arc::clone(&*current), id);
+        let completion = reservation.commit(self, triomphe::Arc::clone(&*current), id);
 
         drop(admission);
-
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(trace) = self.trace.lock().as_ref().cloned() {
-            trace.record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
-            completion.trace = Some(trace);
-        }
+        self.observer
+            .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
 
         let wrapped = async move {
             let _completion = completion;
-            #[cfg(any(test, feature = "refinement"))]
             let result = Abortable::new(future, registration).await;
-            #[cfg(any(test, feature = "refinement"))]
-            {
-                *_completion.completion.lock() = if result.is_ok() {
-                    crate::shutdown_trace::Completion::Completed
-                } else {
-                    crate::shutdown_trace::Completion::Canceled
-                };
-            }
-            #[cfg(not(any(test, feature = "refinement")))]
-            let _ = Abortable::new(future, registration).await;
+            _completion.observation.finished(result.is_ok());
         };
         #[cfg(test)]
         {

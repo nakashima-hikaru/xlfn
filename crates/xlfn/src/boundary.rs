@@ -4,6 +4,8 @@
 //! reporting policy. This module is the narrow boundary adapter used when a
 //! runtime operation has to communicate a failure to the host.
 
+pub(crate) mod host;
+
 use crate::diagnostics::AddinId;
 use crate::error::XllError;
 use std::panic::{AssertUnwindSafe, catch_unwind};

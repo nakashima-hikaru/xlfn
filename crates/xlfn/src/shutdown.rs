@@ -240,7 +240,6 @@ pub(crate) enum UnloadHazard {
     RtdGitRevocationDebt,
 }
 
-#[cfg(any(test, feature = "refinement"))]
 impl UnloadHazard {
     pub(crate) fn shutdown_failure(self) -> crate::shutdown_trace::ShutdownFailure {
         match self {

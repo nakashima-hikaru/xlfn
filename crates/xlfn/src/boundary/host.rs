@@ -10,9 +10,6 @@ use crate::diagnostics::AddinId;
 use crate::lifecycle::{HostLifecycleIntent, lifecycle_access_error};
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
-use crate::runtime_open::open_addin_boundary as open_addin;
-use crate::runtime_recovery::quarantine_runtime;
-use crate::runtime_transactions::remove_addin;
 
 /// Handles the generated `xlAutoOpen` boundary.
 pub(crate) fn host_auto_open<A>(
@@ -33,7 +30,7 @@ where
         Err(error) => {
             let error = lifecycle_access_error(error);
             report_boundary_error("xlAutoOpen lifecycle thread", &error);
-            quarantine_runtime(runtime);
+            runtime.quarantine_runtime();
             return 0;
         }
     };
@@ -41,7 +38,7 @@ where
     let removal_completed_before_open = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
         && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
     if controlled_reload {
-        let result = remove_addin::<A>(runtime, &lifecycle);
+        let result = runtime.remove_addin(&lifecycle);
         if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
             return 0;
         }
@@ -50,13 +47,13 @@ where
             Err(error) => {
                 let error = lifecycle_access_error(error);
                 report_boundary_error("xlAutoOpen lifecycle rebind", &error);
-                quarantine_runtime(runtime);
+                runtime.quarantine_runtime();
                 return 0;
             }
         };
-        runtime.lifecycle_control().clear_host_intent();
+        runtime.clear_host_intent();
     }
-    let result = open_addin(runtime, &lifecycle, addin_id, version, target, descriptors);
+    let result = runtime.open_addin_boundary(&lifecycle, addin_id, version, target, descriptors);
     if controlled_reload
         && result == 0
         && runtime.phase() != crate::lifecycle::LifecyclePhase::Quarantined
@@ -64,7 +61,7 @@ where
         // A reload has already destroyed the previous generation. A failed
         // replacement must therefore not leave a closed runtime with the old
         // residency lease and no generation owner.
-        quarantine_runtime(runtime);
+        runtime.quarantine_runtime();
     } else if result == 0
         && removal_completed_before_open
         && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
@@ -72,7 +69,7 @@ where
         // The old generation was already removed successfully, but Excel
         // attempted a new open before delivering its close hint. Preserve
         // the release marker so that the later hint can release the lease.
-        runtime.lifecycle_control().complete_explicit_removal();
+        runtime.complete_explicit_removal();
     }
     result
 }
@@ -88,15 +85,15 @@ where
         if runtime.physical_unload_enabled() {
             if let Err(error) = runtime.release_module_residency() {
                 report_boundary_error("xlAutoClose module residency release", &error);
-                quarantine_runtime(runtime);
+                runtime.quarantine_runtime();
             } else {
-                runtime.lifecycle_control().clear_host_intent();
+                runtime.clear_host_intent();
             }
         } else {
             // A safe Addin may own executable sources outside framework
             // accounting. Keep the DLL resident unless the Addin explicitly
             // accepted the physical-unload contract.
-            runtime.lifecycle_control().clear_host_intent();
+            runtime.clear_host_intent();
         }
     }
     1
@@ -115,14 +112,14 @@ where
         Err(error) => {
             let error = lifecycle_access_error(error);
             report_boundary_error("xlAutoRemove lifecycle thread", &error);
-            quarantine_runtime(runtime);
+            runtime.quarantine_runtime();
             return 1;
         }
     };
-    runtime.lifecycle_control().request_explicit_removal();
-    let result = remove_addin::<A>(runtime, &lifecycle);
+    runtime.request_explicit_removal();
+    let result = runtime.remove_addin(&lifecycle);
     if result == 1 && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed {
-        runtime.lifecycle_control().complete_explicit_removal();
+        runtime.complete_explicit_removal();
     }
     1
 }

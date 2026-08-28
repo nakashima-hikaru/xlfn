@@ -39,8 +39,7 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) cleanup_failure: Mutex<Option<XllError>>,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
+    pub(crate) observer: crate::shutdown_trace::ObservationSink,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
@@ -90,8 +89,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             cleanup_failure: Mutex::new(None),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
-            #[cfg(any(test, feature = "refinement"))]
-            trace: Mutex::new(None),
+            observer: crate::shutdown_trace::ObservationSink::new(),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -102,16 +100,12 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         *self.test_enter_hook.lock() = hook;
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        *self.trace.lock() = Some(trace);
+        self.observer.set_trace_sink(trace);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
-        if let Some(trace) = self.trace.lock().as_ref().cloned() {
-            trace.record(event);
-        }
+        self.observer.record(event);
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
@@ -560,7 +554,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             server.publish.drive_notification(attempt);
         }
 
-        #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddSubscription);
 
         Ok(())
@@ -671,7 +664,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             (active.key, active.generation)
         };
 
-        #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
 
         let removed_source = {
@@ -765,18 +757,15 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let pending_sources = {
             let mut catalog = self.catalog.lock();
-            #[cfg(any(test, feature = "refinement"))]
+            for _ in 0..catalog
+                .entries
+                .values()
+                .filter(|entry| entry.is_connected())
+                .count()
             {
-                for _ in 0..catalog
-                    .entries
-                    .values()
-                    .filter(|entry| entry.is_connected())
-                    .count()
-                {
-                    self.record_shutdown_event(
-                        crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
-                    );
-                }
+                self.record_shutdown_event(
+                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+                );
             }
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;

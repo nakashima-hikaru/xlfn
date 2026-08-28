@@ -76,8 +76,7 @@ impl Drop for GitRevocationDebtClaim {
 pub(crate) struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
     quiescent: Condvar,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
+    pub(super) observer: crate::shutdown_trace::ObservationSink,
 }
 
 impl ComModuleLifetime {
@@ -95,21 +94,21 @@ impl ComModuleLifetime {
                 git_revocation_debt: Vec::new(),
             }),
             quiescent: Condvar::new(),
-            #[cfg(any(test, feature = "refinement"))]
-            trace: Mutex::new(None),
+            observer: crate::shutdown_trace::ObservationSink::new(),
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(super) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        *self.trace.lock() = Some(trace);
+        self.observer.set_trace_sink(trace);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
+    #[cfg(test)]
+    pub(super) fn disable_trace_for_test(&self) {
+        self.observer.disable_for_test();
+    }
+
     fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
-        if let Some(trace) = self.trace.lock().as_ref().cloned() {
-            trace.record(event);
-        }
+        self.observer.record(event);
     }
 
     pub(super) fn git_cookie_registered(&self) {
@@ -173,10 +172,7 @@ impl ComModuleLifetime {
     }
 
     pub(super) fn enter_call(&'static self) -> (ComModuleCallGuard, bool) {
-        let ingress_guard = crate::module_runtime::ingress().enter_with(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
-        });
+        let ingress_guard = crate::module_runtime::ingress().enter_with(|| {});
         let accepted = matches!(&ingress_guard, crate::ingress::ExportEntry::Admitted(_));
         let mut inner = self.inner.lock();
         Self::increment(&mut inner.state.in_flight_calls);
@@ -185,8 +181,7 @@ impl ComModuleLifetime {
             ComModuleCallGuard {
                 lifetime: self,
                 _ingress_guard: ingress_guard,
-                #[cfg(any(test, feature = "refinement"))]
-                record_trace: accepted,
+                observation: ComModuleCallObservation::begin(self, accepted),
             },
             accepted,
         )
@@ -199,7 +194,6 @@ impl ComModuleLifetime {
             ComObjectKind::Server => Self::increment(&mut inner.state.live_servers),
         }
         drop(inner);
-        #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(match kind {
             ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::AddRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::AddRtdServer,
@@ -213,7 +207,6 @@ impl ComModuleLifetime {
             ComObjectKind::Server => Self::decrement(&mut inner.state.live_servers),
         }
         drop(inner);
-        #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(match kind {
             ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::RemoveRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::RemoveRtdServer,
@@ -234,7 +227,6 @@ impl ComModuleLifetime {
             true
         };
         drop(inner);
-        #[cfg(any(test, feature = "refinement"))]
         if changed {
             self.record_shutdown_event(if lock {
                 crate::shutdown_trace::ShutdownEvent::LockRtdServer
@@ -297,8 +289,7 @@ impl ComModuleLifetime {
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportEntry<'static>,
-    #[cfg(any(test, feature = "refinement"))]
-    record_trace: bool,
+    observation: ComModuleCallObservation,
 }
 
 impl Drop for ComModuleCallGuard {
@@ -307,8 +298,37 @@ impl Drop for ComModuleCallGuard {
         ComModuleLifetime::decrement(&mut inner.state.in_flight_calls);
         self.lifetime.quiescent.notify_all();
         drop(inner);
+    }
+}
+
+struct ComModuleCallObservation {
+    #[cfg(any(test, feature = "refinement"))]
+    lifetime: &'static ComModuleLifetime,
+    #[cfg(any(test, feature = "refinement"))]
+    record_end: bool,
+}
+
+impl ComModuleCallObservation {
+    fn begin(lifetime: &'static ComModuleLifetime, accepted: bool) -> Self {
         #[cfg(any(test, feature = "refinement"))]
-        if self.record_trace {
+        if accepted {
+            lifetime.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = (lifetime, accepted);
+        Self {
+            #[cfg(any(test, feature = "refinement"))]
+            lifetime,
+            #[cfg(any(test, feature = "refinement"))]
+            record_end: accepted,
+        }
+    }
+}
+
+impl Drop for ComModuleCallObservation {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "refinement"))]
+        if self.record_end {
             self.lifetime
                 .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }

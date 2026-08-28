@@ -5,8 +5,6 @@ use super::worker::release_active;
 use crate::cancellation::CancellationSource;
 use crate::error::XllError;
 use futures_util::future::AbortHandle;
-#[cfg(any(test, feature = "refinement"))]
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -54,10 +52,7 @@ impl<'a> ActiveReservation<'a> {
             shared: Arc::clone(shared),
             generation,
             id,
-            #[cfg(any(test, feature = "refinement"))]
-            completion: Mutex::new(crate::shutdown_trace::Completion::Failed),
-            #[cfg(any(test, feature = "refinement"))]
-            trace: None,
+            observation: CompletionObservation::new(),
         }
     }
 }
@@ -74,21 +69,53 @@ pub(crate) struct CompletionGuard {
     pub(crate) shared: Arc<ExecutorShared>,
     pub(crate) generation: triomphe::Arc<GenerationState>,
     pub(crate) id: u64,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) completion: Mutex<crate::shutdown_trace::Completion>,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) trace: Option<crate::shutdown_trace::ShutdownTraceHandle>,
+    pub(crate) observation: CompletionObservation,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         self.generation.remove_task(self.id);
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(trace) = self.trace.as_ref() {
-            trace.record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
-                *self.completion.lock(),
+        self.shared
+            .observer
+            .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
+                self.observation.completion(),
             ));
-        }
         release_active(&self.shared);
+    }
+}
+
+pub(crate) struct CompletionObservation {
+    #[cfg(any(test, feature = "refinement"))]
+    completion: parking_lot::Mutex<crate::shutdown_trace::Completion>,
+}
+
+impl CompletionObservation {
+    fn new() -> Self {
+        Self {
+            #[cfg(any(test, feature = "refinement"))]
+            completion: parking_lot::Mutex::new(crate::shutdown_trace::Completion::Failed),
+        }
+    }
+
+    pub(crate) fn finished(&self, completed: bool) {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            *self.completion.lock() = if completed {
+                crate::shutdown_trace::Completion::Completed
+            } else {
+                crate::shutdown_trace::Completion::Canceled
+            };
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = completed;
+    }
+
+    fn completion(&self) -> crate::shutdown_trace::Completion {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            return *self.completion.lock();
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        crate::shutdown_trace::Completion::Completed
     }
 }

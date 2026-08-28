@@ -48,7 +48,7 @@ impl OpenRollbackOutcome {
 }
 
 fn incomplete<A: Addin>(runtime: &Runtime<A>) -> OpenRollbackOutcome {
-    runtime.runtime_orchestrator().quarantine();
+    runtime.lifecycle_orchestrator().quarantine();
     OpenRollbackOutcome {
         status: OpenRollbackStatus::Incomplete,
     }
@@ -65,7 +65,7 @@ where
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    let Some(rollback_attempt) = runtime.runtime_orchestrator().acquire_open_rollback() else {
+    let Some(rollback_attempt) = runtime.acquire_open_rollback() else {
         let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
             && runtime.host.callbacks_detached()
             && !runtime.host.registration_state_unknown()
@@ -78,10 +78,10 @@ where
             },
         };
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().begin_close(runtime);
+    runtime.observer().begin_close();
+    let shutdown_deps = runtime.shutdown_deps();
 
-    let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
+    let lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
         Err(error) => {
             report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
@@ -92,7 +92,7 @@ where
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
     let mut rollback_attempt = rollback_attempt;
-    let execution_drained = match drain_execution(runtime, &mut rollback_attempt, false) {
+    let execution_drained = match drain_execution(shutdown_deps, &mut rollback_attempt) {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen return quiescence", &error);
@@ -100,7 +100,7 @@ where
         }
     };
     let teardown: teardown::TeardownTxn<'_, A, OpenRollback, teardown::ExecutionDrained> =
-        teardown::TeardownTxn::new(rollback_attempt, execution_drained);
+        teardown::TeardownTxn::new(shutdown_deps, rollback_attempt, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report_cleanup_issue(issue);
     }) {
@@ -111,7 +111,7 @@ where
         }
     };
 
-    let registrations = runtime.host.registrations_snapshot();
+    let registrations = shutdown_deps.host().registrations_snapshot();
     let outcome = {
         let host = RegistrationHost::new(callbacks);
         HostRegistrar::unregister_pending(&host, &registrations)
@@ -131,12 +131,14 @@ where
             error: error.clone(),
         });
     }
-    runtime
-        .host
+    shutdown_deps
+        .host()
         .replace_registrations(outcome.failed.into_iter().map(|(entry, _)| entry).collect());
-    runtime.host.retain_metadata_debt(outcome.metadata_debt);
+    shutdown_deps
+        .host()
+        .retain_metadata_debt(outcome.metadata_debt);
 
-    let events = runtime.host.event_registrations_snapshot();
+    let events = shutdown_deps.host().event_registrations_snapshot();
     if callbacks.permits_callbacks() {
         let event_outcome = {
             let host = RegistrationHost::new(callbacks);
@@ -152,7 +154,7 @@ where
                 error: error.clone(),
             });
         }
-        runtime.host.replace_event_registrations(
+        shutdown_deps.host().replace_event_registrations(
             event_outcome
                 .failed
                 .into_iter()
@@ -168,9 +170,9 @@ where
             })
             .unwrap_or(XllError::Closing);
         report_boundary_error("xlAutoOpen event rollback", &error);
-        runtime.host.replace_event_registrations(events);
+        shutdown_deps.host().replace_event_registrations(events);
     } else {
-        runtime.host.replace_event_registrations(Vec::new());
+        shutdown_deps.host().replace_event_registrations(Vec::new());
     }
 
     teardown.close_module_callbacks();
@@ -194,7 +196,8 @@ where
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values
     // are call-scoped borrows and cannot be stored in state.
-    let addin = if let Some(opening) = runtime.runtime_orchestrator().take_opening_for_rollback() {
+    let addin = if let Some(opening) = runtime.lifecycle_orchestrator().take_opening_for_rollback()
+    {
         let (mut shared_state, layers, _config) = opening.into_parts();
         let quiesce = catch_unwind(AssertUnwindSafe(|| {
             runtime
@@ -209,12 +212,12 @@ where
             report_boundary_error("xlAutoOpen rollback quiesce", &error);
             // A failed quiesce cannot prove that shared-state-owned execution
             // resources have stopped. Preserve both parts until quarantine.
-            runtime.runtime_orchestrator().quarantine_layers(
+            runtime.lifecycle_orchestrator().quarantine_layers(
                 generation,
                 layers,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
-            runtime.runtime_orchestrator().quarantine_shared_state(
+            runtime.lifecycle_orchestrator().quarantine_shared_state(
                 generation,
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
@@ -222,7 +225,7 @@ where
             return incomplete(runtime);
         }
         drop(layers);
-        teardown::QuiescedAddin::shared(runtime, generation, shared_state)
+        teardown::QuiescedAddin::shared(shutdown_deps, generation, shared_state)
     } else {
         if lifecycle_present {
             let error = XllError::Internal {
@@ -231,7 +234,7 @@ where
             report_boundary_error("xlAutoOpen lifecycle rollback state", &error);
             return incomplete(runtime);
         }
-        teardown::QuiescedAddin::empty(runtime, generation)
+        teardown::QuiescedAddin::empty(shutdown_deps, generation)
     };
 
     let teardown = match teardown.seal_services(addin) {
@@ -268,7 +271,7 @@ where
         report_cleanup_issue(issue);
     }
 
-    if let Err(error) = runtime.shutdown_handle_topics() {
+    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
         report_boundary_error("xlAutoOpen RTD rollback", &error);
         return incomplete(runtime);
     }
@@ -310,7 +313,7 @@ where
             return incomplete(runtime);
         }
     };
-    if let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle) {
+    if let Err(error) = shutdown_deps.release_empty_addin_lifecycle(lifecycle) {
         report_boundary_error(
             "xlAutoOpen lifecycle binding release",
             &lifecycle_access_error(error),

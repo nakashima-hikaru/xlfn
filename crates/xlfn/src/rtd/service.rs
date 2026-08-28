@@ -9,8 +9,7 @@ pub(crate) struct SubscriptionServiceSlot {
         SubscriptionRuntime,
         crate::XllError,
     >,
-    #[cfg(any(test, feature = "refinement"))]
-    trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
+    observer: crate::shutdown_trace::ObservationSink,
 }
 
 pub(crate) type SubscriptionRuntimeRead =
@@ -26,8 +25,7 @@ impl SubscriptionServiceSlot {
     pub(crate) const fn new() -> Self {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
-            #[cfg(any(test, feature = "refinement"))]
-            trace: std::sync::OnceLock::new(),
+            observer: crate::shutdown_trace::ObservationSink::new(),
         }
     }
 
@@ -62,9 +60,8 @@ impl SubscriptionServiceSlot {
                     )))
                 },
                 |_runtime| {
-                    #[cfg(any(test, feature = "refinement"))]
-                    if let Some(trace) = self.trace.get() {
-                        _runtime.set_trace_sink(std::sync::Arc::clone(trace));
+                    if let Some(trace) = self.observer.trace_handle() {
+                        _runtime.set_trace_sink(trace);
                     }
                 },
             )
@@ -99,9 +96,12 @@ impl SubscriptionServiceSlot {
             .map_err(crate::error::map_service_slot_error)
     }
 
-    #[cfg(any(test, feature = "refinement"))]
+    #[allow(
+        dead_code,
+        reason = "trace wiring is used only when the runtime observer is enabled"
+    )]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        let _ = self.trace.set(std::sync::Arc::clone(&trace));
+        self.observer.set_trace_sink(std::sync::Arc::clone(&trace));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
                 runtime.set_trace_sink(trace);

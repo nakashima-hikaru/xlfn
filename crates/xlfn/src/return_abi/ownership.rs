@@ -29,20 +29,34 @@ fn current_return_stripe() -> usize {
 
 pub(crate) struct ReturnTracker {
     gate: StripedDrainGate<RETURN_STRIPE_COUNT>,
+    observer: ReturnObserver,
+}
+
+struct ReturnObserver {
     #[cfg(any(test, feature = "refinement"))]
     trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
 pub(crate) struct ReturnObligation<'tracker> {
     _permit: StripedDrainPermit<'tracker, RETURN_STRIPE_COUNT>,
-    #[cfg(any(test, feature = "refinement"))]
-    tracker: &'tracker ReturnTracker,
+    observer: &'tracker ReturnObserver,
 }
 
-#[cfg(any(test, feature = "refinement"))]
 impl<'tracker> ReturnObligation<'tracker> {
-    pub(crate) fn tracker(&self) -> &'tracker ReturnTracker {
-        self.tracker
+    fn observe_create_block(&self) {
+        self.observer.create_block();
+    }
+
+    pub(crate) fn observe_begin_free(&self) {
+        self.observer.begin_free();
+    }
+
+    pub(crate) fn observe_release_block(&self) {
+        self.observer.release_block();
+    }
+
+    fn observe_end_free(&self) {
+        self.observer.end_free();
     }
 }
 
@@ -50,23 +64,56 @@ impl ReturnTracker {
     pub(crate) const fn new_closed() -> Self {
         Self {
             gate: StripedDrainGate::new_sealed(),
+            observer: ReturnObserver::new(),
+        }
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.observer.set_trace_sink(trace);
+    }
+}
+
+impl ReturnObserver {
+    const fn new() -> Self {
+        Self {
             #[cfg(any(test, feature = "refinement"))]
             trace: std::sync::OnceLock::new(),
         }
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+    fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         let _ = self.trace.set(trace);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+    fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = self.trace.get() {
             trace.record(event);
         }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = event;
     }
 
+    fn create_block(&self) {
+        self.record(crate::shutdown_trace::ShutdownEvent::CreateReturnBlock);
+    }
+
+    fn begin_free(&self) {
+        self.record(crate::shutdown_trace::ShutdownEvent::BeginReturnFree);
+    }
+
+    fn release_block(&self) {
+        self.record(crate::shutdown_trace::ShutdownEvent::ReleaseReturnBlock);
+    }
+
+    fn end_free(&self) {
+        self.record(crate::shutdown_trace::ShutdownEvent::EndReturnFree);
+    }
+}
+
+impl ReturnTracker {
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
         if !self.admission_closed() || !self.is_quiescent() {
             return Err(XllError::Internal {
@@ -88,8 +135,7 @@ impl ReturnTracker {
         Some(ReturnProducerGuard {
             obligation: Some(ReturnObligation {
                 _permit: permit,
-                #[cfg(any(test, feature = "refinement"))]
-                tracker: self,
+                observer: &self.observer,
             }),
         })
     }
@@ -125,21 +171,12 @@ impl<'tracker> ReturnProducerGuard<'tracker> {
 
 impl ReturnProducerGuard<'static> {
     pub(crate) fn transfer_to_block(&mut self) -> ReturnObligation<'static> {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            let _obligation = self
-                .obligation
-                .as_ref()
-                .expect("return obligation is transferred exactly once");
-
-            _obligation
-                .tracker()
-                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::CreateReturnBlock);
-        }
-
-        self.obligation
+        let obligation = self
+            .obligation
             .take()
-            .expect("return obligation is transferred exactly once")
+            .expect("return obligation is transferred exactly once");
+        obligation.observe_create_block();
+        obligation
     }
 }
 
@@ -159,9 +196,6 @@ pub(crate) struct ReturnFreeBoundaryGuard {
 
 impl Drop for ReturnFreeGuard {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.obligation
-            .tracker()
-            .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndReturnFree);
+        self.obligation.observe_end_free();
     }
 }

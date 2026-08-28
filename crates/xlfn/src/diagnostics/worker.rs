@@ -5,7 +5,6 @@ use crate::diagnostics::event::DROPPED_EVENTS;
 use parking_lot::Mutex;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-#[cfg(any(test, feature = "refinement"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
@@ -38,10 +37,63 @@ pub(crate) struct AsyncDiagnosticSink {
     pub(crate) sender: Mutex<Option<SyncSender<OwnedDiagnosticEvent>>>,
     pub(crate) worker: Mutex<Option<JoinHandle<()>>>,
     pub(crate) worker_thread_id: std::thread::ThreadId,
+    pub(crate) observer: Arc<DiagnosticObserver>,
+}
+
+pub(crate) struct DiagnosticObserver {
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) pending: Arc<AtomicU64>,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) trace: Arc<Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>>,
+    pending: AtomicU64,
+    sink: crate::shutdown_trace::ObservationSink,
+}
+
+impl DiagnosticObserver {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            #[cfg(any(test, feature = "refinement"))]
+            pending: AtomicU64::new(0),
+            sink: crate::shutdown_trace::ObservationSink::new(),
+        })
+    }
+
+    pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
+        self.sink.set_trace_sink(trace);
+    }
+
+    pub(crate) fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
+        self.sink.trace_handle()
+    }
+
+    pub(crate) fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        self.sink.record(event);
+    }
+
+    fn increment_pending(&self) {
+        #[cfg(any(test, feature = "refinement"))]
+        self.pending.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn decrement_pending(&self) {
+        #[cfg(any(test, feature = "refinement"))]
+        let _ = xlfn_kernel::invariant::checked_atomic_dec_u64(&self.pending);
+    }
+
+    fn take_pending(&self) -> u64 {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            self.pending.swap(0, Ordering::AcqRel)
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        0
+    }
+
+    pub(crate) fn pending(&self) -> u64 {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            self.pending.load(Ordering::Acquire)
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        0
+    }
 }
 
 impl AsyncDiagnosticSink {
@@ -61,28 +113,17 @@ impl AsyncDiagnosticSink {
         }
         let (sender, receiver) =
             mpsc::sync_channel::<OwnedDiagnosticEvent>(super::DIAGNOSTIC_QUEUE_CAPACITY);
-        #[cfg(any(test, feature = "refinement"))]
-        let pending = Arc::new(AtomicU64::new(0));
-        #[cfg(any(test, feature = "refinement"))]
-        let worker_pending = Arc::clone(&pending);
-        #[cfg(any(test, feature = "refinement"))]
-        let trace = Arc::new(Mutex::new(
-            None::<crate::shutdown_trace::ShutdownTraceHandle>,
-        ));
-        #[cfg(any(test, feature = "refinement"))]
-        let worker_trace = Arc::clone(&trace);
+        let observer = DiagnosticObserver::new();
+        let worker_observer = Arc::clone(&observer);
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())
             .spawn(move || {
                 while let Ok(event) = receiver.recv() {
                     event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
-                        #[cfg(any(test, feature = "refinement"))]
-                        if let Some(trace) = worker_trace.lock().as_ref().cloned() {
-                            trace.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
-                        }
-                        #[cfg(any(test, feature = "refinement"))]
-                        let _ = xlfn_kernel::invariant::checked_atomic_dec_u64(&worker_pending);
+                        worker_observer
+                            .record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
+                        worker_observer.decrement_pending();
                     });
                 }
             })
@@ -92,21 +133,16 @@ impl AsyncDiagnosticSink {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
-            #[cfg(any(test, feature = "refinement"))]
-            pending,
-            #[cfg(any(test, feature = "refinement"))]
-            trace,
+            observer,
         })
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        *self.trace.lock() = Some(trace);
+        self.observer.set_trace_sink(trace);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn pending(&self) -> u64 {
-        self.pending.load(Ordering::Acquire)
+        self.observer.pending()
     }
 
     pub(crate) fn is_current_thread_worker(&self) -> bool {
@@ -116,22 +152,18 @@ impl AsyncDiagnosticSink {
     pub(crate) fn report(&self, event: OwnedDiagnosticEvent) {
         let result = crate::ingress::with_diagnostic_linearization(|| {
             let sender = self.sender.lock();
-            #[cfg(any(test, feature = "refinement"))]
-            self.pending.fetch_add(1, Ordering::AcqRel);
+            self.observer.increment_pending();
             let result = match sender.as_ref() {
                 Some(sender) => sender.try_send(event),
                 None => Err(TrySendError::Disconnected(event)),
             };
-            #[cfg(any(test, feature = "refinement"))]
             if result.is_err() {
-                let _ = xlfn_kernel::invariant::checked_atomic_dec_u64(&self.pending);
+                self.observer.decrement_pending();
             }
             drop(sender);
-            #[cfg(any(test, feature = "refinement"))]
-            if result.is_ok()
-                && let Some(trace) = self.trace.lock().as_ref().cloned()
-            {
-                trace.record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
+            if result.is_ok() {
+                self.observer
+                    .record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
             }
             result
         });
@@ -151,20 +183,14 @@ impl AsyncDiagnosticSink {
         if let Some(worker) = worker {
             let result = worker.join();
             if result.is_err() {
-                #[cfg(any(test, feature = "refinement"))]
-                {
-                    let discarded = self.pending.swap(0, Ordering::AcqRel);
-                    if discarded != 0
-                        && let Some(trace) = self.trace.lock().as_ref().cloned()
-                    {
-                        crate::ingress::with_diagnostic_linearization(|| {
-                            for _ in 0..discarded {
-                                trace.record(
-                                    crate::shutdown_trace::ShutdownEvent::DiscardDiagnostic,
-                                );
-                            }
-                        });
-                    }
+                let discarded = self.observer.take_pending();
+                if discarded != 0 {
+                    crate::ingress::with_diagnostic_linearization(|| {
+                        for _ in 0..discarded {
+                            self.observer
+                                .record(crate::shutdown_trace::ShutdownEvent::DiscardDiagnostic);
+                        }
+                    });
                 }
                 return Err(DiagnosticShutdownError::WorkerPanicked);
             }

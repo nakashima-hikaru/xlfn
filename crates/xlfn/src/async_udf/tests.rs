@@ -520,8 +520,8 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         end_async_calculation(runtime);
         exited_tx.send(()).unwrap();
     });
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, (ReentrantLayer { on_exit },));
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (ReentrantLayer { on_exit },));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
@@ -899,8 +899,8 @@ fn async_handle_payload_is_deep_copied() {
 fn async_boundary_returns_completed_value_through_callback() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, ());
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -987,8 +987,8 @@ fn async_boundary_reports_handler_failures_to_layers() {
     let runtime = Box::leak(Box::new(Runtime::<HandlerFailAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, (Recorder(event_sender),));
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -1083,8 +1083,8 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let runtime = Box::leak(Box::new(Runtime::<DeliveryRejectionAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, (Recorder(event_sender),));
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
@@ -1161,8 +1161,8 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 fn async_boundary_returns_error_on_cancellation() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, ());
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
@@ -1210,8 +1210,8 @@ fn async_boundary_returns_error_on_cancellation() {
 fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, ());
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
@@ -1265,8 +1265,8 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
 fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(7_u32, ());
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
@@ -1877,8 +1877,8 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
 
     let runtime = Box::leak(Box::new(Runtime::<PanickingAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
-    let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-    runtime.publish(1_u32, (PanickingLayer,));
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 1_u32, (PanickingLayer,));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 

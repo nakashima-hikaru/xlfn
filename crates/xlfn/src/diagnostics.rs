@@ -38,7 +38,7 @@ pub use event::{
     AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
     DiagnosticStats, InvalidAddinId, diagnostic_stats,
 };
-use worker::{AsyncDiagnosticSink, OwnedDiagnosticEvent};
+use worker::{AsyncDiagnosticSink, DiagnosticObserver, OwnedDiagnosticEvent};
 
 const DIAGNOSTIC_QUEUE_CAPACITY: usize = 1024;
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -90,8 +90,7 @@ struct DiagnosticRouter {
     sink: ArcSwapOption<AsyncDiagnosticSink>,
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
-    #[cfg(any(test, feature = "refinement"))]
-    trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
+    observer: Arc<DiagnosticObserver>,
 }
 
 impl DiagnosticRouter {
@@ -121,17 +120,19 @@ impl DiagnosticRouter {
             .retain(|worker| *worker != sink.worker_thread_id);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
+    #[allow(
+        dead_code,
+        reason = "trace setup is called by the runtime observer integration"
+    )]
     fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        *self.trace.lock() = Some(Arc::clone(&trace));
+        self.observer.set_trace_sink(Arc::clone(&trace));
         if let Some(sink) = self.sink.load().as_ref() {
             sink.set_trace_sink(trace);
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
-        self.trace.lock().clone()
+        self.observer.trace_handle()
     }
 
     #[cfg(test)]
@@ -209,10 +210,8 @@ impl DiagnosticRouter {
             }
             Err(DiagnosticShutdownError::WorkerPanicked) => {
                 self.unmark_retiring(&previous);
-                #[cfg(any(test, feature = "refinement"))]
-                if let Some(trace) = self.trace_handle() {
-                    record_trace_diagnostics_cleanup_issue(trace);
-                }
+                self.observer
+                    .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
                 sink.report(OwnedDiagnosticEvent {
                     udf_id: "diagnostic sink replacement",
                     argument: None,
@@ -235,7 +234,6 @@ impl DiagnosticRouter {
         self.sink.load()
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     fn trace_snapshot(&self) -> DiagnosticSnapshot {
         let sink = self.sink.load();
         DiagnosticSnapshot {
@@ -247,10 +245,8 @@ impl DiagnosticRouter {
     #[cfg(test)]
     fn record_stop_diagnostics(&self) {
         crate::ingress::with_diagnostic_linearization(|| {
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(trace) = self.trace_handle() {
-                trace.record(crate::shutdown_trace::ShutdownEvent::StopDiagnostics);
-            }
+            self.observer
+                .record(crate::shutdown_trace::ShutdownEvent::StopDiagnostics);
         });
     }
 
@@ -308,10 +304,8 @@ impl DiagnosticRouter {
         if result.is_ok() && self.sink.load().is_none() {
             self.record_stop_diagnostics();
         } else if matches!(result, Err(DiagnosticShutdownError::WorkerPanicked)) {
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(trace) = self.trace_handle() {
-                record_trace_diagnostics_cleanup_issue(trace);
-            }
+            self.observer
+                .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
             // A panicked reopenable worker has stopped the current dispatcher.
             // The queue items lost with it are accounted for by the sink
             // before this milestone is recorded.
@@ -407,8 +401,7 @@ static ROUTER: LazyLock<DiagnosticRouter> = LazyLock::new(|| DiagnosticRouter {
     sink: ArcSwapOption::const_empty(),
     transition: Mutex::new(DiagnosticPhase::Closed),
     retiring_workers: Mutex::new(Vec::new()),
-    #[cfg(any(test, feature = "refinement"))]
-    trace: Mutex::new(None),
+    observer: DiagnosticObserver::new(),
 });
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -429,11 +422,10 @@ fn admit_published_sink(
     if !ingress.allows_diagnostic_mutation() {
         return Err(DiagnosticInitError::RouterClosed);
     }
-    #[cfg(not(any(test, feature = "refinement")))]
-    let _ = (router, had_sink);
-    #[cfg(any(test, feature = "refinement"))]
-    if !had_sink && let Some(trace) = router.trace_handle() {
-        trace.record(crate::shutdown_trace::ShutdownEvent::StartDiagnostics);
+    if !had_sink {
+        router
+            .observer
+            .record(crate::shutdown_trace::ShutdownEvent::StartDiagnostics);
     }
     Ok(())
 }
@@ -457,7 +449,6 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
     router.replace_with(
         || {
             let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
-            #[cfg(any(test, feature = "refinement"))]
             if let Some(trace) = router.trace_handle() {
                 sink.set_trace_sink(trace);
             }
@@ -482,19 +473,24 @@ pub(crate) fn reset_diagnostic_router() -> XllResult<()> {
     router().reset()
 }
 
-#[cfg(any(test, feature = "refinement"))]
 pub(crate) fn diagnostic_sink_running() -> bool {
-    router().trace_snapshot().running
+    router().sink.load().is_some()
 }
 
-#[cfg(any(test, feature = "refinement"))]
+#[allow(
+    dead_code,
+    reason = "trace snapshot is consumed by the runtime observer integration"
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct DiagnosticSnapshot {
     pub(crate) running: bool,
     pub(crate) pending: u64,
 }
 
-#[cfg(any(test, feature = "refinement"))]
+#[allow(
+    dead_code,
+    reason = "trace setup is consumed by the runtime observer integration"
+)]
 pub(crate) fn connect_trace<F>(
     trace: crate::shutdown_trace::ShutdownTraceHandle,
     initialize: F,
@@ -508,13 +504,6 @@ where
         router().set_trace_sink(trace);
         Ok(())
     })
-}
-
-#[cfg(any(test, feature = "refinement"))]
-fn record_trace_diagnostics_cleanup_issue(trace: crate::shutdown_trace::ShutdownTraceHandle) {
-    crate::ingress::with_diagnostic_linearization(|| {
-        trace.record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
-    });
 }
 
 /// Number of diagnostic events dropped because the bounded queue was full or closed.
@@ -737,7 +726,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         };
         let result = router.replace_with(
             || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new),
@@ -778,8 +767,7 @@ mod tests {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(Some(worker)),
             worker_thread_id,
-            pending: Arc::new(AtomicU64::new(0)),
-            trace: Arc::new(Mutex::new(None)),
+            observer: DiagnosticObserver::new(),
         };
         assert_eq!(
             sink.shutdown(),
@@ -803,7 +791,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         };
         router
             .replace_with(
@@ -865,7 +853,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -1030,7 +1018,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         });
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -1107,7 +1095,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         });
         let (factory_entered_tx, factory_entered_rx) = std::sync::mpsc::sync_channel(1);
         let (release_factory_tx, release_factory_rx) = std::sync::mpsc::sync_channel(1);
@@ -1147,7 +1135,7 @@ mod tests {
             sink: ArcSwapOption::const_empty(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         };
         let _certificate = router.close_terminal().unwrap().certificate;
 
@@ -1185,12 +1173,11 @@ mod tests {
                 sender: Mutex::new(Some(sender)),
                 worker: Mutex::new(Some(worker)),
                 worker_thread_id,
-                pending: Arc::new(AtomicU64::new(0)),
-                trace: Arc::new(Mutex::new(None)),
+                observer: DiagnosticObserver::new(),
             }))),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
-            trace: Mutex::new(None),
+            observer: DiagnosticObserver::new(),
         };
 
         let error = match router.close_terminal() {

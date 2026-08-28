@@ -444,7 +444,7 @@ fn clear_test_shutdown_trace() {
     // Runtime/lifecycle tests install a process-global shutdown trace.
     // An RTD unit test owns a synthetic module epoch and must not append
     // resource events to a previous runtime generation.
-    *module_lifetime().trace.lock() = None;
+    module_lifetime().disable_trace_for_test();
 }
 
 impl Drop for RtdTestGuard {
@@ -619,7 +619,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     if let Some(path) = std::env::var_os("XLFN_WINDOWS_RTD_TRACE") {
         std::fs::write(path, &trace).expect("write Windows RTD shutdown trace");
     }
-    *module_lifetime().trace.lock() = None;
+    module_lifetime().disable_trace_for_test();
     ingress.begin_close_with(|| {});
     let _ = ingress.seal_and_drain();
     crate::module_runtime::certify_quiescence_for_test();

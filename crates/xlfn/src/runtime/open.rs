@@ -7,67 +7,73 @@ use crate::diagnostics::AddinId;
 use crate::generation::OpeningGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
+use crate::runtime::open_txn::{GenerationStaged, HostAttached, Initialized, OpeningTxn};
+use crate::runtime::rollback::{active_runtime_generation, rollback_open};
+use crate::runtime::transactions::{open_addin_inner, rollback_active_open};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use crate::runtime_open_txn::{
-    HostOpeningState, OpenAttemptBegun, OpenGenerationStaged, OpeningTxn,
-};
-use crate::runtime_rollback::{active_runtime_generation, rollback_open};
-use crate::runtime_transactions::{open_addin_inner, rollback_active_open};
 
 pub(crate) enum OpenFailure<'runtime, A: Addin> {
-    Begun {
-        transaction: Box<OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState>>,
+    HostAttached {
+        transaction: Box<OpeningTxn<'runtime, A, HostAttached>>,
         error: XllError,
     },
-    Staged {
-        transaction: Box<OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>>,
+    Initialized {
+        transaction: Box<OpeningTxn<'runtime, A, Initialized<A>>>,
+        error: XllError,
+    },
+    GenerationStaged {
+        transaction: Box<OpeningTxn<'runtime, A, GenerationStaged<A>>>,
         error: XllError,
     },
 }
 
-impl<A: Addin> OpenFailure<'_, A> {
-    pub(crate) fn rollback(self, lifecycle: &AddinLifecycleAccess<'_, A>) -> XllError {
+impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
+    pub(crate) fn rollback(
+        self,
+        runtime: &'runtime Runtime<A>,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+    ) -> XllError {
         match self {
-            Self::Begun { transaction, error } => {
-                rollback_active_open(lifecycle, Some(*transaction));
+            Self::HostAttached { transaction, error } => {
+                rollback_active_open(runtime, lifecycle, Some(*transaction));
                 error
             }
-            Self::Staged { transaction, error } => {
-                rollback_active_open(lifecycle, Some(*transaction));
+            Self::Initialized { transaction, error } => {
+                rollback_active_open(runtime, lifecycle, Some(*transaction));
+                error
+            }
+            Self::GenerationStaged { transaction, error } => {
+                rollback_active_open(runtime, lifecycle, Some(*transaction));
                 error
             }
         }
     }
 }
 
-impl<'runtime, A: Addin> OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState> {
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, HostAttached> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
-        OpenFailure::Begun {
+        OpenFailure::HostAttached {
             transaction: Box::new(self),
             error,
         }
     }
+}
 
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
     pub(crate) fn stage_generation(
         self,
         opening: OpeningGeneration<A>,
-    ) -> Result<
-        OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>,
-        OpenFailure<'runtime, A>,
-    > {
-        match self.stage(opening) {
+    ) -> Result<OpeningTxn<'runtime, A, GenerationStaged<A>>, OpenFailure<'runtime, A>> {
+        match self.stage_opening_generation(opening) {
             Ok(transaction) => Ok(transaction),
             Err((error, transaction, opening)) => {
                 let transaction = *transaction;
-                transaction
-                    .runtime()
-                    .runtime_orchestrator()
-                    .quarantine_opening_generation(
-                        active_runtime_generation(transaction.runtime()),
-                        *opening,
-                        crate::runtime_components::QuarantineReason::OpenStateInvariant,
-                    );
-                Err(OpenFailure::Begun {
+                transaction.deps().quarantine_opening_generation(
+                    transaction.deps().protocol_generation(),
+                    *opening,
+                    crate::runtime_components::QuarantineReason::OpenStateInvariant,
+                );
+                Err(OpenFailure::Initialized {
                     transaction: Box::new(transaction),
                     error,
                 })
@@ -76,16 +82,16 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningSt
     }
 }
 
-impl<'runtime, A: Addin> OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState> {
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
-        OpenFailure::Staged {
+        OpenFailure::GenerationStaged {
             transaction: Box::new(self),
             error,
         }
     }
 }
 
-pub(crate) fn open_addin_boundary<A>(
+pub(super) fn open_addin_boundary<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     addin_id: &AddinId,
@@ -112,7 +118,7 @@ where
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
                 };
                 report_boundary_error("xlAutoOpen pending rollback", &error);
-                crate::runtime_recovery::quarantine_runtime(runtime);
+                crate::runtime::recovery::quarantine_runtime(runtime);
                 return Err(error);
             }
         }
@@ -121,17 +127,14 @@ where
             return Err(XllError::Closing);
         }
 
-        let mut transaction = runtime
-            .runtime_orchestrator()
-            .begin_open_if_epoch(removal_epoch)?
-            .attach_host();
+        let mut transaction = runtime.begin_open_if_epoch(removal_epoch)?.attach_host();
         let transaction = match crate::registration::retry_metadata_debt(
             &runtime.host,
             transaction.callbacks_mut(),
         ) {
             Ok(()) => transaction,
             Err(error) => {
-                rollback_active_open(lifecycle, Some(transaction));
+                rollback_active_open(runtime, lifecycle, Some(transaction));
                 return Err(error);
             }
         };
@@ -141,13 +144,13 @@ where
             descriptors,
             transaction,
         )
-        .map_err(|failure| failure.rollback(lifecycle))?;
+        .map_err(|failure| failure.rollback(runtime, lifecycle))?;
         let transaction = match transaction.install_lifecycle(lifecycle) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
                 return Err(transaction
                     .failure(crate::lifecycle::lifecycle_access_error(reason))
-                    .rollback(lifecycle));
+                    .rollback(runtime, lifecycle));
             }
         };
         transaction.stage_host_mutations(registrations).commit()
@@ -167,7 +170,7 @@ where
             let error = XllError::Panic;
             write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
-            runtime.runtime_orchestrator().quarantine();
+            runtime.lifecycle_orchestrator().quarantine();
             0
         }
     }

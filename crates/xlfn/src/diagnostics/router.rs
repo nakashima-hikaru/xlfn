@@ -10,7 +10,6 @@ pub(crate) use super::{
     set_diagnostic_sink,
 };
 
-#[cfg(any(test, feature = "refinement"))]
 pub(crate) use super::connect_trace;
 
 #[cfg(test)]

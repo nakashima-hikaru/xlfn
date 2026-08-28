@@ -5,33 +5,31 @@ use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
 use crate::registration::{HostRegistrar, RegistrationHost};
+use crate::runtime::capabilities::ShutdownDeps;
+use crate::runtime::open_txn::{
+    GenerationStaged, HostAttached, OpeningState, OpeningTxn, RollbackState,
+};
 use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use crate::runtime_open_txn::{
-    HostOpeningState, OpenAttemptBegun, OpenGenerationStaged, OpeningTxn,
-};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
+use crate::runtime::open;
+use crate::runtime::recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
+use crate::runtime::rollback::{active_runtime_generation, rollback_open};
 use crate::runtime::shutdown::{self, drain_execution};
-use crate::runtime_open as open;
-use crate::runtime_recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
-use crate::runtime_rollback::{active_runtime_generation, rollback_open};
 
 type StagedOpenResult<'runtime, A> = Result<
     (
-        OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>,
+        OpeningTxn<'runtime, A, GenerationStaged<A>>,
         Vec<crate::registration::RegistrationId>,
     ),
     open::OpenFailure<'runtime, A>,
 >;
 
 type InitializedOpenResult<'runtime, A> = Result<
-    (
-        OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState>,
-        RuntimeConfig,
-    ),
+    (OpeningTxn<'runtime, A, GenerationStaged<A>>, RuntimeConfig),
     open::OpenFailure<'runtime, A>,
 >;
 
@@ -39,7 +37,7 @@ pub(crate) fn open_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
-    mut transaction: OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState>,
+    mut transaction: OpeningTxn<'runtime, A, HostAttached>,
 ) -> StagedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -117,17 +115,22 @@ where
     Ok((transaction, registrations))
 }
 
-pub(crate) fn rollback_active_open<'runtime, A, Stage>(
+pub(crate) fn rollback_active_open<'runtime, A, S>(
+    runtime: &'runtime Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
-    attempt: Option<OpeningTxn<'runtime, A, Stage, HostOpeningState>>,
+    attempt: Option<OpeningTxn<'runtime, A, S>>,
 ) where
     A: Addin,
+    S: RollbackState<A>,
 {
-    let Some(mut attempt) = attempt else {
+    let Some(attempt) = attempt else {
         return;
     };
-    let runtime = attempt.runtime();
-    if let Some(lifecycle_state) = attempt.take_lifecycle_state()
+    let (core, host, lifecycle_ownership) = attempt.into_rollback_parts().into_parts();
+    let (callbacks, journal) = host.into_parts();
+    let mut callbacks = callbacks;
+    if let crate::runtime::open_txn::LifecycleOwnership::Owned(lifecycle_state) =
+        lifecycle_ownership
         && let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state)
     {
         let (lifecycle_state, reason) = error.into_parts();
@@ -138,17 +141,26 @@ pub(crate) fn rollback_active_open<'runtime, A, Stage>(
         std::mem::forget(lifecycle_state);
         let error = lifecycle_access_error(reason);
         report_boundary_error("xlAutoOpen rollback lifecycle installation", &error);
+        let closing = core.into_parts().1.rollback(|| {});
+        runtime.lifecycle_control().complete_open_abort(closing);
         quarantine_runtime(runtime);
         return;
     }
-    runtime.host.merge(attempt.take_journal());
+    runtime.host.merge(journal);
+    let (attempt_id, module_opening) = core.into_parts();
     let generation = Some(
-        RuntimeGeneration::new(attempt.attempt_id().get())
+        RuntimeGeneration::new(attempt_id.get())
             .expect("an active open attempt has a runtime generation"),
     );
-    if attempt.fail().requires_rollback() {
+    let disposition = runtime
+        .lifecycle_orchestrator()
+        .mark_open_failed(attempt_id);
+    runtime
+        .lifecycle_control()
+        .complete_open_abort(module_opening.rollback(|| {}));
+    if disposition.requires_rollback() {
         match catch_unwind(AssertUnwindSafe(|| {
-            rollback_open::<A>(runtime, lifecycle, attempt.callbacks_mut(), generation)
+            rollback_open::<A>(runtime, lifecycle, &mut callbacks, generation)
         })) {
             Ok(outcome) if outcome.unload_safe() => {}
             Ok(_) => {
@@ -168,7 +180,7 @@ pub(crate) fn rollback_active_open<'runtime, A, Stage>(
 
 pub(crate) fn initialize_addin<'runtime, A>(
     context: &OpenContext,
-    transaction: OpeningTxn<'runtime, A, OpenAttemptBegun, HostOpeningState>,
+    transaction: OpeningTxn<'runtime, A, HostAttached>,
 ) -> InitializedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -183,7 +195,7 @@ where
     // Keep the non-Send lifecycle state in the open transaction until the
     // final pre-publication transfer into the thread-affine slot. It must not
     // become part of the cross-thread generation root.
-    let transaction = transaction.with_lifecycle_state(lifecycle_state);
+    let transaction = transaction.initialized(lifecycle_state);
     let opening = crate::generation::OpeningGeneration {
         shared_state,
         layers,
@@ -193,10 +205,13 @@ where
     Ok((transaction, runtime_config))
 }
 
-fn retain_transaction_error<A: Addin, Stage>(
-    transaction: &mut OpeningTxn<'_, A, Stage, HostOpeningState>,
+fn retain_transaction_error<A: Addin, S>(
+    transaction: &mut OpeningTxn<'_, A, S>,
     error: crate::registration::RegistrationTransactionError,
-) -> XllError {
+) -> XllError
+where
+    S: OpeningState<A> + crate::runtime::open_txn::HasHost,
+{
     if error.journal.is_unknown() {
         for unknown in &error.journal.unknown_registrations {
             let recovery_error = unknown.recovery_error.clone();
@@ -242,32 +257,15 @@ where
                 report_boundary_error("xlAutoRemove closed lifecycle binding", &error);
                 quarantine_runtime(runtime);
             }
-            #[cfg(any(test, feature = "refinement"))]
             runtime.record_composition_already_closed_return();
             1
         }
         RemovalSuccess::Quarantined => 1,
-        #[cfg(not(any(test, feature = "refinement")))]
-        RemovalSuccess::Closed {
-            witness: _witness,
-            removal_attempt: _removal_attempt,
-        } => 1,
-        #[cfg(any(test, feature = "refinement"))]
         RemovalSuccess::Closed {
             witness,
             removal_attempt: _removal_attempt,
         } => {
-            runtime
-                .record_returned_success(witness)
-                .unwrap_or_else(|error| {
-                    let control = handle_unload_hazard(
-                        runtime,
-                        crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                        "xlAutoRemove success refinement",
-                        &error,
-                    );
-                    let _ = commit_removal_control(runtime, control);
-                });
+            runtime.record_returned_success(witness);
             1
         }
     }
@@ -294,18 +292,24 @@ pub(crate) enum RemovalControl {
 /// explicit: the transaction is consumed only after a close certificate is
 /// produced, while an active drop can only preserve quarantine.
 struct RemovalTransaction<'runtime, A: Addin> {
-    runtime: &'runtime Runtime<A>,
+    deps: ShutdownDeps<'runtime, A>,
     callbacks: HostCallbackSession,
     attempt: Option<RemovalOwner<'runtime, A>>,
 }
 
 impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
     fn begin(runtime: &'runtime Runtime<A>) -> Option<Self> {
+        let deps = runtime.shutdown_deps();
+        let claim = runtime.lifecycle_orchestrator().begin_final_removal()?;
         Some(Self {
-            runtime,
+            deps,
             callbacks: HostCallbackSession::new(),
-            attempt: Some(runtime.runtime_orchestrator().begin_final_removal()?),
+            attempt: Some(RemovalOwner::new(deps, claim)),
         })
+    }
+
+    fn deps(&self) -> ShutdownDeps<'runtime, A> {
+        self.deps
     }
 
     fn callbacks(&self) -> &HostCallbackSession {
@@ -329,7 +333,7 @@ impl<A: Addin> Drop for RemovalTransaction<'_, A> {
             // No callback or partial cleanup is legal from Drop. The runtime
             // remains terminally quarantined until an explicit boundary can
             // account for every outstanding resource.
-            self.runtime.runtime_orchestrator().quarantine();
+            self.deps.quarantine_state();
         }
     }
 }
@@ -365,12 +369,12 @@ where
     let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
         return Ok(RemovalSuccess::AlreadyClosed);
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().begin_close(runtime);
+    let shutdown_deps = transaction.deps();
+    runtime.observer().begin_close();
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let lifecycle_present = match runtime.has_addin_lifecycle(lifecycle) {
+    let lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
         Err(error) => {
             let error = lifecycle_access_error(error);
@@ -384,7 +388,7 @@ where
     };
 
     let mut owner = transaction.take_attempt();
-    let execution_drained = match drain_execution(runtime, &mut owner, true) {
+    let execution_drained = match drain_execution(shutdown_deps, &mut owner) {
         Ok(stage) => stage,
         Err(error) => {
             return Err(handle_unload_hazard(
@@ -396,7 +400,7 @@ where
         }
     };
     let teardown: shutdown::TeardownTxn<'runtime, A, FinalRemoval, shutdown::ExecutionDrained> =
-        shutdown::TeardownTxn::new(owner, execution_drained);
+        shutdown::TeardownTxn::new(shutdown_deps, owner, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
@@ -411,13 +415,11 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().async_drained(runtime);
+    runtime.observer().async_drained();
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().subscriptions_drained(runtime);
+    runtime.observer().subscriptions_drained();
 
-    let registrations = runtime.host.registrations_snapshot();
+    let registrations = shutdown_deps.host().registrations_snapshot();
     if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
         let host = RegistrationHost::new(transaction.callbacks_mut());
         HostRegistrar::unregister_pending(&host, &registrations)
@@ -448,16 +450,17 @@ where
                 error,
             );
         }
-        #[cfg(any(test, feature = "refinement"))]
         for _ in &outcome.succeeded {
-            runtime.refinement_hooks().unregister_function(runtime);
+            runtime.observer().unregister_function();
         }
-        runtime
-            .host
+        shutdown_deps
+            .host()
             .replace_registrations(outcome.failed.into_iter().map(|(entry, _)| entry).collect());
-        runtime.host.retain_metadata_debt(outcome.metadata_debt);
-        if runtime.host.has_metadata_debt() {
-            let debt_count = runtime.host.metadata_debt_snapshot().len();
+        shutdown_deps
+            .host()
+            .retain_metadata_debt(outcome.metadata_debt);
+        if shutdown_deps.host().has_metadata_debt() {
+            let debt_count = shutdown_deps.host().metadata_debt_snapshot().len();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
                     count = debt_count,
@@ -474,7 +477,7 @@ where
             error,
         ));
     }
-    if runtime.host.registration_state_unknown() && unload_failure.is_none() {
+    if shutdown_deps.host().registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
@@ -486,7 +489,7 @@ where
         ));
     }
 
-    let event_registrations = runtime.host.event_registrations_snapshot();
+    let event_registrations = shutdown_deps.host().event_registrations_snapshot();
     if !transaction.callbacks().permits_callbacks() {
         if !event_registrations.is_empty() {
             let error = transaction
@@ -500,8 +503,8 @@ where
             for _ in &event_registrations {
                 report_boundary_error("xlAutoRemove event unregister", &error);
             }
-            runtime
-                .host
+            shutdown_deps
+                .host()
                 .replace_event_registrations(event_registrations);
             if unload_failure.is_none() {
                 unload_failure = Some((
@@ -532,11 +535,10 @@ where
                 error,
             );
         }
-        #[cfg(any(test, feature = "refinement"))]
         for _ in &event_outcome.succeeded {
-            runtime.refinement_hooks().unregister_event(runtime);
+            runtime.observer().unregister_event();
         }
-        runtime.host.replace_event_registrations(
+        shutdown_deps.host().replace_event_registrations(
             event_outcome
                 .failed
                 .into_iter()
@@ -559,20 +561,16 @@ where
     // cleanup is provably callback-free.
     teardown.close_module_callbacks();
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .callback_admission_closed(runtime);
+    runtime.observer().callback_admission_closed();
 
     if let Some((hazard, boundary, error)) = unload_failure.take() {
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
 
     let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().host_detached(runtime);
+    runtime.observer().host_detached();
 
-    let addin = if let Some(generation) = runtime.take_generation_for_shutdown() {
+    let addin = if let Some(generation) = shutdown_deps.take_generation_for_shutdown() {
         match generation {
             crate::generation::ShutdownGeneration::Open(generation) => {
                 match std::sync::Arc::try_unwrap(generation) {
@@ -592,7 +590,7 @@ where
                         .and_then(|result| result);
                         if let Err(error) = quiesce {
                             report_boundary_error("xlAutoRemove quiesce", &error);
-                            runtime.runtime_orchestrator().quarantine_generation(
+                            runtime.lifecycle_orchestrator().quarantine_generation(
                                 active_runtime_generation(runtime),
                                 generation,
                                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
@@ -606,7 +604,7 @@ where
                         }
                         drop(generation.layers);
                         shutdown::QuiescedAddin::shared(
-                            runtime,
+                            runtime.shutdown_deps(),
                             active_runtime_generation(runtime),
                             generation.shared_state,
                         )
@@ -616,11 +614,13 @@ where
                             diagnostic_id: crate::diagnostics::id::DiagnosticId::STATE_SCAN,
                         };
                         report_boundary_error("xlAutoRemove state escaped", &error);
-                        runtime.runtime_orchestrator().quarantine_shared_generation(
-                            active_runtime_generation(runtime),
-                            generation,
-                            crate::runtime_components::QuarantineReason::AddinGenerationEscaped,
-                        );
+                        runtime
+                            .lifecycle_orchestrator()
+                            .quarantine_shared_generation(
+                                active_runtime_generation(runtime),
+                                generation,
+                                crate::runtime_components::QuarantineReason::AddinGenerationEscaped,
+                            );
                         return Err(handle_unload_hazard(
                             runtime,
                             crate::shutdown::UnloadHazard::AddinGenerationEscaped,
@@ -645,12 +645,12 @@ where
                 if let Err(error) = quiesce {
                     report_boundary_error("xlAutoRemove quiesce", &error);
                     let generation_id = active_runtime_generation(runtime);
-                    runtime.runtime_orchestrator().quarantine_layers(
+                    runtime.lifecycle_orchestrator().quarantine_layers(
                         generation_id,
                         layers,
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
                     );
-                    runtime.runtime_orchestrator().quarantine_shared_state(
+                    runtime.lifecycle_orchestrator().quarantine_shared_state(
                         generation_id,
                         shared_state,
                         crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
@@ -664,7 +664,7 @@ where
                 }
                 drop(layers);
                 shutdown::QuiescedAddin::shared(
-                    runtime,
+                    runtime.shutdown_deps(),
                     active_runtime_generation(runtime),
                     shared_state,
                 )
@@ -682,17 +682,14 @@ where
                 &error,
             ));
         }
-        shutdown::QuiescedAddin::empty(runtime, active_runtime_generation(runtime))
+        shutdown::QuiescedAddin::empty(runtime.shutdown_deps(), active_runtime_generation(runtime))
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    {
-        runtime.refinement_hooks().generation_unique(runtime);
-        runtime.refinement_hooks().addin_quiesced(runtime);
-        runtime.refinement_hooks().generation_reclaimed(runtime);
-    }
+    runtime.observer().generation_unique();
+    runtime.observer().addin_quiesced();
+    runtime.observer().generation_reclaimed();
 
-    if let Err(error) = runtime.shutdown_handle_topics() {
+    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
         return Err(handle_unload_hazard(
             runtime,
             crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
@@ -717,8 +714,7 @@ where
         Ok(stage) => stage,
         Err(error) => {
             for issue in report.issues() {
-                #[cfg(any(test, feature = "refinement"))]
-                runtime.refinement_hooks().cleanup_issue(runtime);
+                runtime.observer().cleanup_issue();
                 report_cleanup_issue(issue);
             }
             return Err(handle_unload_hazard(
@@ -730,8 +726,7 @@ where
         }
     };
     for issue in report.issues() {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.refinement_hooks().cleanup_issue(runtime);
+        runtime.observer().cleanup_issue();
         report_cleanup_issue(issue);
     }
 
@@ -750,15 +745,12 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().handles_drained(runtime);
+    runtime.observer().handles_drained();
 
-    #[cfg(any(test, feature = "refinement"))]
     let diagnostics_was_running = crate::diagnostics::diagnostic_sink_running();
     let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router().map(|outcome| {
         for issue in outcome.issues {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime.refinement_hooks().cleanup_issue(runtime);
+            runtime.observer().cleanup_issue();
             report_cleanup_issue(&issue);
         }
         outcome.certificate
@@ -775,19 +767,10 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    if diagnostics_was_running
-        && let Err(error) = runtime.refinement_hooks().diagnostics_stopped(runtime)
-    {
-        return Err(handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
-            "xlAutoRemove diagnostic refinement",
-            &error,
-        ));
+    if diagnostics_was_running {
+        runtime.observer().diagnostics_stopped();
     }
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().diagnostics_drained(runtime);
+    runtime.observer().diagnostics_drained();
 
     let rtd_quiescent = match crate::excel_rtd::wait_for_module_quiescence() {
         Ok(certificate) => certificate,
@@ -808,8 +791,7 @@ where
         }
     };
 
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().rtd_drained(runtime);
+    runtime.observer().rtd_drained();
 
     let teardown = teardown.reclaim(rtd_quiescent, host_callbacks, diagnostics_stopped);
     let certificate = match teardown.certify() {
@@ -835,7 +817,7 @@ where
         }
     };
 
-    if let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle) {
+    if let Err(error) = shutdown_deps.release_empty_addin_lifecycle(lifecycle) {
         let error = lifecycle_access_error(error);
         return Err(handle_unload_hazard(
             runtime,

@@ -847,8 +847,8 @@ mod tests {
     fn synchronous_contexts_expose_their_state_by_value() {
         let state = 17_u32;
         let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
-        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish(state, ());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         #[cfg(feature = "rtd")]
         let services = runtime.generation_services().unwrap();
@@ -908,8 +908,8 @@ mod tests {
         let state = ();
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
             let runtime = crate::runtime::Runtime::<()>::new();
-            let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
-            runtime.publish((), ());
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish(opening, (), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             let context = MacroSheetContext::<()>::new(state, scope);
             assert!(context.sheet_name(&reference).is_err());
@@ -963,8 +963,8 @@ mod tests {
         }
 
         let runtime = crate::runtime::Runtime::<()>::new();
-        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish((), ());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let subscriptions = runtime.subscriptions().unwrap();
         let subscriptions = subscriptions.as_arc();

@@ -211,13 +211,6 @@ impl AdmittedExport<'_> {
             "admitted export must own an active ingress reservation"
         );
     }
-
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn activity_id(&self) -> crate::shutdown_trace::ActivityId {
-        self.guard
-            .activity_id
-            .expect("admitted export has an activity identity")
-    }
 }
 
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
@@ -355,16 +348,12 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
-        #[cfg(any(test, feature = "refinement"))]
-        let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
         let entry = ExportCallGuard {
             ingress: self,
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
             _permit: Some(permit),
             udf: false,
-            #[cfg(any(test, feature = "refinement"))]
-            activity_id,
         };
         if accepted {
             let hook = on_accepted
@@ -408,16 +397,12 @@ impl ExportIngress {
             return ExportEntry::Rejected(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
-        #[cfg(any(test, feature = "refinement"))]
-        let activity_id = accepted.then(crate::shutdown_trace::ActivityId::fresh);
         let entry = ExportCallGuard {
             ingress: self,
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
             _permit: Some(permit),
             udf: true,
-            #[cfg(any(test, feature = "refinement"))]
-            activity_id,
         };
         if accepted {
             let hook = on_accepted
@@ -571,8 +556,6 @@ impl ExportIngress {
                 stripe: None,
                 _permit: None,
                 udf: false,
-                #[cfg(any(test, feature = "refinement"))]
-                activity_id: None,
             },
         }
     }
@@ -585,8 +568,6 @@ pub(crate) struct ExportCallGuard<'a> {
     stripe: Option<usize>,
     _permit: Option<StripedDrainPermit<'a, INGRESS_STRIPE_COUNT>>,
     udf: bool,
-    #[cfg(any(test, feature = "refinement"))]
-    activity_id: Option<crate::shutdown_trace::ActivityId>,
 }
 
 impl Drop for ExportCallGuard<'_> {

@@ -65,11 +65,10 @@ pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
         let runtime = crate::runtime::Runtime::new();
         runtime.arm_test_generation();
         let removal_epoch = runtime.removal_epoch();
-        let mut opening = runtime
-            .runtime_orchestrator()
+        let opening = runtime
             .begin_open_if_epoch(removal_epoch)
             .expect("benchmark runtime open attempt");
-        runtime.publish((), ());
+        let mut opening = runtime.publish(opening, (), ());
         runtime
             .finish_open(&mut opening, Vec::new())
             .expect("benchmark runtime open");

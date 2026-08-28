@@ -119,7 +119,6 @@ pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
     crate::module_runtime::global().com_module_lifetime()
 }
 
-#[cfg(any(test, feature = "refinement"))]
 pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
     module_lifetime().set_trace_sink(trace);
 }

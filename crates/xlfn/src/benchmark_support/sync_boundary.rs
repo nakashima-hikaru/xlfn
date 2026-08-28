@@ -54,11 +54,10 @@ impl SyncBoundaryWorkerPool {
         let runtime: &'static crate::runtime::Runtime<()> =
             Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
         let removal_epoch = runtime.removal_epoch();
-        let mut open_attempt = runtime
-            .runtime_orchestrator()
+        let open_attempt = runtime
             .begin_open_if_epoch(removal_epoch)
             .expect("begin_open");
-        runtime.publish((), ());
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
         runtime
             .finish_open(&mut open_attempt, Vec::new())
             .expect("finish_open");

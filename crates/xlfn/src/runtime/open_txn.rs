@@ -1,296 +1,669 @@
 use crate::generation::{OpenAttemptId, OpeningGeneration};
 use crate::host_callback::HostCallbackSession;
-use crate::lifecycle::{LifecycleAccess, OpenFailureDisposition};
+use crate::lifecycle::LifecycleAccess;
+#[cfg(test)]
+use crate::lifecycle::OpenFailureDisposition;
 use crate::registration::{HostMutationJournal, RegistrationId};
-use crate::runtime::{AddinLifecycleAccess, Runtime};
+use crate::runtime::AddinLifecycleAccess;
+use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
-use std::marker::PhantomData;
 use std::sync::Arc;
 use xlfn_kernel::thread_affine::ThreadAffineError;
 
-pub(crate) struct OpenAttemptBegun;
+/// A state payload in the open transaction protocol.
+pub(crate) trait OpeningState<A: crate::Addin>: Sized {
+    fn attempt_id(&self) -> OpenAttemptId;
+    fn abandon(self, deps: &OpenDeps<'_, A>);
+}
 
-pub(crate) struct OpenGenerationStaged;
+/// The only common payload shared by every open transaction state.
+pub(crate) struct OpenCore {
+    attempt_id: OpenAttemptId,
+    module_opening: crate::module_runtime::ModuleOpening,
+}
 
-pub(crate) struct HostMutated;
+impl OpenCore {
+    fn new(
+        attempt_id: OpenAttemptId,
+        module_opening: crate::module_runtime::ModuleOpening,
+    ) -> Self {
+        Self {
+            attempt_id,
+            module_opening,
+        }
+    }
 
-pub(crate) type OpeningStageFailure<'runtime, A, Host = NoHost> = (
-    XllError,
-    Box<OpeningTxn<'runtime, A, OpenAttemptBegun, Host>>,
-    Box<OpeningGeneration<A>>,
-);
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.attempt_id
+    }
 
-pub(crate) struct NoHost;
+    pub(crate) fn into_parts(self) -> (OpenAttemptId, crate::module_runtime::ModuleOpening) {
+        (self.attempt_id, self.module_opening)
+    }
+}
+
+/// The open protocol has begun, but no host callback session is attached yet.
+pub(crate) struct Begun {
+    core: OpenCore,
+}
+
+/// Host callback and registration journal ownership is now attached.
+pub(crate) struct HostAttached {
+    core: OpenCore,
+    host: HostOpeningState,
+}
+
+/// `Addin::open` succeeded and its thread-affine lifecycle state is owned by
+/// the transaction.
+pub(crate) struct Initialized<A: crate::Addin> {
+    core: OpenCore,
+    host: HostOpeningState,
+    lifecycle: A::LifecycleState,
+}
+
+/// The generation is staged in canonical lifecycle state, while the
+/// thread-affine lifecycle payload remains owned by the transaction.
+pub(crate) struct GenerationStaged<A: crate::Addin> {
+    core: OpenCore,
+    host: HostOpeningState,
+    lifecycle: A::LifecycleState,
+}
+
+/// The lifecycle payload has been transferred to the runtime's thread-affine
+/// slot. The transaction still owns the module and host capabilities.
+pub(crate) struct LifecycleInstalled {
+    core: OpenCore,
+    host: HostOpeningState,
+}
+
+/// All mandatory open steps are complete and the transaction may commit.
+pub(crate) struct HostMutated {
+    core: OpenCore,
+    host: HostOpeningState,
+}
 
 pub(crate) struct HostOpeningState {
     callbacks: HostCallbackSession,
     journal: HostMutationJournal,
 }
 
-pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, Stage, Host = NoHost> {
-    runtime: &'runtime Runtime<A>,
-    attempt_id: OpenAttemptId,
-    module_opening: Option<crate::module_runtime::ModuleOpening>,
-    host: Option<Host>,
-    lifecycle_state: Option<A::LifecycleState>,
-    _stage: PhantomData<fn() -> Stage>,
-}
-
-impl<'runtime, A: crate::Addin, Stage, Host> OpeningTxn<'runtime, A, Stage, Host> {
-    pub(crate) const fn attempt_id(&self) -> OpenAttemptId {
-        self.attempt_id
-    }
-
-    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
-        self.runtime
-    }
-
-    pub(crate) fn fail(&mut self) -> OpenFailureDisposition {
-        let disposition = self
-            .runtime
-            .runtime_orchestrator()
-            .mark_open_failed(self.attempt_id);
-        if let Some(module_opening) = self.module_opening.take() {
-            self.runtime
-                .lifecycle_control()
-                .complete_open_abort(module_opening.rollback(|| {}));
-        }
-        disposition
-    }
-
-    pub(crate) fn with_lifecycle_state(mut self, state: A::LifecycleState) -> Self {
-        debug_assert!(
-            self.lifecycle_state.is_none(),
-            "an opening transaction receives one lifecycle state"
-        );
-        self.lifecycle_state = Some(state);
-        self
-    }
-
-    pub(crate) fn take_lifecycle_state(&mut self) -> Option<A::LifecycleState> {
-        self.lifecycle_state.take()
-    }
-
-    pub(crate) fn install_lifecycle(
-        mut self,
-        access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<Self, (ThreadAffineError, Self)> {
-        let Some(state) = self.lifecycle_state.take() else {
-            return Ok(self);
-        };
-        match self.runtime.install_addin_lifecycle(access, state) {
-            Ok(()) => Ok(self),
-            Err(error) => {
-                self.lifecycle_state = Some(error.value);
-                Err((error.reason, self))
-            }
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenAttemptBegun, NoHost> {
-    pub(crate) fn new_begun(
-        runtime: &'runtime Runtime<A>,
-        attempt_id: OpenAttemptId,
-        module_opening: crate::module_runtime::ModuleOpening,
-    ) -> Self {
+impl HostOpeningState {
+    fn new() -> Self {
         Self {
-            runtime,
-            attempt_id,
-            module_opening: Some(module_opening),
-            host: Some(NoHost),
-            lifecycle_state: None,
-            _stage: PhantomData,
+            callbacks: HostCallbackSession::new(),
+            journal: HostMutationJournal::default(),
         }
     }
-}
 
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
-    pub(crate) fn attach_host(mut self) -> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
-        OpeningTxn {
-            runtime: self.runtime,
-            attempt_id: self.attempt_id,
-            module_opening: self.module_opening.take(),
-            host: Some(HostOpeningState {
-                callbacks: HostCallbackSession::new(),
-                journal: HostMutationJournal::default(),
-            }),
-            lifecycle_state: self.lifecycle_state.take(),
-            _stage: PhantomData,
-        }
+    pub(crate) fn into_parts(self) -> (HostCallbackSession, HostMutationJournal) {
+        (self.callbacks, self.journal)
     }
-}
 
-impl<'runtime, A: crate::Addin, Host> OpeningTxn<'runtime, A, OpenAttemptBegun, Host> {
-    pub(crate) fn stage(
-        mut self,
-        opening: OpeningGeneration<A>,
-    ) -> Result<
-        OpeningTxn<'runtime, A, OpenGenerationStaged, Host>,
-        OpeningStageFailure<'runtime, A, Host>,
-    > {
-        let result = self
-            .runtime
-            .lifecycle_control()
-            .stage_opening_generation(self.attempt_id, opening);
-        match result {
-            Ok(()) => {
-                let module_opening = self
-                    .module_opening
-                    .take()
-                    .expect("an open attempt owns the module token before staging");
-                Ok(OpeningTxn {
-                    runtime: self.runtime,
-                    attempt_id: self.attempt_id,
-                    module_opening: Some(module_opening),
-                    host: self.host.take(),
-                    lifecycle_state: self.lifecycle_state.take(),
-                    _stage: PhantomData,
-                })
-            }
-            Err((error, opening)) => Err((error, Box::new(self), Box::new(opening))),
-        }
-    }
-}
-
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, OpenGenerationStaged, HostOpeningState> {
     fn stage_registrations(&mut self, registrations: Vec<RegistrationId>) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .pending_registrations = registrations
+        self.journal.pending_registrations = registrations
             .into_iter()
             .map(crate::registration::PendingRegistration::from)
             .collect();
     }
+}
 
-    pub(crate) fn stage_host_mutations(
-        mut self,
-        registrations: Vec<RegistrationId>,
-    ) -> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
-        self.stage_registrations(registrations);
-        OpeningTxn {
-            runtime: self.runtime,
-            attempt_id: self.attempt_id,
-            module_opening: self.module_opening.take(),
-            host: self.host.take(),
-            lifecycle_state: self.lifecycle_state.take(),
-            _stage: PhantomData,
+/// Lifecycle ownership while an opening transaction is being rolled back.
+/// The enum is a recovery projection, not an independent state machine: the
+/// production transaction states above determine which variant can be made.
+pub(crate) enum LifecycleOwnership<A: crate::Addin> {
+    Owned(A::LifecycleState),
+    Installed,
+}
+
+pub(crate) struct RollbackParts<A: crate::Addin> {
+    core: OpenCore,
+    host: HostOpeningState,
+    lifecycle: LifecycleOwnership<A>,
+}
+
+impl<A: crate::Addin> RollbackParts<A> {
+    pub(crate) fn into_parts(self) -> (OpenCore, HostOpeningState, LifecycleOwnership<A>) {
+        (self.core, self.host, self.lifecycle)
+    }
+}
+
+/// States that still own the host-side rollback session.
+pub(crate) trait RollbackState<A: crate::Addin>: OpeningState<A> {
+    fn into_rollback_parts(self) -> RollbackParts<A>;
+}
+
+fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
+    #[allow(
+        clippy::mem_forget,
+        reason = "an abandoned open transaction must not run untrusted lifecycle destruction"
+    )]
+    std::mem::forget(state);
+}
+
+fn abandon_open<A: crate::Addin>(
+    deps: &OpenDeps<'_, A>,
+    core: OpenCore,
+    lifecycle: LifecycleOwnership<A>,
+) {
+    let (_, module_opening) = core.into_parts();
+    deps.lifecycle_control()
+        .complete_open_abort(module_opening.rollback(|| {}));
+    let control_api = deps.lifecycle_control();
+    let mut control = control_api.access();
+    control_api.quarantine_state(&mut control);
+    drop(control);
+    control_api.notify_all();
+    if let LifecycleOwnership::Owned(state) = lifecycle {
+        forget_untrusted_lifecycle_state::<A>(state);
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for Begun {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self { core } = self;
+        abandon_open(deps, core, LifecycleOwnership::Installed);
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for HostAttached {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self { core, host: _ } = self;
+        abandon_open(deps, core, LifecycleOwnership::Installed);
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for Initialized<A> {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self {
+            core,
+            host: _,
+            lifecycle,
+        } = self;
+        abandon_open(deps, core, LifecycleOwnership::Owned(lifecycle));
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self {
+            core,
+            host: _,
+            lifecycle,
+        } = self;
+        abandon_open(deps, core, LifecycleOwnership::Owned(lifecycle));
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self { core, host: _ } = self;
+        abandon_open(deps, core, LifecycleOwnership::Installed);
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for HostMutated {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self { core, host: _ } = self;
+        abandon_open(deps, core, LifecycleOwnership::Installed);
+    }
+}
+
+impl<A: crate::Addin> RollbackState<A> for HostAttached {
+    fn into_rollback_parts(self) -> RollbackParts<A> {
+        let Self { core, host } = self;
+        RollbackParts {
+            core,
+            host,
+            lifecycle: LifecycleOwnership::Installed,
         }
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated, HostOpeningState> {
-    pub(crate) fn commit(mut self) -> XllResult<()> {
-        validate_commit_preconditions(&self)?;
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        let mut journal = self.take_journal();
-        commit_inner(&mut self, module_opening, &mut journal)
+impl<A: crate::Addin> RollbackState<A> for Initialized<A> {
+    fn into_rollback_parts(self) -> RollbackParts<A> {
+        let Self {
+            core,
+            host,
+            lifecycle,
+        } = self;
+        RollbackParts {
+            core,
+            host,
+            lifecycle: LifecycleOwnership::Owned(lifecycle),
+        }
     }
 }
 
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, NoHost> {
+impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
+    fn into_rollback_parts(self) -> RollbackParts<A> {
+        let Self {
+            core,
+            host,
+            lifecycle,
+        } = self;
+        RollbackParts {
+            core,
+            host,
+            lifecycle: LifecycleOwnership::Owned(lifecycle),
+        }
+    }
+}
+
+impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled {
+    fn into_rollback_parts(self) -> RollbackParts<A> {
+        let Self { core, host } = self;
+        RollbackParts {
+            core,
+            host,
+            lifecycle: LifecycleOwnership::Installed,
+        }
+    }
+}
+
+impl<A: crate::Addin> RollbackState<A> for HostMutated {
+    fn into_rollback_parts(self) -> RollbackParts<A> {
+        let Self { core, host } = self;
+        RollbackParts {
+            core,
+            host,
+            lifecycle: LifecycleOwnership::Installed,
+        }
+    }
+}
+
+pub(crate) trait HasHost {
+    fn host_mut(&mut self) -> &mut HostOpeningState;
+}
+
+impl HasHost for HostAttached {
+    fn host_mut(&mut self) -> &mut HostOpeningState {
+        &mut self.host
+    }
+}
+
+impl<A: crate::Addin> HasHost for Initialized<A> {
+    fn host_mut(&mut self) -> &mut HostOpeningState {
+        &mut self.host
+    }
+}
+
+impl<A: crate::Addin> HasHost for GenerationStaged<A> {
+    fn host_mut(&mut self) -> &mut HostOpeningState {
+        &mut self.host
+    }
+}
+
+impl HasHost for LifecycleInstalled {
+    fn host_mut(&mut self) -> &mut HostOpeningState {
+        &mut self.host
+    }
+}
+
+impl HasHost for HostMutated {
+    fn host_mut(&mut self) -> &mut HostOpeningState {
+        &mut self.host
+    }
+}
+
+pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, S: OpeningState<A>> {
+    deps: OpenDeps<'runtime, A>,
+    state: Option<S>,
+}
+
+type OpeningStageFailure<'runtime, A> = (
+    XllError,
+    Box<OpeningTxn<'runtime, A, Initialized<A>>>,
+    Box<OpeningGeneration<A>>,
+);
+
+type LifecycleInstallFailure<'runtime, A> = (
+    ThreadAffineError,
+    Box<OpeningTxn<'runtime, A, GenerationStaged<A>>>,
+);
+
+impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
+    fn new_state(deps: OpenDeps<'runtime, A>, state: S) -> Self {
+        Self {
+            deps,
+            state: Some(state),
+        }
+    }
+
+    fn take_state(&mut self) -> S {
+        self.state
+            .take()
+            .expect("opening transaction state already consumed")
+    }
+
+    pub(crate) fn attempt_id(&self) -> OpenAttemptId {
+        match &self.state {
+            Some(state) => state.attempt_id(),
+            None => panic!("opening transaction state already consumed"),
+        }
+    }
+
+    pub(crate) fn deps(&self) -> OpenDeps<'runtime, A> {
+        self.deps
+    }
+
+    pub(crate) fn into_rollback_parts(self) -> RollbackParts<A>
+    where
+        S: RollbackState<A>,
+    {
+        let mut transaction = self;
+        let state = transaction.take_state();
+        state.into_rollback_parts()
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
+    pub(crate) fn new_begun(
+        deps: OpenDeps<'runtime, A>,
+        attempt_id: OpenAttemptId,
+        module_opening: crate::module_runtime::ModuleOpening,
+    ) -> Self {
+        Self::new_state(
+            deps,
+            Begun {
+                core: OpenCore::new(attempt_id, module_opening),
+            },
+        )
+    }
+
+    pub(crate) fn attach_host(self) -> OpeningTxn<'runtime, A, HostAttached> {
+        let mut transaction = self;
+        let Begun { core } = transaction.take_state();
+        OpeningTxn::new_state(
+            transaction.deps,
+            HostAttached {
+                core,
+                host: HostOpeningState::new(),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(self) -> OpenFailureDisposition {
+        let mut transaction = self;
+        let attempt_id = transaction.attempt_id();
+        let disposition =
+            crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
+                .mark_open_failed(attempt_id);
+        let Begun { core } = transaction.take_state();
+        let (_, module_opening) = core.into_parts();
+        transaction
+            .deps
+            .lifecycle_control()
+            .complete_open_abort(module_opening.rollback(|| {}));
+        disposition
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached> {
+    pub(crate) fn initialized(
+        self,
+        lifecycle: A::LifecycleState,
+    ) -> OpeningTxn<'runtime, A, Initialized<A>> {
+        let mut transaction = self;
+        let HostAttached { core, host } = transaction.take_state();
+        OpeningTxn::new_state(
+            transaction.deps,
+            Initialized {
+                core,
+                host,
+                lifecycle,
+            },
+        )
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
+    pub(crate) fn stage_opening_generation(
+        self,
+        opening: OpeningGeneration<A>,
+    ) -> Result<OpeningTxn<'runtime, A, GenerationStaged<A>>, OpeningStageFailure<'runtime, A>>
+    {
+        let mut transaction = self;
+        let result = transaction
+            .deps
+            .lifecycle_control()
+            .stage_opening_generation(transaction.attempt_id(), opening);
+        match result {
+            Ok(()) => {
+                let Initialized {
+                    core,
+                    host,
+                    lifecycle,
+                } = transaction.take_state();
+                Ok(OpeningTxn::new_state(
+                    transaction.deps,
+                    GenerationStaged {
+                        core,
+                        host,
+                        lifecycle,
+                    },
+                ))
+            }
+            Err((error, opening)) => Err((error, Box::new(transaction), Box::new(opening))),
+        }
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
+    pub(crate) fn install_lifecycle(
+        self,
+        access: &AddinLifecycleAccess<'_, A>,
+    ) -> Result<OpeningTxn<'runtime, A, LifecycleInstalled>, LifecycleInstallFailure<'runtime, A>>
+    {
+        let mut transaction = self;
+        let GenerationStaged {
+            core,
+            host,
+            lifecycle,
+        } = transaction.take_state();
+        match transaction.deps.install_addin_lifecycle(access, lifecycle) {
+            Ok(()) => Ok(OpeningTxn::new_state(
+                transaction.deps,
+                LifecycleInstalled { core, host },
+            )),
+            Err(error) => {
+                transaction.state = Some(GenerationStaged {
+                    core,
+                    host,
+                    lifecycle: error.value,
+                });
+                Err((error.reason, Box::new(transaction)))
+            }
+        }
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled> {
+    pub(crate) fn stage_host_mutations(
+        self,
+        registrations: Vec<RegistrationId>,
+    ) -> OpeningTxn<'runtime, A, HostMutated> {
+        let mut transaction = self;
+        let LifecycleInstalled { core, mut host } = transaction.take_state();
+        host.stage_registrations(registrations);
+        OpeningTxn::new_state(transaction.deps, HostMutated { core, host })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(self) -> OpenFailureDisposition {
+        let mut transaction = self;
+        let attempt_id = transaction.attempt_id();
+        let disposition =
+            crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
+                .mark_open_failed(attempt_id);
+        let LifecycleInstalled { core, host: _ } = transaction.take_state();
+        let (_, module_opening) = core.into_parts();
+        transaction
+            .deps
+            .lifecycle_control()
+            .complete_open_abort(module_opening.rollback(|| {}));
+        disposition
+    }
+
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn commit_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
-        validate_commit_preconditions(self)?;
-        let mut journal = HostMutationJournal {
-            pending_registrations: registrations
-                .into_iter()
-                .map(crate::registration::PendingRegistration::from)
-                .collect(),
-            ..Default::default()
-        };
-        let Some(module_opening) = self.module_opening.take() else {
-            return Err(XllError::Closing);
-        };
-        commit_inner(self, module_opening, &mut journal)
+    pub(crate) fn finish_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
+        let state = self.take_state();
+        OpeningTxn::new_state(self.deps, state)
+            .stage_host_mutations(registrations)
+            .commit()
     }
 }
 
-fn validate_commit_preconditions<A: crate::Addin, Stage, Host>(
-    transaction: &OpeningTxn<'_, A, Stage, Host>,
-) -> XllResult<()> {
-    let control = transaction.runtime.lifecycle.access();
-    transaction
-        .runtime
-        .lifecycle_control()
-        .validate_open_attempt(&control, transaction.attempt_id)
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated> {
+    pub(crate) fn commit(self) -> XllResult<()> {
+        let mut transaction = self;
+        validate_commit_preconditions(&transaction)?;
+        let HostMutated { core, host } = transaction.take_state();
+        let (_callbacks, mut journal) = host.into_parts();
+        commit_inner(transaction.deps, core, &mut journal)
+    }
 }
 
-fn commit_inner<'runtime, A: crate::Addin, Stage, Host>(
-    transaction: &mut OpeningTxn<'runtime, A, Stage, Host>,
-    module_opening: crate::module_runtime::ModuleOpening,
+impl<'runtime, A: crate::Addin, S> OpeningTxn<'runtime, A, S>
+where
+    S: OpeningState<A> + HasHost,
+{
+    pub(crate) fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
+        &mut self
+            .state
+            .as_mut()
+            .expect("opening transaction state already consumed")
+            .host_mut()
+            .callbacks
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn stage_events(
+        &mut self,
+        registrations: Vec<crate::registration::EventRegistration>,
+    ) {
+        self.state
+            .as_mut()
+            .expect("opening transaction state already consumed")
+            .host_mut()
+            .journal
+            .pending_events = registrations;
+    }
+
+    pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
+        self.state
+            .as_mut()
+            .expect("opening transaction state already consumed")
+            .host_mut()
+            .journal
+            .merge(journal);
+    }
+}
+
+fn validate_commit_preconditions<A: crate::Addin, S: OpeningState<A>>(
+    transaction: &OpeningTxn<'_, A, S>,
+) -> XllResult<()> {
+    let control = transaction.deps.lifecycle_access();
+    transaction
+        .deps
+        .lifecycle_control()
+        .validate_open_attempt(&control, transaction.attempt_id())
+}
+
+fn commit_inner<A: crate::Addin>(
+    deps: OpenDeps<'_, A>,
+    core: OpenCore,
     journal: &mut HostMutationJournal,
 ) -> XllResult<()> {
-    let runtime = transaction.runtime;
-    let attempt_id = transaction.attempt_id;
-    let mut control = runtime.lifecycle.access();
+    let (attempt_id, module_opening) = core.into_parts();
+    let mut control = deps.lifecycle_access();
     let registration_ids = journal
         .pending_registrations
         .iter()
         .map(|entry| entry.registration)
         .collect::<Vec<_>>();
-    runtime
-        .host
-        .clear_metadata_debt_for_registrations(&registration_ids);
-    runtime.host.merge(std::mem::take(journal));
+    deps.clear_metadata_debt_for_registrations(&registration_ids);
+    deps.merge_host(std::mem::take(journal));
 
     if control.phase() == crate::lifecycle::LifecyclePhase::Opening {
         let mut module_opening = Some(module_opening);
         let ingress = crate::module_runtime::ingress();
+        let generation = attempt_id.into_runtime_generation();
         let result = ingress
             .complete_open(|| {
-                publish_generation(runtime, attempt_id, &mut control, &mut module_opening)?;
-                let generation = attempt_id.into_runtime_generation();
-                runtime.refinement.commit_open(runtime, attempt_id, || {
-                    runtime
-                        .lifecycle_control()
-                        .finish_open_state(&mut control, generation)?;
-                    if control.phase() != crate::lifecycle::LifecyclePhase::Open
-                        || control.last_committed_generation() != Some(generation)
-                        || control.open_attempt().is_some()
-                    {
-                        crate::boundary::fail_stop_invariant(
-                            "xlAutoOpen commit postcondition",
-                            &XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                            },
-                        );
-                    }
-                    Ok(())
-                })?;
+                publish_generation(deps, attempt_id, &mut control, &mut module_opening)?;
+                deps.lifecycle_control()
+                    .finish_open_state(&mut control, generation)?;
+                if control.phase() != crate::lifecycle::LifecyclePhase::Open
+                    || control.last_committed_generation() != Some(generation)
+                    || control.open_attempt().is_some()
+                {
+                    crate::boundary::fail_stop_invariant(
+                        "xlAutoOpen commit postcondition",
+                        &XllError::Internal {
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                        },
+                    );
+                }
                 Ok::<(), XllError>(())
             })
             .unwrap_or_else(|_| opening_publication_lost());
 
         match result {
             Ok(()) => {
-                runtime.lifecycle.notify_all();
+                deps.observer().commit_open(&deps, attempt_id, generation);
+                deps.lifecycle().notify_all();
                 Ok(())
             }
             Err(error) => {
-                recover_uncommitted_module(runtime, &mut module_opening, &mut control);
+                recover_uncommitted_module(deps, &mut module_opening, &mut control);
                 drop(control);
-                runtime.runtime_orchestrator().quarantine();
+                let lifecycle = deps.lifecycle_control();
+                let mut control = lifecycle.access();
+                lifecycle.quarantine_state(&mut control);
+                drop(control);
+                lifecycle.notify_all();
                 Err(error)
             }
         }
     } else {
-        let authority = runtime.lifecycle_control();
-        authority.complete_open_abort_locked(&mut control, module_opening.rollback(|| {}));
-        runtime.lifecycle.notify_all();
+        let authority = deps.lifecycle_control();
+        let closing = module_opening.rollback(|| {});
+        authority.complete_open_abort_locked(&mut control, closing);
+        deps.lifecycle().notify_all();
         drop(control);
-        runtime.refinement.reject_open(runtime, attempt_id);
+        deps.observer().reject_open(attempt_id);
         Err(XllError::Closing)
     }
 }
 
 fn publish_generation<A: crate::Addin>(
-    runtime: &Runtime<A>,
+    deps: OpenDeps<'_, A>,
     attempt_id: OpenAttemptId,
     control: &mut LifecycleAccess<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
@@ -311,7 +684,7 @@ fn publish_generation<A: crate::Addin>(
         .take()
         .expect("open transaction owns its module opening authority")
         .commit();
-    match runtime.lifecycle_control().publish_generation_state(
+    match deps.lifecycle_control().publish_generation_state(
         control,
         generation,
         Arc::clone(&services),
@@ -322,17 +695,23 @@ fn publish_generation<A: crate::Addin>(
             let (error, opening, module_epoch) = *failure;
             services.disarm_or_abort();
             if let Some(opening) = opening {
-                runtime
-                    .runtime_orchestrator()
-                    .quarantine_opening_generation(
-                        Some(generation),
-                        opening,
-                        crate::runtime_components::QuarantineReason::OpenStateInvariant,
-                    );
+                let crate::generation::OpeningGeneration {
+                    shared_state,
+                    layers,
+                    init_config: _,
+                } = opening;
+                deps.quarantine().retain_generation(
+                    Some(generation),
+                    crate::generation::ExecutionGeneration {
+                        id: generation,
+                        shared_state,
+                        layers,
+                    },
+                    crate::runtime_components::QuarantineReason::OpenStateInvariant,
+                );
             }
             let closing = module_epoch.begin_close(|| {});
-            runtime
-                .lifecycle_control()
+            deps.lifecycle_control()
                 .complete_open_abort_locked(control, closing);
             Err(error)
         }
@@ -340,83 +719,20 @@ fn publish_generation<A: crate::Addin>(
 }
 
 fn recover_uncommitted_module<A: crate::Addin>(
-    runtime: &Runtime<A>,
+    deps: OpenDeps<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
     control: &mut LifecycleAccess<'_, A>,
 ) {
     if let Some(module_opening) = module_opening.take() {
-        runtime
-            .lifecycle_control()
+        deps.lifecycle_control()
             .complete_open_abort_locked(control, module_opening.rollback(|| {}));
     }
 }
 
-impl<'runtime, A: crate::Addin, Stage> OpeningTxn<'runtime, A, Stage, HostOpeningState> {
-    pub(crate) fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        &mut self
-            .host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .callbacks
-    }
-
-    #[cfg(feature = "async")]
-    pub(crate) fn stage_events(
-        &mut self,
-        registrations: Vec<crate::registration::EventRegistration>,
-    ) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .pending_events = registrations;
-    }
-
-    pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
-        self.host
-            .as_mut()
-            .expect("a host transaction owns its opening state")
-            .journal
-            .merge(journal);
-    }
-
-    pub(crate) fn take_journal(&mut self) -> HostMutationJournal {
-        std::mem::take(
-            &mut self
-                .host
-                .as_mut()
-                .expect("a host transaction owns its opening state")
-                .journal,
-        )
-    }
-}
-
-impl<A: crate::Addin, Stage, Host> Drop for OpeningTxn<'_, A, Stage, Host> {
+impl<A: crate::Addin, S: OpeningState<A>> Drop for OpeningTxn<'_, A, S> {
     fn drop(&mut self) {
-        if let Some(module_opening) = self.module_opening.take() {
-            self.runtime
-                .lifecycle_control()
-                .complete_open_abort(module_opening.rollback(|| {}));
-        } else {
-            if let Some(lifecycle_state) = self.lifecycle_state.take() {
-                #[allow(
-                    clippy::mem_forget,
-                    reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
-                )]
-                std::mem::forget(lifecycle_state);
-            }
-            return;
-        }
-        // Lifecycle rollback is owned by OpeningTxn and must be explicit.
-        // Dropping any unfinished stage can only enter the fail-safe state;
-        // Drop never invokes host callbacks or resource cleanup.
-        self.runtime.runtime_orchestrator().quarantine();
-        if let Some(lifecycle_state) = self.lifecycle_state.take() {
-            #[allow(
-                clippy::mem_forget,
-                reason = "an abandoned open transaction must not run untrusted lifecycle destruction during unwind"
-            )]
-            std::mem::forget(lifecycle_state);
+        if let Some(state) = self.state.take() {
+            state.abandon(&self.deps);
         }
     }
 }

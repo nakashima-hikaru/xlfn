@@ -44,20 +44,11 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
         Ok(ingress) => ingress,
         Err(_) => return,
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_entered(runtime, ingress.activity_id());
+    let _external = runtime.observer().observe_external();
 
     let call = match runtime.enter(&ingress) {
         Ok(call) => call,
-        Err(_) => {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime
-                .refinement_hooks()
-                .external_left(runtime, ingress.activity_id());
-            return;
-        }
+        Err(_) => return,
     };
 
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -72,11 +63,6 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     }
 
     drop(call);
-
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_left(runtime, ingress.activity_id());
 }
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(

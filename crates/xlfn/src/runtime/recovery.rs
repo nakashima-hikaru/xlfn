@@ -10,7 +10,7 @@ use crate::addin::Addin;
 use crate::boundary::{fail_stop_invariant, report_boundary_error};
 use crate::generation::RuntimeGeneration;
 use crate::runtime::Runtime;
-use crate::runtime_transactions::{RemovalControl, RemovalSuccess};
+use crate::runtime::transactions::{RemovalControl, RemovalSuccess};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[cold]
@@ -24,10 +24,7 @@ pub(crate) fn handle_unload_hazard<A: Addin>(
         tracing::error!(?hazard, %error, "unload safety could not be established");
     }));
     if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
-        #[cfg(any(test, feature = "refinement"))]
-        _runtime
-            .refinement_hooks()
-            .fail_stop(_runtime, hazard.shutdown_failure());
+        _runtime.observer().fail_stop(hazard.shutdown_failure());
         fail_stop_invariant(boundary, error);
     }
 
@@ -56,12 +53,10 @@ pub(crate) fn commit_removal_control<A: Addin>(
 }
 
 pub(crate) fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
-    runtime.runtime_orchestrator().quarantine();
-    #[cfg(any(test, feature = "refinement"))]
-    runtime.refinement_hooks().quarantine(
-        runtime,
-        crate::shutdown_trace::ShutdownFailure::BoundaryPanic,
-    );
+    runtime.lifecycle_orchestrator().quarantine();
+    runtime
+        .observer()
+        .quarantine(crate::shutdown_trace::ShutdownFailure::BoundaryPanic);
     quarantine_runtime_resources(runtime);
 }
 
@@ -69,11 +64,8 @@ pub(crate) fn quarantine_for_hazard<A: Addin>(
     runtime: &Runtime<A>,
     _hazard: crate::shutdown::UnloadHazard,
 ) {
-    runtime.runtime_orchestrator().quarantine();
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .quarantine(runtime, _hazard.shutdown_failure());
+    runtime.lifecycle_orchestrator().quarantine();
+    runtime.observer().quarantine(_hazard.shutdown_failure());
     quarantine_runtime_resources(runtime);
 }
 

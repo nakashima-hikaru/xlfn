@@ -2172,7 +2172,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.take_current_bundle(&mut core)
     }
 
-    #[cfg(any(all(test, feature = "handles"), feature = "bench-internals"))]
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn install_test_generation_services(&self, services: Arc<GenerationServices>) {
         *self.test_services.lock() = Some(services);
     }

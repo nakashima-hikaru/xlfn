@@ -13,11 +13,11 @@ pub mod v1 {
     use std::future::Future;
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
+    use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
     pub use crate::call::{CallScope, with_excel_call_scope};
     #[cfg(feature = "async")]
     use crate::cancellation::CancellationToken;
     use crate::error::{InputError, XllError, XllResult};
-    use crate::lifecycle_boundary::{host_auto_close, host_auto_open, host_auto_remove};
     use crate::reference::{ExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
@@ -295,7 +295,7 @@ pub mod v1 {
         }
         if let Err(error) = runtime.runtime().release_module_residency() {
             crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
-            runtime.runtime().runtime_orchestrator().quarantine();
+            runtime.runtime().quarantine_runtime();
         }
     }
 

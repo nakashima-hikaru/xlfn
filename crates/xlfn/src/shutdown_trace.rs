@@ -221,6 +221,58 @@ pub(crate) enum ShutdownEvent {
     FailStop(ShutdownFailure),
 }
 
+/// Always-available passive observation sink used by semantic subsystems.
+///
+/// The refinement/test storage is private to this type. Callers therefore
+/// record the event produced by the concrete operation on every build, while
+/// a normal build reduces the sink to a no-op after inlining.
+pub(crate) struct ObservationSink {
+    #[cfg(any(test, feature = "refinement"))]
+    trace: Mutex<Option<ShutdownTraceHandle>>,
+}
+
+impl ObservationSink {
+    pub(crate) const fn new() -> Self {
+        Self {
+            #[cfg(any(test, feature = "refinement"))]
+            trace: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn set_trace_sink(&self, trace: ShutdownTraceHandle) {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            *self.trace.lock() = Some(trace);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = trace;
+    }
+
+    pub(crate) fn trace_handle(&self) -> Option<ShutdownTraceHandle> {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            return self.trace.lock().clone();
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        None
+    }
+
+    #[inline(always)]
+    pub(crate) fn record(&self, event: ShutdownEvent) {
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(trace) = self.trace.lock().as_ref().cloned() {
+            trace.record(event);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = event;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_for_test(&self) {
+        *self.trace.lock() = None;
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ActivityEvent {
@@ -490,6 +542,7 @@ enum RecorderState {
 /// Passive event sink for the independent Lean shutdown specification.
 pub(crate) struct ShutdownTraceRecorder {
     state: Mutex<RecorderState>,
+    #[cfg(any(test, feature = "refinement"))]
     composition: Mutex<Option<Arc<crate::composition_refinement::CompositionTrace>>>,
 }
 
@@ -497,10 +550,12 @@ impl ShutdownTraceRecorder {
     pub(crate) const fn new() -> Self {
         Self {
             state: Mutex::new(RecorderState::Idle),
+            #[cfg(any(test, feature = "refinement"))]
             composition: Mutex::new(None),
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_composition(
         &self,
         composition: Arc<crate::composition_refinement::CompositionTrace>,
@@ -538,6 +593,7 @@ impl ShutdownTraceRecorder {
     /// as a wire observation, preserving the existing composition boundary.
     pub(crate) fn record(&self, event: ShutdownEvent) {
         let observation = event.into_observation();
+        #[cfg(any(test, feature = "refinement"))]
         let mut lifted_certificate = None;
         let mut terminal_outcome = None;
         {
@@ -564,6 +620,7 @@ impl ShutdownTraceRecorder {
                         CertificateEvent::FailStop(_) => Some(TraceOutcome::FailStopped),
                         _ => None,
                     };
+                    #[cfg(any(test, feature = "refinement"))]
                     if !matches!(&certificate, CertificateEvent::FinishClose) {
                         lifted_certificate = Some(certificate);
                     }
@@ -580,6 +637,7 @@ impl ShutdownTraceRecorder {
                 *state = RecorderState::Terminal(session);
             }
         }
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(certificate) = lifted_certificate
             && let Some(composition) = self.composition.lock().as_ref().cloned()
         {

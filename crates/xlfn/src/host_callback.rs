@@ -227,8 +227,8 @@ mod tests {
     #[test]
     fn forgetting_a_borrowed_context_does_not_keep_callbacks_open() {
         let runtime = crate::runtime::Runtime::<()>::new();
-        let mut opening = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish((), ());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let state = ();
         let escaped = crate::call::with_excel_call_scope_and_state(&state, |state, scope| {

@@ -438,28 +438,15 @@ where
         Ok(ingress) => ingress,
         Err(_) => return closing_error_pointer(),
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_entered(runtime, ingress.activity_id());
+    let _external = runtime.observer().observe_external();
     let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
-        Err(_) => {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime
-                .refinement_hooks()
-                .external_left(runtime, ingress.activity_id());
-            return closing_error_pointer();
-        }
+        Err(_) => return closing_error_pointer(),
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime
-            .refinement_hooks()
-            .external_left(runtime, ingress.activity_id());
         return closing_error_pointer();
     };
-    let result = match catch_unwind(AssertUnwindSafe(|| {
+    match catch_unwind(AssertUnwindSafe(|| {
         let mut context = ReturnContext::new();
         let value = T::invoke(&mut context, operation)?;
         allocate_excel_owned(value, &mut producer)
@@ -472,12 +459,7 @@ where
             }
             allocate_excel_error(&XllError::Panic, &mut producer)
         }
-    };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_left(runtime, ingress.activity_id());
-    result
+    }
 }
 
 /// Outermost panic boundary for void-returning `extern "system"` entry points.
@@ -494,25 +476,12 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation
         Ok(ingress) => ingress,
         Err(_) => return,
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_entered(runtime, ingress.activity_id());
+    let _external = runtime.observer().observe_external();
     let _call = match runtime.enter(&ingress) {
         Ok(call) => call,
-        Err(_) => {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime
-                .refinement_hooks()
-                .external_left(runtime, ingress.activity_id());
-            return;
-        }
+        Err(_) => return,
     };
     let _ = catch_unwind(AssertUnwindSafe(operation));
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_left(runtime, ingress.activity_id());
 }
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
@@ -537,25 +506,12 @@ where
         Ok(ingress) => ingress,
         Err(_) => return closing_error_pointer(),
     };
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_entered(runtime, ingress.activity_id());
+    let _external = runtime.observer().observe_external();
     let call = match runtime.enter(&ingress) {
         Ok(call) => call,
-        Err(_) => {
-            #[cfg(any(test, feature = "refinement"))]
-            runtime
-                .refinement_hooks()
-                .external_left(runtime, ingress.activity_id());
-            return closing_error_pointer();
-        }
+        Err(_) => return closing_error_pointer(),
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
-        #[cfg(any(test, feature = "refinement"))]
-        runtime
-            .refinement_hooks()
-            .external_left(runtime, ingress.activity_id());
         return closing_error_pointer();
     };
     let result = match catch_unwind(AssertUnwindSafe(|| {
@@ -571,10 +527,6 @@ where
     };
     drop(producer);
     drop(call);
-    #[cfg(any(test, feature = "refinement"))]
-    runtime
-        .refinement_hooks()
-        .external_left(runtime, ingress.activity_id());
     result
 }
 
@@ -780,16 +732,9 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     let ownership = unsafe { &mut (*block).ownership };
     match ownership {
         ReturnOwnership::Excel(slot) => {
-            #[cfg(any(test, feature = "refinement"))]
-            {
-                let _obligation = slot
-                    .as_ref()
-                    .expect("Excel return obligation is taken exactly once");
-
-                _obligation
-                    .tracker()
-                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginReturnFree);
-            }
+            slot.as_ref()
+                .expect("Excel return obligation is taken exactly once")
+                .observe_begin_free();
 
             Some(ReturnFreeGuard {
                 obligation: slot
@@ -816,11 +761,7 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
         ReturnOwnership::Excel(slot) => {
             debug_assert!(slot.is_none());
             let _operation = operation.expect("Excel return destruction owns a free guard");
-            #[cfg(any(test, feature = "refinement"))]
-            _operation
-                .obligation
-                .tracker()
-                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::ReleaseReturnBlock);
+            _operation.obligation.observe_release_block();
         }
         #[cfg(feature = "async")]
         ReturnOwnership::Local => {
@@ -923,8 +864,8 @@ mod tests {
     fn open_static_test_runtime() -> crate::runtime::StaticTestRuntime<()> {
         let fixture = crate::runtime::StaticTestRuntime::new();
         let runtime = fixture.runtime();
-        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish((), ());
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
         fixture
@@ -1278,7 +1219,7 @@ mod tests {
         });
 
         converting_rx.recv().unwrap();
-        assert!(runtime.runtime_orchestrator().begin_close());
+        assert!(runtime.lifecycle_orchestrator().begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
@@ -1300,7 +1241,7 @@ mod tests {
 
         let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
-        assert!(runtime.runtime_orchestrator().begin_close());
+        assert!(runtime.lifecycle_orchestrator().begin_close());
 
         let (drained_tx, drained_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
@@ -1322,7 +1263,7 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        assert!(runtime.runtime_orchestrator().begin_close());
+        assert!(runtime.lifecycle_orchestrator().begin_close());
 
         let pointer = ffi_boundary(runtime, || Ok(7.0));
         assert!(!pointer.is_null());
@@ -1400,8 +1341,8 @@ mod tests {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let fixture = crate::runtime::StaticTestRuntime::<LayerTestAddin>::new();
         let runtime = fixture.runtime();
-        let mut open_attempt = runtime.runtime_orchestrator().begin_open().unwrap();
-        runtime.publish((), (Recorder(Arc::clone(&events)),));
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), (Recorder(Arc::clone(&events)),));
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
 

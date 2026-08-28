@@ -132,32 +132,79 @@ impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
 pub(crate) struct ScopedServerOperation<'a, H: SubscriptionHost> {
     pub(crate) _gate_guard: OperationGuard<'a>,
     pub(crate) _host_guard: H::AdmissionGuard,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) parent: Weak<SubscriptionRuntime<H>>,
+    pub(crate) observation: ServerOperationObservation<H>,
 }
 
-#[cfg(any(test, feature = "refinement"))]
-impl<H: SubscriptionHost> Drop for ScopedServerOperation<'_, H> {
+pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
+    pub(crate) server: Arc<SubscriptionServer<H>>,
+    pub(crate) _host_guard: H::AdmissionGuard,
+    pub(crate) observation: ServerOperationObservation<H>,
+}
+
+impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
     fn drop(&mut self) {
+        self.server.publish.server_gate.release();
+    }
+}
+
+pub(crate) struct ServerOperationObservation<H: SubscriptionHost> {
+    _host: std::marker::PhantomData<fn() -> H>,
+    #[cfg(any(test, feature = "refinement"))]
+    parent: Weak<SubscriptionRuntime<H>>,
+}
+
+impl<H: SubscriptionHost> ServerOperationObservation<H> {
+    fn begin(parent: &Weak<SubscriptionRuntime<H>>) -> Self {
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(parent) = parent.upgrade() {
+            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = parent;
+        Self {
+            _host: std::marker::PhantomData,
+            #[cfg(any(test, feature = "refinement"))]
+            parent: Weak::clone(parent),
+        }
+    }
+}
+
+impl<H: SubscriptionHost> Drop for ServerOperationObservation<H> {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.parent.upgrade() {
             parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
     }
 }
 
-pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
-    pub(crate) server: Arc<SubscriptionServer<H>>,
-    pub(crate) _host_guard: H::AdmissionGuard,
+struct ServerCallbackObservation<H: SubscriptionHost> {
+    _host: std::marker::PhantomData<fn() -> H>,
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) parent: Weak<SubscriptionRuntime<H>>,
+    parent: Weak<SubscriptionRuntime<H>>,
 }
 
-impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
+impl<H: SubscriptionHost> ServerCallbackObservation<H> {
+    fn begin(parent: &Weak<SubscriptionRuntime<H>>) -> Self {
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(parent) = parent.upgrade() {
+            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginCallback);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = parent;
+        Self {
+            _host: std::marker::PhantomData,
+            #[cfg(any(test, feature = "refinement"))]
+            parent: Weak::clone(parent),
+        }
+    }
+}
+
+impl<H: SubscriptionHost> Drop for ServerCallbackObservation<H> {
     fn drop(&mut self) {
-        self.server.publish.server_gate.release();
         #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.parent.upgrade() {
-            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
+            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndCallback);
         }
     }
 }
@@ -217,19 +264,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let mut gate_guard = None;
         let host_guard = self.host.enter_with(|| {
             gate_guard = Some(self.server_gate.enter().map_err(|_| XllError::Closing)?);
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(parent) = self.parent.upgrade() {
-                parent
-                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
-            }
             Ok(())
         })?;
 
         Ok(ScopedServerOperation {
             _gate_guard: gate_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
-            #[cfg(any(test, feature = "refinement"))]
-            parent: std::sync::Weak::clone(&self.parent),
+            observation: ServerOperationObservation::begin(&self.parent),
         })
     }
 
@@ -243,19 +284,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         let host_guard = self.host.enter_with(|| {
             self.server_gate.acquire().map_err(|_| XllError::Closing)?;
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(parent) = self.parent.upgrade() {
-                parent
-                    .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
-            }
             Ok(())
         })?;
 
         Ok(OwnedServerOperation {
             server,
             _host_guard: host_guard,
-            #[cfg(any(test, feature = "refinement"))]
-            parent: std::sync::Weak::clone(&self.parent),
+            observation: ServerOperationObservation::begin(&self.parent),
         })
     }
 
@@ -326,15 +361,8 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     pub(crate) fn drive_notification(&self, mut attempt: NotificationAttempt<H::Notifier>) {
         loop {
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(parent) = self.parent.upgrade() {
-                parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginCallback);
-            }
+            let _callback = ServerCallbackObservation::begin(&self.parent);
             let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));
-            #[cfg(any(test, feature = "refinement"))]
-            if let Some(parent) = self.parent.upgrade() {
-                parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndCallback);
-            }
             let completion = match res {
                 Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
                 Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
@@ -922,7 +950,6 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
             (late_notifier, active_entries)
         };
 
-        #[cfg(any(test, feature = "refinement"))]
         if let Some(parent) = self.server.parent.upgrade() {
             for _ in 0..self.initial_subscriptions.len() {
                 parent.record_shutdown_event(

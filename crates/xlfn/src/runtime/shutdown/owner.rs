@@ -1,6 +1,6 @@
 use crate::generation::RemovalAttemptId;
 use crate::module_runtime::{ModuleAuthority, ModuleClosing};
-use crate::runtime::Runtime;
+use crate::runtime::capabilities::ShutdownDeps;
 
 /// Runtime-side owner of a lifecycle removal claim.
 ///
@@ -9,7 +9,8 @@ use crate::runtime::Runtime;
 /// module close capability until teardown either consumes it or returns a
 /// cleanup authority to lifecycle state.
 pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
-    runtime: &'runtime Runtime<A>,
+    lifecycle: &'runtime crate::lifecycle::LifecycleCoordinator<A>,
+    observer: &'runtime crate::runtime::observer::RuntimeObserver,
     attempt: RemovalAttemptId,
     module_closing: Option<ModuleClosing>,
     returned_module: Option<Box<ModuleAuthority>>,
@@ -21,7 +22,7 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
         // capability. Return that capability to the runtime so a waiting
         // removal request can take it over without minting a second close
         // authority.
-        let lifecycle = self.runtime.lifecycle_control();
+        let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
         let mut control = lifecycle.access();
         let closing = self.module_closing.take().map(ModuleAuthority::Closing);
         let returned = match (
@@ -33,26 +34,23 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
             (None, None) => None,
         };
         lifecycle.release_removal_claim(&mut control, self.attempt, returned);
-        self.runtime.refinement.release_cleanup_owner(self.runtime);
+        self.observer.release_cleanup_owner();
         lifecycle.notify_all();
     }
 }
 
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     pub(crate) fn new(
-        runtime: &'runtime Runtime<A>,
+        deps: ShutdownDeps<'runtime, A>,
         claim: crate::lifecycle::RemovalClaim,
     ) -> Self {
         Self {
-            runtime,
+            lifecycle: deps.lifecycle(),
+            observer: deps.observer(),
             attempt: claim.attempt(),
             module_closing: Some(claim.into_module_closing()),
             returned_module: None,
         }
-    }
-
-    pub(crate) fn runtime(&self) -> &'runtime Runtime<A> {
-        self.runtime
     }
 
     pub(crate) fn attempt(&self) -> RemovalAttemptId {

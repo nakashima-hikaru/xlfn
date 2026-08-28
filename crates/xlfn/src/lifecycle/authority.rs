@@ -2,7 +2,7 @@
 //!
 //! `LifecycleControl` deliberately owns no `Runtime` reference. It can
 //! mutate only the lifecycle coordinator; runtime-wide orchestration belongs
-//! to `crate::runtime_orchestration`.
+//! to `crate::runtime::orchestration`.
 
 use crate::addin::Addin;
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalAttemptId, RemovalEpoch};

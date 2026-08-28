@@ -66,16 +66,6 @@ impl Machine {
         }
     }
 
-    fn begin_open(&mut self, sampled_epoch: u64, attempt: u64) {
-        self.returned_success = false;
-        self.return_pending = false;
-        self.terminal_pending = false;
-        self.push(CompositionEvent::BeginOpen {
-            sampled_epoch,
-            attempt,
-        });
-    }
-
     fn push(&mut self, event: CompositionEvent) {
         if self.events.len() < MAX_TRACE_EVENTS {
             self.events.push(event);
@@ -94,11 +84,6 @@ impl CompositionTrace {
         Self {
             inner: Mutex::new(Machine::new()),
         }
-    }
-
-    pub(crate) fn begin_open(&self, sampled_epoch: u64, attempt: u64) {
-        let mut machine = self.inner.lock();
-        machine.begin_open(sampled_epoch, attempt);
     }
 
     pub(crate) fn record(&self, event: CompositionEvent) {

@@ -3,6 +3,7 @@ use super::pipeline::QuiescenceProof;
 use crate::XllError;
 use crate::generation::RuntimeGeneration;
 use crate::lifecycle::FinalRemovalReady;
+use crate::runtime::capabilities::ShutdownDeps;
 
 pub(crate) struct FinalRemoval;
 pub(crate) struct OpenRollback;
@@ -21,6 +22,7 @@ pub(crate) trait TerminalCertificateKind {
     fn certify<'runtime, A>(
         owner: RemovalOwner<'runtime, A>,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
     where
         A: crate::Addin + 'runtime;
@@ -35,11 +37,12 @@ impl TerminalCertificateKind for FinalRemoval {
     fn certify<'runtime, A>(
         owner: RemovalOwner<'runtime, A>,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
     where
         A: crate::Addin + 'runtime,
     {
-        owner.certify_final_removal(proof)
+        owner.certify_final_removal(proof, deps)
     }
 }
 
@@ -52,11 +55,12 @@ impl TerminalCertificateKind for OpenRollback {
     fn certify<'runtime, A>(
         owner: RemovalOwner<'runtime, A>,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
     where
         A: crate::Addin + 'runtime,
     {
-        owner.certify_open_rollback(proof)
+        owner.certify_open_rollback(proof, deps)
     }
 }
 
@@ -70,15 +74,13 @@ impl TerminalCertificateKind for OpenRollback {
 pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
     Committed {
         proof: QuiescenceProof,
-        #[cfg(any(test, feature = "refinement"))]
-        composition_resources: crate::shutdown_trace::ShutdownResources,
+        deps: ShutdownDeps<'runtime, A>,
         owner: RemovalOwner<'runtime, A>,
         generation: RuntimeGeneration,
     },
     Uncommitted {
         proof: QuiescenceProof,
-        #[cfg(any(test, feature = "refinement"))]
-        composition_resources: crate::shutdown_trace::ShutdownResources,
+        deps: ShutdownDeps<'runtime, A>,
         owner: RemovalOwner<'runtime, A>,
     },
 }
@@ -87,34 +89,27 @@ pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
 /// Any temporary module epoch is consumed while issuing this value.
 pub(crate) struct OpenRollbackCertificate<'runtime, A: crate::Addin> {
     proof: QuiescenceProof,
-    #[cfg(any(test, feature = "refinement"))]
-    composition_resources: crate::shutdown_trace::ShutdownResources,
+    deps: ShutdownDeps<'runtime, A>,
     owner: RemovalOwner<'runtime, A>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ClosedWitness {
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) runtime_address: usize,
-    #[cfg(any(test, feature = "refinement"))]
-    pub(crate) generation: Option<RuntimeGeneration>,
+    _private: (),
 }
 
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     fn certify_final_removal(
         self,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<FinalRemovalCertificate<'runtime, A>, (XllError, Self)> {
-        let runtime = self.runtime();
-        let lifecycle = runtime.lifecycle_control();
+        let lifecycle = deps.lifecycle_control();
         let control = lifecycle.access();
         let Some(ready) = lifecycle.final_removal_ready(&control, self.attempt()) else {
             return Err((close_certificate_error(), self));
         };
         drop(control);
-
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = crate::shutdown_trace::ShutdownResources::quiescent_snapshot();
 
         match ready {
             FinalRemovalReady::Committed {
@@ -123,7 +118,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             } => {
                 if proof.services_generation() != Some(generation)
                     || proof.module_epoch() != module_epoch
-                    || !runtime.host.is_quiescent()
+                    || !deps.host().is_quiescent()
                 {
                     return Err((close_certificate_error(), self));
                 }
@@ -136,14 +131,13 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 }
                 Ok(FinalRemovalCertificate::Committed {
                     proof,
-                    #[cfg(any(test, feature = "refinement"))]
-                    composition_resources,
+                    deps,
                     owner: self,
                     generation,
                 })
             }
             FinalRemovalReady::Uncommitted => {
-                if !runtime.host.is_quiescent() {
+                if !deps.host().is_quiescent() {
                     return Err((close_certificate_error(), self));
                 }
                 if self.has_module_closing() {
@@ -151,8 +145,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 }
                 Ok(FinalRemovalCertificate::Uncommitted {
                     proof,
-                    #[cfg(any(test, feature = "refinement"))]
-                    composition_resources,
+                    deps,
                     owner: self,
                 })
             }
@@ -162,13 +155,13 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     fn certify_open_rollback(
         self,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<OpenRollbackCertificate<'runtime, A>, (XllError, Self)> {
-        let runtime = self.runtime();
-        let lifecycle = runtime.lifecycle_control();
+        let lifecycle = deps.lifecycle_control();
         let control = lifecycle.access();
         let ready = lifecycle.open_rollback_ready(&control, self.attempt());
         drop(control);
-        if ready.is_none() || !runtime.host.is_quiescent() {
+        if ready.is_none() || !deps.host().is_quiescent() {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
@@ -180,13 +173,9 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             return Err((close_certificate_error(), self));
         }
 
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = crate::shutdown_trace::ShutdownResources::quiescent_snapshot();
-
         Ok(OpenRollbackCertificate {
             proof,
-            #[cfg(any(test, feature = "refinement"))]
-            composition_resources,
+            deps,
             owner: self,
         })
     }
@@ -197,15 +186,15 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     pub(crate) fn certify<K: TerminalCertificateKind>(
         self,
         proof: QuiescenceProof,
+        deps: ShutdownDeps<'runtime, A>,
     ) -> Result<K::Certificate<'runtime, A>, (XllError, Self)> {
-        K::certify(self, proof)
+        K::certify(self, proof, deps)
     }
 }
 
 impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
     pub(crate) fn finish(self) -> Result<RemovalOwner<'runtime, A>, (XllError, Box<Self>)> {
-        let runtime = self.owner.runtime();
-        let lifecycle = runtime.lifecycle_control();
+        let lifecycle = self.deps.lifecycle_control();
         let attempt = self.owner.attempt();
         let result = {
             let mut control = lifecycle.access();
@@ -215,24 +204,13 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
             return Err((error, Box::new(self)));
         }
 
-        let OpenRollbackCertificate {
-            proof,
-            #[cfg(any(test, feature = "refinement"))]
-            composition_resources,
-            owner,
-        } = self;
+        let deps = self.deps;
+        let OpenRollbackCertificate { proof, owner, .. } = self;
         let _quiescence = proof;
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.record_composition_event(
-            crate::composition_refinement::CompositionEvent::FinishOpenRollback(
-                composition_resources,
-            ),
-        );
-        #[cfg(any(test, feature = "refinement"))]
-        runtime.mark_composition_terminal_pending();
+        deps.observer().finish_open_rollback();
         lifecycle.notify_all();
         #[cfg(test)]
-        runtime.release_test_module_lease();
+        deps.release_test_module_lease();
         Ok(owner)
     }
 }
@@ -241,8 +219,8 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
     pub(crate) fn finish(
         self,
     ) -> Result<(ClosedWitness, RemovalOwner<'runtime, A>), (XllError, Box<Self>)> {
-        let runtime = match &self {
-            Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.runtime(),
+        let deps = match &self {
+            Self::Committed { deps, .. } | Self::Uncommitted { deps, .. } => *deps,
         };
         let expected_generation = match &self {
             Self::Committed { generation, .. } => Some(*generation),
@@ -251,7 +229,7 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         let removal_attempt = match &self {
             Self::Committed { owner, .. } | Self::Uncommitted { owner, .. } => owner.attempt(),
         };
-        if expected_generation != runtime.last_committed_generation() {
+        if expected_generation != deps.last_committed_generation() {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,
@@ -259,13 +237,8 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
                 Box::new(self),
             ));
         }
-        #[cfg(any(test, feature = "refinement"))]
-        let committed = matches!(self, Self::Committed { .. });
-        #[cfg(any(test, feature = "refinement"))]
-        if committed && let Err(error) = runtime.refinement_hooks().finish_close(runtime) {
-            return Err((error, Box::new(self)));
-        }
-        let lifecycle = runtime.lifecycle_control();
+        let committed = matches!(&self, Self::Committed { .. });
+        let lifecycle = deps.lifecycle_control();
         let result = {
             let mut control = lifecycle.access();
             lifecycle.finish_final_removal(&mut control, removal_attempt)
@@ -273,53 +246,21 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         if let Err(error) = result {
             return Err((error, Box::new(self)));
         }
-        #[cfg(any(test, feature = "refinement"))]
-        let composition_resources = match &self {
-            Self::Committed {
-                composition_resources,
-                ..
-            }
-            | Self::Uncommitted {
-                composition_resources,
-                ..
-            } => composition_resources.clone(),
-        };
-        #[cfg(any(test, feature = "refinement"))]
-        let generation = match &self {
-            Self::Committed { generation, .. } => Some(*generation),
-            Self::Uncommitted { .. } => None,
-        };
         let owner = match self {
             Self::Committed { owner, proof, .. } | Self::Uncommitted { owner, proof, .. } => {
                 let _quiescence = proof;
                 owner
             }
         };
-        #[cfg(any(test, feature = "refinement"))]
         if committed {
-            runtime.record_composition_event(
-                crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
-            );
-        }
-        #[cfg(any(test, feature = "refinement"))]
-        if !committed {
-            runtime.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(
-                    composition_resources,
-                ),
-            );
+            deps.observer().finish_close();
+            deps.observer().publish_committed_closed();
+        } else {
+            deps.observer().finish_uncommitted_final_close();
         }
         lifecycle.notify_all();
         #[cfg(test)]
-        runtime.release_test_module_lease();
-        Ok((
-            ClosedWitness {
-                #[cfg(any(test, feature = "refinement"))]
-                runtime_address: std::ptr::from_ref(runtime).addr(),
-                #[cfg(any(test, feature = "refinement"))]
-                generation,
-            },
-            owner,
-        ))
+        deps.release_test_module_lease();
+        Ok((ClosedWitness { _private: () }, owner))
     }
 }

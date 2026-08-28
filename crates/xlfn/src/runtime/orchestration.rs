@@ -1,67 +1,71 @@
 //! Runtime-wide lifecycle orchestration.
 //!
-//! This module is the composition layer between the canonical lifecycle state
-//! machine and the return, module, refinement, and quarantine components. The
-//! lifecycle control capability itself is intentionally narrower and does not
-//! own a `Runtime` reference.
+//! This module coordinates lifecycle-owned transitions with the small set of
+//! runtime facilities required to issue an operation claim. It deliberately
+//! does not own a `Runtime` reference; composition-root wiring happens in
+//! `Runtime` itself.
 
 use crate::addin::Addin;
 use crate::generation::{
     ExecutionGeneration, OpenAttemptId, OpeningGeneration, RemovalEpoch, RuntimeGeneration,
 };
 use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
-use crate::runtime::Runtime;
-use crate::runtime::shutdown::RemovalOwner;
+use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::QuarantineReason;
-use crate::runtime_open_txn::{OpenAttemptBegun, OpeningTxn};
 use crate::{XllError, XllResult};
 use std::sync::Arc;
 
-/// Coordinates transitions that span the lifecycle state machine and runtime
-/// resources. It is intentionally the only object in this module that holds a
-/// `Runtime` reference.
-pub(crate) struct RuntimeOrchestrator<'runtime, A: Addin> {
-    runtime: &'runtime Runtime<A>,
+/// The result of beginning an open attempt. The composition root turns this
+/// into an `OpeningTxn` by attaching the operation-scoped open capability.
+pub(crate) struct OpenAttemptStart {
+    pub(crate) attempt: OpenAttemptId,
+    pub(crate) module_opening: crate::module_runtime::ModuleOpening,
 }
 
-impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
-    pub(crate) const fn new(runtime: &'runtime Runtime<A>) -> Self {
-        Self { runtime }
+/// Lifecycle orchestration without ambient access to the runtime aggregate.
+pub(crate) struct LifecycleOrchestrator<'a, A: Addin> {
+    lifecycle: &'a crate::lifecycle::LifecycleCoordinator<A>,
+    returns: &'a crate::runtime_components::ReturnProtocol,
+    quarantine: &'a crate::runtime_components::QuarantineVault<A>,
+    observer: &'a crate::runtime::observer::RuntimeObserver,
+}
+
+impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
+    pub(in crate::runtime) fn new(deps: OpenDeps<'a, A>) -> Self {
+        Self {
+            lifecycle: deps.lifecycle(),
+            returns: deps.returns(),
+            quarantine: deps.quarantine(),
+            observer: deps.observer(),
+        }
     }
 
     fn lifecycle(&self) -> LifecycleControl<'_, A> {
-        LifecycleControl::new(&self.runtime.lifecycle)
+        LifecycleControl::new(self.lifecycle)
     }
 
     pub(crate) fn begin_open_if_epoch(
         &self,
         expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
+    ) -> XllResult<OpenAttemptStart> {
         #[cfg(test)]
         let test_module_lease = crate::ingress::acquire_test_module_lease();
 
         let lifecycle = self.lifecycle();
         let attempt_id = lifecycle.begin_open_state(expected_removal_epoch)?;
-        self.runtime.return_protocol.reopen_admission()?;
+        self.returns.reopen_admission()?;
 
         let module_opening = crate::module_runtime::begin_open();
         #[cfg(test)]
         {
-            *self.runtime.lifecycle.test_module_lease.lock() = Some(test_module_lease);
+            *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
         }
-        self.runtime
-            .refinement
-            .begin_open(self.runtime, expected_removal_epoch.get(), attempt_id);
-        Ok(OpeningTxn::new_begun(
-            self.runtime,
-            attempt_id,
+        self.observer
+            .begin_open(self.returns, expected_removal_epoch.get(), attempt_id);
+        Ok(OpenAttemptStart {
+            attempt: attempt_id,
             module_opening,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'runtime, A, OpenAttemptBegun>> {
-        self.begin_open_if_epoch(self.runtime.removal_epoch())
+        })
     }
 
     pub(crate) fn mark_open_failed(&self, attempt_id: OpenAttemptId) -> OpenFailureDisposition {
@@ -72,19 +76,19 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         }
 
         if control.phase() == LifecyclePhase::Opening {
-            self.runtime.return_protocol.close_admission();
+            self.returns.close_admission();
         }
         let disposition = lifecycle.record_open_failure(&mut control);
         lifecycle.notify_all();
         drop(control);
-        self.runtime.refinement.fail_open(self.runtime, attempt_id);
+        self.observer.fail_open(attempt_id);
         disposition
     }
 
     pub(crate) fn quarantine(&self) {
         let lifecycle = self.lifecycle();
         let mut control = lifecycle.access();
-        self.runtime.return_protocol.close_admission();
+        self.returns.close_admission();
         lifecycle.quarantine_state(&mut control);
     }
 
@@ -94,8 +98,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         shared_state: A::SharedState,
         reason: QuarantineReason,
     ) {
-        self.runtime
-            .quarantine
+        self.quarantine
             .retain_shared_state(generation, shared_state, reason);
     }
 
@@ -105,9 +108,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         layers: A::Layers,
         reason: QuarantineReason,
     ) {
-        self.runtime
-            .quarantine
-            .retain_layers(generation, layers, reason);
+        self.quarantine.retain_layers(generation, layers, reason);
     }
 
     pub(crate) fn quarantine_generation(
@@ -116,9 +117,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         root: ExecutionGeneration<A>,
         reason: QuarantineReason,
     ) {
-        self.runtime
-            .quarantine
-            .retain_generation(generation, root, reason);
+        self.quarantine.retain_generation(generation, root, reason);
     }
 
     pub(crate) fn quarantine_shared_generation(
@@ -127,38 +126,8 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         root: Arc<ExecutionGeneration<A>>,
         reason: QuarantineReason,
     ) {
-        self.runtime
-            .quarantine
+        self.quarantine
             .retain_shared_generation(generation, root, reason);
-    }
-
-    pub(crate) fn quarantine_opening_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        opening: OpeningGeneration<A>,
-        reason: QuarantineReason,
-    ) {
-        let OpeningGeneration {
-            shared_state,
-            layers,
-            init_config: _,
-        } = opening;
-        if let Some(id) = generation {
-            self.runtime.quarantine.retain_generation(
-                Some(id),
-                ExecutionGeneration {
-                    id,
-                    shared_state,
-                    layers,
-                },
-                reason,
-            );
-        } else {
-            self.runtime
-                .quarantine
-                .retain_shared_state(None, shared_state, reason);
-            self.runtime.quarantine.retain_layers(None, layers, reason);
-        }
     }
 
     #[cfg(test)]
@@ -169,7 +138,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
             control.phase(),
             LifecyclePhase::Opening | LifecyclePhase::Open
         ) {
-            self.runtime.return_protocol.close_admission();
+            self.returns.close_admission();
             lifecycle.request_closing(&mut control);
             let _ = lifecycle
                 .take_module_closing_for_test(&mut control)
@@ -187,11 +156,11 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         }
     }
 
-    pub(crate) fn begin_final_removal(&self) -> Option<RemovalOwner<'runtime, A>> {
+    pub(crate) fn begin_final_removal(&self) -> Option<crate::lifecycle::RemovalClaim> {
         let lifecycle = self.lifecycle();
         let mut wait_guard = lifecycle.access();
         lifecycle.begin_removal_request(&mut wait_guard);
-        self.runtime.return_protocol.close_admission();
+        self.returns.close_admission();
         let mut request_recorded = false;
 
         'retry: loop {
@@ -199,16 +168,14 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
                 match wait_guard.phase() {
                     LifecyclePhase::Closed => {
                         if wait_guard.removal_attempt().is_none()
-                            && self.runtime.returns_are_quiescent()
+                            && self.returns.returns_are_quiescent()
                         {
-                            self.runtime
-                                .refinement
-                                .request_final_close(self.runtime, &mut request_recorded);
+                            self.observer.request_final_close(&mut request_recorded);
                             break 'decision Some(None);
                         }
                         if wait_guard.removal_attempt().is_none() {
                             drop(wait_guard);
-                            self.runtime.return_protocol.wait_for_returns();
+                            self.returns.wait_for_returns();
                             wait_guard = lifecycle.access();
                             continue 'retry;
                         }
@@ -234,18 +201,14 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
                             },
                         );
                     }
-                    self.runtime
-                        .refinement
-                        .request_final_close(self.runtime, &mut request_recorded);
+                    self.observer.request_final_close(&mut request_recorded);
                 }
 
                 if wait_guard.phase() != LifecyclePhase::Closed
                     && wait_guard.open_attempt().is_none()
                     && let Some(claim) = lifecycle.claim_removal(&mut wait_guard)
                 {
-                    self.runtime
-                        .refinement
-                        .acquire_final_close_owner(self.runtime);
+                    self.observer.acquire_final_close_owner();
                     Some(Some(claim))
                 } else {
                     None
@@ -253,7 +216,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
             };
 
             match decision {
-                Some(Some(claim)) => return Some(RemovalOwner::new(self.runtime, claim)),
+                Some(Some(claim)) => return Some(claim),
                 Some(None) => return None,
                 None => lifecycle.wait(&mut wait_guard),
             }
@@ -264,7 +227,7 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
         self.lifecycle().take_opening_for_rollback()
     }
 
-    pub(crate) fn acquire_open_rollback(&self) -> Option<RemovalOwner<'runtime, A>> {
+    pub(crate) fn acquire_open_rollback(&self) -> Option<crate::lifecycle::RemovalClaim> {
         let lifecycle = self.lifecycle();
         let mut wait_guard = lifecycle.access();
         loop {
@@ -277,10 +240,8 @@ impl<'runtime, A: Addin> RuntimeOrchestrator<'runtime, A> {
                 | LifecyclePhase::Quarantined => return None,
             }
             if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
-                self.runtime
-                    .refinement
-                    .acquire_open_rollback_owner(self.runtime);
-                return Some(RemovalOwner::new(self.runtime, claim));
+                self.observer.acquire_open_rollback_owner();
+                return Some(claim);
             }
             lifecycle.wait(&mut wait_guard);
         }
