@@ -447,6 +447,37 @@ fn uncommitted_update_does_not_trigger_notification() {
 }
 
 #[test]
+fn publish_between_install_and_commit_prepares_notification() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let (source, sink, _) = publishing_source(Some(1.0f64));
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("known-update").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(2.0).unwrap();
+
+    connection.commit().unwrap();
+
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn server_standalone_termination() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server_a = runtime

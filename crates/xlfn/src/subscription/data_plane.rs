@@ -253,23 +253,19 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
-    pub(crate) fn ensure_notified(&self, epoch: u64) -> XllResult<()> {
+    fn prepare_notification_for_known_update(
+        &self,
+        epoch: u64,
+    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
         if self.notified_epoch.load(Ordering::Acquire) == epoch {
-            return Ok(());
+            return Ok(None);
         }
-        let attempt = {
-            let mut refresh = self.refresh.lock();
-            let has_updates = self.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            prepared.map(|p| {
-                self.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            })
-        };
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
-        Ok(())
+        let mut refresh = self.refresh.lock();
+        let prepared = refresh.prepare_notification(true)?;
+        Ok(prepared.map(|prepared| {
+            self.notified_epoch.store(epoch, Ordering::Release);
+            refresh.commit_notification(prepared)
+        }))
     }
 
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {
@@ -385,55 +381,52 @@ impl<H: SubscriptionHost> PublishCore<H> {
         generation: ConnectionGeneration,
         observed_sequence: Option<u64>,
     ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
-        let mut shard = self.shards[shard_index(topic_id)].lock();
-        self.ensure_open()?;
-        let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
-            return Err(XllError::Closing);
+        let (epoch, has_pending) = {
+            let mut shard = self.shards[shard_index(topic_id)].lock();
+            self.ensure_open()?;
+            let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
+                return Err(XllError::Closing);
+            };
+            if active.generation != generation {
+                return Err(XllError::Closing);
+            }
+            active.committed = true;
+
+            if let Some(obs) = observed_sequence {
+                if shard.pending[0]
+                    .get(&topic_id)
+                    .is_some_and(|u| u.sequence <= obs)
+                {
+                    shard.pending[0].remove(&topic_id);
+                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
+                }
+                if shard.pending[1]
+                    .get(&topic_id)
+                    .is_some_and(|u| u.sequence <= obs)
+                {
+                    shard.pending[1].remove(&topic_id);
+                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
+                }
+            }
+
+            let epoch = self.publish_epoch.load(Ordering::Acquire);
+            let buf0 = (epoch & 1) as usize;
+            let buf1 = 1 - buf0;
+            let has_pending = shard.pending[buf0]
+                .get(&topic_id)
+                .or_else(|| shard.pending[buf1].get(&topic_id))
+                .is_some_and(|u| {
+                    u.connection_generation == generation
+                        && observed_sequence.is_none_or(|seq| u.sequence > seq)
+                });
+            (epoch, has_pending)
         };
-        if active.generation != generation {
-            return Err(XllError::Closing);
-        }
-        active.committed = true;
-
-        if let Some(obs) = observed_sequence {
-            if shard.pending[0]
-                .get(&topic_id)
-                .is_some_and(|u| u.sequence <= obs)
-            {
-                shard.pending[0].remove(&topic_id);
-                let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-            }
-            if shard.pending[1]
-                .get(&topic_id)
-                .is_some_and(|u| u.sequence <= obs)
-            {
-                shard.pending[1].remove(&topic_id);
-                let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-            }
-        }
-
-        let epoch = self.publish_epoch.load(Ordering::Acquire);
-        let buf0 = (epoch & 1) as usize;
-        let buf1 = 1 - buf0;
-        let has_pending = shard.pending[buf0]
-            .get(&topic_id)
-            .or_else(|| shard.pending[buf1].get(&topic_id))
-            .is_some_and(|u| {
-                u.connection_generation == generation
-                    && observed_sequence.is_none_or(|seq| u.sequence > seq)
-            });
-        if has_pending {
-            let mut refresh = self.refresh.lock();
-            let has_updates = self.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            let attempt = prepared.map(|p| {
-                self.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            });
-            Ok(attempt)
+        let attempt = if has_pending {
+            self.prepare_notification_for_known_update(epoch)?
         } else {
-            Ok(None)
-        }
+            None
+        };
+        Ok(attempt)
     }
 
     pub(crate) fn rollback_connection(
@@ -501,7 +494,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         let shard_index = shard_index(topic_id);
 
-        let epoch = loop {
+        let (epoch, committed) = loop {
             self.ensure_open()?;
 
             let epoch = self.publish_epoch.load(Ordering::Acquire);
@@ -548,11 +541,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 }
             }
 
+            let committed = active.committed;
             active.latest = value;
-            break epoch;
+            break (epoch, committed);
         };
 
-        self.ensure_notified(epoch)?;
+        if committed && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
+            self.drive_notification(attempt);
+        }
         Ok(())
     }
 
