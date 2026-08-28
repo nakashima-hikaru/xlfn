@@ -19,6 +19,7 @@
 )]
 
 mod catalog;
+mod data_plane;
 mod delivery;
 mod host;
 mod identity;
@@ -62,6 +63,10 @@ use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
 #[cfg(test)]
 pub(crate) use catalog::SubscriptionCatalog;
+#[cfg(test)]
+pub(crate) use data_plane::{
+    OwnedPublishOperation, PublishCore, RtdRefreshBatch, ScopedPublishOperation,
+};
 #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(all(target_os = "windows", feature = "rtd"))]
@@ -83,12 +88,11 @@ pub(crate) use runtime::OperationEnterHook;
 pub(crate) use runtime_services::RuntimeServices;
 #[cfg(test)]
 pub(crate) use server::{
-    OwnedServerOperation, PANIC_AFTER_TERMINATION_GUARD, PublishCore, RtdRefreshBatch,
-    ScopedServerOperation, ServerReservationFailure, ServerTermination, ServerTerminationPhase,
-    ServerTerminationWaiter, SubscriptionServer, TerminatedTopic, TerminationAdmission,
-    TerminationCompletionGuard, TerminationCoordinator, TerminationState,
-    cleanup_catalog_binding_and_pending, disconnect_all_no_unwind, disconnect_one_no_unwind,
-    drop_notifier_no_unwind,
+    OwnedServerOperation, PANIC_AFTER_TERMINATION_GUARD, ServerReservationFailure,
+    ServerTermination, ServerTerminationPhase, ServerTerminationWaiter, SubscriptionServer,
+    TerminatedTopic, TerminationAdmission, TerminationCompletionGuard, TerminationCoordinator,
+    TerminationState, cleanup_catalog_binding_and_pending, disconnect_all_no_unwind,
+    disconnect_one_no_unwind, drop_notifier_no_unwind,
 };
 #[cfg(feature = "rtd")]
 pub(crate) use source::SourceHandleAllocator;
