@@ -26,6 +26,7 @@ pub(crate) struct PublishCore<H: SubscriptionHost> {
     next_update_sequence: AtomicU64,
     notified_epoch: AtomicU64,
     pending_updates: AtomicUsize,
+    deliverable_pending: AtomicUsize,
     shards: Box<[Mutex<TopicShard>]>,
     refresh: Mutex<RefreshState<H::Notifier>>,
     services: Arc<RuntimeServices>,
@@ -53,6 +54,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             next_update_sequence: AtomicU64::new(0),
             notified_epoch: AtomicU64::new(u64::MAX),
             pending_updates: AtomicUsize::new(0),
+            deliverable_pending: AtomicUsize::new(0),
             shards: shards.into_boxed_slice(),
             refresh: Mutex::new(RefreshState::default()),
             services,
@@ -76,6 +78,10 @@ impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
             .field(
                 "pending_updates",
                 &self.pending_updates.load(Ordering::Relaxed),
+            )
+            .field(
+                "deliverable_pending",
+                &self.deliverable_pending.load(Ordering::Relaxed),
             )
             .finish_non_exhaustive()
     }
@@ -192,6 +198,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             shard.pending[1].clear();
         }
         self.pending_updates.store(0, Ordering::Release);
+        self.deliverable_pending.store(0, Ordering::Release);
     }
 
     pub(crate) fn begin_termination(&self) -> PublishTerminationStart<'_, H> {
@@ -219,6 +226,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             shard.topic_by_id.clear();
         }
         self.pending_updates.store(0, Ordering::Release);
+        self.deliverable_pending.store(0, Ordering::Release);
         self.lifecycle.store(
             super::delivery::SERVER_LIFECYCLE_TERMINATED,
             Ordering::Release,
@@ -236,21 +244,45 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     pub(crate) fn has_deliverable_updates(&self) -> bool {
-        let epoch = self.publish_epoch.load(Ordering::Acquire);
-        let buf0 = (epoch & 1) as usize;
-        let buf1 = 1 - buf0;
-        self.shards.iter().any(|shard_mutex| {
-            let shard = shard_mutex.lock();
-            shard.pending[buf0]
-                .keys()
-                .chain(shard.pending[buf1].keys())
-                .any(|tid| {
-                    shard
-                        .active_by_topic
-                        .get(tid)
-                        .is_some_and(|active| active.committed)
-                })
-        })
+        self.deliverable_pending.load(Ordering::Acquire) != 0
+    }
+
+    #[inline]
+    fn record_pending_insert(&self, deliverable: bool) {
+        self.pending_updates.fetch_add(1, Ordering::Relaxed);
+        if deliverable {
+            self.deliverable_pending.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    fn record_pending_removal(&self, deliverable: bool) {
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
+        if deliverable {
+            let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.deliverable_pending);
+        }
+    }
+
+    fn remove_pending_if(
+        &self,
+        shard: &mut TopicShard,
+        buffer: usize,
+        topic_id: TopicId,
+        predicate: impl FnOnce(&QueuedUpdate) -> bool,
+    ) -> bool {
+        let deliverable = shard
+            .active_by_topic
+            .get(&topic_id)
+            .is_some_and(|active| active.committed);
+        let pending = &mut shard.pending[buffer];
+        if !pending.get(&topic_id).is_some_and(predicate) {
+            return false;
+        }
+        if pending.remove(&topic_id).is_none() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.record_pending_removal(deliverable);
+        true
     }
 
     fn prepare_notification_for_known_update(
@@ -384,41 +416,40 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let (epoch, has_pending) = {
             let mut shard = self.shards[shard_index(topic_id)].lock();
             self.ensure_open()?;
-            let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
+            let Some(active) = shard.active_by_topic.get(&topic_id) else {
                 return Err(XllError::Closing);
             };
             if active.generation != generation {
                 return Err(XllError::Closing);
             }
-            active.committed = true;
+            let was_committed = active.committed;
 
             if let Some(obs) = observed_sequence {
-                if shard.pending[0]
-                    .get(&topic_id)
-                    .is_some_and(|u| u.sequence <= obs)
-                {
-                    shard.pending[0].remove(&topic_id);
-                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-                }
-                if shard.pending[1]
-                    .get(&topic_id)
-                    .is_some_and(|u| u.sequence <= obs)
-                {
-                    shard.pending[1].remove(&topic_id);
-                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-                }
+                self.remove_pending_if(&mut shard, 0, topic_id, |update| update.sequence <= obs);
+                self.remove_pending_if(&mut shard, 1, topic_id, |update| update.sequence <= obs);
             }
 
             let epoch = self.publish_epoch.load(Ordering::Acquire);
-            let buf0 = (epoch & 1) as usize;
-            let buf1 = 1 - buf0;
-            let has_pending = shard.pending[buf0]
-                .get(&topic_id)
-                .or_else(|| shard.pending[buf1].get(&topic_id))
-                .is_some_and(|u| {
-                    u.connection_generation == generation
-                        && observed_sequence.is_none_or(|seq| u.sequence > seq)
-                });
+            let pending_count = shard
+                .pending
+                .iter()
+                .filter(|pending| {
+                    pending.get(&topic_id).is_some_and(|update| {
+                        update.connection_generation == generation
+                            && observed_sequence.is_none_or(|seq| update.sequence > seq)
+                    })
+                })
+                .count();
+            let active = shard
+                .active_by_topic
+                .get_mut(&topic_id)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            active.committed = true;
+            if !was_committed && pending_count != 0 {
+                self.deliverable_pending
+                    .fetch_add(pending_count, Ordering::Relaxed);
+            }
+            let has_pending = pending_count != 0;
             (epoch, has_pending)
         };
         let attempt = if has_pending {
@@ -437,6 +468,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
     ) {
         let mut shard = self.shards[shard_index(topic_id)].lock();
 
+        self.remove_pending_if(&mut shard, 0, topic_id, |update| {
+            update.connection_generation == generation
+        });
+        self.remove_pending_if(&mut shard, 1, topic_id, |update| {
+            update.connection_generation == generation
+        });
+
         if shard
             .active_by_topic
             .get(&topic_id)
@@ -452,18 +490,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }) {
             shard.topic_by_id.remove(&id);
         }
-
-        if shard.pending[0]
-            .get(&topic_id)
-            .is_some_and(|u| u.connection_generation == generation)
-        {
-            shard.pending[0].remove(&topic_id);
-        } else if shard.pending[1]
-            .get(&topic_id)
-            .is_some_and(|u| u.connection_generation == generation)
-        {
-            shard.pending[1].remove(&topic_id);
-        }
     }
 
     pub(crate) fn disconnect_connection(
@@ -472,12 +498,19 @@ impl<H: SubscriptionHost> PublishCore<H> {
     ) -> XllResult<Option<RetiredConnection>> {
         let mut shard = self.shards[shard_index(topic_id)].lock();
         self.ensure_open()?;
-        let Some((tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
+        let Some(active) = shard.active_by_topic.get(&topic_id) else {
             return Ok(None);
         };
+        let active_id = active.id;
+        self.remove_pending_if(&mut shard, 0, topic_id, |_| true);
+        self.remove_pending_if(&mut shard, 1, topic_id, |_| true);
+        let Some((_tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        if active.id != active_id {
+            xlfn_kernel::invariant::fail_stop();
+        }
         shard.topic_by_id.remove(&active.id);
-        shard.pending[0].remove(&tid);
-        shard.pending[1].remove(&tid);
         Ok(Some(RetiredConnection {
             id: active.id,
             generation: active.generation,
@@ -519,6 +552,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 .filter(|active| active.generation == generation)
                 .ok_or(XllError::Closing)?;
             let conn_gen = active.generation;
+            let committed = active.committed;
             match pending_entry {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let sequence = self.next_update_sequence.fetch_add(1, Ordering::Relaxed);
@@ -537,11 +571,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
                         value: value.clone(),
                         _permit: permit,
                     });
-                    self.pending_updates.fetch_add(1, Ordering::Relaxed);
+                    self.record_pending_insert(committed);
                 }
             }
 
-            let committed = active.committed;
             active.latest = value;
             break (epoch, committed);
         };
@@ -662,20 +695,12 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     let topic_id = TopicId(update.topic_id);
                     let shard_index = shard_index(topic_id);
                     let mut shard = self.shards[shard_index].lock();
-                    if shard.pending[0]
-                        .get(&topic_id)
-                        .is_some_and(|u| u.sequence == update.sequence)
-                    {
-                        shard.pending[0].remove(&topic_id);
-                        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-                    }
-                    if shard.pending[1]
-                        .get(&topic_id)
-                        .is_some_and(|u| u.sequence == update.sequence)
-                    {
-                        shard.pending[1].remove(&topic_id);
-                        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
-                    }
+                    self.remove_pending_if(&mut shard, 0, topic_id, |queued| {
+                        queued.sequence == update.sequence
+                    });
+                    self.remove_pending_if(&mut shard, 1, topic_id, |queued| {
+                        queued.sequence == update.sequence
+                    });
                 }
             }
             RefreshOutcome::Failed => {}
@@ -832,25 +857,12 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     #[cfg(test)]
     pub(crate) fn pending_update_count(&self) -> usize {
-        let epoch = self.publish_epoch.load(Ordering::Acquire);
-        let buf0 = (epoch & 1) as usize;
-        let buf1 = 1 - buf0;
-        let mut count = 0;
-        for shard_mutex in self.shards.iter() {
-            let shard = shard_mutex.lock();
-            let keys0 = shard.pending[buf0].keys();
-            let keys1 = shard.pending[buf1].keys();
-            for topic_id in keys0.chain(keys1) {
-                if shard
-                    .active_by_topic
-                    .get(topic_id)
-                    .is_some_and(|a| a.committed)
-                {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.deliverable_pending.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_update_count(&self) -> usize {
+        self.pending_updates.load(Ordering::Acquire)
     }
 
     #[cfg(test)]

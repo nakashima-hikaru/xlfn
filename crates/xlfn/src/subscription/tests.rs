@@ -478,6 +478,51 @@ fn publish_between_install_and_commit_prepares_notification() {
 }
 
 #[test]
+fn deliverable_pending_accounting_tracks_connection_lifecycle() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+
+    let (source, sink, _) = publishing_source(Some(1.0f64));
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("accounting").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    // The source's initial publish and this update both belong to an
+    // uncommitted connection, so neither is deliverable yet.
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 0);
+    sink.publish(2.0).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 0);
+
+    connection.commit().unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+
+    sink.publish(3.0).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    runtime.disconnect(&server, TopicId(1)).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
 fn server_standalone_termination() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server_a = runtime
