@@ -136,16 +136,21 @@ pub(crate) struct ScopedServerOperation<'a, H: SubscriptionHost> {
     pub(crate) observation: ServerOperationObservation,
 }
 
-pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
-    pub(crate) server: Arc<SubscriptionServer<H>>,
-    pub(crate) _host_guard: H::AdmissionGuard,
-    pub(crate) observation: ServerOperationObservation,
+pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
+    core: triomphe::Arc<PublishCore<H>>,
+    _host_guard: H::AdmissionGuard,
+    _observation: ServerOperationObservation,
 }
 
-impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
+impl<H: SubscriptionHost> Drop for OwnedPublishOperation<H> {
     fn drop(&mut self) {
-        self.server.publish.server_gate.release();
+        self.core.server_gate.release();
     }
+}
+
+pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
+    pub(crate) server: Arc<SubscriptionServer<H>>,
+    pub(crate) _publish_operation: OwnedPublishOperation<H>,
 }
 
 pub(crate) struct ServerOperationObservation {
@@ -254,22 +259,22 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     pub(crate) fn enter_owned_operation(
-        &self,
-        server: Arc<SubscriptionServer<H>>,
-    ) -> XllResult<OwnedServerOperation<H>> {
-        if self.runtime_gate.is_closing() {
+        core: triomphe::Arc<Self>,
+    ) -> XllResult<OwnedPublishOperation<H>> {
+        if core.runtime_gate.is_closing() {
             return Err(XllError::Closing);
         }
 
-        let host_guard = self.host.enter_with(|| {
-            self.server_gate.acquire().map_err(|_| XllError::Closing)?;
+        let host_guard = core.host.enter_with(|| {
+            core.server_gate.acquire().map_err(|_| XllError::Closing)?;
             Ok(())
         })?;
+        let observation = ServerOperationObservation::begin(&core.services);
 
-        Ok(OwnedServerOperation {
-            server,
+        Ok(OwnedPublishOperation {
+            core,
             _host_guard: host_guard,
-            observation: ServerOperationObservation::begin(&self.services),
+            _observation: observation,
         })
     }
 
@@ -518,7 +523,12 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
 
     #[inline]
     pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation<H>> {
-        self.publish.enter_owned_operation(Arc::clone(self))
+        let publish_operation =
+            PublishCore::enter_owned_operation(triomphe::Arc::clone(&self.publish))?;
+        Ok(OwnedServerOperation {
+            server: Arc::clone(self),
+            _publish_operation: publish_operation,
+        })
     }
 
     pub(crate) fn attach_update_notifier(
