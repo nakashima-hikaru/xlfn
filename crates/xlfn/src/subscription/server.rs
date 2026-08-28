@@ -6,6 +6,7 @@ use super::delivery::{
 };
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
+use super::runtime_services::RuntimeServices;
 use super::source::{ErasedRtdSource, RtdSubscription};
 use super::topic::{SubscriptionId, TopicId};
 use super::value::StoredRtdValue;
@@ -88,7 +89,7 @@ pub(crate) struct PublishCore<H: SubscriptionHost> {
     pub(crate) pending_updates: AtomicUsize,
     pub(crate) shards: Box<[Mutex<TopicShard>]>,
     pub(crate) refresh: Mutex<RefreshState<H::Notifier>>,
-    pub(crate) parent: Weak<SubscriptionRuntime<H>>,
+    pub(crate) services: Arc<RuntimeServices>,
 }
 
 impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
@@ -132,13 +133,13 @@ impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
 pub(crate) struct ScopedServerOperation<'a, H: SubscriptionHost> {
     pub(crate) _gate_guard: OperationGuard<'a>,
     pub(crate) _host_guard: H::AdmissionGuard,
-    pub(crate) observation: ServerOperationObservation<H>,
+    pub(crate) observation: ServerOperationObservation,
 }
 
 pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
     pub(crate) server: Arc<SubscriptionServer<H>>,
     pub(crate) _host_guard: H::AdmissionGuard,
-    pub(crate) observation: ServerOperationObservation<H>,
+    pub(crate) observation: ServerOperationObservation,
 }
 
 impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
@@ -147,65 +148,43 @@ impl<H: SubscriptionHost> Drop for OwnedServerOperation<H> {
     }
 }
 
-pub(crate) struct ServerOperationObservation<H: SubscriptionHost> {
-    _host: std::marker::PhantomData<fn() -> H>,
-    #[cfg(any(test, feature = "refinement"))]
-    parent: Weak<SubscriptionRuntime<H>>,
+pub(crate) struct ServerOperationObservation {
+    services: Arc<RuntimeServices>,
 }
 
-impl<H: SubscriptionHost> ServerOperationObservation<H> {
-    fn begin(parent: &Weak<SubscriptionRuntime<H>>) -> Self {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(parent) = parent.upgrade() {
-            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = parent;
+impl ServerOperationObservation {
+    fn begin(services: &Arc<RuntimeServices>) -> Self {
+        services.record(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
         Self {
-            _host: std::marker::PhantomData,
-            #[cfg(any(test, feature = "refinement"))]
-            parent: Weak::clone(parent),
+            services: Arc::clone(services),
         }
     }
 }
 
-impl<H: SubscriptionHost> Drop for ServerOperationObservation<H> {
+impl Drop for ServerOperationObservation {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(parent) = self.parent.upgrade() {
-            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
-        }
+        self.services
+            .record(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
     }
 }
 
-struct ServerCallbackObservation<H: SubscriptionHost> {
-    _host: std::marker::PhantomData<fn() -> H>,
-    #[cfg(any(test, feature = "refinement"))]
-    parent: Weak<SubscriptionRuntime<H>>,
+struct ServerCallbackObservation {
+    services: Arc<RuntimeServices>,
 }
 
-impl<H: SubscriptionHost> ServerCallbackObservation<H> {
-    fn begin(parent: &Weak<SubscriptionRuntime<H>>) -> Self {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(parent) = parent.upgrade() {
-            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginCallback);
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = parent;
+impl ServerCallbackObservation {
+    fn begin(services: &Arc<RuntimeServices>) -> Self {
+        services.record(crate::shutdown_trace::ShutdownEvent::BeginCallback);
         Self {
-            _host: std::marker::PhantomData,
-            #[cfg(any(test, feature = "refinement"))]
-            parent: Weak::clone(parent),
+            services: Arc::clone(services),
         }
     }
 }
 
-impl<H: SubscriptionHost> Drop for ServerCallbackObservation<H> {
+impl Drop for ServerCallbackObservation {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "refinement"))]
-        if let Some(parent) = self.parent.upgrade() {
-            parent.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::EndCallback);
-        }
+        self.services
+            .record(crate::shutdown_trace::ShutdownEvent::EndCallback);
     }
 }
 
@@ -270,7 +249,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         Ok(ScopedServerOperation {
             _gate_guard: gate_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
-            observation: ServerOperationObservation::begin(&self.parent),
+            observation: ServerOperationObservation::begin(&self.services),
         })
     }
 
@@ -290,7 +269,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         Ok(OwnedServerOperation {
             server,
             _host_guard: host_guard,
-            observation: ServerOperationObservation::begin(&self.parent),
+            observation: ServerOperationObservation::begin(&self.services),
         })
     }
 
@@ -361,7 +340,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     pub(crate) fn drive_notification(&self, mut attempt: NotificationAttempt<H::Notifier>) {
         loop {
-            let _callback = ServerCallbackObservation::begin(&self.parent);
+            let _callback = ServerCallbackObservation::begin(&self.services);
             let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));
             let completion = match res {
                 Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
@@ -370,9 +349,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     let err = XllError::Internal {
                         diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_NOTIFY,
                     };
-                    if let Some(parent) = self.parent.upgrade() {
-                        parent.record_cleanup_result(Err(err.clone()));
-                    }
+                    self.services.record_cleanup_result(Err(err.clone()));
                     std::panic::resume_unwind(panic_payload);
                 }
             };
@@ -381,9 +358,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 NotificationCompletion::Finished => break,
                 NotificationCompletion::Retry(next) => attempt = next,
                 NotificationCompletion::Failed(err) => {
-                    if let Some(parent) = self.parent.upgrade() {
-                        parent.record_cleanup_result(Err(err));
-                    }
+                    self.services.record_cleanup_result(Err(err));
                     break;
                 }
             }

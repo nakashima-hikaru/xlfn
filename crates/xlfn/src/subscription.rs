@@ -23,6 +23,7 @@ mod delivery;
 mod host;
 mod identity;
 mod runtime;
+mod runtime_services;
 mod server;
 mod source;
 mod topic;
@@ -79,6 +80,7 @@ pub(crate) use identity::{NEXT_RTD_RUNTIME_ID, SubscriptionIdentityIndex, alloca
 use parking_lot::{Condvar, Mutex};
 #[cfg(test)]
 pub(crate) use runtime::OperationEnterHook;
+pub(crate) use runtime_services::RuntimeServices;
 #[cfg(test)]
 pub(crate) use server::{
     OwnedServerOperation, PANIC_AFTER_TERMINATION_GUARD, PublishCore, RtdRefreshBatch,

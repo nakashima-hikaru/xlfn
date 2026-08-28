@@ -1334,7 +1334,9 @@ fn source_refcount_tracks_live_subscription_identities() {
     let second_id = SubscriptionId(2);
 
     index.insert(first_identity.clone(), first_id, 16).unwrap();
-    index.insert(second_identity.clone(), second_id, 16).unwrap();
+    index
+        .insert(second_identity.clone(), second_id, 16)
+        .unwrap();
     assert_eq!(
         index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(2)

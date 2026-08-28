@@ -1,3 +1,4 @@
+use super::RuntimeServices;
 use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::delivery::{
     ActiveSubscription, ErasedSink, RefreshState, SERVER_LIFECYCLE_OPEN, TOPIC_SHARDS, TopicShard,
@@ -38,10 +39,9 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<SubscriptionServer<H>>>>,
     pub(crate) active_quota: triomphe::Arc<Quota>,
     pub(crate) queued_update_quota: triomphe::Arc<Quota>,
-    pub(crate) cleanup_failure: Mutex<Option<XllError>>,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
-    pub(crate) observer: crate::shutdown_trace::ObservationSink,
+    pub(crate) services: Arc<RuntimeServices>,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
@@ -88,10 +88,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             servers: Mutex::new(FxHashMap::default()),
             active_quota: triomphe::Arc::new(Quota::new(limits.max_active.get())),
             queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates.get())),
-            cleanup_failure: Mutex::new(None),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
-            observer: crate::shutdown_trace::ObservationSink::new(),
+            services: Arc::new(RuntimeServices::new()),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -103,27 +102,19 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.observer.set_trace_sink(trace);
+        self.services.set_trace_sink(trace);
     }
 
     pub(crate) fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
-        self.observer.record(event);
+        self.services.record(event);
     }
 
     pub(crate) fn record_cleanup_result(&self, result: XllResult<()>) {
-        if let Err(error) = result {
-            let mut failure = self.cleanup_failure.lock();
-            if failure.is_none() {
-                *failure = Some(error);
-            }
-        }
+        self.services.record_cleanup_result(result);
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
-        self.cleanup_failure
-            .lock()
-            .as_ref()
-            .map_or(Ok(()), |error| Err(error.clone()))
+        self.services.cleanup_result()
     }
 
     pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard<'_>> {
@@ -155,7 +146,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             pending_updates: AtomicUsize::new(0),
             shards: shards.into_boxed_slice(),
             refresh: Mutex::new(RefreshState::default()),
-            parent: Arc::downgrade(self),
+            services: Arc::clone(&self.services),
         });
         let server = Arc::new(SubscriptionServer {
             generation,
@@ -284,10 +275,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
     }
 
-    pub(crate) fn resolve_transport_key(
-        &self,
-        key: SubscriptionKey,
-    ) -> XllResult<SubscriptionId> {
+    pub(crate) fn resolve_transport_key(&self, key: SubscriptionKey) -> XllResult<SubscriptionId> {
         key.validate_runtime(self.runtime_id)
             .ok_or(XllError::StaleHandle)
     }
