@@ -4,7 +4,7 @@ use super::delivery::{
 };
 use super::host::SubscriptionHost;
 use super::runtime_services::RuntimeServices;
-use super::topic::TopicId;
+use super::topic::{SubscriptionId, TopicId};
 use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
@@ -13,22 +13,51 @@ use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
+use xlfn_kernel::operation_gate::{OperationGate, OperationGuard, TerminationWaitGuard};
 use xlfn_kernel::quota::Quota;
 
 pub(crate) struct PublishCore<H: SubscriptionHost> {
-    pub(crate) host: H,
-    pub(crate) runtime_gate: Arc<OperationGate>,
-    pub(crate) server_gate: OperationGate,
-    pub(crate) queued_update_quota: triomphe::Arc<Quota>,
-    pub(crate) lifecycle: AtomicU8,
-    pub(crate) publish_epoch: AtomicU64,
-    pub(crate) next_update_sequence: AtomicU64,
-    pub(crate) notified_epoch: AtomicU64,
-    pub(crate) pending_updates: AtomicUsize,
-    pub(crate) shards: Box<[Mutex<TopicShard>]>,
-    pub(crate) refresh: Mutex<RefreshState<H::Notifier>>,
-    pub(crate) services: Arc<RuntimeServices>,
+    host: H,
+    runtime_gate: Arc<OperationGate>,
+    server_gate: OperationGate,
+    queued_update_quota: triomphe::Arc<Quota>,
+    lifecycle: AtomicU8,
+    publish_epoch: AtomicU64,
+    next_update_sequence: AtomicU64,
+    notified_epoch: AtomicU64,
+    pending_updates: AtomicUsize,
+    shards: Box<[Mutex<TopicShard>]>,
+    refresh: Mutex<RefreshState<H::Notifier>>,
+    services: Arc<RuntimeServices>,
+}
+
+impl<H: SubscriptionHost> PublishCore<H> {
+    pub(crate) fn new(
+        host: H,
+        runtime_gate: Arc<OperationGate>,
+        queued_update_quota: triomphe::Arc<Quota>,
+        services: Arc<RuntimeServices>,
+    ) -> Self {
+        let mut shards = Vec::with_capacity(super::delivery::TOPIC_SHARDS);
+        for _ in 0..super::delivery::TOPIC_SHARDS {
+            shards.push(Mutex::new(TopicShard::default()));
+        }
+
+        Self {
+            host,
+            runtime_gate,
+            server_gate: OperationGate::new(),
+            queued_update_quota,
+            lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
+            publish_epoch: AtomicU64::new(0),
+            next_update_sequence: AtomicU64::new(0),
+            notified_epoch: AtomicU64::new(u64::MAX),
+            pending_updates: AtomicUsize::new(0),
+            shards: shards.into_boxed_slice(),
+            refresh: Mutex::new(RefreshState::default()),
+            services,
+        }
+    }
 }
 
 impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
@@ -68,6 +97,42 @@ impl<H: SubscriptionHost> Drop for OwnedPublishOperation<H> {
     fn drop(&mut self) {
         self.core.server_gate.release();
     }
+}
+
+pub(crate) struct PublishTerminationStart<'a, H: SubscriptionHost> {
+    wait: TerminationWaitGuard<'a>,
+    notifier: Option<H::Notifier>,
+}
+
+impl<H: SubscriptionHost> PublishTerminationStart<'_, H> {
+    pub(crate) fn take_notifier(&mut self) -> Option<H::Notifier> {
+        self.notifier.take()
+    }
+
+    pub(crate) fn wait(self) {
+        self.wait.wait();
+    }
+}
+
+pub(crate) struct RetiredConnection {
+    pub(crate) id: SubscriptionId,
+    pub(crate) generation: ConnectionGeneration,
+}
+
+pub(crate) struct PublishTerminationResult<N> {
+    notifier: Option<N>,
+    connections: Vec<RetiredConnection>,
+}
+
+impl<N> PublishTerminationResult<N> {
+    pub(crate) fn into_parts(self) -> (Option<N>, Vec<RetiredConnection>) {
+        (self.notifier, self.connections)
+    }
+}
+
+pub(crate) struct InstalledConnection {
+    pub(crate) latest: StoredRtdValue,
+    pub(crate) observed_sequence: Option<u64>,
 }
 
 pub(crate) struct ServerOperationObservation {
@@ -118,6 +183,56 @@ impl<H: SubscriptionHost> PublishCore<H> {
         } else {
             Err(XllError::Closing)
         }
+    }
+
+    fn clear_pending(&self) {
+        for shard_mutex in self.shards.iter() {
+            let mut shard = shard_mutex.lock();
+            shard.pending[0].clear();
+            shard.pending[1].clear();
+        }
+        self.pending_updates.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn begin_termination(&self) -> PublishTerminationStart<'_, H> {
+        let wait = self.server_gate.close_and_wait_begin();
+        self.lifecycle
+            .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
+        let notifier = self.refresh.lock().detach_notifier();
+        self.clear_pending();
+        PublishTerminationStart { wait, notifier }
+    }
+
+    pub(crate) fn finish_termination(&self) -> PublishTerminationResult<H::Notifier> {
+        let notifier = self.refresh.lock().detach_notifier();
+        let mut connections = Vec::new();
+        for shard_mutex in self.shards.iter() {
+            let mut shard = shard_mutex.lock();
+            shard.pending[0].clear();
+            shard.pending[1].clear();
+            connections.extend(shard.active_by_topic.drain().map(|(_, active)| {
+                RetiredConnection {
+                    id: active.id,
+                    generation: active.generation,
+                }
+            }));
+            shard.topic_by_id.clear();
+        }
+        self.pending_updates.store(0, Ordering::Release);
+        self.lifecycle.store(
+            super::delivery::SERVER_LIFECYCLE_TERMINATED,
+            Ordering::Release,
+        );
+        PublishTerminationResult {
+            notifier,
+            connections,
+        }
+    }
+
+    pub(crate) fn close_on_server_drop(&self) {
+        self.lifecycle
+            .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
+        self.clear_pending();
     }
 
     pub(crate) fn has_deliverable_updates(&self) -> bool {
@@ -193,6 +308,187 @@ impl<H: SubscriptionHost> PublishCore<H> {
             _host_guard: host_guard,
             _observation: observation,
         })
+    }
+
+    pub(crate) fn reserve_connection(
+        &self,
+        topic_id: TopicId,
+        id: SubscriptionId,
+        generation: ConnectionGeneration,
+        active_quota: &triomphe::Arc<Quota>,
+    ) -> XllResult<()> {
+        let shard_index = shard_index(topic_id);
+        let mut shard = self.shards[shard_index].lock();
+
+        self.ensure_open()?;
+        if shard.active_by_topic.contains_key(&topic_id) {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_ID_DUPLICATE,
+            });
+        }
+        if let std::collections::hash_map::Entry::Vacant(topic_entry) = shard.topic_by_id.entry(id)
+        {
+            let permit = Quota::try_acquire(active_quota).map_err(|_| XllError::Overloaded)?;
+            topic_entry.insert(topic_id);
+            shard.active_by_topic.insert(
+                topic_id,
+                super::delivery::ActiveSubscription {
+                    id,
+                    generation,
+                    committed: false,
+                    latest: StoredRtdValue::Empty,
+                    _permit: permit,
+                },
+            );
+            Ok(())
+        } else {
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_KEY_DUPLICATE,
+            })
+        }
+    }
+
+    pub(crate) fn install_connection(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+    ) -> XllResult<InstalledConnection> {
+        let shard_index = shard_index(topic_id);
+        let mut shard = self.shards[shard_index].lock();
+        self.ensure_open()?;
+        let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
+            return Err(XllError::Closing);
+        };
+        if active.generation != generation {
+            return Err(XllError::Closing);
+        }
+
+        let latest = active.latest.clone();
+        let epoch = self.publish_epoch.load(Ordering::Acquire);
+        let buf0 = (epoch & 1) as usize;
+        let buf1 = 1 - buf0;
+        let observed_sequence = shard.pending[buf0]
+            .get(&topic_id)
+            .or_else(|| shard.pending[buf1].get(&topic_id))
+            .filter(|u| u.connection_generation == generation)
+            .map(|u| u.sequence);
+
+        Ok(InstalledConnection {
+            latest,
+            observed_sequence,
+        })
+    }
+
+    pub(crate) fn commit_connection(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        observed_sequence: Option<u64>,
+    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
+        let mut shard = self.shards[shard_index(topic_id)].lock();
+        self.ensure_open()?;
+        let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
+            return Err(XllError::Closing);
+        };
+        if active.generation != generation {
+            return Err(XllError::Closing);
+        }
+        active.committed = true;
+
+        if let Some(obs) = observed_sequence {
+            if shard.pending[0]
+                .get(&topic_id)
+                .is_some_and(|u| u.sequence <= obs)
+            {
+                shard.pending[0].remove(&topic_id);
+                let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
+            }
+            if shard.pending[1]
+                .get(&topic_id)
+                .is_some_and(|u| u.sequence <= obs)
+            {
+                shard.pending[1].remove(&topic_id);
+                let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
+            }
+        }
+
+        let epoch = self.publish_epoch.load(Ordering::Acquire);
+        let buf0 = (epoch & 1) as usize;
+        let buf1 = 1 - buf0;
+        let has_pending = shard.pending[buf0]
+            .get(&topic_id)
+            .or_else(|| shard.pending[buf1].get(&topic_id))
+            .is_some_and(|u| {
+                u.connection_generation == generation
+                    && observed_sequence.is_none_or(|seq| u.sequence > seq)
+            });
+        if has_pending {
+            let mut refresh = self.refresh.lock();
+            let has_updates = self.has_deliverable_updates();
+            let prepared = refresh.prepare_notification(has_updates)?;
+            let attempt = prepared.map(|p| {
+                self.notified_epoch.store(epoch, Ordering::Release);
+                refresh.commit_notification(p)
+            });
+            Ok(attempt)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn rollback_connection(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        id: SubscriptionId,
+    ) {
+        let mut shard = self.shards[shard_index(topic_id)].lock();
+
+        if shard
+            .active_by_topic
+            .get(&topic_id)
+            .is_some_and(|active| active.generation == generation)
+        {
+            shard.active_by_topic.remove(&topic_id);
+        }
+        if shard.topic_by_id.get(&id).is_some_and(|&tid| {
+            shard
+                .active_by_topic
+                .get(&tid)
+                .is_none_or(|active| active.generation == generation)
+        }) {
+            shard.topic_by_id.remove(&id);
+        }
+
+        if shard.pending[0]
+            .get(&topic_id)
+            .is_some_and(|u| u.connection_generation == generation)
+        {
+            shard.pending[0].remove(&topic_id);
+        } else if shard.pending[1]
+            .get(&topic_id)
+            .is_some_and(|u| u.connection_generation == generation)
+        {
+            shard.pending[1].remove(&topic_id);
+        }
+    }
+
+    pub(crate) fn disconnect_connection(
+        &self,
+        topic_id: TopicId,
+    ) -> XllResult<Option<RetiredConnection>> {
+        let mut shard = self.shards[shard_index(topic_id)].lock();
+        self.ensure_open()?;
+        let Some((tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
+            return Ok(None);
+        };
+        shard.topic_by_id.remove(&active.id);
+        shard.pending[0].remove(&tid);
+        shard.pending[1].remove(&tid);
+        Ok(Some(RetiredConnection {
+            id: active.id,
+            generation: active.generation,
+        }))
     }
 
     pub(crate) fn publish(
@@ -559,6 +855,20 @@ impl<H: SubscriptionHost> PublishCore<H> {
             }
         }
         count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_shard_for_test(
+        &self,
+        index: usize,
+    ) -> parking_lot::MutexGuard<'_, TopicShard> {
+        self.shards[index].lock()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_closing_for_test(&self) {
+        self.lifecycle
+            .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
     }
 }
 

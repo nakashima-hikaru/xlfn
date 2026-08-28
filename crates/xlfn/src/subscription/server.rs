@@ -1,8 +1,8 @@
 use super::catalog::{SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::{
-    OwnedPublishOperation, PublishCore, RtdRefreshBatch, ScopedPublishOperation,
+    OwnedPublishOperation, PublishCore, PublishTerminationStart, RtdRefreshBatch,
+    ScopedPublishOperation,
 };
-use super::delivery::{SERVER_LIFECYCLE_CLOSING, SERVER_LIFECYCLE_TERMINATED};
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::{ErasedRtdSource, RtdSubscription};
@@ -12,9 +12,7 @@ use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use xlfn_kernel::operation_gate::TerminationWaitGuard;
 
 #[derive(Clone)]
 pub(crate) struct SubscriptionServerHandle<H: SubscriptionHost> {
@@ -135,24 +133,9 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
                 })
             }
             ServerTerminationPhase::Open => {
-                let wait = self.publish.server_gate.close_and_wait_begin();
+                let mut termination = self.publish.begin_termination();
                 term_state.phase = ServerTerminationPhase::Terminating;
-
-                self.publish
-                    .lifecycle
-                    .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-
-                let notifier = {
-                    let mut refresh = self.publish.refresh.lock();
-                    refresh.detach_notifier()
-                };
-
-                for shard_mutex in self.publish.shards.iter() {
-                    let mut shard = shard_mutex.lock();
-                    shard.pending[0].clear();
-                    shard.pending[1].clear();
-                }
-                self.publish.pending_updates.store(0, Ordering::Release);
+                let notifier = termination.take_notifier();
 
                 let initial_subscriptions: Vec<_> = self
                     .subscriptions
@@ -163,7 +146,7 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
 
                 TerminationAdmission::Owner(ServerTermination {
                     server: Arc::clone(self),
-                    wait,
+                    wait: termination,
                     notifier,
                     initial_subscriptions,
                 })
@@ -193,15 +176,7 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
 
 impl<H: SubscriptionHost> Drop for SubscriptionServer<H> {
     fn drop(&mut self) {
-        self.publish
-            .lifecycle
-            .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-        for shard_mutex in self.publish.shards.iter() {
-            let mut shard = shard_mutex.lock();
-            shard.pending[0].clear();
-            shard.pending[1].clear();
-        }
-        self.publish.pending_updates.store(0, Ordering::Release);
+        self.publish.close_on_server_drop();
     }
 }
 
@@ -304,18 +279,13 @@ pub(crate) fn drop_notifier_no_unwind<N>(notifier: Option<N>) -> XllResult<()> {
     catch_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::Panic)
 }
 
-pub(crate) struct TerminatedTopic {
-    pub(crate) id: SubscriptionId,
-    pub(crate) generation: ConnectionGeneration,
-}
-
 thread_local! {
     pub(crate) static PANIC_AFTER_TERMINATION_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) struct ServerTermination<'a, H: SubscriptionHost> {
     pub(crate) server: Arc<SubscriptionServer<H>>,
-    pub(crate) wait: TerminationWaitGuard<'a>,
+    pub(crate) wait: PublishTerminationStart<'a, H>,
     pub(crate) notifier: Option<H::Notifier>,
     pub(crate) initial_subscriptions: Vec<Box<dyn RtdSubscription>>,
 }
@@ -353,37 +323,13 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
             first_error = Some(err);
         }
 
-        let wait_res = catch_unwind(AssertUnwindSafe(|| self.wait.wait()));
+        let wait = self.wait;
+        let wait_res = catch_unwind(AssertUnwindSafe(|| wait.wait()));
         if wait_res.is_err() && first_error.is_none() {
             first_error = Some(XllError::Panic);
         }
 
-        let (late_notifier, active_entries) = {
-            let late_notifier = self.server.publish.refresh.lock().detach_notifier();
-            let mut active_entries = Vec::new();
-            for shard_mutex in self.server.publish.shards.iter() {
-                let mut shard = shard_mutex.lock();
-                shard.pending[0].clear();
-                shard.pending[1].clear();
-                for (_, active) in shard.active_by_topic.drain() {
-                    active_entries.push(TerminatedTopic {
-                        id: active.id,
-                        generation: active.generation,
-                    });
-                }
-                shard.topic_by_id.clear();
-            }
-            self.server
-                .publish
-                .pending_updates
-                .store(0, Ordering::Release);
-            self.server
-                .publish
-                .lifecycle
-                .store(SERVER_LIFECYCLE_TERMINATED, Ordering::Release);
-
-            (late_notifier, active_entries)
-        };
+        let (late_notifier, active_entries) = self.server.publish.finish_termination().into_parts();
 
         if let Some(parent) = self.server.parent.upgrade() {
             for _ in 0..self.initial_subscriptions.len() {
@@ -530,24 +476,4 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
     }
 
     None
-}
-
-pub(crate) enum ServerReservationFailure {
-    DuplicateTopicId,
-    DuplicateKey,
-    Overloaded(XllError),
-}
-
-impl ServerReservationFailure {
-    pub(crate) fn into_xll_error(self) -> XllError {
-        match self {
-            ServerReservationFailure::DuplicateTopicId => XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_ID_DUPLICATE,
-            },
-            ServerReservationFailure::DuplicateKey => XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_KEY_DUPLICATE,
-            },
-            ServerReservationFailure::Overloaded(err) => err,
-        }
-    }
 }

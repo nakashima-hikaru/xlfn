@@ -1,16 +1,13 @@
 use super::RuntimeServices;
 use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::PublishCore;
-use super::delivery::{
-    ActiveSubscription, ErasedSink, RefreshState, SERVER_LIFECYCLE_OPEN, TOPIC_SHARDS, TopicShard,
-    shard_index,
-};
+use super::delivery::ErasedSink;
 use super::host::SubscriptionHost;
 use super::identity::allocate_runtime_id;
 use super::server::{
-    OwnedServerOperation, ServerReservationFailure, ServerTerminationPhase, SubscriptionServer,
-    SubscriptionServerHandle, TerminationAdmission, TerminationCoordinator,
-    cleanup_catalog_binding_and_pending, disconnect_one_no_unwind,
+    OwnedServerOperation, ServerTerminationPhase, SubscriptionServer, SubscriptionServerHandle,
+    TerminationAdmission, TerminationCoordinator, cleanup_catalog_binding_and_pending,
+    disconnect_one_no_unwind,
 };
 use super::source::{ErasedRtdSource, RtdSource, RtdSourceHandle};
 use super::topic::{
@@ -22,7 +19,7 @@ use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
 use xlfn_kernel::quota::Quota;
@@ -131,24 +128,12 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
-        let mut shards = Vec::with_capacity(TOPIC_SHARDS);
-        for _ in 0..TOPIC_SHARDS {
-            shards.push(Mutex::new(TopicShard::default()));
-        }
-        let publish = triomphe::Arc::new(PublishCore {
-            host: self.host.clone(),
-            runtime_gate: Arc::clone(&self.runtime_gate),
-            server_gate: OperationGate::new(),
-            queued_update_quota: triomphe::Arc::clone(&self.queued_update_quota),
-            lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
-            publish_epoch: AtomicU64::new(0),
-            next_update_sequence: AtomicU64::new(0),
-            notified_epoch: AtomicU64::new(u64::MAX),
-            pending_updates: AtomicUsize::new(0),
-            shards: shards.into_boxed_slice(),
-            refresh: Mutex::new(RefreshState::default()),
-            services: Arc::clone(&self.services),
-        });
+        let publish = triomphe::Arc::new(PublishCore::new(
+            self.host.clone(),
+            Arc::clone(&self.runtime_gate),
+            triomphe::Arc::clone(&self.queued_update_quota),
+            Arc::clone(&self.services),
+        ));
         let server = Arc::new(SubscriptionServer {
             generation,
             publish,
@@ -351,40 +336,12 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             result?
         };
 
-        let shard_index = shard_index(topic_id);
-        let reservation_result = {
-            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
-
-            if let Err(err) = server_handle.inner.publish.ensure_open() {
-                Err(ServerReservationFailure::Overloaded(err))
-            } else if shard.active_by_topic.contains_key(&topic_id) {
-                Err(ServerReservationFailure::DuplicateTopicId)
-            } else if let std::collections::hash_map::Entry::Vacant(topic_entry) =
-                shard.topic_by_id.entry(id)
-            {
-                match Quota::try_acquire(&self.active_quota) {
-                    Ok(permit) => {
-                        topic_entry.insert(topic_id);
-                        shard.active_by_topic.insert(
-                            topic_id,
-                            ActiveSubscription {
-                                id,
-                                generation: conn_gen,
-                                committed: false,
-                                latest: StoredRtdValue::Empty,
-                                _permit: permit,
-                            },
-                        );
-                        Ok(())
-                    }
-                    Err(_) => Err(ServerReservationFailure::Overloaded(XllError::Overloaded)),
-                }
-            } else {
-                Err(ServerReservationFailure::DuplicateKey)
-            }
-        };
-
-        if let Err(failure) = reservation_result {
+        if let Err(error) = server_handle.inner.publish.reserve_connection(
+            topic_id,
+            id,
+            conn_gen,
+            &self.active_quota,
+        ) {
             if let Some(source) = self.rollback_catalog_connection_reservation(id, conn_gen)
                 && catch_unwind(AssertUnwindSafe(|| drop(source))).is_err()
             {
@@ -392,7 +349,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
                 }));
             }
-            return Err(failure.into_xll_error());
+            return Err(error);
         }
 
         let erased_sink = ErasedSink::for_publish(
@@ -418,36 +375,20 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         };
 
-        let install_result = {
-            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
-            if server_handle.inner.publish.ensure_open().is_err() {
-                Err(subscription)
-            } else {
-                match shard.active_by_topic.get_mut(&topic_id) {
-                    Some(active) if active.generation == conn_gen => {
-                        server_handle
-                            .inner
-                            .subscriptions
-                            .lock()
-                            .insert(topic_id, subscription);
-                        let latest = active.latest.clone();
-                        let epoch = server_handle
-                            .inner
-                            .publish
-                            .publish_epoch
-                            .load(Ordering::Acquire);
-                        let buf0 = (epoch & 1) as usize;
-                        let buf1 = 1 - buf0;
-                        let observed = shard.pending[buf0]
-                            .get(&topic_id)
-                            .or_else(|| shard.pending[buf1].get(&topic_id))
-                            .filter(|u| u.connection_generation == conn_gen)
-                            .map(|u| u.sequence);
-                        Ok((latest, observed))
-                    }
-                    _ => Err(subscription),
-                }
+        let install_result = match server_handle
+            .inner
+            .publish
+            .install_connection(topic_id, conn_gen)
+        {
+            Ok(installed) => {
+                server_handle
+                    .inner
+                    .subscriptions
+                    .lock()
+                    .insert(topic_id, subscription);
+                Ok((installed.latest, installed.observed_sequence))
             }
+            Err(_) => Err(subscription),
         };
 
         let (latest_value, observed_sequence) = match install_result {
@@ -486,62 +427,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         id: SubscriptionId,
         observed_sequence: Option<u64>,
     ) -> XllResult<()> {
-        let attempt = {
-            let shard_index = shard_index(topic_id);
-            let mut shard = server.publish.shards[shard_index].lock();
-            server.publish.ensure_open()?;
-            let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
-                return Err(XllError::Closing);
-            };
-            if active.generation != generation {
-                return Err(XllError::Closing);
-            }
-            active.committed = true;
-
-            if let Some(obs) = observed_sequence {
-                if shard.pending[0]
-                    .get(&topic_id)
-                    .is_some_and(|u| u.sequence <= obs)
-                {
-                    shard.pending[0].remove(&topic_id);
-                    let _ =
-                        xlfn_kernel::invariant::checked_atomic_dec(&server.publish.pending_updates);
-                }
-                if shard.pending[1]
-                    .get(&topic_id)
-                    .is_some_and(|u| u.sequence <= obs)
-                {
-                    shard.pending[1].remove(&topic_id);
-                    let _ =
-                        xlfn_kernel::invariant::checked_atomic_dec(&server.publish.pending_updates);
-                }
-            }
-
-            let epoch = server.publish.publish_epoch.load(Ordering::Acquire);
-            let buf0 = (epoch & 1) as usize;
-            let buf1 = 1 - buf0;
-            let has_pending = shard.pending[buf0]
-                .get(&topic_id)
-                .or_else(|| shard.pending[buf1].get(&topic_id))
-                .is_some_and(|u| {
-                    u.connection_generation == generation
-                        && observed_sequence.is_none_or(|seq| u.sequence > seq)
-                });
-            if has_pending {
-                let mut refresh = server.publish.refresh.lock();
-                let has_updates = server.publish.has_deliverable_updates();
-                let prepared = refresh.prepare_notification(has_updates)?;
-                prepared.map(|p| {
-                    server
-                        .publish
-                        .notified_epoch
-                        .store(epoch, Ordering::Release);
-                    refresh.commit_notification(p)
-                })
-            } else {
-                None
-            }
-        };
+        let attempt = server
+            .publish
+            .commit_connection(topic_id, generation, observed_sequence)?;
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
@@ -576,40 +464,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         id: SubscriptionId,
     ) -> XllResult<()> {
         let subscription = server.subscriptions.lock().remove(&topic_id);
-        let _removed_update = {
-            let shard_index = shard_index(topic_id);
-            let mut shard = server.publish.shards[shard_index].lock();
-
-            if shard
-                .active_by_topic
-                .get(&topic_id)
-                .is_some_and(|a| a.generation == generation)
-            {
-                shard.active_by_topic.remove(&topic_id);
-            }
-            if shard.topic_by_id.get(&id).is_some_and(|&tid| {
-                shard
-                    .active_by_topic
-                    .get(&tid)
-                    .is_none_or(|a| a.generation == generation)
-            }) {
-                shard.topic_by_id.remove(&id);
-            }
-
-            if shard.pending[0]
-                .get(&topic_id)
-                .is_some_and(|u| u.connection_generation == generation)
-            {
-                shard.pending[0].remove(&topic_id)
-            } else if shard.pending[1]
-                .get(&topic_id)
-                .is_some_and(|u| u.connection_generation == generation)
-            {
-                shard.pending[1].remove(&topic_id)
-            } else {
-                None
-            }
-        };
+        server.publish.rollback_connection(topic_id, generation, id);
 
         let removed_source = {
             let mut catalog = self.catalog.lock();
@@ -660,18 +515,15 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         topic_id: TopicId,
     ) -> XllResult<()> {
         let subscription = server_handle.inner.subscriptions.lock().remove(&topic_id);
-        let (id_to_clean, conn_gen) = {
-            let shard_index = shard_index(topic_id);
-            let mut shard = server_handle.inner.publish.shards[shard_index].lock();
-            server_handle.inner.publish.ensure_open()?;
-            let Some((tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
-                return Ok(());
-            };
-            shard.topic_by_id.remove(&active.id);
-            shard.pending[0].remove(&tid);
-            shard.pending[1].remove(&tid);
-            (active.id, active.generation)
+        let Some(retired) = server_handle
+            .inner
+            .publish
+            .disconnect_connection(topic_id)?
+        else {
+            return Ok(());
         };
+        let id_to_clean = retired.id;
+        let conn_gen = retired.generation;
 
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
 

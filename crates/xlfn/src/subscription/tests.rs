@@ -135,7 +135,7 @@ fn server_publish_isolation() {
     let _sink_a = sink_a.lock().clone().unwrap();
     let sink_b = sink_b.lock().clone().unwrap();
 
-    let lock_guard = server_a.inner.publish.shards[0].lock();
+    let lock_guard = server_a.inner.publish.lock_shard_for_test(0);
 
     let b_published = Arc::new(AtomicBool::new(false));
     let b_published_clone = Arc::clone(&b_published);
@@ -242,7 +242,7 @@ fn server_locality_refresh_lock_independence() {
     sink_b.publish(42.0).unwrap();
 
     // server A の shard mutex を保持した状態で server B.begin_refresh を実行
-    let _guard_a = server_a.inner.publish.shards[0].lock();
+    let _guard_a = server_a.inner.publish.lock_shard_for_test(0);
 
     let (tx, rx) = std::sync::mpsc::channel();
     let server_b_clone = server_b.clone();
@@ -858,11 +858,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
         .unwrap();
     let id = prep.id();
 
-    server
-        .inner
-        .publish
-        .lifecycle
-        .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
+    server.inner.publish.mark_closing_for_test();
 
     assert!(matches!(
         server.attach_update_notifier(RtdNotifier::for_test(Arc::new(TestNotifierState::new()))),
@@ -1162,11 +1158,7 @@ fn install_failure_during_closing_propagates_cleanup_error() {
 
     rx_enter.recv().unwrap();
 
-    server
-        .inner
-        .publish
-        .lifecycle
-        .store(SERVER_LIFECYCLE_CLOSING, Ordering::Release);
+    server.inner.publish.mark_closing_for_test();
 
     tx_close.send(()).unwrap();
 
