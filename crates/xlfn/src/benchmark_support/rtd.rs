@@ -297,17 +297,17 @@ impl RtdStringRepresentationBenchmark {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "RtdStringRepresentationBenchmark")]
     pub fn convert_std_arc_str(value: String) -> std::sync::Arc<str> {
         std::sync::Arc::from(value)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "RtdStringRepresentationBenchmark")]
     pub fn convert_std_arc_string(value: String) -> std::sync::Arc<String> {
         std::sync::Arc::new(value)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "RtdStringRepresentationBenchmark")]
     pub fn convert_triomphe_arc_string(value: String) -> triomphe::Arc<String> {
         triomphe::Arc::new(value)
     }
