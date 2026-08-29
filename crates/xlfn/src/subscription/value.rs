@@ -1,6 +1,6 @@
 use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
@@ -17,13 +17,13 @@ pub(crate) enum StoredRtdValue {
     Number(f64),
     Boolean(bool),
     Integer(i32),
-    String(Arc<str>),
+    String(Arc<String>),
     Error(ExcelErrorValue),
     Empty,
 }
 
 impl RtdValue {
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "RtdValue")]
     pub(crate) fn validate(&self) -> XllResult<()> {
         match self {
             Self::Number(value) if !value.is_finite() => Err(XllError::Domain {
@@ -41,14 +41,14 @@ impl RtdValue {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "RtdValue")]
     pub(crate) fn into_stored(self) -> XllResult<StoredRtdValue> {
         self.validate()?;
         Ok(match self {
             Self::Number(value) => StoredRtdValue::Number(value),
             Self::Boolean(value) => StoredRtdValue::Boolean(value),
             Self::Integer(value) => StoredRtdValue::Integer(value),
-            Self::String(value) => StoredRtdValue::String(Arc::from(value)),
+            Self::String(value) => StoredRtdValue::String(Arc::new(value)),
             Self::Error(value) => StoredRtdValue::Error(value),
             Self::Empty => StoredRtdValue::Empty,
         })

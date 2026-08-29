@@ -609,7 +609,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "PublishCore")]
     pub(crate) fn publish(
         &self,
         topic_id: TopicId,
@@ -771,7 +771,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "PublishCore")]
     pub(crate) fn complete_refresh_inner(
         &self,
         refresh_id: u64,
@@ -952,7 +952,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(impl_type = "PublishCore")]
     pub(crate) fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
         let shard = self.shards[shard_index].lock();
         let mut by_topic: FxHashMap<TopicId, (u64, ConnectionGeneration, StoredRtdValue)> =

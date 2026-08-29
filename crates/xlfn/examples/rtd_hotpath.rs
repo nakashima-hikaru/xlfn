@@ -5,75 +5,126 @@
 //! benchmark implementation.
 
 use xlfn::benchmark_support::{
-    RTD_REFRESH_SCALING_CASES, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
-    RtdRefreshScalingCase, RtdRefreshValueKind,
+    RTD_REFRESH_SCALING_CASES, RTD_STRING_REPRESENTATION_LENGTHS, RtdPublishStringBenchmark,
+    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
+    RtdStringRepresentation, RtdStringRepresentationBenchmark,
 };
 
 const REFRESH_ITERATIONS: usize = 32;
 const PUBLISH_ITERATIONS: usize = 100_000;
+const DEFAULT_ITERATION_MULTIPLIER: usize = 1;
 
 #[hotpath::main]
 fn main() {
-    match std::env::args().nth(1).as_deref() {
-        Some("number-dense") => profile_number_dense(),
-        Some("string-dense") => profile_string_dense(),
-        Some("number-sparse") => profile_number_sparse(),
-        Some("string-sparse") => profile_string_sparse(),
-        Some("string-same") => profile_string_repeated_same(),
-        Some("string-changing") => profile_string_changing(),
-        Some("string-stored") => profile_string_stored(),
+    let mut args = std::env::args().skip(1);
+    let scenario = args.next();
+    let multiplier = parse_multiplier(args.next().as_deref());
+    if args.next().is_some() {
+        panic!("too many RTD profiling arguments; expected SCENARIO [ITERATION_MULTIPLIER]");
+    }
+
+    match scenario.as_deref() {
+        Some("number-dense") => profile_number_dense(multiplier),
+        Some("string-dense") => profile_string_dense(multiplier),
+        Some("number-sparse") => profile_number_sparse(multiplier),
+        Some("string-sparse") => profile_string_sparse(multiplier),
+        Some("string-same") => profile_string_repeated_same(multiplier),
+        Some("string-changing") => profile_string_changing(multiplier),
+        Some("string-stored") => profile_string_stored(multiplier),
+        Some("string-conversion") => profile_string_conversion(multiplier),
+        Some("string-repr-arc-str") => {
+            profile_string_representation(RtdStringRepresentation::StdArcStr, multiplier)
+        }
+        Some("string-repr-arc-string") => {
+            profile_string_representation(RtdStringRepresentation::StdArcString, multiplier)
+        }
+        Some("string-repr-triomphe-string") => {
+            profile_string_representation(RtdStringRepresentation::TriompheArcString, multiplier)
+        }
         _ => panic!(
             "unknown RTD profiling scenario; expected one of: \
-             number-dense, string-dense, number-sparse, string-sparse, \
-             string-same, string-changing, string-stored"
+             number-dense, string-dense, number-sparse, string-sparse, string-same, \
+             string-changing, string-stored, string-conversion, string-repr-arc-str, \
+             string-repr-arc-string, string-repr-triomphe-string"
         ),
     }
 }
 
-#[inline(never)]
-fn profile_number_dense() {
-    profile_refresh("dense", RtdRefreshValueKind::Number);
+fn parse_multiplier(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else {
+        return DEFAULT_ITERATION_MULTIPLIER;
+    };
+    let multiplier = raw
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("iteration multiplier must be a positive integer: {raw}"));
+    assert!(multiplier > 0, "iteration multiplier must be positive");
+    multiplier
+}
+
+fn scaled_iterations(base: usize, multiplier: usize) -> usize {
+    base.checked_mul(multiplier)
+        .expect("iteration multiplier overflowed the workload size")
 }
 
 #[inline(never)]
-fn profile_string_dense() {
-    profile_refresh("dense", RtdRefreshValueKind::ShortString);
+fn profile_number_dense(multiplier: usize) {
+    profile_refresh("dense", RtdRefreshValueKind::Number, multiplier);
 }
 
 #[inline(never)]
-fn profile_number_sparse() {
-    profile_refresh("sparse", RtdRefreshValueKind::Number);
+fn profile_string_dense(multiplier: usize) {
+    profile_refresh("dense", RtdRefreshValueKind::ShortString, multiplier);
 }
 
 #[inline(never)]
-fn profile_string_sparse() {
-    profile_refresh("sparse", RtdRefreshValueKind::ShortString);
+fn profile_number_sparse(multiplier: usize) {
+    profile_refresh("sparse", RtdRefreshValueKind::Number, multiplier);
 }
 
-fn profile_refresh(name: &'static str, value_kind: RtdRefreshValueKind) {
+#[inline(never)]
+fn profile_string_sparse(multiplier: usize) {
+    profile_refresh("sparse", RtdRefreshValueKind::ShortString, multiplier);
+}
+
+fn profile_refresh(name: &'static str, value_kind: RtdRefreshValueKind, multiplier: usize) {
     let case = refresh_case(name);
     let benchmark = RtdRefreshScalingBenchmark::new(case, value_kind);
-    for _ in 0..REFRESH_ITERATIONS {
+    for _ in 0..scaled_iterations(REFRESH_ITERATIONS, multiplier) {
         benchmark.run_end_to_end_cycle();
     }
 }
 
 #[inline(never)]
-fn profile_string_repeated_same() {
+fn profile_string_repeated_same(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_repeated_same(PUBLISH_ITERATIONS);
+    benchmark.run_repeated_same(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
 }
 
 #[inline(never)]
-fn profile_string_changing() {
+fn profile_string_changing(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_changing(PUBLISH_ITERATIONS);
+    benchmark.run_changing(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
 }
 
 #[inline(never)]
-fn profile_string_stored() {
+fn profile_string_stored(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_stored_publish(PUBLISH_ITERATIONS);
+    benchmark.run_stored_publish(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
+}
+
+#[inline(never)]
+fn profile_string_conversion(multiplier: usize) {
+    let benchmark = RtdPublishStringBenchmark::new();
+    benchmark.run_string_conversion(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
+}
+
+#[inline(never)]
+fn profile_string_representation(representation: RtdStringRepresentation, multiplier: usize) {
+    let iterations = scaled_iterations(PUBLISH_ITERATIONS, multiplier);
+    for &length in &RTD_STRING_REPRESENTATION_LENGTHS {
+        let benchmark = RtdStringRepresentationBenchmark::new(length);
+        benchmark.run(representation, iterations);
+    }
 }
 
 fn refresh_case(name: &'static str) -> RtdRefreshScalingCase {

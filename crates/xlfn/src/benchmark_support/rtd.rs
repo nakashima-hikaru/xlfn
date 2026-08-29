@@ -268,6 +268,73 @@ impl RtdPublishStringBenchmark {
     }
 }
 
+/// Candidate owned string representations for conversion-cost comparison.
+///
+/// `TriompheArcString` is the current production representation; the other
+/// variants remain available so the ownership/conversion trade-off stays
+/// directly measurable.
+#[derive(Clone, Copy, Debug)]
+pub enum RtdStringRepresentation {
+    StdArcStr,
+    StdArcString,
+    TriompheArcString,
+}
+
+pub const RTD_STRING_REPRESENTATION_LENGTHS: [usize; 5] = [16, 35, 64, 256, 1024];
+
+pub struct RtdStringRepresentationBenchmark {
+    payload: String,
+}
+
+impl RtdStringRepresentationBenchmark {
+    pub fn new(length: usize) -> Self {
+        assert!(
+            RTD_STRING_REPRESENTATION_LENGTHS.contains(&length),
+            "benchmark must use a declared string length"
+        );
+        Self {
+            payload: "x".repeat(length),
+        }
+    }
+
+    #[hotpath::measure]
+    pub fn convert_std_arc_str(value: String) -> std::sync::Arc<str> {
+        std::sync::Arc::from(value)
+    }
+
+    #[hotpath::measure]
+    pub fn convert_std_arc_string(value: String) -> std::sync::Arc<String> {
+        std::sync::Arc::new(value)
+    }
+
+    #[hotpath::measure]
+    pub fn convert_triomphe_arc_string(value: String) -> triomphe::Arc<String> {
+        triomphe::Arc::new(value)
+    }
+
+    #[inline]
+    pub fn run(&self, representation: RtdStringRepresentation, iterations: usize) {
+        for _ in 0..iterations {
+            let value = self.payload.clone();
+            match representation {
+                RtdStringRepresentation::StdArcStr => {
+                    std::hint::black_box(Self::convert_std_arc_str(value));
+                }
+                RtdStringRepresentation::StdArcString => {
+                    std::hint::black_box(Self::convert_std_arc_string(value));
+                }
+                RtdStringRepresentation::TriompheArcString => {
+                    std::hint::black_box(Self::convert_triomphe_arc_string(value));
+                }
+            }
+        }
+    }
+
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum RtdRefreshValueKind {
     Number,

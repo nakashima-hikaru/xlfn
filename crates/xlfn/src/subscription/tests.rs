@@ -608,7 +608,7 @@ fn repeated_string_publish_is_suppressed() {
     assert_eq!(batch.updates.len(), 1);
     assert_eq!(
         batch.updates[0].value,
-        StoredRtdValue::String(Arc::from("same-value")),
+        StoredRtdValue::String(triomphe::Arc::new("same-value".to_owned())),
     );
     assert_eq!(batch.updates[0].sequence, 0);
     batch.complete(RefreshOutcome::Delivered).unwrap();

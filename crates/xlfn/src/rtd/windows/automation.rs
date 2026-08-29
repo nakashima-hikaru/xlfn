@@ -677,7 +677,7 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtd
         StoredRtdValue::String(value) => {
             // SAFETY: `result` was validated as non-null above and `value`
             // remains readable for the duration of the call.
-            return unsafe { write_bstr_variant(result, value) };
+            return unsafe { write_bstr_variant(result, value.as_str()) };
         }
         StoredRtdValue::Error(value) => {
             variant.Anonymous.Anonymous.vt = VT_ERROR;

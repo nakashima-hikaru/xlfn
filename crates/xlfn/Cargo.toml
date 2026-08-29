@@ -82,6 +82,11 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
+name = "rtd_string_representation"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
 name = "rtd_refresh"
 harness = false
 required-features = ["bench-internals", "rtd"]
