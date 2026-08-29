@@ -14,12 +14,20 @@ const PUBLISH_ITERATIONS: usize = 100_000;
 
 #[hotpath::main]
 fn main() {
-    profile_number_dense();
-    profile_string_dense();
-    profile_number_sparse();
-    profile_string_sparse();
-    profile_string_repeated_same();
-    profile_string_changing();
+    match std::env::args().nth(1).as_deref() {
+        Some("number-dense") => profile_number_dense(),
+        Some("string-dense") => profile_string_dense(),
+        Some("number-sparse") => profile_number_sparse(),
+        Some("string-sparse") => profile_string_sparse(),
+        Some("string-same") => profile_string_repeated_same(),
+        Some("string-changing") => profile_string_changing(),
+        Some("string-stored") => profile_string_stored(),
+        _ => panic!(
+            "unknown RTD profiling scenario; expected one of: \
+             number-dense, string-dense, number-sparse, string-sparse, \
+             string-same, string-changing, string-stored"
+        ),
+    }
 }
 
 #[inline(never)]
@@ -60,6 +68,12 @@ fn profile_string_repeated_same() {
 fn profile_string_changing() {
     let benchmark = RtdPublishStringBenchmark::new();
     benchmark.run_changing(PUBLISH_ITERATIONS);
+}
+
+#[inline(never)]
+fn profile_string_stored() {
+    let benchmark = RtdPublishStringBenchmark::new();
+    benchmark.run_stored_publish(PUBLISH_ITERATIONS);
 }
 
 fn refresh_case(name: &'static str) -> RtdRefreshScalingCase {
