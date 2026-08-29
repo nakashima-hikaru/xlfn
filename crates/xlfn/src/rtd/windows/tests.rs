@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::handle::lifetime::FormulaLifetimeBackend;
+use crate::handle::FormulaLifetimeBackend;
 use crate::subscription::{
     RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdUpdate, StoredRtdValue,
 };

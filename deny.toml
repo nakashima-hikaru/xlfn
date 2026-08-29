@@ -20,7 +20,8 @@ allow = [
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
-    { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.6 while xlfn uses constant_time_eq 0.5.0 directly." },
+    { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.7 while xlfn uses constant_time_eq 0.5.0 directly." },
+    { crate = "object@0.36.7", reason = "Required transitively by hotpath 0.24.0 while xlfn-package uses object 0.40.0 directly for PE inspection." },
 ]
 
 [sources]
