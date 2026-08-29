@@ -67,17 +67,16 @@ pub(crate) use catalog::SubscriptionCatalog;
 pub(crate) use data_plane::{
     OwnedPublishOperation, PublishCore, RtdRefreshBatch, ScopedPublishOperation,
 };
-#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
-pub(crate) use delivery::RefreshOutcome;
 #[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) use delivery::RtdUpdate;
 #[cfg(test)]
 pub(crate) use delivery::{
     ActiveSubscription, DeliveryPhase, NotificationAttempt, NotificationCompletion,
     PreparedNotification, QueuedUpdate, RefreshState, SERVER_LIFECYCLE_CLOSING,
-    SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TOPIC_SHARDS, TopicShard,
-    shard_index,
+    SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
 };
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+pub(crate) use delivery::{RefreshOutcome, TOPIC_SHARDS};
 pub(crate) use host::SubscriptionHost;
 #[cfg(test)]
 pub(crate) use identity::{NEXT_RTD_RUNTIME_ID, SubscriptionIdentityIndex, allocate_runtime_id};

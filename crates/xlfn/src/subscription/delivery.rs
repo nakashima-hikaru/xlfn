@@ -78,7 +78,23 @@ pub(crate) struct QueuedUpdate {
 pub(crate) struct RtdUpdate {
     pub(crate) sequence: u64,
     pub(crate) topic_id: i32,
+    pub(crate) connection_generation: ConnectionGeneration,
     pub(crate) value: StoredRtdValue,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RefreshPlan {
+    pub(crate) refresh_id: u64,
+    pub(crate) epoch: u64,
+    /// Advisory work index captured at the control transition. Updates published
+    /// after this snapshot may be collected now or remain pending for the next
+    /// refresh; the shard-local pending maps remain the source of truth.
+    pub(crate) candidate_shards: u32,
+}
+
+pub(crate) struct ShardRefreshBatch {
+    pub(crate) shard_index: usize,
+    pub(crate) updates: Vec<RtdUpdate>,
 }
 
 #[cfg(test)]
@@ -87,6 +103,8 @@ impl RtdUpdate {
         Self {
             sequence: 0,
             topic_id,
+            connection_generation: ConnectionGeneration::new(1)
+                .expect("test connection generation is non-zero"),
             value: value.into_stored().expect("test RTD value is valid"),
         }
     }
@@ -135,6 +153,8 @@ pub(crate) struct TopicShard {
     pub(crate) active_by_topic: FxHashMap<TopicId, ActiveSubscription>,
     pub(crate) topic_by_id: FxHashMap<SubscriptionId, TopicId>,
     pub(crate) pending: [FxHashMap<TopicId, QueuedUpdate>; 2],
+    /// Exact number of pending entries belonging to committed connections.
+    pub(crate) deliverable_count: usize,
 }
 
 pub(crate) struct NotificationAttempt<N> {

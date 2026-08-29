@@ -523,6 +523,241 @@ fn deliverable_pending_accounting_tracks_connection_lifecycle() {
 }
 
 #[test]
+fn old_buffer_update_is_not_redelivered_after_newer_update() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("superseded").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Failed).unwrap();
+
+    sink.publish(11.0).unwrap();
+    let latest = server.begin_refresh().unwrap();
+    assert_eq!(latest.updates.len(), 1);
+    assert_eq!(latest.updates[0].value, StoredRtdValue::Number(11.0));
+    latest.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates.is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn newer_update_survives_completion_of_older_refresh() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("newer-survives").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let older = server.begin_refresh().unwrap();
+    sink.publish(11.0).unwrap();
+    older.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let newer = server.begin_refresh().unwrap();
+    assert_eq!(newer.updates.len(), 1);
+    assert_eq!(newer.updates[0].value, StoredRtdValue::Number(11.0));
+    newer.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn failed_refresh_keeps_pending_update() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("failed-refresh").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let failed = server.begin_refresh().unwrap();
+    let sequence = failed.updates[0].sequence;
+    failed.complete(RefreshOutcome::Failed).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(retry.updates.len(), 1);
+    assert_eq!(retry.updates[0].sequence, sequence);
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("concurrent-publish").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let snapshot = server.begin_refresh().unwrap();
+    let concurrent_sink = sink.clone();
+    std::thread::spawn(move || concurrent_sink.publish(11.0).unwrap())
+        .join()
+        .unwrap();
+    snapshot.complete(RefreshOutcome::Delivered).unwrap();
+
+    let later = server.begin_refresh().unwrap();
+    assert_eq!(later.updates.len(), 1);
+    assert_eq!(later.updates[0].value, StoredRtdValue::Number(11.0));
+    later.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn refresh_collection_skips_shards_without_deliverable_updates() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("ready-shard").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let unrelated_shard = server.inner.publish.lock_shard_for_test(0);
+    let server_clone = server.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let batch = server_clone.begin_refresh().unwrap();
+        let count = batch.updates.len();
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        tx.send(count).unwrap();
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("refresh must not traverse a shard absent from its ready index"),
+        1,
+    );
+    drop(unrelated_shard);
+    handle.join().unwrap();
+}
+
+#[test]
+fn refresh_planning_does_not_traverse_topic_shards() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink, _) = publishing_source::<f64>(None);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("planning-only").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let ready_shard = server.inner.publish.lock_shard_for_test(1);
+    let planned = server.inner.publish.plan_refresh().unwrap();
+    drop(ready_shard);
+    drop(planned);
+}
+
+#[test]
+fn refresh_reduction_orders_updates_by_global_sequence() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source_one, sink_one, _) = publishing_source::<f64>(None);
+    let (source_two, sink_two, _) = publishing_source::<f64>(None);
+
+    for (source, topic_id, name) in [
+        (&source_one, TopicId(1), "reduction-one"),
+        (&source_two, TopicId(2), "reduction-two"),
+    ] {
+        let prepared = runtime
+            .prepare(source, RtdTopic::single(name).unwrap())
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, topic_id, id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    sink_two.lock().clone().unwrap().publish(20.0).unwrap();
+    sink_one.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch
+            .updates
+            .iter()
+            .map(|update| update.topic_id)
+            .collect::<Vec<_>>(),
+        vec![2, 1],
+    );
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
 fn server_standalone_termination() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server_a = runtime

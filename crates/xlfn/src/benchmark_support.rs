@@ -56,7 +56,10 @@ pub use lookup::{
     HandleLookupBenchmark,
 };
 #[cfg(feature = "rtd")]
-pub use rtd::{RtdPublishNumberBenchmark, RtdPublishStringBenchmark};
+pub use rtd::{
+    RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,
+    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
+};
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 
 pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
