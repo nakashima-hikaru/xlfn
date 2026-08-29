@@ -95,7 +95,7 @@ impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
 pub(crate) struct ScopedPublishOperation<'a, H: SubscriptionHost> {
     pub(crate) _gate_guard: OperationGuard<'a>,
     pub(crate) _host_guard: H::AdmissionGuard,
-    pub(crate) observation: ServerOperationObservation,
+    pub(crate) _observation: ServerOperationObservation,
 }
 
 pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
@@ -399,7 +399,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         Ok(ScopedPublishOperation {
             _gate_guard: gate_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
-            observation: ServerOperationObservation::begin(&self.services),
+            _observation: ServerOperationObservation::begin(&self.services),
         })
     }
 
@@ -609,6 +609,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }))
     }
 
+    #[hotpath::measure]
     pub(crate) fn publish(
         &self,
         topic_id: TopicId,
@@ -770,6 +771,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
+    #[hotpath::measure]
     pub(crate) fn complete_refresh_inner(
         &self,
         refresh_id: u64,
@@ -950,6 +952,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
+    #[hotpath::measure]
     pub(crate) fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
         let shard = self.shards[shard_index].lock();
         let mut by_topic: FxHashMap<TopicId, (u64, ConnectionGeneration, StoredRtdValue)> =
@@ -1105,6 +1108,7 @@ impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
     let update_count = batches.iter().map(|batch| batch.updates.len()).sum();
     let mut updates = Vec::with_capacity(update_count);

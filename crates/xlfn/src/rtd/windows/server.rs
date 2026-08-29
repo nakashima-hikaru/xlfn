@@ -523,7 +523,8 @@ pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
     handles: Option<&Arc<H>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,
 ) -> XllResult<EnsuredServer> {
-    let backend = handles.map(|handles| -> Arc<dyn FormulaLifetimeBackend> { handles.clone() });
+    let backend =
+        handles.map(|handles| -> Arc<dyn FormulaLifetimeBackend> { Arc::<H>::clone(handles) });
     ensure_server_impl(backend.as_ref(), subscriptions)
 }
 
@@ -594,7 +595,7 @@ fn ensure_server_impl(
                     });
                 }
                 None => {
-                    backends.handles = Some(handles.clone());
+                    backends.handles = Some(Arc::clone(handles));
                 }
             }
         }
@@ -678,7 +679,7 @@ fn ensure_server_impl(
         operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
-            handles: handles.map(|handles| handles.clone()),
+            handles: handles.cloned(),
             subscriptions: subscriptions.cloned(),
             subscription_server: subscription_handle.clone(),
         }),

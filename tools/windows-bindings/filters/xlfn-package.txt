@@ -43,6 +43,9 @@
     Windows.Win32.Storage.FileSystem.FILE_SHARE_WRITE
     Windows.Win32.Storage.FileSystem.FILE_ID_INFO
     Windows.Win32.Storage.FileSystem.FILE_INFO_BY_HANDLE_CLASS
+    Windows.Win32.Storage.FileSystem.MOVEFILE_REPLACE_EXISTING
+    Windows.Win32.Storage.FileSystem.MOVEFILE_WRITE_THROUGH
+    Windows.Win32.Storage.FileSystem.MoveFileExW
     Windows.Win32.Storage.FileSystem.FileIdInfo
     Windows.Win32.Storage.FileSystem.GetFileInformationByHandle
     Windows.Win32.Storage.FileSystem.GetFileInformationByHandleEx

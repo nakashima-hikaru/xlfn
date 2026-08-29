@@ -25,6 +25,11 @@ unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
 bench-internals = ["handles", "dep:rayon", "xlfn-sys/abi-probe"]
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# The backend bridge is a Unix-only dependency, so Windows all-features does
+# not enable hotpath's unsupported CPU backend.
+hotpath-cpu = ["hotpath", "dep:xlfn-hotpath-cpu"]
 
 [[bench]]
 name = "async_spawn"
@@ -91,6 +96,10 @@ name = "handle_call_resolution"
 harness = false
 required-features = ["bench-internals"]
 
+[[example]]
+name = "rtd_hotpath"
+required-features = ["bench-internals", "rtd", "hotpath"]
+
 [dependencies]
 xlfn-macros.workspace = true
 xlfn-sys.workspace = true
@@ -104,6 +113,7 @@ crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
+hotpath = { workspace = true, features = ["parking_lot"] }
 moka = { workspace = true, optional = true }
 parking_lot.workspace = true
 rayon = { workspace = true, optional = true }
@@ -120,6 +130,9 @@ xlfn-kernel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+xlfn-hotpath-cpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

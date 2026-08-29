@@ -11,7 +11,6 @@
 )]
 
 windows_link::link!("kernel32.dll" "system" fn CloseHandle(hobject : HANDLE) -> BOOL);
-windows_link::link!("kernel32.dll" "system" fn MoveFileExW(lpexistingfilename : PCWSTR, lpnewfilename : PCWSTR, dwflags : MOVE_FILE_FLAGS) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(stringsecuritydescriptor : PCWSTR, stringsdrevision : u32, securitydescriptor : *mut PSECURITY_DESCRIPTOR, securitydescriptorsize : *mut u32) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn ConvertStringSidToSidW(stringsid : PCWSTR, sid : *mut PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn CreateDirectoryW(lppathname : PCWSTR, lpsecurityattributes : *const SECURITY_ATTRIBUTES) -> BOOL);
@@ -28,6 +27,7 @@ windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorDacl(psecuri
 windows_link::link!("advapi32.dll" "system" fn GetTokenInformation(tokenhandle : HANDLE, tokeninformationclass : TOKEN_INFORMATION_CLASS, tokeninformation : *mut core::ffi::c_void, tokeninformationlength : u32, returnlength : *mut u32) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn IsValidSid(psid : PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn LocalFree(hmem : HLOCAL) -> HLOCAL);
+windows_link::link!("kernel32.dll" "system" fn MoveFileExW(lpexistingfilename : PCWSTR, lpnewfilename : PCWSTR, dwflags : MOVE_FILE_FLAGS) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn OpenProcessToken(processhandle : HANDLE, desiredaccess : TOKEN_ACCESS_MASK, tokenhandle : *mut HANDLE) -> BOOL);
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -112,14 +112,14 @@ pub const FILE_SHARE_WRITE: FILE_SHARE_MODE = 2u32;
 pub const FileIdInfo: FILE_INFO_BY_HANDLE_CLASS = 18i32;
 pub type HANDLE = *mut core::ffi::c_void;
 pub type HLOCAL = *mut core::ffi::c_void;
+pub const MOVEFILE_REPLACE_EXISTING: MOVE_FILE_FLAGS = 1u32;
+pub const MOVEFILE_WRITE_THROUGH: MOVE_FILE_FLAGS = 8u32;
+pub type MOVE_FILE_FLAGS = u32;
 pub type OBJECT_SECURITY_INFORMATION = u32;
 pub const OWNER_SECURITY_INFORMATION: OBJECT_SECURITY_INFORMATION = 1u32;
 pub type PCWSTR = *const u16;
 pub type PSECURITY_DESCRIPTOR = *mut core::ffi::c_void;
 pub type PSID = *mut core::ffi::c_void;
-pub const MOVEFILE_REPLACE_EXISTING: MOVE_FILE_FLAGS = 1u32;
-pub const MOVEFILE_WRITE_THROUGH: MOVE_FILE_FLAGS = 8u32;
-pub type MOVE_FILE_FLAGS = u32;
 pub const SDDL_REVISION_1: u32 = 1u32;
 #[repr(C)]
 #[derive(Clone, Copy)]

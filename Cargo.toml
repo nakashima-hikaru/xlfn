@@ -5,6 +5,7 @@ members = [
     "crates/xlfn-sys",
     "crates/xlfn-macros",
     "crates/xlfn-package",
+    "crates/xlfn-hotpath-cpu",
     "crates/cargo-xlfn",
     "tools/windows-bindings",
     "crates/xlfn",
@@ -21,6 +22,10 @@ rust-version = "1.98.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nakashima-hikaru/xlfn"
 publish = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [workspace.dependencies]
 # Member crates
@@ -45,6 +50,8 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 fs-err = "3.3.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
+hotpath = { version = "0.24", default-features = false }
+xlfn-hotpath-cpu = { version = "=0.2.0", path = "crates/xlfn-hotpath-cpu" }
 inventory = "0.3.24"
 libc = "0.2.189"
 loom = "0.7.2"

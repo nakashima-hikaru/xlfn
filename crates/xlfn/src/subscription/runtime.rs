@@ -266,10 +266,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             .ok_or(XllError::StaleHandle)
     }
 
-    pub(crate) fn transport_key(&self, id: SubscriptionId) -> SubscriptionKey {
-        SubscriptionKey::from_internal(self.runtime_id, id)
-    }
-
     pub(crate) fn claim_server(
         &self,
         generation: ServerGeneration,

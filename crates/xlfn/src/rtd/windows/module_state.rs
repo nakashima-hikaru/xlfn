@@ -181,7 +181,7 @@ impl ComModuleLifetime {
             ComModuleCallGuard {
                 lifetime: self,
                 _ingress_guard: ingress_guard,
-                observation: ComModuleCallObservation::begin(self, accepted),
+                _observation: ComModuleCallObservation::begin(self, accepted),
             },
             accepted,
         )
@@ -289,7 +289,7 @@ impl ComModuleLifetime {
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
     _ingress_guard: crate::ingress::ExportEntry<'static>,
-    observation: ComModuleCallObservation,
+    _observation: ComModuleCallObservation,
 }
 
 impl Drop for ComModuleCallGuard {

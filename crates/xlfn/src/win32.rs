@@ -251,7 +251,7 @@ pub type FUNCFLAGS = u16;
 pub type FUNCKIND = i32;
 pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 4u32;
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct GUID {
     pub data1: u32,
     pub data2: u16,
@@ -592,7 +592,7 @@ pub type SYSKIND = i32;
 pub const S_FALSE: HRESULT = 0x1_u32 as _;
 pub const S_OK: HRESULT = 0x0_u32 as _;
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct TLIBATTR {
     pub guid: GUID,
     pub lcid: u32,

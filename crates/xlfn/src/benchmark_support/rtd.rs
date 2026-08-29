@@ -193,9 +193,16 @@ impl RtdPublishStringBenchmark {
 
     #[inline]
     pub fn run_changing(&self, iterations: usize) {
-        for i in 0..iterations {
+        // Alternate fixed payloads so this measures changing-value work
+        // without adding formatting overhead to the workload.
+        for index in 0..iterations {
+            let value = if index & 1 == 0 {
+                "stream_market_data_update_payload_a"
+            } else {
+                "stream_market_data_update_payload_b"
+            };
             self.sink
-                .publish(format!("stream_market_data_update_payload_{i}"))
+                .publish(value.to_owned())
                 .expect("publish must succeed");
         }
     }

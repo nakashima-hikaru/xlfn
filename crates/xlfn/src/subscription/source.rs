@@ -194,6 +194,7 @@ impl<T> RtdSink<T>
 where
     T: IntoRtdValue,
 {
+    #[hotpath::measure]
     pub fn publish(&self, value: T) -> XllResult<()> {
         let value = value.into_rtd_value()?.into_stored()?;
         self.sink.publish_stored(value)

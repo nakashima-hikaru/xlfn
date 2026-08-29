@@ -156,18 +156,6 @@ pub(crate) struct SubscriptionIdentity {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SubscriptionId(pub(crate) u64);
 
-impl SubscriptionId {
-    #[inline]
-    pub(crate) const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    #[inline]
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SubscriptionKey {
     runtime_id: u64,
@@ -182,6 +170,7 @@ impl SubscriptionKey {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn from_allocated_id(runtime_id: u64, subscription_id: u64) -> Self {
         Self {
             runtime_id,
@@ -189,10 +178,12 @@ impl SubscriptionKey {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn runtime_id(self) -> u64 {
         self.runtime_id
     }
 
+    #[cfg(test)]
     pub(crate) const fn subscription_id(self) -> u64 {
         self.subscription_id
     }

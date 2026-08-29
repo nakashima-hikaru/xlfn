@@ -207,7 +207,7 @@ pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
-        return windows::observe(handles, ingress, lifetime_key, token, host);
+        windows::observe(handles, ingress, lifetime_key, token, host)
     }
     #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
     {
@@ -228,7 +228,7 @@ pub(crate) fn observe_subscription(
 ) -> XllResult<crate::subscription::RtdValue> {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
-        return windows::observe_subscription(subscriptions, key, host);
+        windows::observe_subscription(subscriptions, key, host)
     }
     #[cfg(not(all(target_os = "windows", feature = "rtd")))]
     {
@@ -248,7 +248,7 @@ pub(crate) fn shutdown_handle_topics<H: FormulaLifetimeBackend + 'static>(
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
-        return windows::shutdown(handles);
+        windows::shutdown(handles)
     }
     #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
     {
@@ -262,7 +262,7 @@ pub(crate) fn shutdown_subscriptions(
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
-        return windows::shutdown_subscriptions(subscriptions);
+        windows::shutdown_subscriptions(subscriptions)
     }
     #[cfg(not(all(target_os = "windows", feature = "rtd")))]
     {
@@ -284,7 +284,7 @@ pub(crate) unsafe fn dll_get_class_object(
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
         // SAFETY: exported COM boundary forwards its pointer contract.
-        return unsafe { windows::dll_get_class_object(class_id, interface_id, output) };
+        unsafe { windows::dll_get_class_object(class_id, interface_id, output) }
     }
     #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
     {
