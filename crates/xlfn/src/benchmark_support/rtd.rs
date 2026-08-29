@@ -252,6 +252,26 @@ impl RtdPublishStringBenchmark {
     }
 
     #[inline]
+    pub fn run_stored_clone_only(&self, iterations: usize) {
+        let first =
+            crate::subscription::RtdValue::String("stream_market_data_update_payload_a".to_owned())
+                .into_stored()
+                .expect("stored string conversion must succeed");
+        let second =
+            crate::subscription::RtdValue::String("stream_market_data_update_payload_b".to_owned())
+                .into_stored()
+                .expect("stored string conversion must succeed");
+        for index in 0..iterations {
+            let stored = if index & 1 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            std::hint::black_box(stored);
+        }
+    }
+
+    #[inline]
     pub fn run_drain_each(&self, iterations: usize) {
         for _ in 0..iterations {
             self.sink

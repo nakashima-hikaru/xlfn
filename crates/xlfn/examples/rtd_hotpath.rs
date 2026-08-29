@@ -31,6 +31,7 @@ fn main() {
         Some("string-same") => profile_string_repeated_same(multiplier),
         Some("string-changing") => profile_string_changing(multiplier),
         Some("string-stored") => profile_string_stored(multiplier),
+        Some("stored-clone-only") => profile_stored_clone_only(multiplier),
         Some("string-conversion") => profile_string_conversion(multiplier),
         Some("string-repr-arc-str") => {
             profile_string_representation(RtdStringRepresentation::StdArcStr, multiplier)
@@ -44,7 +45,7 @@ fn main() {
         _ => panic!(
             "unknown RTD profiling scenario; expected one of: \
              number-dense, string-dense, number-sparse, string-sparse, string-same, \
-             string-changing, string-stored, string-conversion, string-repr-arc-str, \
+             string-changing, string-stored, stored-clone-only, string-conversion, string-repr-arc-str, \
              string-repr-arc-string, string-repr-triomphe-string"
         ),
     }
@@ -110,6 +111,12 @@ fn profile_string_changing(multiplier: usize) {
 fn profile_string_stored(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
     benchmark.run_stored_publish(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
+}
+
+#[inline(never)]
+fn profile_stored_clone_only(multiplier: usize) {
+    let benchmark = RtdPublishStringBenchmark::new();
+    benchmark.run_stored_clone_only(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
 }
 
 #[inline(never)]
