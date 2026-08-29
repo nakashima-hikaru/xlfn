@@ -178,16 +178,6 @@ impl SubscriptionKey {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn runtime_id(self) -> u64 {
-        self.runtime_id
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn subscription_id(self) -> u64 {
-        self.subscription_id
-    }
-
     pub(crate) fn validate_runtime(self, expected_runtime_id: u64) -> Option<SubscriptionId> {
         if self.runtime_id == expected_runtime_id {
             Some(SubscriptionId(self.subscription_id))

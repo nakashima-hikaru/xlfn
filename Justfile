@@ -97,6 +97,7 @@ semver:
     cargo semver-checks \
         --workspace \
         --exclude xlfn-kernel \
+        --exclude xlfn-hotpath-cpu \
         --baseline-rev 0.1.0 \
         --release-type major
 

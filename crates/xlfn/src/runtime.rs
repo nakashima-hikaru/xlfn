@@ -458,7 +458,7 @@ impl<A: crate::Addin> Runtime<A> {
         attempt.finish_in_place(registrations)
     }
 
-    #[cfg(all(test, feature = "async"))]
+    #[cfg(all(test, feature = "async", not(target_os = "windows")))]
     pub(crate) fn merge_host_for_test(&self, journal: crate::registration::HostMutationJournal) {
         self.host.merge(journal);
     }
