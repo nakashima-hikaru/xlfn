@@ -135,12 +135,6 @@ pub(crate) struct PublishTerminationResult<N> {
     connections: Vec<RetiredConnection>,
 }
 
-enum PublishShardOutcome {
-    Retry(StoredRtdValue),
-    Suppressed,
-    Updated { committed: bool },
-}
-
 impl<N> PublishTerminationResult<N> {
     pub(crate) fn into_parts(self) -> (Option<N>, Vec<RetiredConnection>) {
         (self.notifier, self.connections)
@@ -392,75 +386,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }))
     }
 
-    #[hotpath::measure(impl_type = "PublishCore")]
-    fn publish_shard_update(
-        &self,
-        shard_index: usize,
-        topic_id: TopicId,
-        generation: ConnectionGeneration,
-        epoch: u64,
-        value: StoredRtdValue,
-    ) -> XllResult<PublishShardOutcome> {
-        self.ensure_open()?;
-        let buffer = (epoch & 1) as usize;
-        let mut shard = self.shards[shard_index].lock();
-
-        if self.publish_epoch.load(Ordering::Acquire) != epoch {
-            return Ok(PublishShardOutcome::Retry(value));
-        }
-
-        let (committed, inserted) = {
-            let TopicShard {
-                active_by_topic,
-                pending: pending_buffers,
-                ..
-            } = &mut *shard;
-            let active = active_by_topic
-                .get_mut(&topic_id)
-                .filter(|active| active.generation == generation)
-                .ok_or(XllError::Closing)?;
-            if active
-                .latest
-                .as_ref()
-                .is_some_and(|latest| latest == &value)
-            {
-                return Ok(PublishShardOutcome::Suppressed);
-            }
-            let conn_gen = active.generation;
-            let committed = active.committed;
-            let pending = &mut pending_buffers[buffer];
-            let pending_entry = pending.entry(topic_id);
-            let inserted = match pending_entry {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let sequence = self.allocate_update_sequence()?;
-                    let existing = entry.get_mut();
-                    existing.connection_generation = conn_gen;
-                    existing.sequence = sequence;
-                    existing.value = value.clone();
-                    false
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let permit = Quota::try_acquire(&self.queued_update_quota)
-                        .map_err(|_| XllError::Overloaded)?;
-                    let sequence = self.allocate_update_sequence()?;
-                    entry.insert(QueuedUpdate {
-                        connection_generation: conn_gen,
-                        sequence,
-                        value: value.clone(),
-                        _permit: permit,
-                    });
-                    true
-                }
-            };
-            active.latest = Some(value);
-            (committed, inserted)
-        };
-        if inserted {
-            self.record_pending_insert(&mut shard, shard_index, committed);
-        }
-        Ok(PublishShardOutcome::Updated { committed })
-    }
-
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {
         if self.runtime_gate.is_closing() {
             return Err(XllError::Closing);
@@ -695,17 +620,70 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let _operation = self.enter_operation()?;
 
         let shard_index = shard_index(topic_id);
-        let mut value = value;
 
         let (epoch, committed) = loop {
+            self.ensure_open()?;
+
             let epoch = self.publish_epoch.load(Ordering::Acquire);
-            match self.publish_shard_update(shard_index, topic_id, generation, epoch, value)? {
-                PublishShardOutcome::Retry(next_value) => {
-                    value = next_value;
-                }
-                PublishShardOutcome::Suppressed => return Ok(()),
-                PublishShardOutcome::Updated { committed } => break (epoch, committed),
+            let buffer = (epoch & 1) as usize;
+
+            let mut shard = self.shards[shard_index].lock();
+
+            if self.publish_epoch.load(Ordering::Acquire) != epoch {
+                drop(shard);
+                continue;
             }
+
+            let (committed, inserted) = {
+                let TopicShard {
+                    active_by_topic,
+                    pending: pending_buffers,
+                    ..
+                } = &mut *shard;
+                let active = active_by_topic
+                    .get_mut(&topic_id)
+                    .filter(|active| active.generation == generation)
+                    .ok_or(XllError::Closing)?;
+                if active
+                    .latest
+                    .as_ref()
+                    .is_some_and(|latest| latest == &value)
+                {
+                    return Ok(());
+                }
+                let conn_gen = active.generation;
+                let committed = active.committed;
+                let pending = &mut pending_buffers[buffer];
+                let pending_entry = pending.entry(topic_id);
+                let inserted = match pending_entry {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let sequence = self.allocate_update_sequence()?;
+                        let existing = entry.get_mut();
+                        existing.connection_generation = conn_gen;
+                        existing.sequence = sequence;
+                        existing.value = value.clone();
+                        false
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let permit = Quota::try_acquire(&self.queued_update_quota)
+                            .map_err(|_| XllError::Overloaded)?;
+                        let sequence = self.allocate_update_sequence()?;
+                        entry.insert(QueuedUpdate {
+                            connection_generation: conn_gen,
+                            sequence,
+                            value: value.clone(),
+                            _permit: permit,
+                        });
+                        true
+                    }
+                };
+                active.latest = Some(value);
+                (committed, inserted)
+            };
+            if inserted {
+                self.record_pending_insert(&mut shard, shard_index, committed);
+            }
+            break (epoch, committed);
         };
 
         if committed && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
