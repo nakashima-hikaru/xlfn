@@ -111,23 +111,6 @@ pub(crate) struct RefreshPlan {
 pub(crate) struct ShardRefreshBatch {
     pub(crate) shard_index: usize,
     pub(crate) updates: Vec<RtdUpdate>,
-    pub(crate) retirement: ShardRetirementBatch,
-}
-
-pub(crate) struct ShardRetirementBatch {
-    pub(crate) shard_index: usize,
-    pub(crate) entries: Vec<RetirementEntry>,
-}
-
-pub(crate) struct RetirementEntry {
-    pub(crate) topic_id: TopicId,
-    pub(crate) generation: ConnectionGeneration,
-    pub(crate) through_sequence: u64,
-}
-
-pub(crate) struct ReducedRefresh {
-    pub(crate) updates: Vec<RtdUpdate>,
-    pub(crate) retirement: Vec<ShardRetirementBatch>,
 }
 
 #[cfg(test)]

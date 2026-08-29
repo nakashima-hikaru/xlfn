@@ -1,7 +1,7 @@
 use super::delivery::{
-    DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, ReducedRefresh,
-    RefreshOutcome, RefreshPlan, RefreshState, RetirementEntry, RtdUpdate, SERVER_LIFECYCLE_OPEN,
-    ShardRefreshBatch, ShardRetirementBatch, SignalState, TopicShard, shard_index,
+    DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
+    RefreshPlan, RefreshState, RtdUpdate, SERVER_LIFECYCLE_OPEN, ShardRefreshBatch, SignalState,
+    TopicShard, shard_index,
 };
 use super::host::SubscriptionHost;
 use super::runtime_services::RuntimeServices;
@@ -773,7 +773,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn complete_refresh_inner(
         &self,
         refresh_id: u64,
-        retirement_batches: &[ShardRetirementBatch],
+        delivered_updates: &[RtdUpdate],
         outcome: RefreshOutcome,
     ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
         {
@@ -796,17 +796,17 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         match outcome {
             RefreshOutcome::Delivered => {
-                for batch in retirement_batches {
-                    let mut shard = self.shards[batch.shard_index].lock();
-                    for entry in &batch.entries {
-                        self.retire_pending_through(
-                            &mut shard,
-                            batch.shard_index,
-                            entry.topic_id,
-                            entry.generation,
-                            entry.through_sequence,
-                        );
-                    }
+                for update in delivered_updates {
+                    let topic_id = TopicId(update.topic_id);
+                    let shard_index = shard_index(topic_id);
+                    let mut shard = self.shards[shard_index].lock();
+                    self.retire_pending_through(
+                        &mut shard,
+                        shard_index,
+                        topic_id,
+                        update.connection_generation,
+                        update.sequence,
+                    );
                 }
             }
             RefreshOutcome::Failed => {}
@@ -988,29 +988,20 @@ impl<H: SubscriptionHost> PublishCore<H> {
         if by_topic.is_empty() {
             return None;
         }
-        let mut updates = Vec::with_capacity(by_topic.len());
-        let mut retirement_entries = Vec::with_capacity(by_topic.len());
-        for (topic_id, (sequence, connection_generation, value)) in by_topic {
-            updates.push(RtdUpdate {
-                sequence,
-                topic_id: topic_id.0,
-                connection_generation,
-                value,
-            });
-            retirement_entries.push(RetirementEntry {
-                topic_id,
-                generation: connection_generation,
-                through_sequence: sequence,
-            });
-        }
-        retirement_entries.sort_unstable_by_key(|entry| (entry.through_sequence, entry.topic_id.0));
+        let updates = by_topic
+            .into_iter()
+            .map(
+                |(topic_id, (sequence, connection_generation, value))| RtdUpdate {
+                    sequence,
+                    topic_id: topic_id.0,
+                    connection_generation,
+                    value,
+                },
+            )
+            .collect();
         Some(ShardRefreshBatch {
             shard_index,
             updates,
-            retirement: ShardRetirementBatch {
-                shard_index,
-                entries: retirement_entries,
-            },
         })
     }
 
@@ -1028,7 +1019,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         batches
     }
 
-    fn collect_refresh(&self, plan: &RefreshPlan) -> ReducedRefresh {
+    fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
         reduce_refresh_batches(self.collect_refresh_batches(plan))
     }
 
@@ -1071,15 +1062,14 @@ pub(crate) struct PlannedRtdRefresh<'a, H: SubscriptionHost> {
 
 impl<'a, H: SubscriptionHost> PlannedRtdRefresh<'a, H> {
     pub(crate) fn collect(self) -> RtdRefreshBatch<'a, H> {
-        let reduced = self.publish.collect_refresh(&self.plan);
-        self.finish_collection(reduced)
+        let updates = self.publish.collect_refresh(&self.plan);
+        self.finish_collection(updates)
     }
 
-    pub(crate) fn finish_collection(self, reduced: ReducedRefresh) -> RtdRefreshBatch<'a, H> {
+    pub(crate) fn finish_collection(self, updates: Vec<RtdUpdate>) -> RtdRefreshBatch<'a, H> {
         RtdRefreshBatch {
             transaction: self,
-            updates: reduced.updates,
-            retirement: reduced.retirement,
+            updates,
         }
     }
 }
@@ -1097,14 +1087,13 @@ impl<H: SubscriptionHost> Drop for PlannedRtdRefresh<'_, H> {
 pub(crate) struct RtdRefreshBatch<'a, H: SubscriptionHost> {
     transaction: PlannedRtdRefresh<'a, H>,
     pub(crate) updates: Vec<RtdUpdate>,
-    retirement: Vec<ShardRetirementBatch>,
 }
 
 impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
     pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
         let attempt = self.transaction.publish.complete_refresh_inner(
             self.transaction.plan.refresh_id,
-            &self.retirement,
+            &self.updates,
             outcome,
         )?;
         self.transaction.finished = true;
@@ -1116,11 +1105,9 @@ impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
     }
 }
 
-pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> ReducedRefresh {
+pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
     let update_count = batches.iter().map(|batch| batch.updates.len()).sum();
-    let retirement_count = batches.len();
     let mut updates = Vec::with_capacity(update_count);
-    let mut retirement = Vec::with_capacity(retirement_count);
     for batch in batches {
         debug_assert!(
             batch
@@ -1129,14 +1116,7 @@ pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Reduced
                 .all(|update| { shard_index(TopicId(update.topic_id)) == batch.shard_index })
         );
         updates.extend(batch.updates);
-        debug_assert_eq!(batch.retirement.shard_index, batch.shard_index);
-        if !batch.retirement.entries.is_empty() {
-            retirement.push(batch.retirement);
-        }
     }
     updates.sort_unstable_by_key(|update| update.sequence);
-    ReducedRefresh {
-        updates,
-        retirement,
-    }
+    updates
 }

@@ -1,6 +1,6 @@
 use super::*;
 use rayon::prelude::*;
-use std::time::Instant;
+use std::{cell::Cell, time::Instant};
 
 use crate::subscription::TOPIC_SHARDS;
 
@@ -223,14 +223,23 @@ impl RtdPublishStringBenchmark {
 
     #[inline]
     pub fn run_stored_publish(&self, iterations: usize) {
-        let stored =
-            crate::subscription::RtdValue::String("stream_market_data_update_payload".to_owned())
+        let first =
+            crate::subscription::RtdValue::String("stream_market_data_update_payload_a".to_owned())
                 .into_stored()
                 .expect("stored string conversion must succeed");
-        for _ in 0..iterations {
+        let second =
+            crate::subscription::RtdValue::String("stream_market_data_update_payload_b".to_owned())
+                .into_stored()
+                .expect("stored string conversion must succeed");
+        for index in 0..iterations {
+            let stored = if index & 1 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
             self.sink
                 .sink
-                .publish_stored(stored.clone())
+                .publish_stored(stored)
                 .expect("stored publish must succeed");
         }
     }
@@ -341,6 +350,7 @@ pub struct RtdRefreshScalingBenchmark {
     parallel_pool: rayon::ThreadPool,
     expected_ready_shards: usize,
     expected_updates: usize,
+    publish_revision: Cell<u64>,
 }
 
 impl RtdRefreshScalingBenchmark {
@@ -395,6 +405,7 @@ impl RtdRefreshScalingBenchmark {
             parallel_pool,
             expected_ready_shards: case.ready_shards,
             expected_updates: case.updated_topics,
+            publish_revision: Cell::new(0),
         }
     }
 
@@ -567,12 +578,12 @@ impl RtdRefreshScalingBenchmark {
         let parallel =
             crate::subscription::reduce_refresh_batches(self.collect_parallel_batches(&planned));
         assert_eq!(
-            sequential.updates.len(),
+            sequential.len(),
             self.expected_updates,
             "benchmark shape must collect exactly the requested updates",
         );
-        assert_eq!(sequential.updates.len(), parallel.updates.len());
-        for (sequential, parallel) in sequential.updates.iter().zip(&parallel.updates) {
+        assert_eq!(sequential.len(), parallel.len());
+        for (sequential, parallel) in sequential.iter().zip(&parallel) {
             assert_eq!(sequential.sequence, parallel.sequence);
             assert_eq!(sequential.topic_id, parallel.topic_id);
             assert_eq!(
@@ -580,16 +591,6 @@ impl RtdRefreshScalingBenchmark {
                 parallel.connection_generation
             );
             assert_eq!(sequential.value, parallel.value);
-        }
-        assert_eq!(sequential.retirement.len(), parallel.retirement.len());
-        for (sequential, parallel) in sequential.retirement.iter().zip(&parallel.retirement) {
-            assert_eq!(sequential.shard_index, parallel.shard_index);
-            assert_eq!(sequential.entries.len(), parallel.entries.len());
-            for (sequential, parallel) in sequential.entries.iter().zip(&parallel.entries) {
-                assert_eq!(sequential.topic_id, parallel.topic_id);
-                assert_eq!(sequential.generation, parallel.generation);
-                assert_eq!(sequential.through_sequence, parallel.through_sequence);
-            }
         }
         drop(parallel);
         planned
@@ -612,18 +613,26 @@ impl RtdRefreshScalingBenchmark {
     }
 
     fn publish_updates(&self) {
+        let revision = self.publish_revision.get();
+        self.publish_revision.set(revision.wrapping_add(1));
         match &self.sinks {
             RtdRefreshSinks::Number(sinks) => {
+                let value = if revision & 1 == 0 { 12.5 } else { 13.5 };
                 for &index in &self.updated_indices {
                     sinks[index]
-                        .publish(12.5)
+                        .publish(value)
                         .expect("number publish must succeed");
                 }
             }
             RtdRefreshSinks::ShortString(sinks) => {
+                let value = if revision & 1 == 0 {
+                    "market-update-a"
+                } else {
+                    "market-update-b"
+                };
                 for &index in &self.updated_indices {
                     sinks[index]
-                        .publish("market-update".to_owned())
+                        .publish(value.to_owned())
                         .expect("string publish must succeed");
                 }
             }
