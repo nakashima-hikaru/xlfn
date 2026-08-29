@@ -67,8 +67,12 @@ pub(crate) use catalog::SubscriptionCatalog;
 pub(crate) use data_plane::{
     OwnedPublishOperation, PublishCore, RtdRefreshBatch, ScopedPublishOperation,
 };
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub(crate) use data_plane::{PlannedRtdRefresh, reduce_refresh_batches};
 #[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) use delivery::RtdUpdate;
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub(crate) use delivery::ShardRefreshBatch;
 #[cfg(test)]
 pub(crate) use delivery::{
     ActiveSubscription, DeliveryPhase, NotificationAttempt, NotificationCompletion,

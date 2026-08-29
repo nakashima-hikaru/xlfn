@@ -82,6 +82,18 @@ pub(crate) struct RtdUpdate {
     pub(crate) value: StoredRtdValue,
 }
 
+/// Immutable control snapshot for one refresh transaction.
+///
+/// The snapshot contract is independent of collection scheduling:
+///
+/// - planning and collection never remove a pending update;
+/// - shard collection accepts only updates whose generation is still active;
+/// - completion retires only the same generation through the delivered sequence;
+/// - a newer sequence therefore survives completion of an older snapshot; and
+/// - collection order is not delivery order: reduction restores global sequence order.
+///
+/// A publish racing after planning may appear in this refresh or remain indexed
+/// for the next one. Either outcome is valid; losing the update is not.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RefreshPlan {
     pub(crate) refresh_id: u64,

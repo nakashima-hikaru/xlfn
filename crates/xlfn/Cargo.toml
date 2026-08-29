@@ -24,7 +24,7 @@ handles = []
 unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
-bench-internals = ["handles", "xlfn-sys/abi-probe"]
+bench-internals = ["handles", "dep:rayon", "xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"
@@ -82,6 +82,11 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
+name = "rtd_parallel_collection"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
 name = "handle_call_resolution"
 harness = false
 required-features = ["bench-internals"]
@@ -101,6 +106,7 @@ futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
 moka = { workspace = true, optional = true }
 parking_lot.workspace = true
+rayon = { workspace = true, optional = true }
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true

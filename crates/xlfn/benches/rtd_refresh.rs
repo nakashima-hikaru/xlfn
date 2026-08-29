@@ -1,12 +1,12 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BENCHMARK_MEASUREMENT_TIME, RTD_REFRESH_SCALING_CASES, RtdRefreshScalingBenchmark,
-    RtdRefreshValueKind,
+    RTD_REFRESH_SCALING_CASES, RtdRefreshScalingBenchmark, RtdRefreshValueKind,
+    benchmark_measurement_time,
 };
 
 fn rtd_refresh_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("rtd_refresh");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     for (value_name, value_kind) in [
         ("number", RtdRefreshValueKind::Number),
@@ -39,6 +39,15 @@ fn rtd_refresh_benchmarks(c: &mut Criterion) {
                 |b, &case| {
                     let benchmark = RtdRefreshScalingBenchmark::new(case, value_kind);
                     b.iter_custom(|iterations| benchmark.measure_refresh_collection(iterations));
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("{value_name}/reduction"), case.name),
+                &case,
+                |b, &case| {
+                    let benchmark = RtdRefreshScalingBenchmark::new(case, value_kind);
+                    b.iter_custom(|iterations| benchmark.measure_refresh_reduction(iterations));
                 },
             );
 

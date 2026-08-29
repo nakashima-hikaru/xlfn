@@ -1,4 +1,5 @@
 use super::*;
+use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::subscription::TOPIC_SHARDS;
@@ -217,6 +218,47 @@ pub const RTD_REFRESH_SCALING_CASES: [RtdRefreshScalingCase; 3] = [
     },
 ];
 
+pub const RTD_PARALLEL_CROSSING_CASES: [RtdRefreshScalingCase; 25] = [
+    crossing_case("u0001_s01", 1, 1),
+    crossing_case("u0032_s01", 32, 1),
+    crossing_case("u0032_s02", 32, 2),
+    crossing_case("u0032_s04", 32, 4),
+    crossing_case("u0032_s08", 32, 8),
+    crossing_case("u0032_s16", 32, 16),
+    crossing_case("u0032_s32", 32, 32),
+    crossing_case("u0128_s01", 128, 1),
+    crossing_case("u0128_s02", 128, 2),
+    crossing_case("u0128_s04", 128, 4),
+    crossing_case("u0128_s08", 128, 8),
+    crossing_case("u0128_s16", 128, 16),
+    crossing_case("u0128_s32", 128, 32),
+    crossing_case("u1024_s01", 1_024, 1),
+    crossing_case("u1024_s02", 1_024, 2),
+    crossing_case("u1024_s04", 1_024, 4),
+    crossing_case("u1024_s08", 1_024, 8),
+    crossing_case("u1024_s16", 1_024, 16),
+    crossing_case("u1024_s32", 1_024, 32),
+    crossing_case("u4096_s01", 4_096, 1),
+    crossing_case("u4096_s02", 4_096, 2),
+    crossing_case("u4096_s04", 4_096, 4),
+    crossing_case("u4096_s08", 4_096, 8),
+    crossing_case("u4096_s16", 4_096, 16),
+    crossing_case("u4096_s32", 4_096, 32),
+];
+
+const fn crossing_case(
+    name: &'static str,
+    updated_topics: usize,
+    ready_shards: usize,
+) -> RtdRefreshScalingCase {
+    RtdRefreshScalingCase {
+        name,
+        active_topics: 4_096,
+        updated_topics,
+        ready_shards,
+    }
+}
+
 enum RtdRefreshSinks {
     Number(Vec<crate::subscription::RtdSink<f64>>),
     ShortString(Vec<crate::subscription::RtdSink<String>>),
@@ -227,14 +269,30 @@ pub struct RtdRefreshScalingBenchmark {
     server: crate::subscription::SubscriptionServerHandle,
     sinks: RtdRefreshSinks,
     updated_indices: Vec<usize>,
+    parallel_pool: rayon::ThreadPool,
+    expected_ready_shards: usize,
+    expected_updates: usize,
 }
 
 impl RtdRefreshScalingBenchmark {
     pub fn new(case: RtdRefreshScalingCase, value_kind: RtdRefreshValueKind) -> Self {
+        let parallel_threads = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .min(8);
+        Self::with_parallel_threads(case, value_kind, parallel_threads)
+    }
+
+    pub fn with_parallel_threads(
+        case: RtdRefreshScalingCase,
+        value_kind: RtdRefreshValueKind,
+        parallel_threads: usize,
+    ) -> Self {
         assert!(case.active_topics > 0);
         assert!(case.updated_topics > 0);
         assert!(case.updated_topics <= case.active_topics);
         assert!((1..=TOPIC_SHARDS).contains(&case.ready_shards));
+        assert!(parallel_threads > 0);
 
         let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
         let server = runtime
@@ -243,36 +301,36 @@ impl RtdRefreshScalingBenchmark {
                     .expect("non-zero benchmark server generation"),
             )
             .expect("server registration must succeed");
+        let topic_ids = topic_ids_for_case(case);
 
         let sinks = match value_kind {
-            RtdRefreshValueKind::Number => RtdRefreshSinks::Number(connect_number_topics(
-                &runtime,
-                &server,
-                case.active_topics,
-            )),
-            RtdRefreshValueKind::ShortString => RtdRefreshSinks::ShortString(
-                connect_string_topics(&runtime, &server, case.active_topics),
-            ),
+            RtdRefreshValueKind::Number => {
+                RtdRefreshSinks::Number(connect_number_topics(&runtime, &server, &topic_ids))
+            }
+            RtdRefreshValueKind::ShortString => {
+                RtdRefreshSinks::ShortString(connect_string_topics(&runtime, &server, &topic_ids))
+            }
         };
-        let updated_indices = (0..case.updated_topics)
-            .map(|ordinal| {
-                let shard = ordinal % case.ready_shards;
-                let row = ordinal / case.ready_shards;
-                let index = row * TOPIC_SHARDS + shard;
-                assert!(
-                    index < case.active_topics,
-                    "scaling case exceeds active topics"
-                );
-                index
-            })
-            .collect();
+        let updated_indices = (0..case.updated_topics).collect();
+        let parallel_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(parallel_threads)
+            .thread_name(|index| format!("xlfn-rtd-bench-{index}"))
+            .build()
+            .expect("benchmark Rayon pool must start");
 
         Self {
             _runtime: runtime,
             server,
             sinks,
             updated_indices,
+            parallel_pool,
+            expected_ready_shards: case.ready_shards,
+            expected_updates: case.updated_topics,
         }
+    }
+
+    pub fn parallel_threads(&self) -> usize {
+        self.parallel_pool.current_num_threads()
     }
 
     #[inline]
@@ -308,9 +366,69 @@ impl RtdRefreshScalingBenchmark {
                 .plan_refresh()
                 .expect("refresh planning must succeed");
             let started = Instant::now();
-            let batch = planned.collect();
+            let batches = planned.publish.collect_refresh_batches(&planned.plan);
             measured += started.elapsed();
-            drop(batch);
+            drop(batches);
+            drop(planned);
+        }
+        measured
+    }
+
+    pub fn measure_parallel_refresh_collection(&self, iterations: u64) -> Duration {
+        self.publish_updates();
+        let mut measured = Duration::ZERO;
+        for _ in 0..iterations {
+            let planned = self
+                .server
+                .inner
+                .publish
+                .plan_refresh()
+                .expect("refresh planning must succeed");
+            let started = Instant::now();
+            let batches = self.collect_parallel_batches(&planned);
+            measured += started.elapsed();
+            drop(batches);
+            drop(planned);
+        }
+        measured
+    }
+
+    pub fn measure_refresh_reduction(&self, iterations: u64) -> Duration {
+        self.publish_updates();
+        let mut measured = Duration::ZERO;
+        for _ in 0..iterations {
+            let planned = self
+                .server
+                .inner
+                .publish
+                .plan_refresh()
+                .expect("refresh planning must succeed");
+            let batches = planned.publish.collect_refresh_batches(&planned.plan);
+            let started = Instant::now();
+            let updates = crate::subscription::reduce_refresh_batches(batches);
+            measured += started.elapsed();
+            drop(updates);
+            drop(planned);
+        }
+        measured
+    }
+
+    pub fn measure_parallel_refresh_reduction(&self, iterations: u64) -> Duration {
+        self.publish_updates();
+        let mut measured = Duration::ZERO;
+        for _ in 0..iterations {
+            let planned = self
+                .server
+                .inner
+                .publish
+                .plan_refresh()
+                .expect("refresh planning must succeed");
+            let batches = self.collect_parallel_batches(&planned);
+            let started = Instant::now();
+            let updates = crate::subscription::reduce_refresh_batches(batches);
+            measured += started.elapsed();
+            drop(updates);
+            drop(planned);
         }
         measured
     }
@@ -344,6 +462,76 @@ impl RtdRefreshScalingBenchmark {
             .expect("refresh completion must succeed");
     }
 
+    #[inline]
+    pub fn run_parallel_end_to_end_cycle(&self) {
+        self.publish_updates();
+        let planned = self
+            .server
+            .inner
+            .publish
+            .plan_refresh()
+            .expect("refresh planning must succeed");
+        let batches = self.collect_parallel_batches(&planned);
+        let updates = crate::subscription::reduce_refresh_batches(batches);
+        let batch = planned.finish_collection(updates);
+        batch
+            .complete(crate::subscription::RefreshOutcome::Delivered)
+            .expect("parallel refresh completion must succeed");
+    }
+
+    pub fn assert_parallel_collection_equivalent(&self) {
+        self.publish_updates();
+        let planned = self
+            .server
+            .inner
+            .publish
+            .plan_refresh()
+            .expect("refresh planning must succeed");
+        assert_eq!(
+            planned.plan.candidate_shards.count_ones() as usize,
+            self.expected_ready_shards,
+            "benchmark shape must activate exactly the requested shards",
+        );
+        let sequential = crate::subscription::reduce_refresh_batches(
+            planned.publish.collect_refresh_batches(&planned.plan),
+        );
+        let parallel =
+            crate::subscription::reduce_refresh_batches(self.collect_parallel_batches(&planned));
+        assert_eq!(
+            sequential.len(),
+            self.expected_updates,
+            "benchmark shape must collect exactly the requested updates",
+        );
+        assert_eq!(sequential.len(), parallel.len());
+        for (sequential, parallel) in sequential.iter().zip(&parallel) {
+            assert_eq!(sequential.sequence, parallel.sequence);
+            assert_eq!(sequential.topic_id, parallel.topic_id);
+            assert_eq!(
+                sequential.connection_generation,
+                parallel.connection_generation
+            );
+            assert_eq!(sequential.value, parallel.value);
+        }
+        drop(parallel);
+        planned
+            .finish_collection(sequential)
+            .complete(crate::subscription::RefreshOutcome::Delivered)
+            .expect("equivalence snapshot completion must succeed");
+    }
+
+    fn collect_parallel_batches(
+        &self,
+        planned: &crate::subscription::PlannedRtdRefresh<'_, crate::excel_rtd::RtdSubscriptionHost>,
+    ) -> Vec<crate::subscription::ShardRefreshBatch> {
+        let shard_indices = candidate_shard_indices(planned.plan.candidate_shards);
+        self.parallel_pool.install(|| {
+            shard_indices
+                .into_par_iter()
+                .filter_map(|index| planned.publish.collect_shard(index))
+                .collect()
+        })
+    }
+
     fn publish_updates(&self) {
         match &self.sinks {
             RtdRefreshSinks::Number(sinks) => {
@@ -367,20 +555,26 @@ impl RtdRefreshScalingBenchmark {
 fn connect_number_topics(
     runtime: &Arc<crate::subscription::SubscriptionRuntime>,
     server: &crate::subscription::SubscriptionServerHandle,
-    active_topics: usize,
+    topic_ids: &[crate::subscription::TopicId],
 ) -> Vec<crate::subscription::RtdSink<f64>> {
-    (0..active_topics)
-        .map(|index| connect_topic::<f64>(runtime, server, index))
+    topic_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, topic_id)| connect_topic::<f64>(runtime, server, index, topic_id))
         .collect()
 }
 
 fn connect_string_topics(
     runtime: &Arc<crate::subscription::SubscriptionRuntime>,
     server: &crate::subscription::SubscriptionServerHandle,
-    active_topics: usize,
+    topic_ids: &[crate::subscription::TopicId],
 ) -> Vec<crate::subscription::RtdSink<String>> {
-    (0..active_topics)
-        .map(|index| connect_topic::<String>(runtime, server, index))
+    topic_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, topic_id)| connect_topic::<String>(runtime, server, index, topic_id))
         .collect()
 }
 
@@ -388,6 +582,7 @@ fn connect_topic<T>(
     runtime: &Arc<crate::subscription::SubscriptionRuntime>,
     server: &crate::subscription::SubscriptionServerHandle,
     index: usize,
+    topic_id: crate::subscription::TopicId,
 ) -> crate::subscription::RtdSink<T>
 where
     T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static,
@@ -406,11 +601,41 @@ where
         .prepare(&source, topic)
         .expect("prepare must succeed");
     let id = prepared.id();
-    let topic_id = i32::try_from(index + TOPIC_SHARDS).expect("benchmark topic id must fit i32");
     let connection = runtime
-        .connect_transaction(server, crate::subscription::TopicId(topic_id), id)
+        .connect_transaction(server, topic_id, id)
         .expect("connect_transaction must succeed");
     connection.commit().expect("connection commit must succeed");
     prepared.commit();
     sink_slot.lock().clone().expect("sink must be captured")
+}
+
+fn topic_ids_for_case(case: RtdRefreshScalingCase) -> Vec<crate::subscription::TopicId> {
+    let mut topic_ids = Vec::with_capacity(case.active_topics);
+    for ordinal in 0..case.updated_topics {
+        let shard = ordinal % case.ready_shards;
+        let row = ordinal / case.ready_shards;
+        let raw = TOPIC_SHARDS
+            .checked_add(row * TOPIC_SHARDS + shard)
+            .and_then(|raw| i32::try_from(raw).ok())
+            .expect("benchmark topic id must fit i32");
+        topic_ids.push(crate::subscription::TopicId(raw));
+    }
+    let next_raw = topic_ids.last().map_or(TOPIC_SHARDS * 2, |topic_id| {
+        topic_id.0 as usize + TOPIC_SHARDS
+    });
+    for offset in 0..(case.active_topics - case.updated_topics) {
+        let raw = i32::try_from(next_raw + offset).expect("benchmark topic id must fit i32");
+        topic_ids.push(crate::subscription::TopicId(raw));
+    }
+    topic_ids
+}
+
+fn candidate_shard_indices(mut candidate_shards: u32) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(candidate_shards.count_ones() as usize);
+    while candidate_shards != 0 {
+        let index = candidate_shards.trailing_zeros() as usize;
+        candidate_shards &= candidate_shards - 1;
+        indices.push(index);
+    }
+    indices
 }

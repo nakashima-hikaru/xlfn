@@ -943,7 +943,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
-    fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
+    pub(crate) fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
         let shard = self.shards[shard_index].lock();
         let mut by_topic: FxHashMap<TopicId, (u64, ConnectionGeneration, StoredRtdValue)> =
             FxHashMap::default();
@@ -998,7 +998,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
-    fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
+    pub(crate) fn collect_refresh_batches(&self, plan: &RefreshPlan) -> Vec<ShardRefreshBatch> {
         debug_assert_eq!(self.publish_epoch.load(Ordering::Acquire), plan.epoch);
         let mut candidate_shards = plan.candidate_shards;
         let mut batches = Vec::with_capacity(candidate_shards.count_ones() as usize);
@@ -1009,7 +1009,11 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 batches.push(batch);
             }
         }
-        reduce_refresh_batches(batches)
+        batches
+    }
+
+    fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
+        reduce_refresh_batches(self.collect_refresh_batches(plan))
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
@@ -1052,6 +1056,10 @@ pub(crate) struct PlannedRtdRefresh<'a, H: SubscriptionHost> {
 impl<'a, H: SubscriptionHost> PlannedRtdRefresh<'a, H> {
     pub(crate) fn collect(self) -> RtdRefreshBatch<'a, H> {
         let updates = self.publish.collect_refresh(&self.plan);
+        self.finish_collection(updates)
+    }
+
+    pub(crate) fn finish_collection(self, updates: Vec<RtdUpdate>) -> RtdRefreshBatch<'a, H> {
         RtdRefreshBatch {
             transaction: self,
             updates,
@@ -1090,7 +1098,7 @@ impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
     }
 }
 
-fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
+pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
     let update_count = batches.iter().map(|batch| batch.updates.len()).sum();
     let mut updates = Vec::with_capacity(update_count);
     for batch in batches {

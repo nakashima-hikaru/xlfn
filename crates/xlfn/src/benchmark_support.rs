@@ -23,6 +23,17 @@ use std::time::Duration;
 /// Shared Criterion measurement policy for all production-path benchmarks.
 pub const BENCHMARK_MEASUREMENT_TIME: Duration = Duration::from_secs(10);
 
+/// Returns the standard measurement time, with an opt-in override for local
+/// crossing-point exploration. CI and normal runs keep the ten-second policy.
+pub fn benchmark_measurement_time() -> Duration {
+    std::env::var("XLFN_BENCH_MEASUREMENT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&milliseconds| milliseconds != 0)
+        .map(Duration::from_millis)
+        .unwrap_or(BENCHMARK_MEASUREMENT_TIME)
+}
+
 use crate::handle::{
     ExcelHandleObject, FormulaCaller, FormulaHandleService, FormulaRevisionKey, HandleTopicKey,
     resolve_formula_caller,
@@ -57,8 +68,9 @@ pub use lookup::{
 };
 #[cfg(feature = "rtd")]
 pub use rtd::{
-    RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,
-    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
+    RTD_PARALLEL_CROSSING_CASES, RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark,
+    RtdPublishStringBenchmark, RtdRefreshScalingBenchmark, RtdRefreshScalingCase,
+    RtdRefreshValueKind,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 
