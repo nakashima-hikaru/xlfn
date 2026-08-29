@@ -93,6 +93,22 @@ impl RtdPublishNumberBenchmark {
     }
 
     #[inline]
+    pub fn run_repeated_same(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink.publish(12.5).expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_changing(&self, iterations: usize) {
+        for i in 0..iterations {
+            self.sink
+                .publish(12.5 + i as f64)
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
     pub fn run_drain_each(&self, iterations: usize) {
         for i in 0..iterations {
             self.sink
@@ -163,6 +179,59 @@ impl RtdPublishStringBenchmark {
             self.sink
                 .publish("stream_market_data_update_payload".to_owned())
                 .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_repeated_same(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish("stream_market_data_update_payload".to_owned())
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_changing(&self, iterations: usize) {
+        for i in 0..iterations {
+            self.sink
+                .publish(format!("stream_market_data_update_payload_{i}"))
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_string_allocated_publish(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish("stream_market_data_update_payload".to_owned())
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_string_conversion(&self, iterations: usize) {
+        for _ in 0..iterations {
+            let stored = crate::subscription::RtdValue::String(
+                "stream_market_data_update_payload".to_owned(),
+            )
+            .into_stored()
+            .expect("string conversion must succeed");
+            std::hint::black_box(stored);
+        }
+    }
+
+    #[inline]
+    pub fn run_stored_publish(&self, iterations: usize) {
+        let stored =
+            crate::subscription::RtdValue::String("stream_market_data_update_payload".to_owned())
+                .into_stored()
+                .expect("stored string conversion must succeed");
+        for _ in 0..iterations {
+            self.sink
+                .sink
+                .publish_stored(stored.clone())
+                .expect("stored publish must succeed");
         }
     }
 
@@ -405,9 +474,9 @@ impl RtdRefreshScalingBenchmark {
                 .expect("refresh planning must succeed");
             let batches = planned.publish.collect_refresh_batches(&planned.plan);
             let started = Instant::now();
-            let updates = crate::subscription::reduce_refresh_batches(batches);
+            let reduced = crate::subscription::reduce_refresh_batches(batches);
             measured += started.elapsed();
-            drop(updates);
+            drop(reduced);
             drop(planned);
         }
         measured
@@ -425,9 +494,9 @@ impl RtdRefreshScalingBenchmark {
                 .expect("refresh planning must succeed");
             let batches = self.collect_parallel_batches(&planned);
             let started = Instant::now();
-            let updates = crate::subscription::reduce_refresh_batches(batches);
+            let reduced = crate::subscription::reduce_refresh_batches(batches);
             measured += started.elapsed();
-            drop(updates);
+            drop(reduced);
             drop(planned);
         }
         measured
@@ -472,8 +541,8 @@ impl RtdRefreshScalingBenchmark {
             .plan_refresh()
             .expect("refresh planning must succeed");
         let batches = self.collect_parallel_batches(&planned);
-        let updates = crate::subscription::reduce_refresh_batches(batches);
-        let batch = planned.finish_collection(updates);
+        let reduced = crate::subscription::reduce_refresh_batches(batches);
+        let batch = planned.finish_collection(reduced);
         batch
             .complete(crate::subscription::RefreshOutcome::Delivered)
             .expect("parallel refresh completion must succeed");
@@ -498,12 +567,12 @@ impl RtdRefreshScalingBenchmark {
         let parallel =
             crate::subscription::reduce_refresh_batches(self.collect_parallel_batches(&planned));
         assert_eq!(
-            sequential.len(),
+            sequential.updates.len(),
             self.expected_updates,
             "benchmark shape must collect exactly the requested updates",
         );
-        assert_eq!(sequential.len(), parallel.len());
-        for (sequential, parallel) in sequential.iter().zip(&parallel) {
+        assert_eq!(sequential.updates.len(), parallel.updates.len());
+        for (sequential, parallel) in sequential.updates.iter().zip(&parallel.updates) {
             assert_eq!(sequential.sequence, parallel.sequence);
             assert_eq!(sequential.topic_id, parallel.topic_id);
             assert_eq!(
@@ -511,6 +580,16 @@ impl RtdRefreshScalingBenchmark {
                 parallel.connection_generation
             );
             assert_eq!(sequential.value, parallel.value);
+        }
+        assert_eq!(sequential.retirement.len(), parallel.retirement.len());
+        for (sequential, parallel) in sequential.retirement.iter().zip(&parallel.retirement) {
+            assert_eq!(sequential.shard_index, parallel.shard_index);
+            assert_eq!(sequential.entries.len(), parallel.entries.len());
+            for (sequential, parallel) in sequential.entries.iter().zip(&parallel.entries) {
+                assert_eq!(sequential.topic_id, parallel.topic_id);
+                assert_eq!(sequential.generation, parallel.generation);
+                assert_eq!(sequential.through_sequence, parallel.through_sequence);
+            }
         }
         drop(parallel);
         planned

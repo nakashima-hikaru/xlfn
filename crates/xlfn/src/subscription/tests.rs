@@ -84,6 +84,33 @@ pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>
     (source, slot, disconnected)
 }
 
+fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+    initial: Option<T>,
+    topic: &str,
+) -> (
+    Arc<SubscriptionRuntime>,
+    SubscriptionServerHandle,
+    RtdSink<T>,
+) {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink_slot, _) = publishing_source(initial);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single(topic).unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink_slot.lock().clone().expect("source must capture sink");
+    (runtime, server, sink)
+}
+
 #[test]
 fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
     assert_eq!(RtdCapacity::from_usize(0), RtdCapacity::Disabled);
@@ -520,6 +547,167 @@ fn deliverable_pending_accounting_tracks_connection_lifecycle() {
     runtime.disconnect(&server, TopicId(1)).unwrap();
     assert_eq!(server.inner.publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn first_empty_publish_is_deliverable() {
+    let (_runtime, server, sink) = connected_sink::<()>(None, "first-empty-publish");
+
+    sink.publish(()).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Empty);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+}
+
+#[test]
+fn repeated_empty_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<()>(None, "repeated-empty-publish");
+
+    sink.publish(()).unwrap();
+    sink.publish(()).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn repeated_number_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "repeated-number-publish");
+
+    sink.publish(12.5).unwrap();
+    sink.publish(12.5).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(12.5));
+    assert_eq!(batch.updates[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn repeated_string_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<String>(None, "repeated-string-publish");
+
+    sink.publish("same-value".to_owned()).unwrap();
+    sink.publish("same-value".to_owned()).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(
+        batch.updates[0].value,
+        StoredRtdValue::String(Arc::from("same-value")),
+    );
+    assert_eq!(batch.updates[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn changed_value_after_same_value_is_delivered() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "changed-after-same");
+
+    sink.publish(10.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates.len(), 1);
+    first.complete(RefreshOutcome::Delivered).unwrap();
+
+    sink.publish(10.0).unwrap();
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    sink.publish(11.0).unwrap();
+
+    let changed = server.begin_refresh().unwrap();
+    assert_eq!(changed.updates.len(), 1);
+    assert_eq!(changed.updates[0].value, StoredRtdValue::Number(11.0));
+    changed.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn same_value_while_pending_does_not_allocate_new_sequence() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "same-while-pending");
+
+    sink.publish(7.0).unwrap();
+    sink.publish(7.0).unwrap();
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn same_value_after_successful_refresh_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "same-after-refresh");
+
+    sink.publish(21.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Delivered).unwrap();
+
+    sink.publish(21.0).unwrap();
+
+    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates.is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn reconnect_does_not_inherit_previous_generation_latest() {
+    let runtime = Arc::new(SubscriptionRuntime::new());
+    let server_a = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let (source, sink_slot, _) = publishing_source(Some(100.0_f64));
+
+    let prepared_a = runtime
+        .prepare(&source, RtdTopic::single("generation-latest").unwrap())
+        .unwrap();
+    let id_a = prepared_a.id();
+    prepared_a.commit();
+    let connection_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    assert_eq!(connection_a.value(), &StoredRtdValue::Number(100.0));
+    connection_a.commit().unwrap();
+
+    server_a.terminate().unwrap();
+
+    let server_b = runtime
+        .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
+        .unwrap();
+    let prepared_b = runtime
+        .prepare(&source, RtdTopic::single("generation-latest").unwrap())
+        .unwrap();
+    let id_b = prepared_b.id();
+    prepared_b.commit();
+    runtime
+        .claim_server(server_b.inner.generation, id_b)
+        .unwrap();
+    let connection_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    assert_eq!(connection_b.value(), &StoredRtdValue::Number(100.0));
+    connection_b.commit().unwrap();
+
+    assert_eq!(server_b.inner.publish.queued_update_count(), 0);
+    let sink = sink_slot.lock().clone().expect("reconnected source sink");
+    sink.publish(100.0).unwrap();
+    assert_eq!(server_b.inner.publish.queued_update_count(), 0);
+    let second = server_b.begin_refresh().unwrap();
+    assert!(second.updates.is_empty());
+    second.complete(RefreshOutcome::Delivered).unwrap();
 }
 
 #[test]

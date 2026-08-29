@@ -29,7 +29,11 @@ impl RtdValue {
                 code: crate::error::DomainErrorCode::InvalidInput,
             }),
             Self::String(value) => {
-                crate::utf16::encode_bounded(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT)?;
+                crate::utf16::checked_utf16_len(
+                    value,
+                    "RTD value",
+                    crate::utf16::EXCEL_STRING_LIMIT,
+                )?;
                 Ok(())
             }
             _ => Ok(()),

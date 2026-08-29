@@ -29,6 +29,24 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("number", "repeated_same"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishNumberBenchmark::new();
+            b.iter(|| bench.run_repeated_same(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("number", "changing"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishNumberBenchmark::new();
+            b.iter(|| bench.run_changing(iterations));
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("string", "coalesced"),
         &ITERATIONS,
         |b, &iterations| {
@@ -43,6 +61,51 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
         |b, &iterations| {
             let bench = RtdPublishStringBenchmark::new();
             b.iter(|| bench.run_drain_each(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "repeated_same"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_repeated_same(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "changing"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_changing(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "caller_publish"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_string_allocated_publish(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "conversion"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_string_conversion(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "stored_publish"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_stored_publish(iterations));
         },
     );
 
