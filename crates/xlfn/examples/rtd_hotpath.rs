@@ -5,9 +5,8 @@
 //! benchmark implementation.
 
 use xlfn::benchmark_support::{
-    RTD_REFRESH_SCALING_CASES, RTD_STRING_REPRESENTATION_LENGTHS, RtdPublishStringBenchmark,
-    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
-    RtdStringRepresentation, RtdStringRepresentationBenchmark,
+    RTD_REFRESH_SCALING_CASES, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
+    RtdRefreshScalingCase, RtdRefreshValueKind,
 };
 
 const REFRESH_ITERATIONS: usize = 32;
@@ -31,22 +30,11 @@ fn main() {
         Some("string-same") => profile_string_repeated_same(multiplier),
         Some("string-changing") => profile_string_changing(multiplier),
         Some("string-stored") => profile_string_stored(multiplier),
-        Some("stored-clone-only") => profile_stored_clone_only(multiplier),
         Some("string-conversion") => profile_string_conversion(multiplier),
-        Some("string-repr-arc-str") => {
-            profile_string_representation(RtdStringRepresentation::StdArcStr, multiplier)
-        }
-        Some("string-repr-arc-string") => {
-            profile_string_representation(RtdStringRepresentation::StdArcString, multiplier)
-        }
-        Some("string-repr-triomphe-string") => {
-            profile_string_representation(RtdStringRepresentation::TriompheArcString, multiplier)
-        }
         _ => panic!(
             "unknown RTD profiling scenario; expected one of: \
              number-dense, string-dense, number-sparse, string-sparse, string-same, \
-             string-changing, string-stored, stored-clone-only, string-conversion, string-repr-arc-str, \
-             string-repr-arc-string, string-repr-triomphe-string"
+             string-changing, string-stored, string-conversion"
         ),
     }
 }
@@ -114,24 +102,9 @@ fn profile_string_stored(multiplier: usize) {
 }
 
 #[inline(never)]
-fn profile_stored_clone_only(multiplier: usize) {
-    let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_stored_clone_only(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
-}
-
-#[inline(never)]
 fn profile_string_conversion(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
     benchmark.run_string_conversion(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
-}
-
-#[inline(never)]
-fn profile_string_representation(representation: RtdStringRepresentation, multiplier: usize) {
-    let iterations = scaled_iterations(PUBLISH_ITERATIONS, multiplier);
-    for &length in &RTD_STRING_REPRESENTATION_LENGTHS {
-        let benchmark = RtdStringRepresentationBenchmark::new(length);
-        benchmark.run(representation, iterations);
-    }
 }
 
 fn refresh_case(name: &'static str) -> RtdRefreshScalingCase {

@@ -5,7 +5,6 @@ members = [
     "crates/xlfn-sys",
     "crates/xlfn-macros",
     "crates/xlfn-package",
-    "crates/xlfn-hotpath-cpu",
     "crates/cargo-xlfn",
     "tools/windows-bindings",
     "crates/xlfn",
@@ -51,7 +50,6 @@ fs-err = "3.3.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 hotpath = { version = "0.24", default-features = false }
-xlfn-hotpath-cpu = { version = "=0.2.0", path = "crates/xlfn-hotpath-cpu" }
 inventory = "0.3.24"
 libc = "0.2.189"
 loom = "0.7.2"
@@ -62,7 +60,6 @@ proc-macro-crate = "3.5.0"
 proc-macro2 = "1.0.107"
 proptest = "1.11.0"
 quote = "1.0.47"
-rayon = "1.11.0"
 rustc-hash = "2.1.3"
 scopeguard = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }

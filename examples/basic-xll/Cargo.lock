@@ -122,22 +122,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
-name = "hotpath"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2645642a23d4061ec15a4a6e74f851a3145c3125356846cfc7772ff9c6f2737"
-dependencies = [
- "hotpath-macros",
- "parking_lot",
-]
-
-[[package]]
-name = "hotpath-macros"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89a3d3cdf9b0d4d3d4f6d4a29798f3b9170401ba500eaa58dd8f890f926af0f1"
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -459,7 +443,6 @@ dependencies = [
  "constant_time_eq 0.5.0",
  "crossbeam-utils",
  "getrandom",
- "hotpath",
  "inventory",
  "parking_lot",
  "rustc-hash",

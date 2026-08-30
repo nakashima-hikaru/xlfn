@@ -23,7 +23,6 @@ pub(crate) enum StoredRtdValue {
 }
 
 impl RtdValue {
-    #[hotpath::measure(impl_type = "RtdValue")]
     pub(crate) fn validate(&self) -> XllResult<()> {
         match self {
             Self::Number(value) if !value.is_finite() => Err(XllError::Domain {
@@ -41,7 +40,6 @@ impl RtdValue {
         }
     }
 
-    #[hotpath::measure(impl_type = "RtdValue")]
     pub(crate) fn into_stored(self) -> XllResult<StoredRtdValue> {
         self.validate()?;
         Ok(match self {

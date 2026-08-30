@@ -97,7 +97,6 @@ semver:
     cargo semver-checks \
         --workspace \
         --exclude xlfn-kernel \
-        --exclude xlfn-hotpath-cpu \
         --baseline-rev 0.1.0 \
         --release-type major
 
@@ -123,6 +122,7 @@ bench-full:
     just bench-one formula_caller
     just bench-one argument_ingress
     just bench-one rtd_publish "bench-internals rtd"
+    just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution
 
 # Representative PR suite. Scaling curves remain available through
@@ -137,6 +137,7 @@ bench-pr:
     just bench-one formula_caller
     just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/with_identity|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
     just bench-one rtd_publish "bench-internals rtd"
+    just bench-one-filter rtd_refresh "^rtd_refresh/(short_string/end_to_end/(sparse|medium|dense)|number/end_to_end/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^(handle_call_resolution/handles/(1|8)|handle_runtime_resolution/concurrent/(1|32))\z"
 
 # Diagnostic microbenchmarks are useful for diagnosis, but are not part of

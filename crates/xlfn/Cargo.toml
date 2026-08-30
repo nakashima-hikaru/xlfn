@@ -24,12 +24,9 @@ handles = []
 unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
-bench-internals = ["handles", "dep:rayon", "xlfn-sys/abi-probe"]
-hotpath = ["hotpath/hotpath"]
+bench-internals = ["handles", "xlfn-sys/abi-probe"]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
-# The backend bridge is a Unix-only dependency, so Windows all-features does
-# not enable hotpath's unsupported CPU backend.
-hotpath-cpu = ["hotpath", "dep:xlfn-hotpath-cpu"]
 
 [[bench]]
 name = "async_spawn"
@@ -82,17 +79,7 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
-name = "rtd_string_representation"
-harness = false
-required-features = ["bench-internals", "rtd"]
-
-[[bench]]
 name = "rtd_refresh"
-harness = false
-required-features = ["bench-internals", "rtd"]
-
-[[bench]]
-name = "rtd_parallel_collection"
 harness = false
 required-features = ["bench-internals", "rtd"]
 
@@ -118,10 +105,9 @@ crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
-hotpath = { workspace = true, features = ["parking_lot"] }
+hotpath = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 parking_lot.workspace = true
-rayon = { workspace = true, optional = true }
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -135,9 +121,6 @@ xlfn-kernel.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
-
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-xlfn-hotpath-cpu = { workspace = true, optional = true }
 
 [lints]
 workspace = true

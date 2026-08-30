@@ -11,20 +11,11 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
     group.throughput(Throughput::Elements(ITERATIONS as u64));
 
     group.bench_with_input(
-        BenchmarkId::new("number", "coalesced"),
+        BenchmarkId::new("number", "changing"),
         &ITERATIONS,
         |b, &iterations| {
             let bench = RtdPublishNumberBenchmark::new();
-            b.iter(|| bench.run_coalesced(iterations));
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("number", "drain_each"),
-        &ITERATIONS,
-        |b, &iterations| {
-            let bench = RtdPublishNumberBenchmark::new();
-            b.iter(|| bench.run_drain_each(iterations));
+            b.iter(|| bench.run_changing(iterations));
         },
     );
 
@@ -38,38 +29,11 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
     );
 
     group.bench_with_input(
-        BenchmarkId::new("number", "changing"),
+        BenchmarkId::new("number", "drain_each"),
         &ITERATIONS,
         |b, &iterations| {
             let bench = RtdPublishNumberBenchmark::new();
-            b.iter(|| bench.run_changing(iterations));
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("string", "coalesced"),
-        &ITERATIONS,
-        |b, &iterations| {
-            let bench = RtdPublishStringBenchmark::new();
-            b.iter(|| bench.run_coalesced(iterations));
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("string", "drain_each"),
-        &ITERATIONS,
-        |b, &iterations| {
-            let bench = RtdPublishStringBenchmark::new();
             b.iter(|| bench.run_drain_each(iterations));
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("string", "repeated_same"),
-        &ITERATIONS,
-        |b, &iterations| {
-            let bench = RtdPublishStringBenchmark::new();
-            b.iter(|| bench.run_repeated_same(iterations));
         },
     );
 
@@ -83,11 +47,20 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
     );
 
     group.bench_with_input(
-        BenchmarkId::new("string", "caller_publish"),
+        BenchmarkId::new("string", "repeated_same"),
         &ITERATIONS,
         |b, &iterations| {
             let bench = RtdPublishStringBenchmark::new();
-            b.iter(|| bench.run_string_allocated_publish(iterations));
+            b.iter(|| bench.run_repeated_same(iterations));
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("string", "drain_each"),
+        &ITERATIONS,
+        |b, &iterations| {
+            let bench = RtdPublishStringBenchmark::new();
+            b.iter(|| bench.run_drain_each(iterations));
         },
     );
 

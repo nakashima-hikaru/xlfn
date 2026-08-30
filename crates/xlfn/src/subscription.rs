@@ -67,12 +67,12 @@ use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
 #[cfg(test)]
 pub(crate) use catalog::SubscriptionCatalog;
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub(crate) use data_plane::reduce_refresh_batches;
 #[cfg(test)]
 pub(crate) use data_plane::{
     OwnedPublishOperation, PublishCore, RtdRefreshBatch, ScopedPublishOperation,
 };
-#[cfg(all(feature = "bench-internals", feature = "rtd"))]
-pub(crate) use data_plane::{PlannedRtdRefresh, reduce_refresh_batches};
 #[cfg(any(
     test,
     all(feature = "bench-internals", feature = "rtd"),
@@ -81,8 +81,6 @@ pub(crate) use data_plane::{PlannedRtdRefresh, reduce_refresh_batches};
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
 pub(crate) use delivery::RtdUpdate;
-#[cfg(all(feature = "bench-internals", feature = "rtd"))]
-pub(crate) use delivery::ShardRefreshBatch;
 #[cfg(test)]
 pub(crate) use delivery::{
     ActiveSubscription, DeliveryPhase, NotificationAttempt, NotificationCompletion,

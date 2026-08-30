@@ -68,10 +68,8 @@ pub use lookup::{
 };
 #[cfg(feature = "rtd")]
 pub use rtd::{
-    RTD_PARALLEL_CROSSING_CASES, RTD_REFRESH_SCALING_CASES, RTD_STRING_REPRESENTATION_LENGTHS,
-    RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
-    RtdRefreshScalingCase, RtdRefreshValueKind, RtdStringRepresentation,
-    RtdStringRepresentationBenchmark,
+    RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,
+    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 
