@@ -23,5 +23,8 @@ xlfn-common.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

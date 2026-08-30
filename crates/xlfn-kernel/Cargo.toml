@@ -14,5 +14,8 @@ crossbeam-utils.workspace = true
 parking_lot.workspace = true
 triomphe.workspace = true
 
+[dev-dependencies]
+static_assertions.workspace = true
+
 [lints]
 workspace = true

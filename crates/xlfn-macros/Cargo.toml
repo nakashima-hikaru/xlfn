@@ -19,5 +19,8 @@ quote.workspace = true
 syn.workspace = true
 xlfn-common.workspace = true
 
+[dev-dependencies]
+trybuild.workspace = true
+
 [lints]
 workspace = true
