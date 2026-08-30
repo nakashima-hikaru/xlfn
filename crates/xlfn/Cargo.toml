@@ -139,18 +139,5 @@ windows-link.workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 xlfn-hotpath-cpu = { workspace = true, optional = true }
 
-[dev-dependencies]
-criterion.workspace = true
-futures-util.workspace = true
-proptest.workspace = true
-static_assertions.workspace = true
-tempfile.workspace = true
-trybuild.workspace = true
-xlfn-sys = { workspace = true, features = ["abi-probe"] }
-
-[target.'cfg(not(all(target_os = "windows", target_arch = "x86")))'.dev-dependencies]
-loom.workspace = true
-shuttle.workspace = true
-
 [lints]
 workspace = true

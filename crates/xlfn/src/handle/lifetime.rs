@@ -26,7 +26,7 @@ impl FormulaLifetimeGeneration {
     }
 }
 
-#[cfg(any(target_os = "windows", test, feature = "refinement"))]
+#[cfg(any(test, feature = "refinement"))]
 impl FormulaLifetimeGeneration {
     pub(crate) const fn get(self) -> u64 {
         self.0.get()

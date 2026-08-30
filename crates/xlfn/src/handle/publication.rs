@@ -146,16 +146,19 @@ pub(super) struct ProvisionalPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     generation: TopicGeneration,
-    reservation: TopicReservation<'runtime>,
+    // Drop order is a synchronization invariant: withdraw the provisional
+    // publication before releasing the single-flight reservation and waking
+    // waiters.
     provisional: ProvisionalPublication<'runtime>,
+    reservation: TopicReservation<'runtime>,
 }
 
 pub(super) struct ObservedPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     generation: TopicGeneration,
-    reservation: TopicReservation<'runtime>,
     provisional: ProvisionalPublication<'runtime>,
+    reservation: TopicReservation<'runtime>,
 }
 
 impl<'runtime> PublicationReservation<'runtime> {
@@ -204,8 +207,8 @@ impl<'runtime> PublicationReservation<'runtime> {
                 runtime,
                 key,
                 generation,
-                reservation,
                 provisional,
+                reservation,
             },
             token,
             binding_id,
@@ -245,31 +248,29 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
             runtime,
             key,
             generation,
-            reservation,
             provisional,
+            reservation,
         } = self;
         Ok(ObservedPublicationTxn {
             runtime,
             key,
             generation,
-            reservation,
             provisional,
+            reservation,
         })
     }
 }
 
 impl ObservedPublicationTxn<'_> {
     pub(super) fn commit(self, publication: &triomphe::Arc<PublishedTopic>) -> XllResult<()> {
-        let Self {
-            runtime,
-            key,
-            generation,
-            reservation,
-            provisional,
-        } = self;
-        runtime.commit_publication(key, generation, &reservation.initialization, publication)?;
-        provisional.commit();
-        reservation.commit();
+        self.runtime.commit_publication(
+            self.key,
+            self.generation,
+            &self.reservation.initialization,
+            publication,
+        )?;
+        self.provisional.commit();
+        self.reservation.commit();
         Ok(())
     }
 }

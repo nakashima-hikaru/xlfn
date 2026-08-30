@@ -80,15 +80,9 @@ pub(crate) use formula::formula_revision_key;
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(test)]
 pub(crate) use formula::test_topic_key;
-#[cfg(any(
-    feature = "handles",
-    all(target_os = "windows", feature = "rtd"),
-))]
+#[cfg(any(feature = "handles", all(target_os = "windows", feature = "rtd"),))]
 pub(crate) use lifetime::FormulaLifetimeBackend;
-#[cfg(all(
-    target_os = "windows",
-    any(feature = "rtd", feature = "handles"),
-))]
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
 pub(crate) use lifetime::FormulaLifetimeConnection;
 pub(crate) use lifetime::FormulaLifetimeGeneration;
 pub(crate) use object::SharedObject;

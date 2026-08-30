@@ -91,6 +91,9 @@ use registration::{
     RTD_REGISTRATION_OWNER, RTD_REGISTRATION_SCHEMA, guid_braced, guid_compact,
     read_registry_string, scavenge_owned_registrations, set_registry_value, wide_nul,
 };
+pub(super) use server::shutdown;
+#[cfg(feature = "rtd")]
+pub(super) use server::shutdown_subscriptions;
 use server::{
     ACTIVE_SERVER, ActiveServer, IID_IRTD_UPDATE_EVENT, RtdServer, connect_data, disconnect_data,
     heartbeat, refresh_data, server_add_ref, server_query_interface, server_release, server_start,
@@ -104,9 +107,6 @@ use server::{
     discard_unpublished_server, ensure_server, ensure_server_without_handles,
     synchronize_callback_notification,
 };
-pub(super) use server::shutdown;
-#[cfg(feature = "rtd")]
-pub(super) use server::shutdown_subscriptions;
 #[cfg(test)]
 use server_gate::{
     ServerCloseError, ServerNotificationOperation, ServerOperation, ServerOperationBarrier,

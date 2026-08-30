@@ -73,10 +73,13 @@ pub(crate) use data_plane::{
 };
 #[cfg(all(feature = "bench-internals", feature = "rtd"))]
 pub(crate) use data_plane::{PlannedRtdRefresh, reduce_refresh_batches};
-#[cfg(all(
-    target_os = "windows",
-    any(feature = "rtd", feature = "handles"),
+#[cfg(any(
+    test,
+    all(feature = "bench-internals", feature = "rtd"),
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
 ))]
+pub(crate) use delivery::RefreshOutcome;
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
 pub(crate) use delivery::RtdUpdate;
 #[cfg(all(feature = "bench-internals", feature = "rtd"))]
 pub(crate) use delivery::ShardRefreshBatch;
@@ -86,12 +89,9 @@ pub(crate) use delivery::{
     PreparedNotification, QueuedUpdate, RefreshState, SERVER_LIFECYCLE_CLOSING,
     SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
 };
-#[cfg(any(
-    test,
-    all(feature = "bench-internals", feature = "rtd"),
-    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
-))]
-pub(crate) use delivery::{RefreshOutcome, TOPIC_SHARDS};
+
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+pub(crate) use delivery::TOPIC_SHARDS;
 pub(crate) use host::SubscriptionHost;
 #[cfg(test)]
 pub(crate) use identity::{NEXT_RTD_RUNTIME_ID, SubscriptionIdentityIndex, allocate_runtime_id};

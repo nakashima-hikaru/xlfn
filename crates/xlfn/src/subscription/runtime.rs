@@ -665,6 +665,7 @@ pub(crate) struct PreparedSubscription<H: SubscriptionHost> {
 }
 
 impl<H: SubscriptionHost> PreparedSubscription<H> {
+    #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
     #[inline]
     pub(crate) fn id(&self) -> SubscriptionId {
         self.id
