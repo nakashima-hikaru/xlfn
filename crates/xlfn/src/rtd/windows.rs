@@ -80,6 +80,7 @@ use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
 #[cfg(feature = "handles")]
 pub(super) use excel_rtd::observe;
+#[cfg(feature = "rtd")]
 pub(super) use excel_rtd::observe_subscription;
 pub(crate) use module_state::ComModuleLifetime;
 #[cfg(test)]
@@ -103,7 +104,9 @@ use server::{
     discard_unpublished_server, ensure_server, ensure_server_without_handles,
     synchronize_callback_notification,
 };
-pub(super) use server::{shutdown, shutdown_subscriptions};
+pub(super) use server::shutdown;
+#[cfg(feature = "rtd")]
+pub(super) use server::shutdown_subscriptions;
 #[cfg(test)]
 use server_gate::{
     ServerCloseError, ServerNotificationOperation, ServerOperation, ServerOperationBarrier,

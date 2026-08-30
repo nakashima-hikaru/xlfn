@@ -167,7 +167,10 @@ impl<'call> ExcelHost<'call> {
         )
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(
+        target_os = "windows",
+        any(feature = "rtd", feature = "handles"),
+    ))]
     pub(crate) fn module_path(&self) -> XllResult<String> {
         self.invoke(
             xlfn_sys::XL_GET_NAME,

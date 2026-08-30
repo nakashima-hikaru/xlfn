@@ -165,11 +165,11 @@ impl Drop for RtdOperationGuard {
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 #[cfg(feature = "handles")]
 pub(crate) fn begin_operation<H: FormulaLifetimeBackend + ?Sized>(
-    handles: &H,
+    _handles: &H,
     ingress: &'static ExportIngress,
 ) -> XllResult<RtdOperationGuard> {
     #[cfg(any(test, feature = "refinement"))]
-    let trace = handles.lifetime_trace();
+    let trace = _handles.lifetime_trace();
     let ingress_guard = match ingress
         .enter_with(|| {
             #[cfg(any(test, feature = "refinement"))]

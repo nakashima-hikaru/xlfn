@@ -53,7 +53,11 @@ pub use value::RtdValue;
 #[cfg(not(feature = "rtd"))]
 pub(crate) use value::RtdValue;
 
-#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+#[cfg(any(
+    test,
+    all(feature = "bench-internals", feature = "rtd"),
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+))]
 pub(crate) use crate::generation::ServerGeneration;
 #[cfg(test)]
 pub(crate) use crate::generation::{ConnectionGeneration, RuntimeGeneration};
@@ -69,7 +73,10 @@ pub(crate) use data_plane::{
 };
 #[cfg(all(feature = "bench-internals", feature = "rtd"))]
 pub(crate) use data_plane::{PlannedRtdRefresh, reduce_refresh_batches};
-#[cfg(all(target_os = "windows", feature = "rtd"))]
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "rtd", feature = "handles"),
+))]
 pub(crate) use delivery::RtdUpdate;
 #[cfg(all(feature = "bench-internals", feature = "rtd"))]
 pub(crate) use delivery::ShardRefreshBatch;
@@ -79,7 +86,11 @@ pub(crate) use delivery::{
     PreparedNotification, QueuedUpdate, RefreshState, SERVER_LIFECYCLE_CLOSING,
     SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
 };
-#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+#[cfg(any(
+    test,
+    all(feature = "bench-internals", feature = "rtd"),
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+))]
 pub(crate) use delivery::{RefreshOutcome, TOPIC_SHARDS};
 pub(crate) use host::SubscriptionHost;
 #[cfg(test)]
@@ -111,7 +122,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
 pub(crate) use topic::SubscriptionKey;
-#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+#[cfg(any(
+    test,
+    all(feature = "bench-internals", feature = "rtd"),
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+))]
 pub(crate) use topic::TopicId;
 #[cfg(test)]
 pub(crate) use topic::{
@@ -119,7 +134,10 @@ pub(crate) use topic::{
     DEFAULT_MAX_RTD_SOURCE_IDS, DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES, MAX_RTD_TOPIC_BYTES,
     MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionId, SubscriptionIdentity,
 };
-#[cfg(any(all(target_os = "windows", feature = "rtd"), test))]
+#[cfg(any(
+    test,
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+))]
 pub(crate) use value::StoredRtdValue;
 #[cfg(all(test, feature = "rtd"))]
 pub(crate) mod tests;

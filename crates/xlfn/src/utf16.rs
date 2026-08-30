@@ -43,7 +43,10 @@ const fn fold_ascii(unit: u16) -> u16 {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(
+    test,
+    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+))]
 pub(crate) fn encode_bounded(
     text: &str,
     argument: &'static str,
