@@ -79,10 +79,6 @@ features:
     cargo hack check \
         --package xlfn \
         --feature-powerset \
-        --no-dev-deps
-    cargo hack check \
-        --package xlfn \
-        --feature-powerset \
         --depth 2 \
         --no-dev-deps
 
