@@ -93,9 +93,33 @@ pub(crate) struct OpenRollbackCertificate<'runtime, A: crate::Addin> {
     owner: RemovalOwner<'runtime, A>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClosedKind {
+    Committed,
+    Uncommitted,
+}
+
 #[derive(Debug)]
 pub(crate) struct ClosedWitness {
-    _private: (),
+    kind: ClosedKind,
+}
+
+impl ClosedWitness {
+    fn committed() -> Self {
+        Self {
+            kind: ClosedKind::Committed,
+        }
+    }
+
+    fn uncommitted() -> Self {
+        Self {
+            kind: ClosedKind::Uncommitted,
+        }
+    }
+
+    pub(crate) const fn is_committed(&self) -> bool {
+        matches!(self.kind, ClosedKind::Committed)
+    }
 }
 
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
@@ -252,15 +276,17 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
                 owner
             }
         };
-        if committed {
+        let witness = if committed {
             deps.observer().finish_close();
             deps.observer().publish_committed_closed();
+            ClosedWitness::committed()
         } else {
             deps.observer().finish_uncommitted_final_close();
-        }
+            ClosedWitness::uncommitted()
+        };
         lifecycle.notify_all();
         #[cfg(test)]
         deps.release_test_module_lease();
-        Ok((ClosedWitness { _private: () }, owner))
+        Ok((witness, owner))
     }
 }

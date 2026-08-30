@@ -52,10 +52,7 @@ impl RuntimeObserver {
     )]
     pub(crate) fn mark_returned_success(&self) {
         #[cfg(any(test, feature = "refinement"))]
-        {
-            self.trace_handle().mark_returned_success();
-            self.retire_committed_shutdown();
-        }
+        self.trace_handle().mark_returned_success();
     }
 
     pub(crate) fn fail_stop(&self, reason: crate::shutdown_trace::ShutdownFailure) {
@@ -324,8 +321,8 @@ impl RuntimeObserver {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn retire_committed_shutdown(&self) {
+        #[cfg(any(test, feature = "refinement"))]
         self.record_composition_event(
             crate::composition_refinement::CompositionEvent::RetireCommittedShutdown,
         );

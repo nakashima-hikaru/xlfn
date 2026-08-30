@@ -513,8 +513,11 @@ impl<A: crate::Addin> Runtime<A> {
         self.observer().disable_for_test();
     }
 
-    pub(crate) fn record_returned_success(&self, _witness: ClosedWitness) {
+    pub(crate) fn record_returned_success(&self, witness: ClosedWitness) {
         self.observer().mark_returned_success();
+        if witness.is_committed() {
+            self.observer().retire_committed_shutdown();
+        }
         self.observer().mark_return_pending();
     }
 
