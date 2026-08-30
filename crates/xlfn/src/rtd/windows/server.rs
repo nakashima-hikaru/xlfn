@@ -321,6 +321,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     unsafe { server_release(server) };
 }
 
+#[cfg(any(feature = "handles", test))]
 pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: Arc<H>) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
@@ -519,6 +520,7 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
     }
 }
 
+#[cfg(any(feature = "handles", test))]
 pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
     handles: Option<&Arc<H>>,
     subscriptions: Option<&Arc<SubscriptionRuntime>>,

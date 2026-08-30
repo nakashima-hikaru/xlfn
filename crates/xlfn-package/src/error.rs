@@ -8,8 +8,6 @@ pub const REQUIRED_XLL_EXPORTS: &[&str] = &[
     "xlAutoRemove",
     "xlAutoFree12",
     "xlAddInManagerInfo12",
-    "DllGetClassObject",
-    "DllCanUnloadNow",
 ];
 
 pub(crate) const MAX_PREPARED_ENTRIES: usize = 100_000;

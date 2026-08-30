@@ -98,6 +98,7 @@ impl ComModuleLifetime {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(super) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(trace);
     }

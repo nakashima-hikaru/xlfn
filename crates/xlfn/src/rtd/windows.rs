@@ -91,6 +91,7 @@ use registration::{
     RTD_REGISTRATION_OWNER, RTD_REGISTRATION_SCHEMA, guid_braced, guid_compact,
     read_registry_string, scavenge_owned_registrations, set_registry_value, wide_nul,
 };
+#[cfg(any(feature = "handles", test))]
 pub(super) use server::shutdown;
 #[cfg(feature = "rtd")]
 pub(super) use server::shutdown_subscriptions;
@@ -122,6 +123,7 @@ pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
     crate::module_runtime::global().com_module_lifetime()
 }
 
+#[cfg(any(test, feature = "refinement"))]
 pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
     module_lifetime().set_trace_sink(trace);
 }

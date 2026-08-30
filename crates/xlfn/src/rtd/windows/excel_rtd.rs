@@ -1,15 +1,19 @@
 use super::registration::TemporaryRegistration;
+#[cfg(feature = "handles")]
+use super::server::ensure_server;
 use super::server::{
-    RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server,
-    ensure_server_without_handles,
+    RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server_without_handles,
 };
+#[cfg(feature = "handles")]
+use crate::XllError;
+use crate::XllResult;
 #[cfg(feature = "handles")]
 use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
+#[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
-use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
