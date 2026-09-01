@@ -175,12 +175,9 @@ impl ObjectArena {
         entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
             code: crate::error::DomainErrorCode::Overflow,
         })?;
-        state.active_pins = state
-            .active_pins
-            .checked_add(1)
-            .ok_or(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            })?;
+        state.active_pins = state.active_pins.checked_add(1).ok_or(XllError::Domain {
+            code: crate::error::DomainErrorCode::Overflow,
+        })?;
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(ObjectLeaseGuard {
@@ -202,7 +199,13 @@ impl ObjectArena {
                 .checked_sub(1)
                 .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
             if entry.bindings == 0 && entry.pins == 0 {
-                Some(state.objects.remove(&id).expect("object entry was present").cell)
+                Some(
+                    state
+                        .objects
+                        .remove(&id)
+                        .expect("object entry was present")
+                        .cell,
+                )
             } else {
                 None
             }
@@ -230,7 +233,13 @@ impl ObjectArena {
                 .active_pins
                 .checked_sub(1)
                 .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-            reclaim.then(|| state.objects.remove(&id).expect("object entry was present").cell)
+            reclaim.then(|| {
+                state
+                    .objects
+                    .remove(&id)
+                    .expect("object entry was present")
+                    .cell
+            })
         };
         self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandlePin);
         if let Some(cell) = retired {

@@ -14,7 +14,9 @@ fn armed_handle_slot() -> (
         .expect("test handle slot should arm");
     slot.initialize()
         .expect("test handle slot should initialize");
-    let runtime = slot.read().expect("test handle slot should publish its runtime");
+    let runtime = slot
+        .read()
+        .expect("test handle slot should publish its runtime");
     (slot, runtime)
 }
 use crate::input_identity::InputFingerprint;
@@ -1074,10 +1076,8 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         )
         .unwrap()
         .id;
-    let alias_object_id = with_handle::<DataRecord, _>(&runtime, &alias_token, |handle| {
-        handle.object_id()
-    })
-    .unwrap();
+    let alias_object_id =
+        with_handle::<DataRecord, _>(&runtime, &alias_token, |handle| handle.object_id()).unwrap();
     assert_ne!(source_binding, alias_binding);
     assert_eq!(alias_object_id, object_id);
 

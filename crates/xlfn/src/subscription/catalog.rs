@@ -246,10 +246,7 @@ impl SubscriptionEntry {
         true
     }
 
-    pub(crate) fn finish_connection(
-        &mut self,
-        connection: ConnectionGeneration,
-    ) -> bool {
+    pub(crate) fn finish_connection(&mut self, connection: ConnectionGeneration) -> bool {
         let (reservations, server) = match &self.phase {
             SubscriptionPhase::Connecting {
                 reservations,
@@ -259,9 +256,7 @@ impl SubscriptionEntry {
             } if *current == connection => (*reservations, *server),
             _ => return false,
         };
-        let reservation = reservations.map(|reservations| ActiveReservation {
-            reservations,
-        });
+        let reservation = reservations.map(|reservations| ActiveReservation { reservations });
         self.phase = SubscriptionPhase::Active {
             server,
             connection,

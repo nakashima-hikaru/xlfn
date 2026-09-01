@@ -34,9 +34,7 @@ impl Drop for WorkerExitGuard {
         let shared = self.shared.get();
         if std::thread::panicking() {
             self.recover_local_queue();
-            shared
-                .fatal_worker_failure
-                .store(true, Ordering::Release);
+            shared.fatal_worker_failure.store(true, Ordering::Release);
         } else {
             // Normal workers exit only when the queue is sealed and empty.
             debug_assert!(

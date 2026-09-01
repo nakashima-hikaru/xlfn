@@ -11,9 +11,9 @@ use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-use xlfn_kernel::drain_gate::{DrainGate, DrainPermit};
 #[cfg(test)]
 use std::time::{Duration, Instant};
+use xlfn_kernel::drain_gate::{DrainGate, DrainPermit};
 
 pub(crate) const MAX_PENDING: usize = 4096;
 pub(crate) const MAX_ASYNC_HANDLE_BYTES: usize = 1024 * 1024;
@@ -164,8 +164,7 @@ impl AsyncManager {
 
     #[cfg(test)]
     pub(crate) fn snapshot_spawn_executor(&self) -> Result<ExecutorRead<'_>, (XllError, bool)> {
-        self.published_executor()
-            .ok_or((XllError::Closing, false))
+        self.published_executor().ok_or((XllError::Closing, false))
     }
 
     pub(crate) fn spawn<F>(
@@ -262,17 +261,12 @@ impl AsyncManager {
                     if NonNull::from(current_executor.shared.as_ref()) == executor_pointer =>
                 {
                     self.current_generation
-                        .compare_exchange(
-                            current,
-                            next,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
+                        .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                 }
-                ExecutorState::Stopped
-                | ExecutorState::Running(_)
-                | ExecutorState::Closing(_) => false,
+                ExecutorState::Stopped | ExecutorState::Running(_) | ExecutorState::Closing(_) => {
+                    false
+                }
             }
         };
         #[cfg(test)]

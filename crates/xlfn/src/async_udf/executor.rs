@@ -138,10 +138,7 @@ impl Executor {
             workers_local.push((worker, parker));
         }
 
-        let queue = RunnableQueue::new(
-            stealers.into_boxed_slice(),
-            unparkers.into_boxed_slice(),
-        );
+        let queue = RunnableQueue::new(stealers.into_boxed_slice(), unparkers.into_boxed_slice());
         let initial_generation = Box::new(GenerationState::new(generation));
         let initial_pointer = NonNull::from(initial_generation.as_ref());
         let shared = Box::new(ExecutorShared {

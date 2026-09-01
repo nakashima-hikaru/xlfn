@@ -353,7 +353,12 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
     ));
     assert!(token.is_cancelled());
     spawning.join().unwrap();
-    assert!(close_rx.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert!(
+        close_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok()
+    );
     closing.join().unwrap();
     manager.set_after_spawn_handle_snapshot_hook(None);
     assert!(manager.is_stopped());
@@ -1978,7 +1983,10 @@ fn executor_can_restart_after_publication_is_drained() {
     let manager = Arc::new(AsyncManager::new());
     manager.start(1).unwrap();
     let old_snapshot = manager.snapshot_spawn_executor().unwrap();
-    assert_eq!(old_snapshot.current.load(Ordering::Acquire).is_null(), false);
+    assert_eq!(
+        old_snapshot.current.load(Ordering::Acquire).is_null(),
+        false
+    );
     drop(old_snapshot);
 
     assert!(manager.close().issues.is_empty());

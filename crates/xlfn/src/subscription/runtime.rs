@@ -24,10 +24,10 @@ use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
 use xlfn_kernel::quota::Quota;
 
@@ -64,9 +64,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             RuntimeGeneration::new(1).expect("test generation is non-zero"),
             RtdLimits::standard(),
             H::default(),
-            SourceArena::empty(
-                RuntimeGeneration::new(1).expect("test generation is non-zero"),
-            ),
+            SourceArena::empty(RuntimeGeneration::new(1).expect("test generation is non-zero")),
         )
     }
 
@@ -88,9 +86,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             RuntimeGeneration::new(1).expect("test generation is non-zero"),
             limits,
             H::default(),
-            SourceArena::empty(
-                RuntimeGeneration::new(1).expect("test generation is non-zero"),
-            ),
+            SourceArena::empty(RuntimeGeneration::new(1).expect("test generation is non-zero")),
         )
     }
 
@@ -248,9 +244,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 return Ok(PreparedSubscription {
                     id: existing_id,
                     key: existing_key,
-                    reservation: Some(PreparationReservation {
-                        runtime: self,
-                    }),
+                    reservation: Some(PreparationReservation { runtime: self }),
                 });
             }
 
@@ -259,19 +253,12 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        let (id, key) = catalog.insert_pending(
-            self.runtime_id,
-            source.id,
-            topic,
-            self.limits,
-        )?;
+        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
         Ok(PreparedSubscription {
             id,
             key,
-            reservation: Some(PreparationReservation {
-                runtime: self,
-            }),
+            reservation: Some(PreparationReservation { runtime: self }),
         })
     }
 
@@ -359,23 +346,21 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             };
             result?
         };
-        let source = self.sources.resolve(source_id).ok_or(XllError::StaleHandle)?;
+        let source = self
+            .sources
+            .resolve(source_id)
+            .ok_or(XllError::StaleHandle)?;
 
-        if let Err(error) = server.publish.reserve_connection(
-            topic_id,
-            id,
-            conn_gen,
-            &self.active_quota,
-        ) {
+        if let Err(error) =
+            server
+                .publish
+                .reserve_connection(topic_id, id, conn_gen, &self.active_quota)
+        {
             self.rollback_catalog_connection_reservation(id, conn_gen);
             return Err(error);
         }
 
-        let erased_sink = ErasedSink::for_publish(
-            server.publish.as_ref(),
-            topic_id,
-            conn_gen,
-        );
+        let erased_sink = ErasedSink::for_publish(server.publish.as_ref(), topic_id, conn_gen);
 
         let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));
 
@@ -396,10 +381,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let install_result = match server.publish.install_connection(topic_id, conn_gen) {
             Ok(installed) => {
-                server
-                    .subscriptions
-                    .lock()
-                    .insert(topic_id, subscription);
+                server.subscriptions.lock().insert(topic_id, subscription);
                 Ok((installed.latest, installed.observed_sequence))
             }
             Err(_) => Err(subscription),
@@ -409,8 +391,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             Ok(res) => res,
             Err(sub) => {
                 let cleanup_res = disconnect_one_no_unwind(sub);
-                let rollback_res =
-                    self.rollback_connection(server, topic_id, conn_gen, id);
+                let rollback_res = self.rollback_connection(server, topic_id, conn_gen, id);
                 let first_error = cleanup_res.err().or_else(|| rollback_res.err());
                 if let Some(error) = first_error {
                     self.record_cleanup_result(Err(error.clone()));
@@ -511,8 +492,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let server = server_handle.server()?;
         let _operation = server.enter_operation()?;
         let subscription = server.subscriptions.lock().remove(&topic_id);
-        let Some(retired) = server.publish.disconnect_connection(topic_id)?
-        else {
+        let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
             return Ok(());
         };
         let id_to_clean = retired.id;

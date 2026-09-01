@@ -125,10 +125,11 @@ impl GenerationServices {
         #[cfg(feature = "handles")]
         services.formula_handles.arm(_config.handle_config())?;
         #[cfg(feature = "rtd")]
-        if let Err(error) = services
-            .rtd
-            .subscriptions
-            .arm(generation, _config.rtd_limits(), inputs.rtd_sources)
+        if let Err(error) =
+            services
+                .rtd
+                .subscriptions
+                .arm(generation, _config.rtd_limits(), inputs.rtd_sources)
         {
             services.disarm_or_abort();
             return Err(error);

@@ -21,9 +21,9 @@ use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
 
 const MIN_PUBLISHED_TOPIC_SHARDS: usize = 64;
@@ -119,10 +119,7 @@ impl PublishedTopics {
     }
 
     pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicPtr> {
-        self.shards[self.shard_index(key)]
-            .read()
-            .get(key)
-            .copied()
+        self.shards[self.shard_index(key)].read().get(key).copied()
     }
 
     fn insert(&self, key: HandleTopicKey, topic: PublishedTopicPtr) {

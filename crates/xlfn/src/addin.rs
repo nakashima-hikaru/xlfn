@@ -128,9 +128,7 @@ impl OpenContext {
         }
     }
 
-    pub(crate) fn into_service_inputs(
-        self,
-    ) -> crate::runtime_components::GenerationServiceInputs {
+    pub(crate) fn into_service_inputs(self) -> crate::runtime_components::GenerationServiceInputs {
         #[cfg(feature = "rtd")]
         {
             crate::runtime_components::GenerationServiceInputs::with_rtd_sources(

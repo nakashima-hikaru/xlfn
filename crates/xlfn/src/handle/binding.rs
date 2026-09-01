@@ -124,8 +124,8 @@ impl BindingReadLease {
         let record_ref = record.get();
         // SAFETY: the record is a table-owned tombstone. Its gate is drained
         // before the object capability is retired.
-        let permit = unsafe { record_ref.readers.enter_owned() }
-            .map_err(|_| XllError::StaleHandle)?;
+        let permit =
+            unsafe { record_ref.readers.enter_owned() }.map_err(|_| XllError::StaleHandle)?;
         if record_ref.id != id || record_ref.state() != BindingState::Live {
             drop(permit);
             return Err(XllError::StaleHandle);
@@ -148,9 +148,7 @@ impl BindingReadLease {
         self.record().duplicate_object_binding()
     }
 
-    pub(crate) fn acquire_object_lease(
-        &self,
-    ) -> XllResult<super::object::ObjectLeaseGuard> {
+    pub(crate) fn acquire_object_lease(&self) -> XllResult<super::object::ObjectLeaseGuard> {
         self.record()
             .object
             .lock()

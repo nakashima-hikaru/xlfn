@@ -212,8 +212,7 @@ impl ServerCallbackObservation {
 impl Drop for ServerCallbackObservation {
     fn drop(&mut self) {
         // SAFETY: callback observation is scoped by host/server admission.
-        unsafe { self.services.as_ref() }
-            .record(crate::shutdown_trace::ShutdownEvent::EndCallback);
+        unsafe { self.services.as_ref() }.record(crate::shutdown_trace::ShutdownEvent::EndCallback);
     }
 }
 
@@ -420,11 +419,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let mut runtime_guard = None;
         let mut server_guard = None;
         let host_guard = self.host.enter_with(|| {
-            runtime_guard = Some(
-                self.runtime_gate()
-                    .enter()
-                    .map_err(|_| XllError::Closing)?,
-            );
+            runtime_guard = Some(self.runtime_gate().enter().map_err(|_| XllError::Closing)?);
             server_guard = Some(self.server_gate.enter().map_err(|_| XllError::Closing)?);
             Ok(())
         })?;
@@ -443,15 +438,12 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let host_guard = self.host.enter_with(|| {
             // SAFETY: the runtime close waits this gate before reclaiming the
             // runtime and all server-owned publish cores.
-            runtime_guard = Some(
-                unsafe { self.runtime_gate().enter_owned() }
-                    .map_err(|_| XllError::Closing)?,
-            );
+            runtime_guard =
+                Some(unsafe { self.runtime_gate().enter_owned() }.map_err(|_| XllError::Closing)?);
             // SAFETY: server termination drains this gate before reclaiming
             // the publish core.
-            server_guard = Some(
-                unsafe { self.server_gate.enter_owned() }.map_err(|_| XllError::Closing)?,
-            );
+            server_guard =
+                Some(unsafe { self.server_gate.enter_owned() }.map_err(|_| XllError::Closing)?);
             Ok(())
         })?;
         let observation = ServerOperationObservation::begin(self.services());
@@ -484,8 +476,8 @@ impl<H: SubscriptionHost> PublishCore<H> {
         {
             // SAFETY: the runtime-owned active quota outlives every server and
             // is reclaimed only after all connection permits are drained.
-            let permit = unsafe { Quota::try_acquire(active_quota) }
-                .map_err(|_| XllError::Overloaded)?;
+            let permit =
+                unsafe { Quota::try_acquire(active_quota) }.map_err(|_| XllError::Overloaded)?;
             topic_entry.insert(topic_id);
             shard.active_by_topic.insert(
                 topic_id,

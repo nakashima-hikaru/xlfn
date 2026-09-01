@@ -716,13 +716,9 @@ fn publish_generation<A: crate::Addin>(
     ));
     #[cfg(not(feature = "rtd"))]
     let subscription_host = None;
-    let services = GenerationServices::arm_generation(
-        generation,
-        config,
-        subscription_host,
-        service_inputs,
-    )?
-    .commit();
+    let services =
+        GenerationServices::arm_generation(generation, config, subscription_host, service_inputs)?
+            .commit();
     let module_epoch = module_opening
         .take()
         .expect("open transaction owns its module opening authority")

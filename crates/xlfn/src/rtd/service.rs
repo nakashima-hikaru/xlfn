@@ -120,8 +120,8 @@ impl SubscriptionServiceSlot {
 mod tests {
     use super::*;
     use crate::excel_rtd::RtdSubscriptionHost;
-    use std::sync::Barrier;
     use std::sync::Arc;
+    use std::sync::Barrier;
     use std::thread;
 
     fn generation() -> RuntimeGeneration {

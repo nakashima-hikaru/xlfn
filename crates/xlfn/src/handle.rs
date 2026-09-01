@@ -95,10 +95,10 @@ pub(crate) use registry::HandleRegistryPhase;
 pub(crate) use registry::{HandleRegistry, PendingHandleValue};
 #[cfg(any(test, feature = "bench-internals", target_os = "windows"))]
 pub(crate) use runtime::FormulaHandleService;
-#[cfg(feature = "handles")]
-pub(crate) use runtime::FormulaHandleServiceResolver;
 #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
 pub(crate) use runtime::FormulaHandleServiceRead;
+#[cfg(feature = "handles")]
+pub(crate) use runtime::FormulaHandleServiceResolver;
 #[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceSlot;
 pub(crate) use store::HandleStore;

@@ -49,8 +49,8 @@ impl Default for RtdPublishNumberBenchmark {
 
 impl RtdPublishNumberBenchmark {
     pub fn new() -> Self {
-        let generation = crate::generation::RuntimeGeneration::new(1)
-            .expect("benchmark generation is non-zero");
+        let generation =
+            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
         let registration = crate::subscription::SourceRegistration::new(generation);
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
         let source = registration
@@ -135,8 +135,8 @@ impl Default for RtdPublishStringBenchmark {
 
 impl RtdPublishStringBenchmark {
     pub fn new() -> Self {
-        let generation = crate::generation::RuntimeGeneration::new(1)
-            .expect("benchmark generation is non-zero");
+        let generation =
+            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
         let registration = crate::subscription::SourceRegistration::new(generation);
         let sink_slot = Arc::new(parking_lot::Mutex::new(None));
         let source = registration
@@ -460,8 +460,8 @@ fn build_refresh_topics<T>(
 where
     T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static,
 {
-    let generation = crate::generation::RuntimeGeneration::new(1)
-        .expect("benchmark generation is non-zero");
+    let generation =
+        crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
     let registration = crate::subscription::SourceRegistration::new(generation);
     let registered = topic_ids
         .iter()
@@ -476,9 +476,7 @@ where
         })
         .collect::<Vec<_>>();
     let runtime = Arc::new(
-        crate::subscription::SubscriptionRuntime::with_sources_for_internal(
-            registration.finish(),
-        ),
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
     );
     let server = runtime
         .register_server(

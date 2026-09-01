@@ -1,10 +1,9 @@
 use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
-    ExcelHandleObject, Handle, HandleAlias, HandlePrepareState,
-    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, InitializationPtr,
-    ObjectBinding, PrepareDecision, PublishedTopic, PublishedTopicPtr, PublishedTopicState,
-    TopicRemoval, TopicTable,
+    ExcelHandleObject, Handle, HandleAlias, HandlePrepareState, HandleRefinementHooks, HandleStore,
+    HandleTopicKey, Initialization, InitializationPtr, ObjectBinding, PrepareDecision,
+    PublishedTopic, PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
@@ -862,5 +861,4 @@ impl<'call> FormulaHandleServiceResolver<'call> {
             Err(error) => Err(error.clone()),
         }
     }
-
 }

@@ -363,17 +363,14 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
             first_error = Some(error);
         }
 
-        if catch_unwind(AssertUnwindSafe(|| self.wait.wait())).is_err()
-            && first_error.is_none()
-        {
+        if catch_unwind(AssertUnwindSafe(|| self.wait.wait())).is_err() && first_error.is_none() {
             first_error = Some(XllError::Panic);
         }
 
         let (late_notifier, active_entries) = self.server.publish.finish_termination().into_parts();
         for _ in 0..self.initial_subscriptions.len() {
-            self.runtime.record_shutdown_event(
-                crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
-            );
+            self.runtime
+                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
         }
         if let Err(error) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()
@@ -396,15 +393,13 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
-                    !entry.is_active()
-                        && entry.server_generation() == Some(self.server.generation)
+                    !entry.is_active() && entry.server_generation() == Some(self.server.generation)
                 })
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
             for id in pending_ids {
                 let Some(should_remove) = catalog.with_entry(id, |entry| {
-                    entry.reset_for_server_termination(self.server.generation)
-                        && entry.can_remove()
+                    entry.reset_for_server_termination(self.server.generation) && entry.can_remove()
                 }) else {
                     continue;
                 };

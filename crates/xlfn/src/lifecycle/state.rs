@@ -80,10 +80,7 @@ pub(crate) struct GenerationAdmission<'lifecycle, A: crate::Addin> {
 }
 
 impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
-    fn new(
-        publication: NonNull<PublishedGeneration<A>>,
-        permit: DrainPermit<'lifecycle>,
-    ) -> Self {
+    fn new(publication: NonNull<PublishedGeneration<A>>, permit: DrainPermit<'lifecycle>) -> Self {
         Self {
             publication,
             _permit: permit,
@@ -155,9 +152,7 @@ impl<A: crate::Addin> OpenGeneration<A> {
 }
 
 impl<A: crate::Addin> ClosingGeneration<A> {
-    fn into_retirement_with_generation(
-        self,
-    ) -> (Box<ExecutionGeneration<A>>, OpenRetirement<A>) {
+    fn into_retirement_with_generation(self) -> (Box<ExecutionGeneration<A>>, OpenRetirement<A>) {
         let Self {
             generation,
             services,
@@ -1609,9 +1604,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             .publication_readers
             .try_enter()
             .map_err(|_| crate::XllError::Closing)?;
-        let Some(publication) =
-            NonNull::new(self.publication.load(Ordering::Acquire))
-        else {
+        let Some(publication) = NonNull::new(self.publication.load(Ordering::Acquire)) else {
             drop(permit);
             return Err(crate::XllError::Closing);
         };
@@ -1626,9 +1619,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         let permit = self
             .publication_readers
             .try_enter_owned()
-            .unwrap_or_else(|_| lifecycle_invariant_violation(
-                "async execution lease requested after generation admission closed",
-            ));
+            .unwrap_or_else(|_| {
+                lifecycle_invariant_violation(
+                    "async execution lease requested after generation admission closed",
+                )
+            });
         // SAFETY: the publication gate is owned by this process-lifetime
         // coordinator and is drained before the unique generation Box moves
         // to reclamation.

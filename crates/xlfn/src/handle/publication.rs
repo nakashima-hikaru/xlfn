@@ -269,12 +269,7 @@ impl ObservedPublicationTxn<'_> {
             provisional,
             reservation,
         } = self;
-        runtime.commit_publication(
-            key,
-            generation,
-            reservation.initialization,
-            publication,
-        )?;
+        runtime.commit_publication(key, generation, reservation.initialization, publication)?;
         provisional.commit();
         reservation.commit();
         Ok(())

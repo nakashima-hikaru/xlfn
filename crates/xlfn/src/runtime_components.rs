@@ -19,6 +19,4 @@ pub(crate) use residency::ModuleResidency;
 pub(crate) use return_protocol::ReturnProtocol;
 #[cfg(feature = "async")]
 pub(crate) use services::RuntimeExecutors;
-pub(crate) use services::{
-    GenerationServiceInputs, GenerationServices, SealedGenerationServices,
-};
+pub(crate) use services::{GenerationServiceInputs, GenerationServices, SealedGenerationServices};

@@ -33,10 +33,7 @@ mod rollback;
 mod shutdown;
 mod transactions;
 
-#[cfg(any(
-    feature = "bench-internals",
-    test,
-))]
+#[cfg(any(feature = "bench-internals", test,))]
 use crate::runtime_components::GenerationServices;
 #[cfg(feature = "async")]
 use crate::runtime_components::RuntimeExecutors;
@@ -470,10 +467,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn execution_lease(
-        &'static self,
-        call: &CallGuard<'_, A>,
-    ) -> ExecutionLease<A> {
+    pub(crate) fn execution_lease(&'static self, call: &CallGuard<'_, A>) -> ExecutionLease<A> {
         self.lifecycle
             .acquire_execution_lease(call.admission.generation_pointer())
     }
@@ -573,7 +567,9 @@ impl<A: crate::Addin> Runtime<A> {
     ) -> XllResult<R> {
         self.lifecycle
             .with_generation_services(|services| {
-                services.formula_handle_service().map(|service| operation(&service))
+                services
+                    .formula_handle_service()
+                    .map(|service| operation(&service))
             })
             .ok_or(XllError::Closing)?
     }
@@ -802,7 +798,6 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         let _ = generation.id();
         generation
     }
-
 }
 
 #[cfg(test)]

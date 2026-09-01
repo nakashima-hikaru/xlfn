@@ -39,9 +39,7 @@ pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
 #[cfg(feature = "rtd")]
-pub use source::{
-    RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
-};
+pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 #[cfg(feature = "rtd")]
 pub use topic::RtdTopic;
 #[cfg(feature = "rtd")]
@@ -105,10 +103,10 @@ pub(crate) use server::{
     TerminationCoordinator, TerminationState, cleanup_catalog_binding_and_pending,
     disconnect_all_no_unwind, disconnect_one_no_unwind, drop_notifier_no_unwind,
 };
-#[cfg(feature = "rtd")]
-pub(crate) use source::{SourceArena, SourceRegistration};
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};
+#[cfg(feature = "rtd")]
+pub(crate) use source::{SourceArena, SourceRegistration};
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
