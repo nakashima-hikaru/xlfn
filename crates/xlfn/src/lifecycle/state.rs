@@ -1,10 +1,15 @@
-//! Canonical lifecycle ownership and its read-side projections.
+//! Canonical lifecycle ownership and its non-owning read-side projection.
 
-use arc_swap::ArcSwapOption;
+#![allow(
+    unsafe_code,
+    reason = "the publication pointer is protected by the lifecycle-owned drain gate"
+)]
+
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::mem;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use xlfn_kernel::drain_gate::{DrainGate, DrainPermit};
 
 #[cold]
 fn lifecycle_invariant_violation(message: &'static str) -> ! {
@@ -32,9 +37,36 @@ use crate::runtime_components::GenerationServices;
 /// therefore never observe a generation root from one open attempt with
 /// services from another attempt.
 pub(crate) struct PublishedGeneration<A: crate::Addin> {
-    pub(crate) root: Arc<ExecutionGeneration<A>>,
-    pub(crate) services: Arc<GenerationServices>,
+    root: NonNull<ExecutionGeneration<A>>,
+    services: NonNull<GenerationServices>,
 }
+
+impl<A: crate::Addin> PublishedGeneration<A> {
+    fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
+        Self {
+            root: NonNull::from(root),
+            services: NonNull::from(services),
+        }
+    }
+
+    fn root(&self) -> &ExecutionGeneration<A> {
+        // SAFETY: OpenGeneration/ClosingGeneration own the stable Box and the
+        // publication is drained before either Box can be reclaimed.
+        unsafe { self.root.as_ref() }
+    }
+
+    fn services(&self) -> &GenerationServices {
+        // SAFETY: identical to `root`; both pointers share one publication
+        // lifetime and are withdrawn as one coherent projection.
+        unsafe { self.services.as_ref() }
+    }
+}
+
+// SAFETY: both pointers target uniquely owned, stable Boxes whose payloads are
+// Send + Sync by their contracts. Access is possible only while the
+// publication drain gate holds an admission.
+unsafe impl<A: crate::Addin> Send for PublishedGeneration<A> {}
+unsafe impl<A: crate::Addin> Sync for PublishedGeneration<A> {}
 
 /// Read-side admission capability for one coherent open generation.
 ///
@@ -42,62 +74,65 @@ pub(crate) struct PublishedGeneration<A: crate::Addin> {
 /// enter. It is empty throughout opening and is cleared at the beginning of
 /// closing, so a loaded publication already carries the lifecycle decision;
 /// callers do not need to combine it with a separately observed phase.
-pub(crate) struct GenerationAdmission<A: crate::Addin> {
-    publication: arc_swap::Guard<Option<Arc<PublishedGeneration<A>>>>,
+pub(crate) struct GenerationAdmission<'lifecycle, A: crate::Addin> {
+    publication: NonNull<PublishedGeneration<A>>,
+    _permit: DrainPermit<'lifecycle>,
 }
 
-impl<A: crate::Addin> GenerationAdmission<A> {
-    fn new(publication: arc_swap::Guard<Option<Arc<PublishedGeneration<A>>>>) -> Self {
-        Self { publication }
+impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
+    fn new(
+        publication: NonNull<PublishedGeneration<A>>,
+        permit: DrainPermit<'lifecycle>,
+    ) -> Self {
+        Self {
+            publication,
+            _permit: permit,
+        }
+    }
+
+    fn publication(&self) -> &PublishedGeneration<A> {
+        // SAFETY: the lifecycle owns the pointed-to Box and cannot reclaim it
+        // before every publication permit has drained.
+        unsafe { self.publication.as_ref() }
     }
 
     pub(crate) fn generation(&self) -> &ExecutionGeneration<A> {
-        &self
-            .publication
-            .as_ref()
-            .expect("a live generation admission always observes a publication")
-            .root
+        self.publication().root()
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn generation_arc(&self) -> &Arc<ExecutionGeneration<A>> {
-        &self
-            .publication
-            .as_ref()
-            .expect("a live generation admission always observes a publication")
-            .root
+    pub(crate) fn generation_pointer(&self) -> NonNull<ExecutionGeneration<A>> {
+        self.publication().root
     }
 
-    #[cfg(any(feature = "handles", feature = "rtd"))]
     pub(crate) fn services(&self) -> &GenerationServices {
-        &self
-            .publication
-            .as_ref()
-            .expect("a live generation admission always observes a publication")
-            .services
+        self.publication().services()
     }
 }
 
 /// The complete ownership bundle for a published generation.
 pub(crate) struct OpenGeneration<A: crate::Addin> {
-    generation: Arc<ExecutionGeneration<A>>,
-    services: Arc<GenerationServices>,
+    generation: Box<ExecutionGeneration<A>>,
+    services: Box<GenerationServices>,
+    publication: Box<PublishedGeneration<A>>,
     module_epoch: ModuleEpochLease,
 }
 
 /// The generation resources retained after its module lease moves into the
 /// closing ownership slot.
 pub(crate) struct ClosingGeneration<A: crate::Addin> {
-    generation: Arc<ExecutionGeneration<A>>,
-    services: Arc<GenerationServices>,
+    generation: Box<ExecutionGeneration<A>>,
+    services: Box<GenerationServices>,
+    publication: Box<PublishedGeneration<A>>,
 }
 
 /// Ownership retained after the generation root has been handed to the
 /// shutdown/quiesce pipeline. The generation identity remains part of the
 /// payload while the module authority remains in the lifecycle state.
-pub(crate) struct OpenRetirement {
+pub(crate) struct OpenRetirement<A: crate::Addin> {
     generation: RuntimeGeneration,
-    services: Arc<GenerationServices>,
+    services: Box<GenerationServices>,
+    _publication: Box<PublishedGeneration<A>>,
 }
 
 impl<A: crate::Addin> OpenGeneration<A> {
@@ -105,12 +140,14 @@ impl<A: crate::Addin> OpenGeneration<A> {
         let Self {
             generation,
             services,
+            publication,
             module_epoch,
         } = self;
         (
             ClosingGeneration {
                 generation,
                 services,
+                publication,
             },
             ModuleAuthority::Open(module_epoch),
         )
@@ -118,17 +155,23 @@ impl<A: crate::Addin> OpenGeneration<A> {
 }
 
 impl<A: crate::Addin> ClosingGeneration<A> {
-    fn into_retirement(self) -> OpenRetirement {
-        OpenRetirement {
-            generation: self.generation.id(),
-            services: self.services,
-        }
-    }
-
-    fn into_retirement_with_generation(self) -> (Arc<ExecutionGeneration<A>>, OpenRetirement) {
-        let generation = Arc::clone(&self.generation);
-        let retirement = self.into_retirement();
-        (generation, retirement)
+    fn into_retirement_with_generation(
+        self,
+    ) -> (Box<ExecutionGeneration<A>>, OpenRetirement<A>) {
+        let Self {
+            generation,
+            services,
+            publication,
+        } = self;
+        let generation_id = generation.id();
+        (
+            generation,
+            OpenRetirement {
+                generation: generation_id,
+                services,
+                _publication: publication,
+            },
+        )
     }
 }
 
@@ -217,7 +260,7 @@ pub(crate) enum ClosePayload<A: crate::Addin> {
     Empty,
     Staged(OpeningGeneration<A>),
     Published(ClosingGeneration<A>),
-    Retiring(OpenRetirement),
+    Retiring(OpenRetirement<A>),
 }
 
 impl<A: crate::Addin> ClosePayload<A> {
@@ -237,10 +280,10 @@ impl<A: crate::Addin> ClosePayload<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
+    fn retiring_services(&self) -> Option<&GenerationServices> {
         match self {
-            Self::Retiring(retirement) => Some(&retirement.services),
-            Self::Published(bundle) => Some(&bundle.services),
+            Self::Retiring(retirement) => Some(retirement.services.as_ref()),
+            Self::Published(bundle) => Some(bundle.services.as_ref()),
             Self::Empty | Self::Staged(_) => None,
         }
     }
@@ -256,7 +299,7 @@ impl<A: crate::Addin> ClosePayload<A> {
         }
     }
 
-    fn take_retirement(&mut self) -> Option<OpenRetirement> {
+    fn take_retirement(&mut self) -> Option<OpenRetirement<A>> {
         let payload = mem::replace(self, Self::Empty);
         match payload {
             Self::Retiring(retirement) => Some(retirement),
@@ -322,7 +365,7 @@ impl<A: crate::Addin> OpenAbortPayload<A> {
 /// this type.
 pub(crate) enum PublishedClosePayload<A: crate::Addin> {
     Published(ClosingGeneration<A>),
-    Retiring(OpenRetirement),
+    Retiring(OpenRetirement<A>),
 }
 
 impl<A: crate::Addin> PublishedClosePayload<A> {
@@ -333,10 +376,10 @@ impl<A: crate::Addin> PublishedClosePayload<A> {
         }
     }
 
-    fn retiring_services(&self) -> &Arc<GenerationServices> {
+    fn retiring_services(&self) -> &GenerationServices {
         match self {
-            Self::Published(closing) => &closing.services,
-            Self::Retiring(retirement) => &retirement.services,
+            Self::Published(closing) => closing.services.as_ref(),
+            Self::Retiring(retirement) => retirement.services.as_ref(),
         }
     }
 }
@@ -400,7 +443,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
+    fn retiring_services(&self) -> Option<&GenerationServices> {
         match self {
             Self::AwaitingOpenAbort { .. } => None,
             Self::Unowned { payload }
@@ -627,7 +670,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn take_retirement(&mut self) -> Option<OpenRetirement> {
+    fn take_retirement(&mut self) -> Option<OpenRetirement<A>> {
         let resources = mem::replace(
             self,
             Self::Unowned {
@@ -660,7 +703,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn into_retiring(self) -> (Option<Arc<ExecutionGeneration<A>>>, Self) {
+    fn into_retiring(self) -> (Option<Box<ExecutionGeneration<A>>>, Self) {
         match self {
             Self::AwaitingOpenAbort { .. } => (None, self),
             Self::Unowned {
@@ -815,7 +858,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
+    fn retiring_services(&self) -> Option<&GenerationServices> {
         match self {
             Self::OpeningActive {
                 resources: ActiveOpeningClose::Published { payload, .. },
@@ -884,7 +927,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn into_retiring(self) -> (Option<Arc<ExecutionGeneration<A>>>, Self) {
+    fn into_retiring(self) -> (Option<Box<ExecutionGeneration<A>>>, Self) {
         match self {
             Self::OpeningActive {
                 attempt,
@@ -925,7 +968,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn take_retirement(&mut self) -> Option<OpenRetirement> {
+    fn take_retirement(&mut self) -> Option<OpenRetirement<A>> {
         match self {
             Self::OpeningActive { .. } => None,
             Self::Ready { resources } => resources.take_retirement(),
@@ -1077,13 +1120,18 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
+    fn generation_services(&self) -> Option<&GenerationServices> {
         match self {
+            Self::Opening {
+                payload: OpeningPayload::Published(bundle),
+                ..
+            }
+            | Self::Open { bundle } => Some(bundle.services.as_ref()),
             Self::Closing(closing) => closing.retiring_services(),
             Self::OpenRollbackPending(resources) | Self::Quarantined(resources) => {
                 resources.retiring_services()
             }
-            Self::Closed(_) | Self::Open { .. } | Self::Opening { .. } => None,
+            Self::Closed(_) | Self::Opening { .. } => None,
         }
     }
 
@@ -1121,7 +1169,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    fn take_retirement(&mut self) -> Option<OpenRetirement> {
+    fn take_retirement(&mut self) -> Option<OpenRetirement<A>> {
         match self {
             Self::Closing(closing) => closing.take_retirement(),
             Self::OpenRollbackPending(resources) | Self::Quarantined(resources) => {
@@ -1308,8 +1356,8 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.state.has_current_generation()
     }
 
-    fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
-        self.state.retiring_services()
+    fn generation_services(&self) -> Option<&GenerationServices> {
+        self.state.generation_services()
     }
 }
 
@@ -1402,8 +1450,8 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.state.has_opening_generation()
     }
 
-    pub(crate) fn retiring_services(&self) -> Option<&Arc<GenerationServices>> {
-        self.core.retiring_services()
+    pub(crate) fn generation_services(&self) -> Option<&GenerationServices> {
+        self.core.generation_services()
     }
 
     #[cfg(test)]
@@ -1419,11 +1467,10 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
 /// access; lifecycle writers mutate `core` first and then update projections.
 pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
-    publication: ArcSwapOption<PublishedGeneration<A>>,
+    publication: AtomicPtr<PublishedGeneration<A>>,
+    publication_readers: DrainGate,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
-    #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-    test_services: Mutex<Option<Arc<GenerationServices>>>,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -1431,6 +1478,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
 pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) error: crate::XllError,
     pub(crate) opening: Option<OpeningGeneration<A>>,
+    pub(crate) services: Box<GenerationServices>,
     pub(crate) module_epoch: ModuleEpochLease,
 }
 
@@ -1443,18 +1491,17 @@ pub(crate) struct PublishOpeningError<A: crate::Addin> {
 enum TransitionEffect<A: crate::Addin> {
     Keep,
     ClearPublication,
-    Publish(Arc<PublishedGeneration<A>>),
+    Publish(NonNull<PublishedGeneration<A>>),
 }
 
 impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) const fn new() -> Self {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
-            publication: ArcSwapOption::const_empty(),
+            publication: AtomicPtr::new(std::ptr::null_mut()),
+            publication_readers: DrainGate::new_sealed(),
             core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
-            #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-            test_services: Mutex::new(None),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
@@ -1554,15 +1601,38 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Admits one call from the published generation projection.
     ///
-    /// Opening has no publication and closing clears it before the lifecycle
-    /// phase changes, so one ArcSwap load is sufficient for the hot path.
-    pub(crate) fn try_admit(&self) -> crate::XllResult<GenerationAdmission<A>> {
-        let publication = self.publication.load();
-        if publication.is_some() {
-            Ok(GenerationAdmission::new(publication))
-        } else {
-            Err(crate::XllError::Closing)
-        }
+    /// Opening has no publication and closing seals admission before the
+    /// lifecycle phase changes. The permit protects the uniquely owned
+    /// generation bundle without participating in its ownership.
+    pub(crate) fn try_admit(&self) -> crate::XllResult<GenerationAdmission<'_, A>> {
+        let permit = self
+            .publication_readers
+            .try_enter()
+            .map_err(|_| crate::XllError::Closing)?;
+        let Some(publication) =
+            NonNull::new(self.publication.load(Ordering::Acquire))
+        else {
+            drop(permit);
+            return Err(crate::XllError::Closing);
+        };
+        Ok(GenerationAdmission::new(publication, permit))
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn acquire_execution_lease(
+        &'static self,
+        generation: NonNull<ExecutionGeneration<A>>,
+    ) -> crate::generation::ExecutionLease<A> {
+        let permit = self
+            .publication_readers
+            .try_enter_owned()
+            .unwrap_or_else(|_| lifecycle_invariant_violation(
+                "async execution lease requested after generation admission closed",
+            ));
+        // SAFETY: the publication gate is owned by this process-lifetime
+        // coordinator and is drained before the unique generation Box moves
+        // to reclamation.
+        unsafe { crate::generation::ExecutionLease::new(generation, permit) }
     }
 
     pub(in crate::lifecycle) fn set_host_intent(&self, intent: HostLifecycleIntent) {
@@ -1620,18 +1690,31 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     fn commit_transition(&self, access: &LifecycleAccess<'_, A>, effect: TransitionEffect<A>) {
         match effect {
             TransitionEffect::Keep => {}
-            TransitionEffect::ClearPublication => self.publication.store(None),
-            TransitionEffect::Publish(publication) => self.publication.store(Some(publication)),
+            TransitionEffect::ClearPublication => {
+                self.publication_readers.seal();
+                self.publication
+                    .store(std::ptr::null_mut(), Ordering::Release);
+            }
+            TransitionEffect::Publish(publication) => {
+                require_lifecycle_invariant(
+                    self.publication_readers.is_sealed()
+                        && self.publication_readers.active() == 0
+                        && self.publication.load(Ordering::Acquire).is_null(),
+                    "generation publication requires a drained closed projection",
+                );
+                self.publication
+                    .store(publication.as_ptr(), Ordering::Release);
+                self.publication_readers.reopen().unwrap_or_else(|_| {
+                    lifecycle_invariant_violation("generation publication gate failed to reopen")
+                });
+            }
         }
         self.phase.store(access.phase() as u8, Ordering::Release);
         self.changed.notify_all();
     }
 
     fn publish_effect(bundle: &OpenGeneration<A>) -> TransitionEffect<A> {
-        TransitionEffect::Publish(Arc::new(PublishedGeneration {
-            root: Arc::clone(&bundle.generation),
-            services: Arc::clone(&bundle.services),
-        }))
+        TransitionEffect::Publish(NonNull::from(bundle.publication.as_ref()))
     }
 
     /// Clears host intent before the external module-open protocol is started.
@@ -2016,7 +2099,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
         core: &mut LifecycleAccess<'_, A>,
         generation: RuntimeGeneration,
-        services: Arc<GenerationServices>,
+        services: Box<GenerationServices>,
         module_epoch: ModuleEpochLease,
     ) -> Result<(), Box<PublishOpeningError<A>>> {
         core.transition(|core| {
@@ -2028,6 +2111,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: core.state.take_opening(),
+                        services,
                         module_epoch,
                     })),
                     TransitionEffect::Keep,
@@ -2041,6 +2125,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: core.state.take_opening(),
+                        services,
                         module_epoch,
                     })),
                     TransitionEffect::Keep,
@@ -2051,6 +2136,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     Err(Box::new(PublishOpeningError {
                         error: open_state_error(),
                         opening: None,
+                        services,
                         module_epoch,
                     })),
                     TransitionEffect::Keep,
@@ -2061,14 +2147,19 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 layers,
                 init_config: _,
             } = opening;
-            let published = Arc::new(ExecutionGeneration {
+            let generation = Box::new(ExecutionGeneration {
                 id: generation,
                 shared_state,
                 layers,
             });
+            let publication = Box::new(PublishedGeneration::new(
+                generation.as_ref(),
+                services.as_ref(),
+            ));
             let bundle = OpenGeneration {
-                generation: Arc::clone(&published),
+                generation,
                 services,
+                publication,
                 module_epoch,
             };
             core.state = LifecycleState::Opening {
@@ -2089,20 +2180,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.access().has_current_generation()
     }
 
-    /// Service access is a cold-path operation. It borrows the coherent
-    /// publication long enough to clone the service root; no independent
-    /// production projection exists.
-    pub(crate) fn load_generation_services(&self) -> Option<Arc<GenerationServices>> {
-        let publication = self.publication.load();
-        if let Some(publication) = publication.as_ref() {
-            return Some(Arc::clone(&publication.services));
+    /// Borrows generation services while either a read admission or the
+    /// canonical lifecycle lock proves the unique owner cannot move.
+    pub(crate) fn with_generation_services<R>(
+        &self,
+        operation: impl FnOnce(&GenerationServices) -> R,
+    ) -> Option<R> {
+        if let Ok(admission) = self.try_admit() {
+            return Some(operation(admission.services()));
         }
-        #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
-        {
-            return self.test_services.lock().clone();
-        }
-        #[cfg(not(any(test, feature = "refinement", feature = "bench-internals")))]
-        None
+        let access = self.access();
+        access.generation_services().map(operation)
     }
 
     pub(in crate::lifecycle) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
@@ -2113,16 +2201,16 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     fn take_current_bundle(
         &self,
         core: &mut LifecycleAccess<'_, A>,
-    ) -> Option<Arc<ExecutionGeneration<A>>> {
-        core.transition(|core| {
+    ) -> Option<Box<ExecutionGeneration<A>>> {
+        let generation = core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             match state {
                 LifecycleState::Open { bundle } => {
                     let (closing, authority) = bundle.into_closing();
-                    let generation = Arc::clone(&closing.generation);
+                    let (generation, retirement) = closing.into_retirement_with_generation();
                     core.state = LifecycleState::Closing(ClosingState::Ready {
                         resources: CloseResources::Available {
-                            payload: ClosePayload::Retiring(closing.into_retirement()),
+                            payload: ClosePayload::Retiring(retirement),
                             authority,
                         },
                     });
@@ -2163,18 +2251,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     (None, TransitionEffect::Keep)
                 }
             }
-        })
+        });
+        if generation.is_some() {
+            self.publication_readers.wait_until_idle();
+        }
+        generation
     }
 
     #[cfg(test)]
-    pub(crate) fn take_current_generation(&self) -> Option<Arc<ExecutionGeneration<A>>> {
+    pub(crate) fn take_current_generation(&self) -> Option<Box<ExecutionGeneration<A>>> {
         let mut core = self.access();
         self.take_current_bundle(&mut core)
-    }
-
-    #[cfg(feature = "bench-internals")]
-    pub(crate) fn install_test_generation_services(&self, services: Arc<GenerationServices>) {
-        *self.test_services.lock() = Some(services);
     }
 
     pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {

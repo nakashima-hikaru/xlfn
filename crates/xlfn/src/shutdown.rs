@@ -230,7 +230,6 @@ pub(crate) enum UnloadHazard {
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
     HandleStoreNotQuiescent,
-    AddinGenerationEscaped,
     AddinQuiesceFailed,
     AddinCleanupFailed,
     DiagnosticWorkerStillRunning,
@@ -256,9 +255,6 @@ impl UnloadHazard {
             }
             Self::HandleStoreNotQuiescent => {
                 crate::shutdown_trace::ShutdownFailure::HandleShutdownFailed
-            }
-            Self::AddinGenerationEscaped => {
-                crate::shutdown_trace::ShutdownFailure::GenerationEscaped
             }
             Self::AddinQuiesceFailed => crate::shutdown_trace::ShutdownFailure::AddinShutdownFailed,
             Self::AddinCleanupFailed => crate::shutdown_trace::ShutdownFailure::AddinShutdownFailed,

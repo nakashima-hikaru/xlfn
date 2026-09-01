@@ -12,7 +12,6 @@ use crate::lifecycle::{
 };
 use crate::module_runtime::{ModuleAuthority, ModuleCleanupAuthority, ModuleClosing};
 use crate::{XllError, XllResult};
-use std::sync::Arc;
 
 /// Lifecycle-only write capability issued by a [`LifecycleCoordinator`].
 pub(crate) struct LifecycleControl<'coordinator, A: Addin> {
@@ -22,6 +21,7 @@ pub(crate) struct LifecycleControl<'coordinator, A: Addin> {
 pub(crate) type PublishGenerationFailure<A> = Box<(
     XllError,
     Option<OpeningGeneration<A>>,
+    Box<crate::runtime_components::GenerationServices>,
     crate::module_runtime::ModuleEpochLease,
 )>;
 
@@ -165,12 +165,19 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         &self,
         control: &mut LifecycleAccess<'_, A>,
         generation: crate::generation::RuntimeGeneration,
-        services: Arc<crate::runtime_components::GenerationServices>,
+        services: Box<crate::runtime_components::GenerationServices>,
         module_epoch: crate::module_runtime::ModuleEpochLease,
     ) -> Result<(), PublishGenerationFailure<A>> {
         self.coordinator
             .publish_opening_generation_locked(control, generation, services, module_epoch)
-            .map_err(|failure| Box::new((failure.error, failure.opening, failure.module_epoch)))
+            .map_err(|failure| {
+                Box::new((
+                    failure.error,
+                    failure.opening,
+                    failure.services,
+                    failure.module_epoch,
+                ))
+            })
     }
 
     pub(crate) fn finish_open_state(

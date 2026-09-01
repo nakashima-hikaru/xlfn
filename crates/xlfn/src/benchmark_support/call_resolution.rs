@@ -3,7 +3,6 @@ use super::*;
 
 pub struct MultiHandleCallBenchmark {
     runtime: &'static crate::runtime::Runtime<()>,
-    _handle_runtime: Arc<FormulaHandleService>,
     raw_tokens: Vec<xlfn_sys::XLOPER12>,
     _storage: Vec<Vec<u16>>,
 }
@@ -11,36 +10,37 @@ pub struct MultiHandleCallBenchmark {
 impl MultiHandleCallBenchmark {
     pub fn new(count: usize) -> Self {
         let runtime = get_benchmark_runtime();
-        let handle_runtime = runtime
-            .formula_handle_service()
+        let (raw_tokens, storage) = runtime
+            .with_formula_handle_service(|handle_runtime| {
+                let mut raw_tokens = Vec::with_capacity(count);
+                let mut storage = Vec::with_capacity(count);
+                for i in 0..count {
+                    let key = benchmark_revision_key("BENCH.MULTI.HANDLE", i as u64);
+                    let token = handle_runtime
+                        .prepare_observed(
+                            key,
+                            move || Ok(BenchHandleObject { _payload: i as u64 }),
+                            |_, _| Ok(()),
+                        )
+                        .expect("benchmark handle preparation must succeed")
+                        .into_token();
+                    let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
+                    u16_chars.push(token.len() as u16);
+                    u16_chars.extend(token.encode_utf16());
+                    let raw = xlfn_sys::XLOPER12 {
+                        value: xlfn_sys::XLOPER12Value {
+                            string: u16_chars.as_ptr() as *mut u16,
+                        },
+                        xltype: xlfn_sys::XLTYPE_STR,
+                    };
+                    raw_tokens.push(raw);
+                    storage.push(u16_chars);
+                }
+                (raw_tokens, storage)
+            })
             .expect("benchmark handle runtime must initialize");
-        let mut raw_tokens = Vec::with_capacity(count);
-        let mut storage = Vec::with_capacity(count);
-        for i in 0..count {
-            let key = benchmark_revision_key("BENCH.MULTI.HANDLE", i as u64);
-            let token = handle_runtime
-                .prepare_observed(
-                    key,
-                    move || Ok(BenchHandleObject { _payload: i as u64 }),
-                    |_, _| Ok(()),
-                )
-                .expect("benchmark handle preparation must succeed")
-                .into_token();
-            let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
-            u16_chars.push(token.len() as u16);
-            u16_chars.extend(token.encode_utf16());
-            let raw = xlfn_sys::XLOPER12 {
-                value: xlfn_sys::XLOPER12Value {
-                    string: u16_chars.as_ptr() as *mut u16,
-                },
-                xltype: xlfn_sys::XLTYPE_STR,
-            };
-            raw_tokens.push(raw);
-            storage.push(u16_chars);
-        }
         Self {
             runtime,
-            _handle_runtime: handle_runtime,
             raw_tokens,
             _storage: storage,
         }
@@ -72,7 +72,7 @@ impl MultiHandleCallBenchmark {
 }
 
 pub struct ConcurrentHandleResolutionBenchmark {
-    _services: Arc<crate::runtime_components::GenerationServices>,
+    _runtime: &'static crate::runtime::Runtime<()>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -82,12 +82,9 @@ pub struct ConcurrentHandleResolutionBenchmark {
 impl ConcurrentHandleResolutionBenchmark {
     pub fn new(threads: usize, iterations_per_thread: usize) -> Self {
         let runtime = get_benchmark_runtime();
-        let _ = runtime
-            .formula_handle_service()
+        runtime
+            .with_formula_handle_service(|_| ())
             .expect("benchmark handle runtime must initialize");
-        let services = runtime
-            .generation_services()
-            .expect("benchmark handle runtime must publish its services");
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);
@@ -96,15 +93,18 @@ impl ConcurrentHandleResolutionBenchmark {
         for _ in 0..threads {
             let (s_tx, s_rx) = std::sync::mpsc::sync_channel::<()>(1);
             let d_tx = done_tx.clone();
-            let services = Arc::clone(&services);
             start_tx.push(s_tx);
 
             let handle = std::thread::spawn(move || {
                 while s_rx.recv().is_ok() {
                     for _ in 0..iterations_per_thread {
-                        let resolver = services.handle_call_access();
-                        let rt = resolver.get().expect("handle runtime must resolve");
-                        std::hint::black_box(rt);
+                        runtime
+                            .with_generation_services(|services| {
+                                let resolver = services.handle_call_access();
+                                let rt = resolver.get().expect("handle runtime must resolve");
+                                std::hint::black_box(rt);
+                            })
+                            .expect("benchmark generation remains published");
                     }
                     let _ = d_tx.send(());
                 }
@@ -113,7 +113,7 @@ impl ConcurrentHandleResolutionBenchmark {
         }
 
         Self {
-            _services: services,
+            _runtime: runtime,
             threads,
             start_tx,
             done_rx,

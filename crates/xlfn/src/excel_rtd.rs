@@ -18,6 +18,7 @@ use crate::handle::FormulaLifetimeBackend;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;
+#[cfg(all(test, feature = "rtd", not(target_os = "windows")))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -199,7 +200,7 @@ pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) 
 
 #[cfg(feature = "handles")]
 pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
-    handles: Arc<H>,
+    handles: &H,
     ingress: &'static ExportIngress,
     lifetime_key: &str,
     token: &str,
@@ -222,7 +223,7 @@ pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
 }
 
 pub(crate) fn observe_subscription(
-    subscriptions: &Arc<crate::subscription::SubscriptionRuntime>,
+    subscriptions: &crate::subscription::SubscriptionRuntime,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
@@ -244,7 +245,7 @@ pub(crate) fn observe_subscription(
 
 #[cfg(feature = "handles")]
 pub(crate) fn shutdown_handle_topics<H: FormulaLifetimeBackend + 'static>(
-    handles: Arc<H>,
+    handles: &H,
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
@@ -258,7 +259,7 @@ pub(crate) fn shutdown_handle_topics<H: FormulaLifetimeBackend + 'static>(
 }
 
 pub(crate) fn shutdown_subscriptions(
-    subscriptions: Arc<crate::subscription::SubscriptionRuntime>,
+    subscriptions: &crate::subscription::SubscriptionRuntime,
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
     {

@@ -1,5 +1,10 @@
+#![allow(
+    unsafe_code,
+    reason = "ExecutionLease is the audited temporal lifetime capability for a uniquely owned generation"
+)]
+
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::ptr::NonNull;
 
 /// Identity of one published or staged runtime service generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -52,29 +57,45 @@ impl<A: crate::Addin> OpeningGeneration<A> {
 /// Generation reclaimed during shutdown.
 pub(crate) enum ShutdownGeneration<A: crate::Addin> {
     Opening(OpeningGeneration<A>),
-    Open(Arc<ExecutionGeneration<A>>),
+    Open(Box<ExecutionGeneration<A>>),
 }
 
 /// Explicit open-generation lifetime lease for call-scoped and asynchronous
 /// UDF executions.
 pub struct ExecutionLease<A: crate::Addin> {
-    pub(crate) generation: Arc<ExecutionGeneration<A>>,
-}
-
-impl<A: crate::Addin> Clone for ExecutionLease<A> {
-    fn clone(&self) -> Self {
-        Self {
-            generation: Arc::clone(&self.generation),
-        }
-    }
+    generation: NonNull<ExecutionGeneration<A>>,
+    _permit: xlfn_kernel::drain_gate::OwnedDrainPermit,
 }
 
 impl<A: crate::Addin> ExecutionLease<A> {
+    /// Creates a temporal lease over the uniquely owned generation root.
+    ///
+    /// # Safety
+    ///
+    /// `generation` must remain valid until `permit` is dropped, and the gate
+    /// that issued `permit` must be drained before the generation is reclaimed.
+    #[cfg(feature = "async")]
+    pub(crate) unsafe fn new(
+        generation: NonNull<ExecutionGeneration<A>>,
+        permit: xlfn_kernel::drain_gate::OwnedDrainPermit,
+    ) -> Self {
+        Self {
+            generation,
+            _permit: permit,
+        }
+    }
+
     #[must_use]
     pub fn state(&self) -> &A::SharedState {
-        &self.generation.shared_state
+        // SAFETY: construction couples the pointer to the owned drain permit.
+        &unsafe { self.generation.as_ref() }.shared_state
     }
 }
+
+// SAFETY: the generation payload is Send + Sync by the Addin contract and the
+// owned permit prevents reclamation while the pointer crosses threads.
+unsafe impl<A: crate::Addin> Send for ExecutionLease<A> {}
+unsafe impl<A: crate::Addin> Sync for ExecutionLease<A> {}
 
 /// Identity of an in-flight open transaction. It is distinct from the
 /// published generation even though both participate in lifecycle state.

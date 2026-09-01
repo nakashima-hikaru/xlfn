@@ -77,7 +77,6 @@ pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
     static RUNTIME: std::sync::OnceLock<crate::runtime::Runtime<()>> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         let runtime = crate::runtime::Runtime::new();
-        runtime.arm_test_generation();
         let removal_epoch = runtime.removal_epoch();
         let opening = runtime
             .begin_open_if_epoch(removal_epoch)

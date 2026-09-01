@@ -178,7 +178,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_unwind(AssertUnwindSafe(|| {
-        start(guard, guard.lease(), token.clone())
+        start(guard, runtime.execution_lease(guard), token.clone())
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
@@ -248,7 +248,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_unwind(AssertUnwindSafe(|| {
-        start(guard, guard.lease(), token.clone())
+        start(guard, runtime.execution_lease(guard), token.clone())
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {

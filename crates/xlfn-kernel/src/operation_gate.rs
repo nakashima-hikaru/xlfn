@@ -1,6 +1,12 @@
 //! A generic admission gate for operations that must drain before shutdown.
 
+#![allow(
+    unsafe_code,
+    reason = "owned operation guards are audited non-owning shutdown capabilities"
+)]
+
 use crate::drain_gate::{DrainGate, DrainPermit};
+use std::ptr::NonNull;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GateClosed;
@@ -43,6 +49,20 @@ impl OperationGate {
         Ok(OperationGuard { _permit: permit })
     }
 
+    /// Enters an operation whose guard cannot borrow the gate directly.
+    ///
+    /// # Safety
+    ///
+    /// The gate owner must not reclaim the gate until the returned guard has
+    /// been dropped. Shutdown should seal and drain this same gate before
+    /// reclaiming its owner.
+    pub unsafe fn enter_owned(&self) -> Result<OwnedOperationGuard, GateClosed> {
+        self.acquire()?;
+        Ok(OwnedOperationGuard {
+            gate: NonNull::from(self),
+        })
+    }
+
     pub fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
         self.begin_close();
         TerminationWaitGuard { gate: self }
@@ -61,6 +81,23 @@ impl OperationGate {
 pub struct OperationGuard<'a> {
     _permit: DrainPermit<'a>,
 }
+
+pub struct OwnedOperationGuard {
+    gate: NonNull<OperationGate>,
+}
+
+impl Drop for OwnedOperationGuard {
+    fn drop(&mut self) {
+        // SAFETY: guaranteed by `OperationGate::enter_owned`; this guard is
+        // itself the outstanding operation that delays owner reclamation.
+        unsafe { self.gate.as_ref() }.release();
+    }
+}
+
+// SAFETY: OperationGate is thread-safe and may release an operation from any
+// thread; temporal validity is guaranteed by the constructor contract.
+unsafe impl Send for OwnedOperationGuard {}
+unsafe impl Sync for OwnedOperationGuard {}
 
 pub struct TerminationWaitGuard<'a> {
     gate: &'a OperationGate,

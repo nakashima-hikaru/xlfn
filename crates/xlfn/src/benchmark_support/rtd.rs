@@ -5,10 +5,11 @@ use crate::subscription::TOPIC_SHARDS;
 
 struct BenchmarkSubscription;
 
-impl crate::subscription::RtdSubscription for BenchmarkSubscription {
-    fn cancellation(&self) -> Arc<dyn crate::subscription::RtdCancellation> {
-        Arc::new(crate::subscription::RtdCancellationHandle::noop())
-    }
+// SAFETY: the benchmark subscription owns no background activity or retained
+// sink clones, so disconnect returns only after all possible publication ends.
+unsafe impl crate::subscription::RtdSubscription for BenchmarkSubscription {
+    fn request_cancel(&self) {}
+
     fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
         Ok(())
     }
@@ -48,21 +49,26 @@ impl Default for RtdPublishNumberBenchmark {
 
 impl RtdPublishNumberBenchmark {
     pub fn new() -> Self {
-        let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
+        let generation = crate::generation::RuntimeGeneration::new(1)
+            .expect("benchmark generation is non-zero");
+        let registration = crate::subscription::SourceRegistration::new(generation);
+        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let source = registration
+            .register(BenchmarkRtdSource {
+                sink: Arc::clone(&sink_slot),
+            })
+            .expect("benchmark source handle allocation must succeed");
+        let runtime = Arc::new(
+            crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+                registration.finish(),
+            ),
+        );
         let server = runtime
             .register_server(
                 crate::subscription::ServerGeneration::new(1)
                     .expect("non-zero test server generation"),
             )
             .expect("server registration must succeed");
-        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::subscription::RtdSourceHandle::for_internal(
-            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
-            BenchmarkRtdSource {
-                sink: Arc::clone(&sink_slot),
-            },
-        )
-        .expect("benchmark source handle allocation must succeed");
         let topic = crate::subscription::RtdTopic::new(["BENCH", "NUMBER"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
@@ -129,21 +135,26 @@ impl Default for RtdPublishStringBenchmark {
 
 impl RtdPublishStringBenchmark {
     pub fn new() -> Self {
-        let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
+        let generation = crate::generation::RuntimeGeneration::new(1)
+            .expect("benchmark generation is non-zero");
+        let registration = crate::subscription::SourceRegistration::new(generation);
+        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let source = registration
+            .register(BenchmarkRtdSource {
+                sink: Arc::clone(&sink_slot),
+            })
+            .expect("benchmark source handle allocation must succeed");
+        let runtime = Arc::new(
+            crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+                registration.finish(),
+            ),
+        );
         let server = runtime
             .register_server(
                 crate::subscription::ServerGeneration::new(1)
                     .expect("non-zero test server generation"),
             )
             .expect("server registration must succeed");
-        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-        let source = crate::subscription::RtdSourceHandle::for_internal(
-            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
-            BenchmarkRtdSource {
-                sink: Arc::clone(&sink_slot),
-            },
-        )
-        .expect("benchmark source handle allocation must succeed");
         let topic = crate::subscription::RtdTopic::new(["BENCH", "STRING"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
@@ -295,21 +306,16 @@ impl RtdRefreshScalingBenchmark {
         assert!(case.updated_topics <= case.active_topics);
         assert!((1..=TOPIC_SHARDS).contains(&case.ready_shards));
 
-        let runtime = Arc::new(crate::subscription::SubscriptionRuntime::new());
-        let server = runtime
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero benchmark server generation"),
-            )
-            .expect("server registration must succeed");
         let topic_ids = topic_ids_for_case(case);
 
-        let sinks = match value_kind {
+        let (runtime, server, sinks) = match value_kind {
             RtdRefreshValueKind::Number => {
-                RtdRefreshSinks::Number(connect_number_topics(&runtime, &server, &topic_ids))
+                let (runtime, server, sinks) = build_refresh_topics::<f64>(&topic_ids);
+                (runtime, server, RtdRefreshSinks::Number(sinks))
             }
             RtdRefreshValueKind::ShortString => {
-                RtdRefreshSinks::ShortString(connect_string_topics(&runtime, &server, &topic_ids))
+                let (runtime, server, sinks) = build_refresh_topics::<String>(&topic_ids);
+                (runtime, server, RtdRefreshSinks::ShortString(sinks))
             }
         };
         let updated_indices = (0..case.updated_topics).collect();
@@ -335,7 +341,8 @@ impl RtdRefreshScalingBenchmark {
             let started = Instant::now();
             let batch = self
                 .server
-                .inner
+                .server()
+                .expect("benchmark server remains registered")
                 .publish
                 .plan_refresh()
                 .expect("refresh planning must succeed");
@@ -351,7 +358,8 @@ impl RtdRefreshScalingBenchmark {
         for _ in 0..iterations {
             let planned = self
                 .server
-                .inner
+                .server()
+                .expect("benchmark server remains registered")
                 .publish
                 .plan_refresh()
                 .expect("refresh planning must succeed");
@@ -370,7 +378,8 @@ impl RtdRefreshScalingBenchmark {
         for _ in 0..iterations {
             let planned = self
                 .server
-                .inner
+                .server()
+                .expect("benchmark server remains registered")
                 .publish
                 .plan_refresh()
                 .expect("refresh planning must succeed");
@@ -441,61 +450,62 @@ impl RtdRefreshScalingBenchmark {
     }
 }
 
-fn connect_number_topics(
-    runtime: &Arc<crate::subscription::SubscriptionRuntime>,
-    server: &crate::subscription::SubscriptionServerHandle,
+fn build_refresh_topics<T>(
     topic_ids: &[crate::subscription::TopicId],
-) -> Vec<crate::subscription::RtdSink<f64>> {
-    topic_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, topic_id)| connect_topic::<f64>(runtime, server, index, topic_id))
-        .collect()
-}
-
-fn connect_string_topics(
-    runtime: &Arc<crate::subscription::SubscriptionRuntime>,
-    server: &crate::subscription::SubscriptionServerHandle,
-    topic_ids: &[crate::subscription::TopicId],
-) -> Vec<crate::subscription::RtdSink<String>> {
-    topic_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, topic_id)| connect_topic::<String>(runtime, server, index, topic_id))
-        .collect()
-}
-
-fn connect_topic<T>(
-    runtime: &Arc<crate::subscription::SubscriptionRuntime>,
-    server: &crate::subscription::SubscriptionServerHandle,
-    index: usize,
-    topic_id: crate::subscription::TopicId,
-) -> crate::subscription::RtdSink<T>
+) -> (
+    Arc<crate::subscription::SubscriptionRuntime>,
+    crate::subscription::SubscriptionServerHandle,
+    Vec<crate::subscription::RtdSink<T>>,
+)
 where
     T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static,
 {
-    let sink_slot = Arc::new(parking_lot::Mutex::new(None));
-    let source = crate::subscription::RtdSourceHandle::for_internal(
-        crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero"),
-        BenchmarkRtdSource {
-            sink: Arc::clone(&sink_slot),
-        },
-    )
-    .expect("benchmark source handle allocation must succeed");
-    let topic = crate::subscription::RtdTopic::single(format!("refresh-{index}"))
-        .expect("benchmark RTD topic must be valid");
-    let prepared = runtime
-        .prepare(&source, topic)
-        .expect("prepare must succeed");
-    let id = prepared.id();
-    let connection = runtime
-        .connect_transaction(server, topic_id, id)
-        .expect("connect_transaction must succeed");
-    connection.commit().expect("connection commit must succeed");
-    prepared.commit();
-    sink_slot.lock().clone().expect("sink must be captured")
+    let generation = crate::generation::RuntimeGeneration::new(1)
+        .expect("benchmark generation is non-zero");
+    let registration = crate::subscription::SourceRegistration::new(generation);
+    let registered = topic_ids
+        .iter()
+        .map(|_| {
+            let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+            let source = registration
+                .register(BenchmarkRtdSource {
+                    sink: Arc::clone(&sink_slot),
+                })
+                .expect("benchmark source handle allocation must succeed");
+            (source, sink_slot)
+        })
+        .collect::<Vec<_>>();
+    let runtime = Arc::new(
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+            registration.finish(),
+        ),
+    );
+    let server = runtime
+        .register_server(
+            crate::subscription::ServerGeneration::new(1)
+                .expect("non-zero benchmark server generation"),
+        )
+        .expect("server registration must succeed");
+    let sinks = registered
+        .into_iter()
+        .zip(topic_ids.iter().copied())
+        .enumerate()
+        .map(|(index, ((source, sink_slot), topic_id))| {
+            let topic = crate::subscription::RtdTopic::single(format!("refresh-{index}"))
+                .expect("benchmark RTD topic must be valid");
+            let prepared = runtime
+                .prepare(&source, topic)
+                .expect("prepare must succeed");
+            let id = prepared.id();
+            let connection = runtime
+                .connect_transaction(&server, topic_id, id)
+                .expect("connect_transaction must succeed");
+            connection.commit().expect("connection commit must succeed");
+            prepared.commit();
+            sink_slot.lock().clone().expect("sink must be captured")
+        })
+        .collect();
+    (runtime, server, sinks)
 }
 
 fn topic_ids_for_case(case: RtdRefreshScalingCase) -> Vec<crate::subscription::TopicId> {

@@ -52,7 +52,7 @@ pub(crate) use boundary::AFTER_ASYNC_EVALUATION_HOOK;
 #[cfg(test)]
 pub(crate) use excel_handle::ExcelAsyncResponder;
 #[cfg(test)]
-pub(crate) use executor::{Executor, ExecutorShared};
+pub(crate) use executor::{Executor, ExecutorPtr, ExecutorShared};
 #[cfg(test)]
 use futures_util::FutureExt;
 #[cfg(test)]

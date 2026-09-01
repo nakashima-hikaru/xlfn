@@ -9,7 +9,6 @@ use crate::addin::Addin;
 use crate::lifecycle::{LifecycleAccess, LifecycleControl, LifecycleCoordinator};
 use crate::runtime::observer::RuntimeObserver;
 use crate::runtime_components::{GenerationServices, HostLedger, QuarantineVault, ReturnProtocol};
-use std::sync::Arc;
 use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
 
 #[cfg(feature = "async")]
@@ -85,13 +84,11 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         dead_code,
         reason = "the observer samples generation services only for formal traces"
     )]
-    pub(in crate::runtime) fn generation_services_snapshot(
+    pub(in crate::runtime) fn with_generation_services<R>(
         &self,
-    ) -> Option<Arc<GenerationServices>> {
-        self.lifecycle.load_generation_services().or_else(|| {
-            let control = self.lifecycle.access();
-            control.retiring_services().map(Arc::clone)
-        })
+        operation: impl FnOnce(&GenerationServices) -> R,
+    ) -> Option<R> {
+        self.lifecycle.with_generation_services(operation)
     }
 
     #[cfg(feature = "async")]
@@ -288,11 +285,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         }
         #[cfg(feature = "rtd")]
         {
-            let services = self.lifecycle.load_generation_services().or_else(|| {
-                let control = self.lifecycle.access();
-                control.retiring_services().map(std::sync::Arc::clone)
+            let result = self.lifecycle.with_generation_services(|services| {
+                services.close_subscriptions(self.protocol_generation())
             });
-            let Some(services) = services else {
+            let Some(result) = result else {
                 #[cfg(test)]
                 {
                     return Ok(crate::excel_rtd::stopped_subscriptions(
@@ -304,7 +300,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
                     return Err(crate::XllError::Closing);
                 }
             };
-            services.close_subscriptions(self.protocol_generation())
+            result
         }
     }
 
@@ -313,28 +309,30 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<crate::runtime_components::SealedGenerationServices> {
         let generation = self.protocol_generation();
-        let services = self.lifecycle.load_generation_services().or_else(|| {
-            let control = self.lifecycle.access();
-            control.retiring_services().map(std::sync::Arc::clone)
+        let mut subscriptions_stopped = Some(subscriptions_stopped);
+        let sealed = self.lifecycle.with_generation_services(|services| {
+            services.seal(
+                generation,
+                subscriptions_stopped
+                    .take()
+                    .expect("generation services consume the subscription certificate once"),
+            )
         });
-        let Some(services) = services else {
+        let Some(sealed) = sealed else {
             return Ok(crate::runtime_components::SealedGenerationServices::empty(
                 generation,
-                subscriptions_stopped,
+                subscriptions_stopped
+                    .take()
+                    .expect("missing generation services preserve the subscription certificate"),
             ));
         };
-        services.seal(generation, subscriptions_stopped)
+        sealed
     }
 
     pub(in crate::runtime) fn shutdown_handle_topics(&self) -> crate::XllResult<()> {
-        let services = self.lifecycle.load_generation_services().or_else(|| {
-            let control = self.lifecycle.access();
-            control.retiring_services().map(std::sync::Arc::clone)
-        });
-        let Some(services) = services else {
-            return Ok(());
-        };
-        services.shutdown_handle_topics()
+        self.lifecycle
+            .with_generation_services(GenerationServices::shutdown_handle_topics)
+            .unwrap_or(Ok(()))
     }
 
     pub(in crate::runtime) fn take_generation_for_shutdown(

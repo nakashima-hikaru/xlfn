@@ -71,5 +71,7 @@ impl GenerationState {
 
 pub(crate) struct ExecutorControl {
     pub(crate) phase: ControlPhase,
-    pub(crate) generations: FxHashMap<u64, triomphe::Arc<GenerationState>>,
+    /// Unique generation owners. Box allocation keeps every published pointer
+    /// stable while hash-table entries move during growth.
+    pub(crate) generations: FxHashMap<u64, Box<GenerationState>>,
 }

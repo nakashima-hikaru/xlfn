@@ -5,7 +5,6 @@ use super::*;
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
     runtime: &'static crate::runtime::Runtime<()>,
-    _handle_runtime: Option<Arc<FormulaHandleService>>,
     raw: xlfn_sys::XLOPER12,
     _storage: Option<Box<dyn std::any::Any>>,
 }
@@ -14,7 +13,6 @@ impl RawArgumentIngressBenchmark {
     pub fn number(value: f64) -> Self {
         Self {
             runtime: get_benchmark_runtime(),
-            _handle_runtime: None,
             raw: xlfn_sys::XLOPER12::number(value),
             _storage: None,
         }
@@ -33,7 +31,6 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            _handle_runtime: None,
             raw,
             _storage: Some(Box::new(u16_chars)),
         }
@@ -70,7 +67,6 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            _handle_runtime: None,
             raw,
             _storage: Some(Box::new((cells, strings))),
         }
@@ -101,7 +97,6 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            _handle_runtime: None,
             raw,
             _storage: Some(Box::new((cells, text))),
         }
@@ -125,7 +120,6 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime: get_benchmark_runtime(),
-            _handle_runtime: None,
             raw,
             _storage: Some(Box::new(cells)),
         }
@@ -139,16 +133,16 @@ impl RawArgumentIngressBenchmark {
 
     pub fn handle() -> Self {
         let runtime = get_benchmark_runtime();
-        let handle_runtime = runtime
-            .formula_handle_service()
-            .expect("benchmark handle runtime must initialize");
         let key = benchmark_revision_key("BENCH.INGRESS.HANDLE", 1);
-        let token = handle_runtime
-            .prepare_observed(
-                key,
-                || Ok(BenchHandleObject { _payload: 42 }),
-                |_, _| Ok(()),
-            )
+        let token = runtime
+            .with_formula_handle_service(|handle_runtime| {
+                handle_runtime.prepare_observed(
+                    key,
+                    || Ok(BenchHandleObject { _payload: 42 }),
+                    |_, _| Ok(()),
+                )
+            })
+            .expect("benchmark handle runtime must initialize")
             .expect("benchmark handle preparation must succeed")
             .into_token();
         let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
@@ -162,7 +156,6 @@ impl RawArgumentIngressBenchmark {
         };
         Self {
             runtime,
-            _handle_runtime: Some(handle_runtime),
             raw,
             _storage: Some(Box::new(u16_chars)),
         }

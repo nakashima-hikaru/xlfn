@@ -70,7 +70,7 @@ where
         Err(error) => return Err(transaction.failure(error)),
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let (mut transaction, runtime_config) = initialize_addin::<A>(&context, transaction)?;
+    let (mut transaction, runtime_config) = initialize_addin::<A>(context, transaction)?;
     #[cfg(not(feature = "async"))]
     let _ = runtime_config;
     let has_async_functions = prepared_set
@@ -147,7 +147,7 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
         return;
     }
     runtime.host.merge(journal);
-    let (attempt_id, module_opening) = core.into_parts();
+    let (attempt_id, module_opening, _service_inputs) = core.into_parts();
     let generation = Some(
         RuntimeGeneration::new(attempt_id.get())
             .expect("an active open attempt has a runtime generation"),
@@ -179,23 +179,24 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
 }
 
 pub(crate) fn initialize_addin<'runtime, A>(
-    context: &OpenContext,
+    context: OpenContext,
     transaction: OpeningTxn<'runtime, A, HostAttached>,
 ) -> InitializedOpenResult<'runtime, A>
 where
     A: Addin,
 {
-    let opened = match A::open(context) {
+    let opened = match A::open(&context) {
         Ok(opened) => opened,
         Err(error) => {
             return Err(transaction.failure(IntoXllError::into_xll_error(error)));
         }
     };
     let (shared_state, lifecycle_state, layers, runtime_config) = opened.into_parts();
+    let service_inputs = context.into_service_inputs();
     // Keep the non-Send lifecycle state in the open transaction until the
     // final pre-publication transfer into the thread-affine slot. It must not
     // become part of the cross-thread generation root.
-    let transaction = transaction.initialized(lifecycle_state);
+    let transaction = transaction.initialized(lifecycle_state, service_inputs);
     let opening = crate::generation::OpeningGeneration {
         shared_state,
         layers,
@@ -573,62 +574,40 @@ where
     let addin = if let Some(generation) = shutdown_deps.take_generation_for_shutdown() {
         match generation {
             crate::generation::ShutdownGeneration::Open(generation) => {
-                match std::sync::Arc::try_unwrap(generation) {
-                    Ok(mut generation) => {
-                        let quiesce = catch_unwind(AssertUnwindSafe(|| {
-                            runtime
-                                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                                    runtime.quiesce_addin(
-                                        &mut generation.shared_state,
-                                        lifecycle_state,
-                                    )
-                                })
-                                .map_err(lifecycle_access_error)
-                        }))
-                        .map_err(|_| XllError::Panic)
-                        .and_then(|result| result)
-                        .and_then(|result| result);
-                        if let Err(error) = quiesce {
-                            report_boundary_error("xlAutoRemove quiesce", &error);
-                            runtime.lifecycle_orchestrator().quarantine_generation(
-                                active_runtime_generation(runtime),
-                                generation,
-                                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                            );
-                            return Err(handle_unload_hazard(
-                                runtime,
-                                crate::shutdown::UnloadHazard::AddinQuiesceFailed,
-                                "xlAutoRemove quiesce",
-                                &error,
-                            ));
-                        }
-                        drop(generation.layers);
-                        shutdown::QuiescedAddin::shared(
-                            runtime.shutdown_deps(),
-                            active_runtime_generation(runtime),
-                            generation.shared_state,
-                        )
-                    }
-                    Err(generation) => {
-                        let error = XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::STATE_SCAN,
-                        };
-                        report_boundary_error("xlAutoRemove state escaped", &error);
-                        runtime
-                            .lifecycle_orchestrator()
-                            .quarantine_shared_generation(
-                                active_runtime_generation(runtime),
-                                generation,
-                                crate::runtime_components::QuarantineReason::AddinGenerationEscaped,
-                            );
-                        return Err(handle_unload_hazard(
-                            runtime,
-                            crate::shutdown::UnloadHazard::AddinGenerationEscaped,
-                            "xlAutoRemove state escaped",
-                            &error,
-                        ));
-                    }
+                let mut generation = *generation;
+                let quiesce = catch_unwind(AssertUnwindSafe(|| {
+                    runtime
+                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
+                            runtime.quiesce_addin(
+                                &mut generation.shared_state,
+                                lifecycle_state,
+                            )
+                        })
+                        .map_err(lifecycle_access_error)
+                }))
+                .map_err(|_| XllError::Panic)
+                .and_then(|result| result)
+                .and_then(|result| result);
+                if let Err(error) = quiesce {
+                    report_boundary_error("xlAutoRemove quiesce", &error);
+                    runtime.lifecycle_orchestrator().quarantine_generation(
+                        active_runtime_generation(runtime),
+                        generation,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                    return Err(handle_unload_hazard(
+                        runtime,
+                        crate::shutdown::UnloadHazard::AddinQuiesceFailed,
+                        "xlAutoRemove quiesce",
+                        &error,
+                    ));
                 }
+                drop(generation.layers);
+                shutdown::QuiescedAddin::shared(
+                    runtime.shutdown_deps(),
+                    active_runtime_generation(runtime),
+                    generation.shared_state,
+                )
             }
             crate::generation::ShutdownGeneration::Opening(opening) => {
                 let (mut shared_state, layers, _config) = opening.into_parts();

@@ -1,9 +1,10 @@
 use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
-    ExcelHandleObject, FormulaBinding, Handle, HandleAlias, HandlePrepareState,
-    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, PrepareDecision,
-    PublishedTopic, PublishedTopicState, SharedObject, TopicRemoval, TopicTable,
+    ExcelHandleObject, Handle, HandleAlias, HandlePrepareState,
+    HandleRefinementHooks, HandleStore, HandleTopicKey, Initialization, InitializationPtr,
+    ObjectBinding, PrepareDecision, PublishedTopic, PublishedTopicPtr, PublishedTopicState,
+    TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
@@ -14,29 +15,28 @@ use parking_lot::{Condvar, Mutex};
 #[cfg(feature = "handles")]
 use std::cell::OnceCell;
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) struct NewObject(SharedObject);
+pub(crate) struct NewObject(ObjectBinding);
 
 impl NewObject {
-    fn new(value: SharedObject) -> Self {
+    fn new(value: ObjectBinding) -> Self {
         Self(value)
     }
 
-    pub(super) fn into_shared(self) -> SharedObject {
+    pub(super) fn into_binding(self) -> ObjectBinding {
         self.0
     }
 }
 
-pub(crate) struct ExistingObject(SharedObject);
+pub(crate) struct ExistingObject(ObjectBinding);
 
 impl ExistingObject {
-    fn new(object: SharedObject) -> Self {
+    fn new(object: ObjectBinding) -> Self {
         Self(object)
     }
 
-    pub(super) fn into_shared(self) -> SharedObject {
+    pub(super) fn into_binding(self) -> ObjectBinding {
         self.0
     }
 }
@@ -160,7 +160,7 @@ impl FormulaHandleService {
     pub(crate) fn observe_existing(
         &self,
         key: HandleTopicKey,
-        lifetime_key: Arc<str>,
+        lifetime_key: String,
         token: String,
         generation: TopicGeneration,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
@@ -174,8 +174,8 @@ impl FormulaHandleService {
         &self,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        initialization: &Arc<Initialization>,
-        publication: &triomphe::Arc<PublishedTopic>,
+        initialization: InitializationPtr,
+        publication: PublishedTopicPtr,
     ) -> XllResult<()> {
         // A provisional snapshot lets readers that raced with the publication
         // fall back to the canonical single-flight path. Make it Live only
@@ -233,7 +233,7 @@ impl FormulaHandleService {
             key,
             || {
                 Ok(PreparedHandleObject::Existing(ExistingObject::new(
-                    object.into_shared_object(),
+                    object.into_object_binding()?,
                 )))
             },
             observe,
@@ -263,13 +263,15 @@ impl FormulaHandleService {
         let decision = loop {
             let decision = self.topics.prepare_decision(key, owner, || {
                 let refinement_id = self.refinement.observe_allocate_initializer_id();
-                Arc::new(Initialization {
+                Initialization {
                     owner,
                     owner_done: AtomicBool::new(false),
                     wait: Mutex::new(()),
                     completed: Condvar::new(),
                     refinement_id,
-                })
+                    #[cfg(test)]
+                    waiters: std::sync::atomic::AtomicUsize::new(0),
+                }
             })?;
             match decision {
                 PrepareDecision::Wait { initialization } => {
@@ -319,19 +321,13 @@ impl FormulaHandleService {
         // Cold path: no existing topic, invoke the factory.
         //
         let publication_reservation =
-            PublicationReservation::new(self, key, generation, Arc::clone(&initialization));
+            PublicationReservation::new(self, key, generation, initialization);
         let prepared = create()?;
         let InsertedPublication {
             transaction: publication_txn,
             token,
-            binding_id,
-            object_id,
             allocation,
         } = publication_reservation.insert_object::<T>(prepared)?;
-        let binding = FormulaBinding {
-            id: binding_id,
-            object_id,
-        };
         let parsed = self.refinement_token(&token);
         if allocation == ObjectAllocation::Reused {
             self.refinement.observe_insert_pending_reuse(
@@ -344,28 +340,22 @@ impl FormulaHandleService {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization.refinement_id);
         }
-        let lifetime_key: Arc<str> = key.format_lifetime_key().into();
-        let publication = triomphe::Arc::new(PublishedTopic::new(
-            binding,
-            token.clone(),
-            Arc::clone(&lifetime_key),
-        ));
+        let publication = PublishedTopic::new(token.clone(), key.format_lifetime_key());
         let publication_txn = publication_txn.publish_and_observe(
-            publication.clone(),
-            Arc::clone(&lifetime_key),
+            publication,
             observe
                 .take()
                 .expect("the cold path owns the observation closure"),
-            || {
+            |publication| {
                 self.refinement.observe_publish_and_install(
                     &key,
                     initialization.refinement_id,
                     self.refinement_token(&token),
-                    &lifetime_key,
+                    &publication.lifetime_key,
                 );
             },
         )?;
-        publication_txn.commit(&publication)?;
+        publication_txn.commit()?;
         Ok(HandlePreparation::Published { token })
     }
 
@@ -380,8 +370,7 @@ impl FormulaHandleService {
     where
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
-        let published = self.topics.published().load(&key);
-        let Some(publication) = published.get(&key) else {
+        let Some(publication) = self.topics.published().load(&key) else {
             return Ok(None);
         };
         if publication.state() != PublishedTopicState::Live {
@@ -697,7 +686,7 @@ impl super::lifetime::FormulaLifetimeBackend for FormulaHandleService {
 enum FormulaHandleServiceSealed {
     Present {
         generation: RuntimeGeneration,
-        service: Arc<FormulaHandleService>,
+        service: Box<FormulaHandleService>,
         registry: HandleRegistrySealed,
     },
 }
@@ -705,7 +694,7 @@ enum FormulaHandleServiceSealed {
 impl FormulaHandleServiceSealed {
     fn from_service(
         generation: Option<RuntimeGeneration>,
-        service: Arc<FormulaHandleService>,
+        service: Box<FormulaHandleService>,
         registry: super::registry::HandleRegistrySealed,
     ) -> Self {
         Self::Present {
@@ -739,12 +728,11 @@ pub(crate) struct FormulaHandleServiceSlot {
     trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
-/// A read capability that holds an `arc_swap::Guard` over a published
-/// `FormulaHandleService`.  The warm path acquires this without any `Mutex` or
-/// `Arc::clone`.
+/// A non-owning read capability over the slot-owned `FormulaHandleService`.
+/// The warm path acquires one drain permit and one atomic pointer load.
 #[cfg(feature = "handles")]
-pub(crate) type FormulaHandleServiceRead =
-    xlfn_kernel::service_slot::GenerationServiceRead<FormulaHandleService>;
+pub(crate) type FormulaHandleServiceRead<'a> =
+    xlfn_kernel::service_slot::GenerationServiceRead<'a, FormulaHandleService>;
 
 #[cfg(feature = "handles")]
 impl FormulaHandleServiceSlot {
@@ -797,10 +785,9 @@ impl FormulaHandleServiceSlot {
 
     /// Acquire a read guard over the published `FormulaHandleService`.
     ///
-    /// The warm path (runtime already initialized) performs a single
-    /// `ArcSwap::load` with no `Mutex` and no `Arc::clone`.
+    /// The warm path performs one admission increment and one pointer load.
     #[inline]
-    pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead> {
+    pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead<'_>> {
         self.service
             .read(
                 |config| {
@@ -808,12 +795,12 @@ impl FormulaHandleServiceSlot {
                         usize::try_from(config.maximum_bindings())
                             .expect("handle capacity fits the platform usize"),
                     )
-                    .map(Arc::new)
+                    .map(Box::new)
                 },
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
                     if let Some(trace) = self.trace.get() {
-                        _runtime.set_trace_sink(Arc::clone(trace));
+                        _runtime.set_trace_sink(std::sync::Arc::clone(trace));
                     }
                 },
             )
@@ -824,46 +811,34 @@ impl FormulaHandleServiceSlot {
     ///
     /// RTD shutdown uses this read-only probe from the generation service
     /// bundle. The handle slot itself remains independent of the RTD adapter.
-    pub(crate) fn read_if_ready(&self) -> Option<FormulaHandleServiceRead> {
+    pub(crate) fn read_if_ready(&self) -> Option<FormulaHandleServiceRead<'_>> {
         self.service.read_if_ready()
-    }
-
-    /// Owned `Arc` escape for test/benchmark code that needs to hold a
-    /// `FormulaHandleService` beyond a call scope.
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn get_owned(&self) -> XllResult<Arc<FormulaHandleService>> {
-        let read = self.read()?;
-        Ok(Arc::clone(read.as_arc()))
     }
 
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
     ) -> XllResult<crate::shutdown::HandlesSealed> {
-        self.service
-            .seal(
-                crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
-                },
-                || crate::shutdown::HandlesSealed::empty(generation),
-                |handles| {
-                    let handle_result = handles.seal();
-                    handle_result.map(|registry| {
-                        crate::shutdown::HandlesSealed::from_teardown(
-                            generation,
-                            FormulaHandleServiceSealed::from_service(generation, handles, registry),
-                        )
-                    })
-                },
-            )
-            .map_err(crate::error::map_service_slot_error)
+        let sealed = self
+            .service
+            .seal(|| None, |handles| handles.seal().map(Some))
+            .map_err(crate::error::map_service_slot_error)?;
+        let (service, registry) = sealed.into_parts();
+        match (service, registry) {
+            (None, None) => Ok(crate::shutdown::HandlesSealed::empty(generation)),
+            (Some(service), Some(registry)) => Ok(crate::shutdown::HandlesSealed::from_teardown(
+                generation,
+                FormulaHandleServiceSealed::from_service(generation, service, registry),
+            )),
+            _ => xlfn_kernel::invariant::fail_stop(),
+        }
     }
 }
 
 #[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceResolver<'call> {
     slot: &'call FormulaHandleServiceSlot,
-    resolved: OnceCell<XllResult<FormulaHandleServiceRead>>,
+    resolved: OnceCell<XllResult<FormulaHandleServiceRead<'call>>>,
 }
 
 #[cfg(feature = "handles")]
@@ -878,8 +853,8 @@ impl<'call> FormulaHandleServiceResolver<'call> {
 
     /// Returns a shared reference to the `FormulaHandleService`.
     ///
-    /// The first call performs an `ArcSwap::load`; subsequent calls within the
-    /// same UDF invocation return the cached guard with zero atomic operations.
+    /// The first call acquires a read permit; subsequent calls within the same
+    /// UDF invocation return the cached guard without another admission.
     #[inline]
     pub(crate) fn get(&self) -> XllResult<&FormulaHandleService> {
         match self.resolved.get_or_init(|| self.slot.read()) {
@@ -888,13 +863,4 @@ impl<'call> FormulaHandleServiceResolver<'call> {
         }
     }
 
-    /// Returns a reference to the underlying `Arc` for paths that need
-    /// ownership escape (RTD observation, `ensure_server`).
-    #[inline]
-    pub(crate) fn get_arc(&self) -> XllResult<&Arc<FormulaHandleService>> {
-        match self.resolved.get_or_init(|| self.slot.read()) {
-            Ok(runtime) => Ok(runtime.as_arc()),
-            Err(error) => Err(error.clone()),
-        }
-    }
 }

@@ -104,7 +104,7 @@ pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
 }
 
 pub(crate) fn observe_subscription(
-    subscriptions: &Arc<SubscriptionRuntime>,
+    subscriptions: &SubscriptionRuntime,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<RtdValue> {

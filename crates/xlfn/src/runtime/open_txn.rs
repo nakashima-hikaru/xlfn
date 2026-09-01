@@ -8,7 +8,6 @@ use crate::runtime::AddinLifecycleAccess;
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
-use std::sync::Arc;
 use xlfn_kernel::thread_affine::ThreadAffineError;
 
 /// A state payload in the open transaction protocol.
@@ -21,6 +20,7 @@ pub(crate) trait OpeningState<A: crate::Addin>: Sized {
 pub(crate) struct OpenCore {
     attempt_id: OpenAttemptId,
     module_opening: crate::module_runtime::ModuleOpening,
+    service_inputs: Option<crate::runtime_components::GenerationServiceInputs>,
 }
 
 impl OpenCore {
@@ -31,6 +31,7 @@ impl OpenCore {
         Self {
             attempt_id,
             module_opening,
+            service_inputs: None,
         }
     }
 
@@ -38,8 +39,28 @@ impl OpenCore {
         self.attempt_id
     }
 
-    pub(crate) fn into_parts(self) -> (OpenAttemptId, crate::module_runtime::ModuleOpening) {
-        (self.attempt_id, self.module_opening)
+    fn install_service_inputs(
+        &mut self,
+        inputs: crate::runtime_components::GenerationServiceInputs,
+    ) {
+        if self.service_inputs.replace(inputs).is_some() {
+            crate::boundary::fail_stop_invariant(
+                "open transaction service inputs installed twice",
+                &crate::XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        OpenAttemptId,
+        crate::module_runtime::ModuleOpening,
+        Option<crate::runtime_components::GenerationServiceInputs>,
+    ) {
+        (self.attempt_id, self.module_opening, self.service_inputs)
     }
 }
 
@@ -146,7 +167,7 @@ fn abandon_open<A: crate::Addin>(
     core: OpenCore,
     lifecycle: LifecycleOwnership<A>,
 ) {
-    let (_, module_opening) = core.into_parts();
+    let (_, module_opening, _service_inputs) = core.into_parts();
     deps.lifecycle_control()
         .complete_open_abort(module_opening.rollback(|| {}));
     let control_api = deps.lifecycle_control();
@@ -415,7 +436,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
             crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
                 .mark_open_failed(attempt_id);
         let Begun { core } = transaction.take_state();
-        let (_, module_opening) = core.into_parts();
+        let (_, module_opening, _service_inputs) = core.into_parts();
         transaction
             .deps
             .lifecycle_control()
@@ -428,9 +449,11 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached> {
     pub(crate) fn initialized(
         self,
         lifecycle: A::LifecycleState,
+        service_inputs: crate::runtime_components::GenerationServiceInputs,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
-        let HostAttached { core, host } = transaction.take_state();
+        let HostAttached { mut core, host } = transaction.take_state();
+        core.install_service_inputs(service_inputs);
         OpeningTxn::new_state(
             transaction.deps,
             Initialized {
@@ -522,7 +545,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled> {
             crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
                 .mark_open_failed(attempt_id);
         let LifecycleInstalled { core, host: _ } = transaction.take_state();
-        let (_, module_opening) = core.into_parts();
+        let (_, module_opening, _service_inputs) = core.into_parts();
         transaction
             .deps
             .lifecycle_control()
@@ -600,7 +623,15 @@ fn commit_inner<A: crate::Addin>(
     core: OpenCore,
     journal: &mut HostMutationJournal,
 ) -> XllResult<()> {
-    let (attempt_id, module_opening) = core.into_parts();
+    let (attempt_id, module_opening, service_inputs) = core.into_parts();
+    let service_inputs = service_inputs.unwrap_or_else(|| {
+        crate::boundary::fail_stop_invariant(
+            "open transaction missing generation service inputs",
+            &crate::XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+            },
+        )
+    });
     let mut control = deps.lifecycle_access();
     let registration_ids = journal
         .pending_registrations
@@ -616,7 +647,13 @@ fn commit_inner<A: crate::Addin>(
         let generation = attempt_id.into_runtime_generation();
         let result = ingress
             .complete_open(|| {
-                publish_generation(deps, attempt_id, &mut control, &mut module_opening)?;
+                publish_generation(
+                    deps,
+                    attempt_id,
+                    &mut control,
+                    &mut module_opening,
+                    service_inputs,
+                )?;
                 deps.lifecycle_control()
                     .finish_open_state(&mut control, generation)?;
                 if control.phase() != crate::lifecycle::LifecyclePhase::Open
@@ -667,6 +704,7 @@ fn publish_generation<A: crate::Addin>(
     attempt_id: OpenAttemptId,
     control: &mut LifecycleAccess<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
+    service_inputs: crate::runtime_components::GenerationServiceInputs,
 ) -> XllResult<()> {
     let generation = attempt_id.into_runtime_generation();
     let config = control.opening_config().ok_or(XllError::Internal {
@@ -678,8 +716,13 @@ fn publish_generation<A: crate::Addin>(
     ));
     #[cfg(not(feature = "rtd"))]
     let subscription_host = None;
-    let services =
-        GenerationServices::arm_generation(generation, config, subscription_host)?.commit();
+    let services = GenerationServices::arm_generation(
+        generation,
+        config,
+        subscription_host,
+        service_inputs,
+    )?
+    .commit();
     let module_epoch = module_opening
         .take()
         .expect("open transaction owns its module opening authority")
@@ -687,12 +730,12 @@ fn publish_generation<A: crate::Addin>(
     match deps.lifecycle_control().publish_generation_state(
         control,
         generation,
-        Arc::clone(&services),
+        services,
         module_epoch,
     ) {
         Ok(()) => Ok(()),
         Err(failure) => {
-            let (error, opening, module_epoch) = *failure;
+            let (error, opening, services, module_epoch) = *failure;
             services.disarm_or_abort();
             if let Some(opening) = opening {
                 let crate::generation::OpeningGeneration {

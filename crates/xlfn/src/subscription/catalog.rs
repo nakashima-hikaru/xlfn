@@ -1,5 +1,5 @@
 use super::identity::SubscriptionIdentityIndex;
-use super::source::{ErasedRtdSource, SourceHandleId};
+use super::source::SourceHandleId;
 use super::topic::{
     RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentity, SubscriptionKey,
 };
@@ -7,7 +7,6 @@ use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 use xlfn_kernel::invariant::checked_sub_or_abort;
 
@@ -18,19 +17,16 @@ pub(crate) enum PendingCommitment {
 }
 
 pub(crate) struct ActiveReservation {
-    source: Arc<dyn ErasedRtdSource>,
     reservations: NonZeroUsize,
 }
 
 pub(crate) enum SubscriptionPhase {
     Pending {
-        source: Arc<dyn ErasedRtdSource>,
         reservations: Option<NonZeroUsize>,
         server: Option<ServerGeneration>,
         commitment: PendingCommitment,
     },
     Connecting {
-        source: Arc<dyn ErasedRtdSource>,
         reservations: Option<NonZeroUsize>,
         server: ServerGeneration,
         connection: ConnectionGeneration,
@@ -46,7 +42,6 @@ pub(crate) enum SubscriptionPhase {
 pub(crate) enum PreparationFinish {
     Keep,
     Remove,
-    DropSource(Arc<dyn ErasedRtdSource>),
 }
 
 pub(crate) struct SubscriptionEntry {
@@ -104,16 +99,6 @@ impl SubscriptionEntry {
         }
     }
 
-    pub(crate) fn into_source(self) -> Option<Arc<dyn ErasedRtdSource>> {
-        match self.phase {
-            SubscriptionPhase::Pending { source, .. }
-            | SubscriptionPhase::Connecting { source, .. } => Some(source),
-            SubscriptionPhase::Active { reservation, .. } => {
-                reservation.map(|reservation| reservation.source)
-            }
-        }
-    }
-
     pub(crate) fn add_reservation(&mut self) -> XllResult<()> {
         let reservations = match &mut self.phase {
             SubscriptionPhase::Pending { reservations, .. }
@@ -168,9 +153,8 @@ impl SubscriptionEntry {
                     return PreparationFinish::Keep;
                 };
                 if active.reservations.get() == 1 {
-                    let source = Arc::clone(&active.source);
                     *reservation = None;
-                    PreparationFinish::DropSource(source)
+                    PreparationFinish::Keep
                 } else {
                     active.reservations = NonZeroUsize::new(active.reservations.get() - 1)
                         .expect("a remaining reservation is non-zero");
@@ -210,14 +194,13 @@ impl SubscriptionEntry {
         &mut self,
         server: ServerGeneration,
         connection: ConnectionGeneration,
-    ) -> XllResult<Arc<dyn ErasedRtdSource>> {
-        let (source, reservations, commitment, existing_server) = match &self.phase {
+    ) -> XllResult<()> {
+        let (reservations, commitment, existing_server) = match &self.phase {
             SubscriptionPhase::Pending {
-                source,
                 reservations,
                 commitment,
                 server,
-            } => (source, *reservations, *commitment, *server),
+            } => (*reservations, *commitment, *server),
             SubscriptionPhase::Connecting { .. } => {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CONNECTION_INFLIGHT,
@@ -236,30 +219,26 @@ impl SubscriptionEntry {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
             });
         }
-        let source = Arc::clone(source);
         self.phase = SubscriptionPhase::Connecting {
-            source: Arc::clone(&source),
             reservations,
             server,
             connection,
             commitment,
         };
-        Ok(source)
+        Ok(())
     }
 
     pub(crate) fn rollback_connection(&mut self, connection: ConnectionGeneration) -> bool {
-        let (source, reservations, server, commitment) = match &self.phase {
+        let (reservations, server, commitment) = match &self.phase {
             SubscriptionPhase::Connecting {
-                source,
                 reservations,
                 server,
                 connection: current,
                 commitment,
-            } if *current == connection => (source, *reservations, *server, *commitment),
+            } if *current == connection => (*reservations, *server, *commitment),
             _ => return false,
         };
         self.phase = SubscriptionPhase::Pending {
-            source: Arc::clone(source),
             reservations,
             server: Some(server),
             commitment,
@@ -270,20 +249,17 @@ impl SubscriptionEntry {
     pub(crate) fn finish_connection(
         &mut self,
         connection: ConnectionGeneration,
-    ) -> Option<Arc<dyn ErasedRtdSource>> {
-        let (source, reservations, server) = match &self.phase {
+    ) -> bool {
+        let (reservations, server) = match &self.phase {
             SubscriptionPhase::Connecting {
-                source,
                 reservations,
                 server,
                 connection: current,
                 ..
-            } if *current == connection => (source, *reservations, *server),
-            _ => return None,
+            } if *current == connection => (*reservations, *server),
+            _ => return false,
         };
-        let drop_source = reservations.is_none().then(|| Arc::clone(source));
         let reservation = reservations.map(|reservations| ActiveReservation {
-            source: Arc::clone(source),
             reservations,
         });
         self.phase = SubscriptionPhase::Active {
@@ -291,7 +267,7 @@ impl SubscriptionEntry {
             connection,
             reservation,
         };
-        drop_source
+        true
     }
 
     pub(crate) fn reset_for_server_termination(&mut self, server: ServerGeneration) -> bool {
@@ -306,17 +282,14 @@ impl SubscriptionEntry {
                 true
             }
             SubscriptionPhase::Connecting {
-                source,
                 reservations,
                 server: current,
                 commitment,
                 ..
             } if *current == server => {
-                let source = Arc::clone(source);
                 let reservations = *reservations;
                 *commitment = PendingCommitment::Uncommitted;
                 self.phase = SubscriptionPhase::Pending {
-                    source,
                     reservations,
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
@@ -334,16 +307,13 @@ impl SubscriptionEntry {
     ) -> (bool, bool) {
         match &mut self.phase {
             SubscriptionPhase::Connecting {
-                source,
                 reservations,
                 server: current_server,
                 connection: current_connection,
                 ..
             } if *current_server == server && *current_connection == connection => {
-                let source = Arc::clone(source);
                 let reservations = *reservations;
                 self.phase = SubscriptionPhase::Pending {
-                    source,
                     reservations,
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
@@ -358,10 +328,8 @@ impl SubscriptionEntry {
                 let Some(active) = reservation.as_ref() else {
                     return (true, true);
                 };
-                let source = Arc::clone(&active.source);
                 let reservations = active.reservations;
                 self.phase = SubscriptionPhase::Pending {
-                    source,
                     reservations: Some(reservations),
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
@@ -429,7 +397,6 @@ impl SubscriptionCatalog {
     fn commit_pending_insert(
         &mut self,
         plan: PendingInsertPlan,
-        source: Arc<dyn ErasedRtdSource>,
         topic: RtdTopic,
     ) -> (SubscriptionId, SubscriptionKey) {
         let PendingInsertPlan {
@@ -448,7 +415,6 @@ impl SubscriptionCatalog {
                 source_id: identity.source_id,
                 topic,
                 phase: SubscriptionPhase::Pending {
-                    source,
                     reservations: Some(NonZeroUsize::new(1).expect("one is non-zero")),
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
@@ -466,14 +432,13 @@ impl SubscriptionCatalog {
         &mut self,
         runtime_id: u64,
         source_id: SourceHandleId,
-        source: Arc<dyn ErasedRtdSource>,
         topic: RtdTopic,
         limits: RtdLimits,
     ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
         let plan = self.plan_pending_insert(runtime_id, source_id, &topic, limits)?;
         self.identities
             .insert(plan.identity.clone(), plan.id, limits.max_source_ids.get())?;
-        Ok(self.commit_pending_insert(plan, source, topic))
+        Ok(self.commit_pending_insert(plan, topic))
     }
 
     pub(crate) fn pending_len(&self) -> usize {
@@ -561,25 +526,21 @@ impl SubscriptionCatalog {
         for entry in self.entries.values() {
             match &entry.phase {
                 SubscriptionPhase::Pending {
-                    source,
                     reservations,
                     server: _,
                     commitment,
                 } => {
-                    assert!(Arc::strong_count(source) >= 1);
                     assert!(entry.connection_generation().is_none());
                     if reservations.is_none() {
                         assert_eq!(*commitment, PendingCommitment::Committed);
                     }
                 }
                 SubscriptionPhase::Connecting {
-                    source,
                     reservations: _,
                     server: _,
                     connection: _,
                     commitment: _,
                 } => {
-                    assert!(Arc::strong_count(source) >= 1);
                     assert!(entry.connection_generation().is_some());
                 }
                 SubscriptionPhase::Active {
@@ -590,7 +551,6 @@ impl SubscriptionCatalog {
                     assert!(entry.connection_generation().is_some());
                     if let Some(reservation) = reservation {
                         assert!(reservation.reservations.get() > 0);
-                        assert!(Arc::strong_count(&reservation.source) >= 1);
                     }
                 }
             }

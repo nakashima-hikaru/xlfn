@@ -3,19 +3,13 @@ use super::FormulaHandleService;
 use super::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use super::HandleTopicKey;
-use super::{HandleId, ObjectId, PublishedTopic};
+use super::PublishedTopicPtr;
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FormulaBinding {
-    pub(crate) id: HandleId,
-    pub(crate) object_id: ObjectId,
-}
-
 pub(crate) struct Topic {
-    /// The immutable publication owns the formula binding and wire identities.
-    pub(crate) publication: triomphe::Arc<PublishedTopic>,
+    /// Non-owning identity into the topic table's publication arena.
+    pub(crate) publication: PublishedTopicPtr,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) lifetime_generation: Option<FormulaLifetimeGeneration>,
     pub(crate) observer: Option<FormulaObserverId>,

@@ -1,7 +1,12 @@
 //! A generic bounded permit counter.
 
+#![allow(
+    unsafe_code,
+    reason = "quota permits are non-owning capabilities whose owner is reclaimed after all permits"
+)]
+
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use triomphe::Arc;
 
 use crate::invariant::checked_atomic_dec;
 
@@ -21,15 +26,21 @@ impl Quota {
         }
     }
 
-    pub fn try_acquire(this: &Arc<Self>) -> Result<QuotaPermit, QuotaExceeded> {
-        this.used
+    /// Acquires a non-owning permit.
+    ///
+    /// # Safety
+    ///
+    /// The quota must outlive the returned permit. Its owner must drain or
+    /// destroy every permit-bearing object before reclaiming the quota.
+    pub unsafe fn try_acquire(&self) -> Result<QuotaPermit, QuotaExceeded> {
+        self.used
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < this.limit).then_some(used + 1)
+                (used < self.limit).then_some(used + 1)
             })
             .map_err(|_| QuotaExceeded)?;
 
         Ok(QuotaPermit {
-            quota: Arc::clone(this),
+            quota: NonNull::from(self),
         })
     }
 
@@ -40,11 +51,18 @@ impl Quota {
 }
 
 pub struct QuotaPermit {
-    quota: Arc<Quota>,
+    quota: NonNull<Quota>,
 }
 
 impl Drop for QuotaPermit {
     fn drop(&mut self) {
-        let _ = checked_atomic_dec(&self.quota.used);
+        // SAFETY: guaranteed by `Quota::try_acquire`'s owner-lifetime
+        // contract. Dropping the permit ends the capability before reclaim.
+        let _ = checked_atomic_dec(&unsafe { self.quota.as_ref() }.used);
     }
 }
+
+// SAFETY: Quota is thread-safe and the lifetime contract is independent of
+// the thread on which a permit is dropped.
+unsafe impl Send for QuotaPermit {}
+unsafe impl Sync for QuotaPermit {}

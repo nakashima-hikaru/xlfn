@@ -1,54 +1,102 @@
-use super::catalog::{SubscriptionCatalog, SubscriptionEntry};
+#![allow(
+    unsafe_code,
+    reason = "server handles are audited non-owning generational capabilities into a runtime-owned arena"
+)]
+
+use super::catalog::SubscriptionCatalog;
 use super::data_plane::{
     OwnedPublishOperation, PublishCore, PublishTerminationStart, RtdRefreshBatch,
     ScopedPublishOperation,
 };
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
-use super::source::{ErasedRtdSource, RtdSubscription};
+use super::source::RtdSubscription;
 use super::topic::{SubscriptionId, TopicId};
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Weak};
+use std::ptr::NonNull;
 
-#[derive(Clone)]
+/// Generational, non-owning access to one server retained by a subscription
+/// runtime arena.
 pub(crate) struct SubscriptionServerHandle<H: SubscriptionHost> {
-    pub(crate) inner: Arc<SubscriptionServer<H>>,
+    runtime: NonNull<SubscriptionRuntime<H>>,
+    generation: ServerGeneration,
+}
+
+impl<H: SubscriptionHost> Copy for SubscriptionServerHandle<H> {}
+
+impl<H: SubscriptionHost> Clone for SubscriptionServerHandle<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
+    pub(super) fn new(runtime: &SubscriptionRuntime<H>, generation: ServerGeneration) -> Self {
+        Self {
+            runtime: NonNull::from(runtime),
+            generation,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn generation(&self) -> ServerGeneration {
+        self.generation
+    }
+
+    #[inline]
+    fn runtime(&self) -> &SubscriptionRuntime<H> {
+        // SAFETY: the COM/server lifecycle contract drains every handle use
+        // before the runtime service is sealed and reclaimed.
+        unsafe { self.runtime.as_ref() }
+    }
+
+    #[inline]
+    pub(crate) fn server(&self) -> XllResult<&SubscriptionServer<H>> {
+        self.runtime()
+            .resolve_server(self.generation)
+            .ok_or(XllError::Closing)
+    }
+
     pub(crate) fn attach_update_notifier(
         &self,
         notifier: H::Notifier,
     ) -> XllResult<Option<H::Notifier>> {
-        self.inner.publish.attach_update_notifier(notifier)
+        self.server()?.publish.attach_update_notifier(notifier)
     }
 
     pub(crate) fn detach_update_notifier(&self) -> Option<H::Notifier> {
-        self.inner.publish.detach_update_notifier()
+        self.server()
+            .ok()
+            .and_then(|server| server.publish.detach_update_notifier())
     }
 
     pub(crate) fn pulse_notification(&self) -> XllResult<()> {
-        self.inner.publish.pulse_notification()
+        self.server()?.publish.pulse_notification()
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
-        self.inner.publish.begin_refresh()
+        self.server()?.publish.begin_refresh()
     }
 
     #[cfg(test)]
     pub(crate) fn pending_update_count(&self) -> usize {
-        self.inner.publish.pending_update_count()
+        self.server()
+            .expect("test server remains registered")
+            .publish
+            .pending_update_count()
     }
 
     pub(crate) fn claim(&self, id: SubscriptionId) -> XllResult<()> {
-        let _operation = self.inner.enter_operation()?;
-        self.inner.ensure_open()?;
-        let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
-        parent.claim_server(self.inner.generation, id)
+        let runtime = self.runtime();
+        let _runtime_operation = runtime.enter_external_operation()?;
+        let server = self.server()?;
+        let _server_operation = server.enter_operation()?;
+        server.ensure_open()?;
+        runtime.claim_server(self.generation, id)
     }
 
     pub(crate) fn connect_transaction(
@@ -56,32 +104,34 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         topic_id: TopicId,
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H>> {
-        let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
-        parent.connect_transaction(self, topic_id, id)
+        self.runtime().connect_transaction(self, topic_id, id)
     }
 
     pub(crate) fn disconnect(&self, topic_id: TopicId) -> XllResult<()> {
-        let _operation = self.inner.enter_operation()?;
-        let parent = self.inner.parent.upgrade().ok_or(XllError::Closing)?;
-        parent.disconnect(self, topic_id)
+        self.runtime().disconnect(self, topic_id)
     }
 
     pub(crate) fn terminate(&self) -> XllResult<()> {
-        self.inner.terminate()
+        self.runtime().terminate_server(self.generation)
     }
 }
 
+// SAFETY: the runtime and server are thread-safe; the temporal validity proof
+// is the same server/module quiescence contract used by every handle method.
+unsafe impl<H: SubscriptionHost> Send for SubscriptionServerHandle<H> {}
+unsafe impl<H: SubscriptionHost> Sync for SubscriptionServerHandle<H> {}
+
 pub(crate) struct SubscriptionServer<H: SubscriptionHost> {
     pub(crate) generation: ServerGeneration,
-    pub(crate) publish: triomphe::Arc<PublishCore<H>>,
+    pub(crate) publish: Box<PublishCore<H>>,
     pub(crate) subscriptions: Mutex<FxHashMap<TopicId, Box<dyn RtdSubscription>>>,
-    pub(crate) parent: Weak<SubscriptionRuntime<H>>,
     pub(crate) termination_coordinator: TerminationCoordinator,
 }
 
 impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SubscriptionServer")
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubscriptionServer")
             .field("generation", &self.generation)
             .field("publish", &self.publish)
             .finish_non_exhaustive()
@@ -89,8 +139,17 @@ impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
 }
 
 pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
-    pub(crate) server: Arc<SubscriptionServer<H>>,
+    server: NonNull<SubscriptionServer<H>>,
     pub(crate) _publish_operation: OwnedPublishOperation<H>,
+}
+
+impl<H: SubscriptionHost> OwnedServerOperation<H> {
+    #[inline]
+    pub(crate) fn server(&self) -> &SubscriptionServer<H> {
+        // SAFETY: the nested runtime/server operation guards prevent teardown
+        // while this non-owning pointer is used.
+        unsafe { self.server.as_ref() }
+    }
 }
 
 impl<H: SubscriptionHost> SubscriptionServer<H> {
@@ -105,23 +164,18 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
     }
 
     #[inline]
-    pub(crate) fn enter_owned_operation(self: &Arc<Self>) -> XllResult<OwnedServerOperation<H>> {
-        let publish_operation =
-            PublishCore::enter_owned_operation(triomphe::Arc::clone(&self.publish))?;
+    pub(crate) fn enter_owned_operation(&self) -> XllResult<OwnedServerOperation<H>> {
+        let publish_operation = self.publish.enter_owned_operation()?;
         Ok(OwnedServerOperation {
-            server: Arc::clone(self),
+            server: NonNull::from(self),
             _publish_operation: publish_operation,
         })
     }
 
-    pub(crate) fn remove_from_registry(&self) {
-        if let Some(parent) = self.parent.upgrade() {
-            let mut servers = parent.servers.lock();
-            servers.remove(&self.generation);
-        }
-    }
-
-    pub(crate) fn begin_termination<'a>(self: &'a Arc<Self>) -> TerminationAdmission<'a, H> {
+    pub(crate) fn begin_termination<'a>(
+        &'a self,
+        runtime: &'a SubscriptionRuntime<H>,
+    ) -> TerminationAdmission<'a, H> {
         let mut term_state = self.termination_coordinator.state.lock();
         match term_state.phase {
             ServerTerminationPhase::Terminated | ServerTerminationPhase::Failed => {
@@ -136,16 +190,15 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
                 let mut termination = self.publish.begin_termination();
                 term_state.phase = ServerTerminationPhase::Terminating;
                 let notifier = termination.take_notifier();
-
-                let initial_subscriptions: Vec<_> = self
+                let initial_subscriptions = self
                     .subscriptions
                     .lock()
                     .drain()
-                    .map(|(_, sub)| sub)
+                    .map(|(_, subscription)| subscription)
                     .collect();
-
                 TerminationAdmission::Owner(ServerTermination {
-                    server: Arc::clone(self),
+                    runtime,
+                    server: self,
                     wait: termination,
                     notifier,
                     initial_subscriptions,
@@ -160,17 +213,6 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
             .failure
             .as_ref()
             .map_or(Ok(()), |error| Err(error.clone()))
-    }
-
-    pub(crate) fn terminate(self: &Arc<Self>) -> XllResult<()> {
-        match self.begin_termination() {
-            TerminationAdmission::Owner(owner) => {
-                let res = owner.request_cancel();
-                owner.finish(res)
-            }
-            TerminationAdmission::Waiter(waiter) => waiter.wait(),
-            TerminationAdmission::Complete => self.termination_result(),
-        }
     }
 }
 
@@ -219,7 +261,7 @@ pub(crate) struct ServerTerminationWaiter<'a> {
     pub(crate) coordinator: &'a TerminationCoordinator,
 }
 
-impl<'a> ServerTerminationWaiter<'a> {
+impl ServerTerminationWaiter<'_> {
     pub(crate) fn wait(self) -> XllResult<()> {
         let mut state = self.coordinator.state.lock();
         while state.phase == ServerTerminationPhase::Terminating {
@@ -262,11 +304,9 @@ impl Drop for TerminationCompletionGuard<'_> {
         if self.completed {
             return;
         }
-
         if self.failure.is_none() {
             self.failure = Some(XllError::Panic);
         }
-
         self.publish_completion(ServerTerminationPhase::Failed);
     }
 }
@@ -284,17 +324,18 @@ thread_local! {
 }
 
 pub(crate) struct ServerTermination<'a, H: SubscriptionHost> {
-    pub(crate) server: Arc<SubscriptionServer<H>>,
+    pub(crate) runtime: &'a SubscriptionRuntime<H>,
+    pub(crate) server: &'a SubscriptionServer<H>,
     pub(crate) wait: PublishTerminationStart<'a, H>,
     pub(crate) notifier: Option<H::Notifier>,
     pub(crate) initial_subscriptions: Vec<Box<dyn RtdSubscription>>,
 }
 
-impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
+impl<H: SubscriptionHost> ServerTermination<'_, H> {
     pub(crate) fn request_cancel(&self) -> XllResult<()> {
         let mut first_error = None;
-        for sub in &self.initial_subscriptions {
-            if catch_unwind(AssertUnwindSafe(|| sub.cancellation().request_cancel())).is_err()
+        for subscription in &self.initial_subscriptions {
+            if catch_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err()
                 && first_error.is_none()
             {
                 first_error = Some(XllError::Panic);
@@ -316,115 +357,82 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H> {
         }
 
         let mut first_error = cancel_result.err();
-
-        if let Err(err) = drop_notifier_no_unwind(self.notifier.take())
+        if let Err(error) = drop_notifier_no_unwind(self.notifier.take())
             && first_error.is_none()
         {
-            first_error = Some(err);
+            first_error = Some(error);
         }
 
-        let wait = self.wait;
-        let wait_res = catch_unwind(AssertUnwindSafe(|| wait.wait()));
-        if wait_res.is_err() && first_error.is_none() {
+        if catch_unwind(AssertUnwindSafe(|| self.wait.wait())).is_err()
+            && first_error.is_none()
+        {
             first_error = Some(XllError::Panic);
         }
 
         let (late_notifier, active_entries) = self.server.publish.finish_termination().into_parts();
-
-        if let Some(parent) = self.server.parent.upgrade() {
-            for _ in 0..self.initial_subscriptions.len() {
-                parent.record_shutdown_event(
-                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
-                );
-            }
+        for _ in 0..self.initial_subscriptions.len() {
+            self.runtime.record_shutdown_event(
+                crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+            );
         }
-
-        if let Err(err) = drop_notifier_no_unwind(late_notifier)
+        if let Err(error) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()
         {
-            first_error = Some(err);
+            first_error = Some(error);
         }
 
-        let removed_sources = if let Some(parent) = self.server.parent.upgrade() {
-            let mut catalog = parent.catalog.lock();
-            let mut sources = Vec::new();
-
+        {
+            let mut catalog = self.runtime.catalog.lock();
             for topic in &active_entries {
-                if let Some(src) = cleanup_catalog_binding_and_pending(
+                cleanup_catalog_binding_and_pending(
                     &mut catalog,
                     topic.id,
                     self.server.generation,
                     topic.generation,
-                ) {
-                    sources.push(src);
-                }
+                );
             }
 
-            sources
-        } else {
-            Vec::new()
-        };
-
-        if let Some(parent) = self.server.parent.upgrade() {
-            let mut catalog = parent.catalog.lock();
-            let unactive_pending_ids: Vec<_> = catalog
+            let pending_ids = catalog
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
-                    !entry.is_active() && entry.server_generation() == Some(self.server.generation)
+                    !entry.is_active()
+                        && entry.server_generation() == Some(self.server.generation)
                 })
                 .map(|(id, _)| *id)
-                .collect();
-
-            let mut extra_sources = Vec::new();
-            for id in unactive_pending_ids {
+                .collect::<Vec<_>>();
+            for id in pending_ids {
                 let Some(should_remove) = catalog.with_entry(id, |entry| {
-                    entry.reset_for_server_termination(self.server.generation) && entry.can_remove()
+                    entry.reset_for_server_termination(self.server.generation)
+                        && entry.can_remove()
                 }) else {
                     continue;
                 };
-
-                if should_remove
-                    && let Some(removed) = catalog.remove_entry(id)
-                    && let Some(source) = removed.into_source()
-                {
-                    extra_sources.push(source);
-                }
-            }
-            drop(catalog);
-            for src in extra_sources {
-                if catch_unwind(AssertUnwindSafe(|| drop(src))).is_err() && first_error.is_none() {
-                    first_error = Some(XllError::Panic);
+                if should_remove {
+                    catalog.remove_entry(id);
                 }
             }
         }
 
-        for source in removed_sources {
-            if catch_unwind(AssertUnwindSafe(|| drop(source))).is_err() && first_error.is_none() {
-                first_error = Some(XllError::Panic);
-            }
-        }
-
-        let all_subscriptions: Vec<Box<dyn RtdSubscription>> = self
+        let subscriptions = self
             .initial_subscriptions
             .drain(..)
-            .chain(self.server.subscriptions.lock().drain().map(|(_, s)| s))
-            .collect();
-
-        if let Err(error) = disconnect_all_no_unwind(all_subscriptions)
+            .chain(
+                self.server
+                    .subscriptions
+                    .lock()
+                    .drain()
+                    .map(|(_, subscription)| subscription),
+            )
+            .collect::<Vec<_>>();
+        if let Err(error) = disconnect_all_no_unwind(subscriptions)
             && first_error.is_none()
         {
             first_error = Some(error);
         }
 
         let result = first_error.map_or(Ok(()), Err);
-
-        if let Some(parent) = self.server.parent.upgrade() {
-            parent.record_cleanup_result(result.clone());
-        }
-
-        self.server.remove_from_registry();
-
+        self.runtime.record_cleanup_result(result.clone());
         guard.complete(result)
     }
 }
@@ -443,10 +451,10 @@ pub(crate) fn disconnect_all_no_unwind(
 ) -> XllResult<()> {
     let mut first_error = None;
     for subscription in subscriptions {
-        if let Err(err) = disconnect_one_no_unwind(subscription)
+        if let Err(error) = disconnect_one_no_unwind(subscription)
             && first_error.is_none()
         {
-            first_error = Some(err);
+            first_error = Some(error);
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -456,24 +464,19 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
     catalog: &mut SubscriptionCatalog,
     id: SubscriptionId,
     server_generation: ServerGeneration,
-    conn_generation: ConnectionGeneration,
-) -> Option<Arc<dyn ErasedRtdSource>> {
-    let (_, should_remove) = catalog.with_entry(id, |entry| {
-        if entry.connection_generation() != Some(conn_generation)
+    connection_generation: ConnectionGeneration,
+) {
+    let Some((_, should_remove)) = catalog.with_entry(id, |entry| {
+        if entry.connection_generation() != Some(connection_generation)
             || entry.server_generation() != Some(server_generation)
         {
             return (false, false);
         }
-
-        let (matched, should_remove) = entry.cleanup_connection(server_generation, conn_generation);
-        (matched, should_remove)
-    })?;
-
+        entry.cleanup_connection(server_generation, connection_generation)
+    }) else {
+        return;
+    };
     if should_remove {
-        return catalog
-            .remove_entry(id)
-            .and_then(SubscriptionEntry::into_source);
+        catalog.remove_entry(id);
     }
-
-    None
 }

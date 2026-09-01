@@ -11,10 +11,9 @@ use crate::XllResult;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{
-    IntoRtdValue, RtdCancellation, RtdCancellationHandle, RtdCapacity, RtdLimits, RtdSink,
-    RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue,
+    IntoRtdValue, RtdCapacity, RtdLimits, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
+    RtdTopic, RtdValue,
 };
-use std::sync::Arc;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -74,9 +73,8 @@ impl<'call> RtdCallContext<'call> {
         Source: crate::subscription::RtdSource,
     {
         let subscriptions = self.generation.read()?;
-        let subscriptions = subscriptions.as_arc();
         let prepared = subscriptions.prepare(source, topic)?;
-        match observe_subscription(subscriptions, prepared.key(), self.host) {
+        match observe_subscription(&subscriptions, prepared.key(), self.host) {
             Ok(value) => {
                 prepared.commit();
                 Ok(value)
@@ -90,14 +88,14 @@ impl<'call> RtdCallContext<'call> {
 }
 
 #[cfg(feature = "rtd")]
-impl RtdGenerationAccess<'_> {
-    pub(crate) fn read(self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead> {
+impl<'call> RtdGenerationAccess<'call> {
+    pub(crate) fn read(self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead<'call>> {
         self.subscriptions.read(self.subscription_host)
     }
 }
 
 pub(crate) fn observe_subscription(
-    subscriptions: &Arc<crate::subscription::SubscriptionRuntime>,
+    subscriptions: &crate::subscription::SubscriptionRuntime,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {

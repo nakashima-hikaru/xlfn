@@ -1,27 +1,29 @@
-//! The handle topic table and its publication snapshots.
+//! Runtime-owned topic and initializer arenas.
 //!
-//! A topic has two representations with different synchronization needs:
-//! [`TopicTableState`] is the canonical mutable state used by connection and
-//! shutdown transitions, while [`PublishedTopics`] is the immutable, sharded
-//! read snapshot used by the synchronous prepare hot path.  Keeping both
-//! under one owner makes the publication protocol explicit: every snapshot
-//! update is paired with a mutation of the canonical table while its lock is
-//! held.
+//! Published topic and single-flight initializer allocations are retained as
+//! tombstones until the handle service is reclaimed. Read-side maps publish
+//! copyable pointers only; they never share ownership or run reclamation.
+
+#![allow(
+    unsafe_code,
+    reason = "topic publication uses stable non-owning pointers into table-owned arenas"
+)]
 
 #[cfg(any(target_os = "windows", test))]
 use super::FormulaLifetimeGeneration;
-use super::{FormulaBinding, FormulaObserverId, HandleTopicKey, Topic};
+use super::{FormulaObserverId, HandleTopicKey, Topic};
 use crate::generation::TopicGeneration;
 use crate::{XllError, XllResult};
-use arc_swap::ArcSwapAny;
 use parking_lot::{Condvar, Mutex, RwLock};
 #[cfg(test)]
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
-use rustc_hash::FxHashMap;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::thread::ThreadId;
 
 const MIN_PUBLISHED_TOPIC_SHARDS: usize = 64;
@@ -49,16 +51,14 @@ impl PublishedTopicState {
 }
 
 pub(crate) struct PublishedTopic {
-    pub(crate) binding: FormulaBinding,
     pub(crate) token: String,
-    pub(crate) lifetime_key: Arc<str>,
+    pub(crate) lifetime_key: String,
     pub(crate) state: AtomicU8,
 }
 
 impl PublishedTopic {
-    pub(crate) fn new(binding: FormulaBinding, token: String, lifetime_key: Arc<str>) -> Self {
+    pub(crate) fn new(token: String, lifetime_key: String) -> Self {
         Self {
-            binding,
             token,
             lifetime_key,
             state: AtomicU8::new(PublishedTopicState::Provisional as u8),
@@ -70,21 +70,43 @@ impl PublishedTopic {
     }
 }
 
-pub(crate) type PublishedTopicMap = FxHashMap<HandleTopicKey, triomphe::Arc<PublishedTopic>>;
-pub(crate) type PublishedTopicMapArc = triomphe::Arc<PublishedTopicMap>;
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct PublishedTopicPtr(NonNull<PublishedTopic>);
+
+impl PublishedTopicPtr {
+    fn from_ref(topic: &PublishedTopic) -> Self {
+        Self(NonNull::from(topic))
+    }
+
+    pub(crate) fn get(self) -> &'static PublishedTopic {
+        // SAFETY: TopicTable retains every publication allocation until the
+        // service is quiescent and reclaimed.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Deref for PublishedTopicPtr {
+    type Target = PublishedTopic;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
+    }
+}
+
+unsafe impl Send for PublishedTopicPtr {}
+unsafe impl Sync for PublishedTopicPtr {}
 
 pub(crate) struct PublishedTopics {
-    shards: Box<[ArcSwapAny<PublishedTopicMapArc>]>,
+    shards: Box<[RwLock<FxHashMap<HandleTopicKey, PublishedTopicPtr>>]>,
     shard_mask: usize,
 }
 
 impl PublishedTopics {
     pub(crate) fn new(maximum_bindings: usize) -> Self {
         let shard_count = shard_count_for(maximum_bindings);
-        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
         Self {
             shards: (0..shard_count)
-                .map(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_map)))
+                .map(|_| RwLock::new(FxHashMap::default()))
                 .collect(),
             shard_mask: shard_count - 1,
         }
@@ -96,36 +118,30 @@ impl PublishedTopics {
         (hasher.finish() as usize) & self.shard_mask
     }
 
-    pub(crate) fn load(&self, key: &HandleTopicKey) -> arc_swap::Guard<PublishedTopicMapArc> {
-        self.shards[self.shard_index(key)].load()
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicPtr> {
+        self.shards[self.shard_index(key)]
+            .read()
+            .get(key)
+            .copied()
     }
 
-    /// Update the publication snapshot while holding the canonical topic lock.
-    pub(crate) fn insert(&self, key: HandleTopicKey, topic: triomphe::Arc<PublishedTopic>) {
-        let shard = &self.shards[self.shard_index(&key)];
-        let current = shard.load_full();
-        let mut next = current.as_ref().clone();
-        next.insert(key, topic);
-        shard.store(triomphe::Arc::new(next));
-    }
-
-    /// Update the publication snapshot while holding the canonical topic lock.
-    pub(crate) fn remove(&self, key: HandleTopicKey) {
-        let shard = &self.shards[self.shard_index(&key)];
-        let current = shard.load_full();
-        if !current.contains_key(&key) {
-            return;
+    fn insert(&self, key: HandleTopicKey, topic: PublishedTopicPtr) {
+        if self.shards[self.shard_index(&key)]
+            .write()
+            .insert(key, topic)
+            .is_some()
+        {
+            xlfn_kernel::invariant::fail_stop();
         }
-        let mut next = current.as_ref().clone();
-        next.remove(&key);
-        shard.store(triomphe::Arc::new(next));
     }
 
-    /// Clear all publication snapshots while holding the canonical topic lock.
-    pub(crate) fn clear(&self) {
-        let empty_map = triomphe::Arc::new(PublishedTopicMap::default());
+    fn remove(&self, key: HandleTopicKey) {
+        self.shards[self.shard_index(&key)].write().remove(&key);
+    }
+
+    fn clear(&self) {
         for shard in &self.shards {
-            shard.store(triomphe::Arc::clone(&empty_map));
+            shard.write().clear();
         }
     }
 }
@@ -135,13 +151,39 @@ fn shard_count_for(maximum_bindings: usize) -> usize {
     required.next_power_of_two().max(MIN_PUBLISHED_TOPIC_SHARDS)
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct InitializationPtr(NonNull<Initialization>);
+
+impl InitializationPtr {
+    fn from_ref(initialization: &Initialization) -> Self {
+        Self(NonNull::from(initialization))
+    }
+
+    pub(crate) fn get(self) -> &'static Initialization {
+        // SAFETY: initializers are retained in TopicTableState's arena until
+        // service reclamation, after all prepare operations are drained.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Deref for InitializationPtr {
+    type Target = Initialization;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
+    }
+}
+
+unsafe impl Send for InitializationPtr {}
+unsafe impl Sync for InitializationPtr {}
+
 pub(crate) struct TopicTableState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
-    // Excel RTD callback strings are resolved here; they are not lifecycle
-    // identities and are never parsed back into formula components.
-    pub(crate) by_lifetime_key: FxHashMap<Arc<str>, HandleTopicKey>,
+    pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
     pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
-    pub(crate) initializing: FxHashMap<HandleTopicKey, Arc<Initialization>>,
+    pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
+    publications: Vec<Box<PublishedTopic>>,
+    initializations: Vec<Box<Initialization>>,
     pub(crate) generation: TopicGeneration,
     pub(crate) closed: bool,
 }
@@ -153,13 +195,14 @@ impl Default for TopicTableState {
             by_lifetime_key: FxHashMap::default(),
             by_observer_id: FxHashMap::default(),
             initializing: FxHashMap::default(),
+            publications: Vec::new(),
+            initializations: Vec::new(),
             generation: TopicGeneration::ONE,
             closed: false,
         }
     }
 }
 
-/// Canonical owner of all topic indices and their read-side publication view.
 pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
     published: PublishedTopics,
@@ -191,20 +234,17 @@ impl TopicTable {
         &self.published
     }
 
-    /// Inspect or reserve a formula topic using the table's single-flight
-    /// protocol.  Waiting is returned as data so the caller can release all
-    /// table access before blocking on the initializer.
     pub(crate) fn prepare_decision(
         &self,
         key: HandleTopicKey,
         owner: ThreadId,
-        make_initialization: impl FnOnce() -> Arc<Initialization>,
+        make_initialization: impl FnOnce() -> Initialization,
     ) -> XllResult<PrepareDecision> {
         let state = self.state.read();
         if state.closed {
             return Err(XllError::Closing);
         }
-        if let Some(initialization) = state.initializing.get(&key).cloned() {
+        if let Some(initialization) = state.initializing.get(&key).copied() {
             if initialization.owner == owner {
                 return Err(XllError::ReentrantCall);
             }
@@ -213,7 +253,7 @@ impl TopicTable {
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
                 token: topic.publication.token.clone(),
-                lifetime_key: Arc::clone(&topic.publication.lifetime_key),
+                lifetime_key: topic.publication.lifetime_key.clone(),
                 generation: state.generation,
             });
         }
@@ -223,7 +263,7 @@ impl TopicTable {
         if state.closed {
             return Err(XllError::Closing);
         }
-        if let Some(initialization) = state.initializing.get(&key).cloned() {
+        if let Some(initialization) = state.initializing.get(&key).copied() {
             if initialization.owner == owner {
                 return Err(XllError::ReentrantCall);
             }
@@ -232,14 +272,16 @@ impl TopicTable {
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
                 token: topic.publication.token.clone(),
-                lifetime_key: Arc::clone(&topic.publication.lifetime_key),
+                lifetime_key: topic.publication.lifetime_key.clone(),
                 generation: state.generation,
             });
         }
 
-        let initialization = make_initialization();
+        let allocation = Box::new(make_initialization());
+        let initialization = InitializationPtr::from_ref(allocation.as_ref());
+        state.initializations.push(allocation);
         let generation = state.generation;
-        state.initializing.insert(key, Arc::clone(&initialization));
+        state.initializing.insert(key, initialization);
         Ok(PrepareDecision::Initialize {
             initialization,
             generation,
@@ -361,38 +403,40 @@ impl TopicTable {
         }
         state.by_observer_id.remove(&owner);
         if let Some(topic) = state.by_key.get_mut(&key) {
-            // The formula already owns the object and token. Roll back only
-            // the COM topic assignment so a failed value write can be retried.
             topic.observer = None;
             topic.observer_committed = false;
         }
         true
     }
 
-    /// Install the provisional canonical topic and its reverse index.
     pub(crate) fn insert_provisional(
         &self,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        publication: triomphe::Arc<PublishedTopic>,
-        on_linearized: impl FnOnce(),
-    ) -> XllResult<Arc<str>> {
-        let lifetime_key = Arc::clone(&publication.lifetime_key);
+        publication: PublishedTopic,
+        on_linearized: impl FnOnce(PublishedTopicPtr),
+    ) -> XllResult<PublishedTopicPtr> {
         let mut state = self.state.write();
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
         if state.by_key.contains_key(&key)
-            || state.by_lifetime_key.contains_key(lifetime_key.as_ref())
+            || state
+                .by_lifetime_key
+                .contains_key(publication.lifetime_key.as_str())
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
             });
         }
+        let lifetime_key = publication.lifetime_key.clone();
+        let publication = Box::new(publication);
+        let pointer = PublishedTopicPtr::from_ref(publication.as_ref());
+        state.publications.push(publication);
         state.by_key.insert(
             key,
             Topic {
-                publication,
+                publication: pointer,
                 #[cfg(any(target_os = "windows", test))]
                 lifetime_generation: None,
                 observer: None,
@@ -400,42 +444,32 @@ impl TopicTable {
                 observer_committed: false,
             },
         );
-        state.by_lifetime_key.insert(Arc::clone(&lifetime_key), key);
-        on_linearized();
-        Ok(lifetime_key)
+        state.by_lifetime_key.insert(lifetime_key, key);
+        on_linearized(pointer);
+        Ok(pointer)
     }
 
-    /// Make a provisional publication visible only after its initializer is
-    /// still the current single-flight owner.
     pub(crate) fn commit_publication(
         &self,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        initialization: &Arc<Initialization>,
-        publication: &triomphe::Arc<PublishedTopic>,
+        initialization: InitializationPtr,
+        publication: PublishedTopicPtr,
         on_linearized: impl FnOnce(),
     ) -> XllResult<()> {
         let mut state = self.state.write();
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
-        let valid_topic = state.by_key.get(&key).is_some_and(|topic| {
-            topic.publication.binding == publication.binding
-                && topic.publication.token == publication.token
-                && triomphe::Arc::ptr_eq(&topic.publication, publication)
-        });
-        if !valid_topic {
-            return Err(XllError::StaleHandle);
-        }
         if !state
-            .initializing
+            .by_key
             .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, initialization))
+            .is_some_and(|topic| topic.publication == publication)
+            || state.initializing.get(&key).copied() != Some(initialization)
         {
             return Err(XllError::StaleHandle);
         }
-        self.published
-            .insert(key, triomphe::Arc::clone(publication));
+        self.published.insert(key, publication);
         state.initializing.remove(&key);
         publication
             .state
@@ -447,14 +481,10 @@ impl TopicTable {
     pub(crate) fn finish_initialization(
         &self,
         key: HandleTopicKey,
-        initialization: &Arc<Initialization>,
+        initialization: InitializationPtr,
     ) -> bool {
         let mut state = self.state.write();
-        if state
-            .initializing
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, initialization))
-        {
+        if state.initializing.get(&key).copied() == Some(initialization) {
             state.initializing.remove(&key);
             true
         } else {
@@ -488,10 +518,7 @@ impl TopicTable {
         state: &mut TopicTableState,
         key: HandleTopicKey,
     ) -> Option<TopicRemoval> {
-        let publication = state
-            .by_key
-            .get(&key)
-            .map(|topic| triomphe::Arc::clone(&topic.publication))?;
+        let publication = state.by_key.get(&key)?.publication;
         let was_provisional = publication.state() == PublishedTopicState::Provisional;
         let initialization_id = state
             .initializing
@@ -504,7 +531,7 @@ impl TopicTable {
         let topic = state.by_key.remove(&key)?;
         state
             .by_lifetime_key
-            .remove(topic.publication.lifetime_key.as_ref());
+            .remove(topic.publication.lifetime_key.as_str());
         if let Some(owner) = topic.observer {
             state.by_observer_id.remove(&owner);
         }
@@ -551,9 +578,7 @@ impl TopicTable {
         removal
     }
 
-    /// Close the canonical table and return cold initializers that must be
-    /// woken outside the table lock.
-    pub(crate) fn close(&self) -> Vec<Arc<Initialization>> {
+    pub(crate) fn close(&self) -> Vec<InitializationPtr> {
         let mut state = self.state.write();
         state.closed = true;
         state.generation = state.generation.next().unwrap_or(state.generation);
@@ -613,6 +638,8 @@ pub(crate) struct Initialization {
     pub(crate) wait: Mutex<()>,
     pub(crate) completed: Condvar,
     pub(crate) refinement_id: u64,
+    #[cfg(test)]
+    pub(crate) waiters: AtomicUsize,
 }
 
 impl Initialization {
@@ -624,10 +651,14 @@ impl Initialization {
     }
 
     pub(crate) fn wait_until_done_or_closed(&self, topics: &TopicTable) {
+        #[cfg(test)]
+        self.waiters.fetch_add(1, Ordering::AcqRel);
         let mut wait = self.wait.lock();
         while !self.owner_done.load(Ordering::Acquire) && !topics.is_closed() {
             self.completed.wait(&mut wait);
         }
+        #[cfg(test)]
+        self.waiters.fetch_sub(1, Ordering::AcqRel);
     }
 
     pub(crate) fn complete(&self) {
@@ -640,19 +671,24 @@ impl Initialization {
         let _wait = self.wait.lock();
         self.completed.notify_all();
     }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.load(Ordering::Acquire)
+    }
 }
 
 pub(crate) enum PrepareDecision {
     Existing {
         token: String,
-        lifetime_key: Arc<str>,
+        lifetime_key: String,
         generation: TopicGeneration,
     },
     Wait {
-        initialization: Arc<Initialization>,
+        initialization: InitializationPtr,
     },
     Initialize {
-        initialization: Arc<Initialization>,
+        initialization: InitializationPtr,
         generation: TopicGeneration,
     },
 }

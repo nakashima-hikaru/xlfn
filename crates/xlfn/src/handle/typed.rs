@@ -1,5 +1,5 @@
 use super::binding::BindingReadLease;
-use super::object::{ObjectLeaseGuard, SharedObject, TypedObjectProjection};
+use super::object::{ObjectBinding, ObjectLeaseGuard, TypedObjectProjection};
 use super::token::ObjectId;
 use crate::XllResult;
 use std::marker::PhantomData;
@@ -61,17 +61,18 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
 
     /// Promotes this call-scoped capability to an owned handle lease.
     ///
-    /// This is the only handle operation on the warm path that increments an
-    /// object reference count. The lease also contributes to the shutdown
-    /// liveness certificate until it is dropped.
+    /// The lease contributes a pin capability to the shutdown certificate;
+    /// it never shares ownership of the payload allocation.
     pub fn pin(self) -> XllResult<HandleLease<T>> {
-        let object = triomphe::Arc::clone(self.binding.object());
-        let lease = object.acquire_lease()?;
-        let value = object
+        let object_id = self.binding.object().id();
+        let lease = self.binding.acquire_object_lease()?;
+        let value = self
+            .binding
+            .object()
             .typed_projection::<T>()
             .expect("handle type was validated before promotion");
         Ok(HandleLease {
-            object,
+            object_id,
             value,
             _lease: lease,
         })
@@ -104,7 +105,7 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
 /// A long-lived handle lease. Use this when a handle must cross Excel calls or
 /// be moved into an asynchronous future.
 pub struct HandleLease<T: ExcelHandleObject> {
-    pub(crate) object: SharedObject,
+    pub(crate) object_id: ObjectId,
     pub(crate) value: TypedObjectProjection<T>,
     pub(crate) _lease: ObjectLeaseGuard,
 }
@@ -112,7 +113,7 @@ pub struct HandleLease<T: ExcelHandleObject> {
 impl<T: ExcelHandleObject> HandleLease<T> {
     /// Returns the stable session-scoped object identity.
     pub fn object_id(&self) -> HandleObjectId {
-        HandleObjectId::from_object_id(self.object.id())
+        HandleObjectId::from_object_id(self.object_id)
     }
 }
 
@@ -142,8 +143,8 @@ pub struct HandleAlias<'call, T: ExcelHandleObject> {
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_shared_object(self) -> SharedObject {
-        triomphe::Arc::clone(self.binding.object())
+    pub(crate) fn into_object_binding(self) -> XllResult<ObjectBinding> {
+        self.binding.duplicate_object_binding()
     }
 
     #[cfg(test)]

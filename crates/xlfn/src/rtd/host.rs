@@ -9,7 +9,7 @@ pub(crate) struct RtdSubscriptionHost {
 }
 
 impl RtdSubscriptionHost {
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     pub(crate) const fn detached() -> Self {
         Self { ingress: None }
     }

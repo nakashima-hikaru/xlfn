@@ -75,7 +75,7 @@ pub struct OpenContext {
     module_directory: PathBuf,
     build_info: BuildInfo,
     #[cfg(feature = "rtd")]
-    source_allocator: crate::subscription::SourceHandleAllocator,
+    source_registration: crate::subscription::SourceRegistration,
 }
 
 impl OpenContext {
@@ -95,7 +95,7 @@ impl OpenContext {
             module_directory,
             build_info,
             #[cfg(feature = "rtd")]
-            source_allocator: crate::subscription::SourceHandleAllocator::new(generation),
+            source_registration: crate::subscription::SourceRegistration::new(generation),
         }
     }
 
@@ -124,7 +124,22 @@ impl OpenContext {
     #[must_use]
     pub fn rtd(&self) -> RtdOpenContext<'_> {
         RtdOpenContext {
-            allocator: &self.source_allocator,
+            registration: &self.source_registration,
+        }
+    }
+
+    pub(crate) fn into_service_inputs(
+        self,
+    ) -> crate::runtime_components::GenerationServiceInputs {
+        #[cfg(feature = "rtd")]
+        {
+            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(
+                self.source_registration.finish(),
+            )
+        }
+        #[cfg(not(feature = "rtd"))]
+        {
+            crate::runtime_components::GenerationServiceInputs::empty()
         }
     }
 }
@@ -133,7 +148,7 @@ impl OpenContext {
 #[cfg(feature = "rtd")]
 #[derive(Clone, Copy, Debug)]
 pub struct RtdOpenContext<'a> {
-    allocator: &'a crate::subscription::SourceHandleAllocator,
+    registration: &'a crate::subscription::SourceRegistration,
 }
 
 #[cfg(feature = "rtd")]
@@ -143,20 +158,7 @@ impl RtdOpenContext<'_> {
     where
         S: RtdSource,
     {
-        self.allocator.allocate(source)
-    }
-
-    /// Registers one new source identity backed by shared source storage.
-    ///
-    /// The returned handle, rather than the `Arc`, is used by subscriptions.
-    pub fn register_shared_source<S>(
-        &self,
-        source: std::sync::Arc<S>,
-    ) -> XllResult<RtdSourceHandle<S>>
-    where
-        S: RtdSource,
-    {
-        self.allocator.allocate_shared(source)
+        self.registration.register(source)
     }
 }
 
@@ -790,6 +792,10 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Add-in tests implement the audited non-owning RTD subscription contract"
+)]
 mod tests {
     #[cfg(feature = "async")]
     use super::AsyncContext;
@@ -932,10 +938,8 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
-        impl crate::subscription::RtdSubscription for TestSubscription {
-            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
-                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
-            }
+        unsafe impl crate::subscription::RtdSubscription for TestSubscription {
+            fn request_cancel(&self) {}
             fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
                 self.disconnected.store(true, Ordering::Release);
                 Ok(())

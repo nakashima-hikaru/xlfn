@@ -338,7 +338,14 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should snapshot the executor handle");
 
-    assert!(manager.close_with_timeout(Duration::from_secs(1)).is_ok());
+    let closing_manager = Arc::clone(&manager);
+    let (close_tx, close_rx) = std::sync::mpsc::sync_channel(1);
+    let closing = std::thread::spawn(move || {
+        close_tx
+            .send(closing_manager.close_with_timeout(Duration::from_secs(1)))
+            .unwrap();
+    });
+    assert!(close_rx.recv_timeout(Duration::from_millis(50)).is_err());
     release_tx.send(()).unwrap();
     assert!(matches!(
         result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -346,6 +353,8 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
     ));
     assert!(token.is_cancelled());
     spawning.join().unwrap();
+    assert!(close_rx.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    closing.join().unwrap();
     manager.set_after_spawn_handle_snapshot_hook(None);
     assert!(manager.is_stopped());
 }
@@ -1744,15 +1753,16 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    let executor_shared = match &*manager.state.lock() {
-        ExecutorState::Running(executor) => Arc::clone(&executor.shared),
-        _ => panic!("executor should be running"),
-    };
-
-    assert!(
-        executor_shared.control.try_lock().is_some(),
-        "advance_generation must release control mutex while waiting for admission idle"
-    );
+    {
+        let state = manager.state.lock();
+        let ExecutorState::Running(executor) = &*state else {
+            panic!("executor should be running");
+        };
+        assert!(
+            executor.shared.control.try_lock().is_some(),
+            "advance_generation must release control mutex while waiting for admission idle"
+        );
+    }
 
     release_tx.send(()).unwrap();
     assert!(
@@ -1813,16 +1823,14 @@ fn close_preempts_in_progress_advance_generation() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    let executor_shared = match &*manager.state.lock() {
-        ExecutorState::Closing(executor) => executor.as_ref().map(|exec| Arc::clone(&exec.shared)),
-        _ => None,
-    };
-
-    if let Some(shared) = executor_shared {
-        assert!(
-            shared.closing.load(Ordering::Acquire),
-            "close must set closing atomic mirror even while advance is waiting"
-        );
+    {
+        let state = manager.state.lock();
+        if let ExecutorState::Closing(Some(executor)) = &*state {
+            assert!(
+                executor.shared.closing.load(Ordering::Acquire),
+                "close must set closing atomic mirror even while advance is waiting"
+            );
+        }
     }
 
     release_tx.send(()).unwrap();
@@ -1943,42 +1951,41 @@ fn spawn_fast_path_does_not_wait_for_manager_state() {
 }
 
 #[test]
-fn stale_spawn_snapshot_rejects_spawns_after_close() {
+fn close_waits_for_a_published_executor_reader() {
     let manager = Arc::new(AsyncManager::new());
     manager.start(1).unwrap();
-
-    // Take snapshot while running
+    let closing_manager = Arc::clone(&manager);
     let snapshot = manager.snapshot_spawn_executor().unwrap();
+    let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel(1);
+    let closer = std::thread::spawn(move || {
+        closed_tx.send(closing_manager.close()).unwrap();
+    });
 
-    // Close the manager
-    let outcome = manager.close();
-    assert!(outcome.issues.is_empty());
-
-    // Spawning on stale snapshot must fail with XllError::Closing
-    let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let result = snapshot.spawn(TEST_GENERATION, async {}, source);
-    assert!(matches!(
-        result,
-        Err(SpawnRejection {
-            error: XllError::Closing,
-            ..
-        })
-    ));
+    assert!(closed_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    drop(snapshot);
+    assert!(
+        closed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+    closer.join().unwrap();
 }
 
 #[test]
-fn executor_incarnation_identity_guards_advance_generation() {
+fn executor_can_restart_after_publication_is_drained() {
     let manager = Arc::new(AsyncManager::new());
     manager.start(1).unwrap();
     let old_snapshot = manager.snapshot_spawn_executor().unwrap();
+    assert_eq!(old_snapshot.current.load(Ordering::Acquire).is_null(), false);
+    drop(old_snapshot);
 
-    // Stop and restart to create a new executor incarnation
     assert!(manager.close().issues.is_empty());
     manager.start(1).unwrap();
     let new_snapshot = manager.snapshot_spawn_executor().unwrap();
-
-    // old and new have distinct pointer identities
-    assert!(!Arc::ptr_eq(&old_snapshot, &new_snapshot));
+    assert!(!new_snapshot.closing.load(Ordering::Acquire));
+    drop(new_snapshot);
 
     assert!(manager.close().issues.is_empty());
 }
@@ -2174,12 +2181,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
             task1_ran_clone.store(true, Ordering::Release);
         },
         {
-            let q = Arc::downgrade(&executor.queue);
-            move |r| {
-                if let Some(q) = q.upgrade() {
-                    q.schedule(r);
-                }
-            }
+            let shared = ExecutorPtr::from_ref(&executor);
+            move |r| shared.get().queue.schedule(r)
         },
     );
     t1.detach();
@@ -2190,12 +2193,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
             task2_ran_clone.store(true, Ordering::Release);
         },
         {
-            let q = Arc::downgrade(&executor.queue);
-            move |r| {
-                if let Some(q) = q.upgrade() {
-                    q.schedule(r);
-                }
-            }
+            let shared = ExecutorPtr::from_ref(&executor);
+            move |r| shared.get().queue.schedule(r)
         },
     );
     t2.detach();
@@ -2206,12 +2205,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
             task3_ran_clone.store(true, Ordering::Release);
         },
         {
-            let q = Arc::downgrade(&executor.queue);
-            move |r| {
-                if let Some(q) = q.upgrade() {
-                    q.schedule(r);
-                }
-            }
+            let shared = ExecutorPtr::from_ref(&executor);
+            move |r| shared.get().queue.schedule(r)
         },
     );
     t3.detach();
@@ -2219,7 +2214,7 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
 
     // Simulate worker panic with WorkerExitGuard
     executor.live_workers.fetch_add(1, Ordering::Release);
-    let shared = Arc::clone(&executor);
+    let shared = ExecutorPtr::from_ref(&executor);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _guard = WorkerExitGuard {
             shared,
@@ -2249,6 +2244,7 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
     assert!(task3_ran.load(Ordering::Acquire));
 
     // Clean up
+    drop(executor);
     let _ = manager.close();
 }
 

@@ -1,4 +1,4 @@
-use super::executor::ExecutorShared;
+use super::executor::{ExecutorPtr, ExecutorShared};
 use super::task::TaskControl;
 use crate::XllError;
 use crate::cancellation::CancellationSource;
@@ -6,24 +6,24 @@ use async_task::Runnable;
 use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Parker;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 pub(crate) struct WorkerExitGuard {
-    pub(crate) shared: Arc<ExecutorShared>,
+    pub(crate) shared: ExecutorPtr,
     pub(crate) local: Option<Worker<Runnable>>,
 }
 
 impl WorkerExitGuard {
     fn recover_local_queue(&mut self) {
+        let shared = self.shared.get();
         if let Some(local) = self.local.take() {
             let mut returned = 0;
             while let Some(runnable) = local.pop() {
-                self.shared.queue.injector.push(runnable);
+                shared.queue.injector.push(runnable);
                 returned += 1;
             }
             if returned > 0 {
-                self.shared.queue.wake_one();
+                shared.queue.wake_one();
             }
         }
     }
@@ -31,9 +31,10 @@ impl WorkerExitGuard {
 
 impl Drop for WorkerExitGuard {
     fn drop(&mut self) {
+        let shared = self.shared.get();
         if std::thread::panicking() {
             self.recover_local_queue();
-            self.shared
+            shared
                 .fatal_worker_failure
                 .store(true, Ordering::Release);
         } else {
@@ -44,9 +45,9 @@ impl Drop for WorkerExitGuard {
             );
         }
 
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.shared.live_workers);
-        let _guard = self.shared.wait_lock.lock();
-        self.shared.idle.notify_all();
+        let _ = xlfn_kernel::invariant::checked_atomic_dec(&shared.live_workers);
+        let _guard = shared.wait_lock.lock();
+        shared.idle.notify_all();
     }
 }
 
@@ -100,28 +101,32 @@ fn find_task(
 
 pub(crate) fn run_executor(
     worker_index: usize,
-    shared: Arc<ExecutorShared>,
+    shared: ExecutorPtr,
     local: Worker<Runnable>,
     parker: Parker,
 ) {
+    let shared_ref = shared.get();
     let exit_guard = WorkerExitGuard {
-        shared: Arc::clone(&shared),
+        shared,
         local: Some(local),
     };
     let my_bit = 1u64 << worker_index;
 
     loop {
         let local_ref = exit_guard.local.as_ref().unwrap();
-        if let Some(runnable) = find_task(worker_index, &shared, local_ref) {
+        if let Some(runnable) = find_task(worker_index, shared_ref, local_ref) {
             runnable.run();
             continue;
         }
 
-        shared.queue.idle_workers.fetch_or(my_bit, Ordering::AcqRel);
+        shared_ref
+            .queue
+            .idle_workers
+            .fetch_or(my_bit, Ordering::AcqRel);
 
         let local_ref = exit_guard.local.as_ref().unwrap();
-        if let Some(runnable) = find_task(worker_index, &shared, local_ref) {
-            shared
+        if let Some(runnable) = find_task(worker_index, shared_ref, local_ref) {
+            shared_ref
                 .queue
                 .idle_workers
                 .fetch_and(!my_bit, Ordering::AcqRel);
@@ -129,8 +134,8 @@ pub(crate) fn run_executor(
             continue;
         }
 
-        if shared.queue.is_sealed() {
-            shared
+        if shared_ref.queue.is_sealed() {
+            shared_ref
                 .queue
                 .idle_workers
                 .fetch_and(!my_bit, Ordering::AcqRel);
@@ -138,7 +143,7 @@ pub(crate) fn run_executor(
         }
 
         parker.park();
-        shared
+        shared_ref
             .queue
             .idle_workers
             .fetch_and(!my_bit, Ordering::AcqRel);

@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "Windows RTD tests implement the audited non-owning subscription lifetime contract"
+)]
+
 use super::*;
 
 use crate::handle::FormulaLifetimeBackend;
@@ -1196,10 +1201,8 @@ struct DispatchTestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
-impl RtdSubscription for DispatchTestSubscription {
-    fn cancellation(&self) -> Arc<dyn crate::subscription::RtdCancellation> {
-        Arc::new(crate::subscription::RtdCancellationHandle::noop())
-    }
+unsafe impl RtdSubscription for DispatchTestSubscription {
+    fn request_cancel(&self) {}
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         self.disconnected.store(true, Ordering::Release);

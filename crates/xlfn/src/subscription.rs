@@ -40,7 +40,7 @@ pub(crate) type SubscriptionServerHandle =
 
 #[cfg(feature = "rtd")]
 pub use source::{
-    RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
+    RtdSink, RtdSource, RtdSourceHandle, RtdSubscription,
 };
 #[cfg(feature = "rtd")]
 pub use topic::RtdTopic;
@@ -106,7 +106,7 @@ pub(crate) use server::{
     disconnect_all_no_unwind, disconnect_one_no_unwind, drop_notifier_no_unwind,
 };
 #[cfg(feature = "rtd")]
-pub(crate) use source::SourceHandleAllocator;
+pub(crate) use source::{SourceArena, SourceRegistration};
 #[cfg(test)]
 pub(crate) use source::{ErasedRtdSource, SourceHandleId};
 #[cfg(test)]

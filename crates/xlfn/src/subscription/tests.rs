@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "RTD tests implement the audited non-owning subscription lifetime contract"
+)]
+
 use super::*;
 use crate::excel_rtd::RtdNotifier;
 use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
@@ -10,12 +15,9 @@ pub(crate) struct TestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
-impl RtdSubscription for TestSubscription {
-    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
-        let canceled = Arc::clone(&self.canceled);
-        Arc::new(RtdCancellationHandle::new(move || {
-            canceled.store(true, Ordering::Release);
-        }))
+unsafe impl RtdSubscription for TestSubscription {
+    fn request_cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
     }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
@@ -1376,10 +1378,9 @@ fn server_lifecycle_rejects_mutations_when_closing() {
 }
 
 pub(crate) struct FailingDisconnectSubscription;
-impl RtdSubscription for FailingDisconnectSubscription {
-    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
-        Arc::new(RtdCancellationHandle::noop())
-    }
+unsafe impl RtdSubscription for FailingDisconnectSubscription {
+    fn request_cancel(&self) {}
+
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL,
@@ -1561,11 +1562,9 @@ fn rollback_records_subscription_cleanup_error() {
 }
 
 struct PanickingCancelSubscription;
-impl RtdSubscription for PanickingCancelSubscription {
-    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
-        Arc::new(RtdCancellationHandle::new(|| {
-            panic!("request_cancel panic test");
-        }))
+unsafe impl RtdSubscription for PanickingCancelSubscription {
+    fn request_cancel(&self) {
+        panic!("request_cancel panic test");
     }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Ok(())
@@ -2351,10 +2350,9 @@ pub(crate) struct SinkHoldingSubscription<T> {
     _sink: RtdSink<T>,
 }
 
-impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
-    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
-        Arc::new(RtdCancellationHandle::noop())
-    }
+unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
+    fn request_cancel(&self) {}
+
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         Ok(())
     }

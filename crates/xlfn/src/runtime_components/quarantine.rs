@@ -2,7 +2,6 @@
 
 use parking_lot::Mutex;
 use std::mem::ManuallyDrop;
-use std::sync::Arc;
 
 use crate::generation::ExecutionGeneration;
 use crate::generation::RuntimeGeneration;
@@ -13,7 +12,6 @@ use crate::generation::RuntimeGeneration;
 pub(crate) enum QuarantineReason {
     OpenStateInvariant,
     AddinQuiesceFailed,
-    AddinGenerationEscaped,
     AddinCleanupPanicked,
     TeardownIncomplete,
 }
@@ -37,11 +35,6 @@ pub(crate) enum QuarantinedResource<A: crate::Addin> {
         generation: Option<RuntimeGeneration>,
         shared_state: ManuallyDrop<A::SharedState>,
         layers: ManuallyDrop<A::Layers>,
-        reason: QuarantineReason,
-    },
-    SharedGeneration {
-        generation: Option<RuntimeGeneration>,
-        generation_root: ManuallyDrop<Arc<ExecutionGeneration<A>>>,
         reason: QuarantineReason,
     },
 }
@@ -104,21 +97,6 @@ impl<A: crate::Addin> QuarantineVault<A> {
         });
     }
 
-    pub(crate) fn retain_shared_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: Arc<ExecutionGeneration<A>>,
-        reason: QuarantineReason,
-    ) {
-        self.resources
-            .lock()
-            .push(QuarantinedResource::SharedGeneration {
-                generation,
-                generation_root: ManuallyDrop::new(root),
-                reason,
-            });
-    }
-
     pub(crate) fn snapshot(&self) -> Vec<(Option<RuntimeGeneration>, QuarantineReason)> {
         self.resources
             .lock()
@@ -147,14 +125,6 @@ impl<A: crate::Addin> QuarantineVault<A> {
                     reason,
                 } => {
                     let _ = (shared_state, layers);
-                    (*generation, *reason)
-                }
-                QuarantinedResource::SharedGeneration {
-                    generation,
-                    generation_root,
-                    reason,
-                } => {
-                    let _ = generation_root;
                     (*generation, *reason)
                 }
             })

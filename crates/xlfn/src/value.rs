@@ -2191,7 +2191,7 @@ mod tests {
         slot.arm(crate::RuntimeConfig::new().handle_config())
             .unwrap();
         slot.initialize().unwrap();
-        let handle_rt = slot.get_owned().unwrap();
+        let handle_rt = slot.read().unwrap();
 
         let topic_a = HandleTopicKey::Formula(FormulaRevisionKey::new(
             FormulaCaller {

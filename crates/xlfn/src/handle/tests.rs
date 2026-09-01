@@ -4,16 +4,17 @@ fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
     crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
 }
 
-fn armed_handle_slot() -> (&'static FormulaHandleServiceSlot, Arc<FormulaHandleService>) {
+fn armed_handle_slot() -> (
+    &'static FormulaHandleServiceSlot,
+    FormulaHandleServiceRead<'static>,
+) {
     let slot: &'static FormulaHandleServiceSlot =
         Box::leak(Box::new(FormulaHandleServiceSlot::new()));
     slot.arm(crate::RuntimeConfig::new().handle_config())
         .expect("test handle slot should arm");
     slot.initialize()
         .expect("test handle slot should initialize");
-    let runtime = slot
-        .get_owned()
-        .expect("test handle slot should publish its runtime");
+    let runtime = slot.read().expect("test handle slot should publish its runtime");
     (slot, runtime)
 }
 use crate::input_identity::InputFingerprint;
@@ -269,16 +270,17 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         .get(&identity)
         .expect("reverse map identity must resolve to a topic");
     assert_eq!(
-        topic.publication.lifetime_key.as_ref(),
+        topic.publication.lifetime_key.as_str(),
         lifetime_key.as_str()
     );
     assert_eq!(topic.publication.token, token);
     assert!(topics.by_observer_id.is_empty());
     drop(topics);
 
-    let published = runtime.topics.published().load(&key);
-    let publication = published
-        .get(&key)
+    let publication = runtime
+        .topics
+        .published()
+        .load(&key)
         .expect("successful observation must commit its published snapshot");
     assert_eq!(
         publication.state.load(Ordering::Acquire),
@@ -311,14 +313,13 @@ fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
             key,
             || Ok(DataRecord(1)),
             |_, _| {
-                let published = runtime.topics.published().load(&key);
-                assert!(published.get(&key).is_none());
+                assert!(runtime.topics.published().load(&key).is_none());
                 Ok(())
             },
         )
         .unwrap();
 
-    assert!(runtime.topics.published().load(&key).get(&key).is_some());
+    assert!(runtime.topics.published().load(&key).is_some());
 }
 
 #[test]
@@ -342,7 +343,7 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
         topics.by_lifetime_key.remove(first_lifetime_key.as_str());
         topics
             .by_lifetime_key
-            .insert(Arc::from(second_lifetime_key.as_str()), first_key);
+            .insert(second_lifetime_key.clone(), first_key);
     }
 
     let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
@@ -377,7 +378,7 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
         topics.by_lifetime_key.remove(second_lifetime_key.as_str());
         topics
             .by_lifetime_key
-            .insert(Arc::from(first_lifetime_key.as_str()), first_key);
+            .insert(first_lifetime_key.clone(), first_key);
     }
     runtime.rollback(&first_lifetime_key);
     assert_eq!(runtime.len(), 0);
@@ -485,7 +486,10 @@ fn one_call_scope_can_borrow_from_each_runtime() {
 }
 
 #[test]
-fn published_binding_snapshot_keeps_object_alive_after_retirement() {
+fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     struct Counted(Arc<AtomicUsize>);
     impl ExcelHandleObject for Counted {}
     impl Drop for Counted {
@@ -495,7 +499,7 @@ fn published_binding_snapshot_keeps_object_alive_after_retirement() {
     }
 
     let drops = Arc::new(AtomicUsize::new(0));
-    let registry = HandleRegistry::new(2);
+    let registry = Arc::new(HandleRegistry::new(2));
     let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops)))).unwrap();
     let parsed = registry
         .codec
@@ -505,16 +509,26 @@ fn published_binding_snapshot_keeps_object_alive_after_retirement() {
         )
         .unwrap();
     let snapshot = registry.bindings.published().load(parsed.id.slot);
-    let publication = snapshot
-        .get(parsed.id.slot)
-        .expect("inserted handle must be published");
-    assert_eq!(publication.state(), BindingState::Live);
+    let reader = super::binding::BindingReadLease::new(snapshot, parsed.id)
+        .expect("inserted handle must admit a binding reader");
+    assert_eq!(reader.record().state(), BindingState::Live);
 
-    registry.remove::<Counted>(&token).unwrap();
-    assert_eq!(publication.state(), BindingState::Retired);
+    let removal_registry = Arc::clone(&registry);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let removal = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        removal_registry.remove::<Counted>(&token).unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+    assert_eq!(reader.record().state(), BindingState::Retired);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
-    drop(snapshot);
+    drop(reader);
+    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    removal.join().unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -1060,16 +1074,12 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
         )
         .unwrap()
         .id;
-    let state = runtime.store.registry.bindings.read_state();
-    let alias_object_id = state.slots[alias_binding.slot as usize]
-        .record
-        .as_ref()
-        .unwrap()
-        .object
-        .id();
+    let alias_object_id = with_handle::<DataRecord, _>(&runtime, &alias_token, |handle| {
+        handle.object_id()
+    })
+    .unwrap();
     assert_ne!(source_binding, alias_binding);
     assert_eq!(alias_object_id, object_id);
-    drop(state);
 
     runtime.disconnect(lifetime_generation(1), 1);
     assert!(matches!(
@@ -1148,7 +1158,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
 }
 
 #[test]
-fn alias_publication_keeps_a_snapshot_owned_object_alive() {
+fn alias_publication_installs_an_independent_object_capability() {
     struct DropTracked {
         value: u32,
         drops: Arc<AtomicUsize>,
@@ -1184,39 +1194,25 @@ fn alias_publication_keeps_a_snapshot_owned_object_alive() {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
         let object_id = source.object_id();
 
-        // The source binding snapshot keeps the object available for alias
-        // publication even though its last live binding is gone.
-        runtime
-            .store
-            .registry
-            .remove_and_drop(&source_token, "retire source before alias publication");
-
         let alias_token = runtime
             .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
             .unwrap()
             .into_token();
 
-        let alias_id = runtime
-            .store
-            .registry
-            .codec
-            .parse(
-                std::ptr::from_ref(&runtime.store.registry).addr(),
-                HandleToken::new(&alias_token),
-            )
-            .unwrap()
-            .id;
-        let state = runtime.store.registry.bindings.read_state();
-        let alias_record = state.slots[alias_id.slot as usize]
-            .record
-            .as_ref()
-            .expect("aliased object must have a canonical record");
-        assert_eq!(alias_record.object.id(), object_id);
-        drop(state);
+        let alias_object_id = runtime
+            .lookup::<DropTracked>(scope, &alias_token)
+            .expect("aliased object must have a live binding")
+            .object_id();
+        assert_eq!(alias_object_id, object_id);
 
         (alias_token, object_id)
     })
     .0;
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&source_token, "retire source after alias publication");
 
     assert_eq!(
         with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
@@ -2245,7 +2241,7 @@ fn concurrent_waiter_retries_after_observation_failure() {
             topics
                 .initializing
                 .get(&test_topic_key("concurrent-observe"))
-                .is_some_and(|initialization| Arc::strong_count(initialization) >= 2)
+                .is_some_and(|initialization| initialization.waiter_count() >= 1)
         };
         if waiter_is_blocked {
             break;
@@ -2437,7 +2433,7 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
             .read()
             .initializing
             .get(&key)
-            .is_some_and(|initialization| Arc::strong_count(initialization) >= 4);
+            .is_some_and(|initialization| initialization.waiter_count() >= 1);
         if blocked {
             break;
         }
@@ -2863,7 +2859,10 @@ fn zero_sized_type_handle_lifecycle() {
 }
 
 #[test]
-fn alias_capability_does_not_extend_object_lifetime() {
+fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     let drops = Arc::new(AtomicUsize::new(0));
 
     struct TrackedValue {
@@ -2877,7 +2876,7 @@ fn alias_capability_does_not_extend_object_lifetime() {
         }
     }
 
-    let runtime = FormulaHandleService::new(16);
+    let runtime = Arc::new(FormulaHandleService::new(16));
     let key = test_topic_key("alias_alone_alive");
     let token = runtime
         .prepare_observed(
@@ -2893,21 +2892,32 @@ fn alias_capability_does_not_extend_object_lifetime() {
         .unwrap()
         .into_token();
 
-    crate::value::with_excel_call_scope(|scope| {
+    let (removal, finished_rx) = crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
         let alias = handle.alias();
 
-        // Remove the original binding from registry
-        runtime
-            .store
-            .registry
-            .remove_and_drop(&token, "remove original");
+        let removal_runtime = Arc::clone(&runtime);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let removal = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            removal_runtime
+                .store
+                .registry
+                .remove_and_drop(&token, "remove original");
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
 
-        // The binding snapshot keeps the object readable until the scope
-        // ends, but the borrowed alias is not an ownership extension.
+        // Retirement withdraws the binding immediately but cannot reclaim its
+        // object capability until the alias's read permit leaves the scope.
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert_eq!(alias.object_id().sequence(), 1);
+        (removal, finished_rx)
     });
+    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    removal.join().unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -2956,7 +2966,6 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
 
         let res_ref = &moved_access.as_ref().unwrap().runtime;
         assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
-        assert!(std::ptr::eq(&**res_ref.get_arc().unwrap(), &*handle_rt));
 
         let mut return_ctx = ReturnContext::for_frame(
             moved_access.expect("test context has handle access"),
@@ -3006,7 +3015,7 @@ fn close_resets_to_closed_for_reopen() {
     assert!(slot.is_none());
 
     slot.arm(crate::HandleConfig::default()).unwrap();
-    let rt1 = slot.get_owned().unwrap();
+    let session1 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
     slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
@@ -3015,10 +3024,10 @@ fn close_resets_to_closed_for_reopen() {
     assert!(slot.is_none());
 
     slot.arm(crate::HandleConfig::default()).unwrap();
-    let rt2 = slot.get_owned().unwrap();
+    let session2 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
-    assert!(!Arc::ptr_eq(&rt1, &rt2));
+    assert_ne!(session1, session2);
 }
 
 #[test]
@@ -3027,7 +3036,7 @@ fn handle_slot_seal_is_local_to_its_generation_bundle() {
     assert!(matches!(slot.read(), Err(XllError::Closing)));
 
     slot.arm(crate::HandleConfig::default()).unwrap();
-    assert!(slot.get_owned().is_ok());
+    assert!(slot.read().is_ok());
     assert!(matches!(slot.disarm(), Err(XllError::Closing)));
 
     slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))

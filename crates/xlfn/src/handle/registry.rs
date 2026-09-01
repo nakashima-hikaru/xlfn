@@ -6,7 +6,7 @@
 //! resurrection path to keep in sync.
 
 use super::binding::{BindingReadLease, BindingState, BindingTable};
-use super::object::{ObjectCell, ObjectLifetimeTracker, SharedObject};
+use super::object::{ObjectArena, ObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
@@ -15,7 +15,6 @@ use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 #[repr(u8)]
@@ -54,7 +53,7 @@ pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
     pub(super) bindings: BindingTable,
-    pub(super) lifetime: Arc<ObjectLifetimeTracker>,
+    pub(super) objects: Box<ObjectArena>,
     next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
@@ -64,15 +63,15 @@ pub(crate) struct HandleRegistry {
 /// fails, dropping this guard releases the object through the same
 /// `ObjectCell` destructor path as every other ownership edge.
 pub(crate) struct PendingHandleValue {
-    value: Option<SharedObject>,
+    value: Option<ObjectBinding>,
 }
 
 impl PendingHandleValue {
-    pub(crate) fn new(value: SharedObject) -> Self {
+    pub(crate) fn new(value: ObjectBinding) -> Self {
         Self { value: Some(value) }
     }
 
-    pub(crate) fn slot(&mut self) -> &mut Option<SharedObject> {
+    pub(crate) fn slot(&mut self) -> &mut Option<ObjectBinding> {
         &mut self.value
     }
 }
@@ -130,12 +129,11 @@ impl HandleRegistry {
         let secret = entropy[8..]
             .try_into()
             .expect("the handle MAC key slice has 32 bytes");
-        let lifetime = ObjectLifetimeTracker::new();
         Self {
             codec: TokenCodec::new(session, secret),
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             bindings: BindingTable::new(maximum_bindings),
-            lifetime,
+            objects: Box::new(ObjectArena::new()),
             next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
             trace: Mutex::new(None),
@@ -144,7 +142,7 @@ impl HandleRegistry {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.lifetime.set_trace_sink(std::sync::Arc::clone(&trace));
+        self.objects.set_trace_sink(std::sync::Arc::clone(&trace));
         *self.trace.lock() = Some(trace);
     }
 
@@ -192,9 +190,12 @@ impl HandleRegistry {
             })
     }
 
-    pub(crate) fn new_object<T: Send + Sync + 'static>(&self, value: T) -> XllResult<SharedObject> {
+    pub(crate) fn new_object<T: Send + Sync + 'static>(
+        &self,
+        value: T,
+    ) -> XllResult<ObjectBinding> {
         let object_id = self.allocate_object_id()?;
-        ObjectCell::new(object_id, value, Arc::clone(&self.lifetime))
+        self.objects.insert(object_id, value)
     }
 
     #[cfg(test)]
@@ -210,7 +211,7 @@ impl HandleRegistry {
 
     pub(crate) fn insert_pending_object_with_kind<T>(
         &self,
-        value: &mut Option<SharedObject>,
+        value: &mut Option<ObjectBinding>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Send + Sync + 'static,
@@ -235,7 +236,7 @@ impl HandleRegistry {
 
     pub(crate) fn insert_existing_object_binding<T>(
         &self,
-        object: SharedObject,
+        object: ObjectBinding,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Send + Sync + 'static,
@@ -256,11 +257,11 @@ impl HandleRegistry {
         Ok((self.codec.format(id), id, object_id, reused))
     }
 
-    fn validate_type<T: Send + Sync + 'static>(&self, object: &SharedObject) -> XllResult<()> {
-        if object.type_id() == TypeId::of::<T>() {
+    fn validate_type<T: Send + Sync + 'static>(&self, object: &ObjectBinding) -> XllResult<()> {
+        if object.object().type_id() == TypeId::of::<T>() {
             return Ok(());
         }
-        let actual_type = object.type_name();
+        let actual_type = object.object().type_name();
         let _ = catch_unwind(AssertUnwindSafe(|| {
             tracing::warn!(
                 expected_type = type_name::<T>(),
@@ -291,7 +292,7 @@ impl HandleRegistry {
             return Err(XllError::StaleHandle);
         }
         let value = record
-            .object
+            .object()
             .typed_projection::<T>()
             .ok_or(XllError::InvalidHandle)?;
         Ok(value.as_ref().clone())
@@ -319,8 +320,8 @@ impl HandleRegistry {
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
-        let Some(value) = record.object.typed_projection::<T>() else {
-            let actual_type = record.object.type_name();
+        let Some(value) = record.object().typed_projection::<T>() else {
+            let actual_type = record.object().type_name();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
                     expected_type = type_name::<T>(),
@@ -373,7 +374,7 @@ impl HandleRegistry {
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
-        self.lifetime.cleanup().result()
+        self.objects.cleanup_result()
     }
 
     #[cfg(test)]
@@ -437,7 +438,7 @@ impl HandleRegistry {
                 }
             }
         }
-        self.lifetime.seal();
+        self.objects.seal();
         self.retire_values_for_seal();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
@@ -446,6 +447,6 @@ impl HandleRegistry {
     }
 
     pub(super) fn finish_quiescence(&self, _sealed: &HandleRegistrySealed) -> XllResult<()> {
-        self.lifetime.finish_quiescence()
+        self.objects.finish_quiescence()
     }
 }

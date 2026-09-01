@@ -1,17 +1,24 @@
-//! Binding ownership and its immutable read-side publication.
+//! Formula-binding ownership and non-owning read-side publication.
 //!
-//! This module owns the formula-token side of the handle registry. A binding
-//! record owns the shared [`ObjectCell`] reference that makes its immutable
-//! publication snapshot a complete read-side lifetime proof.
+//! Every binding record is uniquely owned by this table and retained as a
+//! tombstone until service reclamation. Atomic publication exposes only a
+//! pointer; a per-record operation permit protects the binding's object
+//! capability while a call reads it.
 
-use super::object::SharedObject;
+#![allow(
+    unsafe_code,
+    reason = "binding reads use audited non-owning pointers protected by per-record drain gates"
+)]
+
+use super::object::{ObjectBinding, ObjectCell};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
 use crate::generation::BindingGeneration;
 use crate::{XllError, XllResult};
-use arc_swap::ArcSwapAny;
-use parking_lot::{RwLock, RwLockWriteGuard};
-use std::sync::atomic::{AtomicU8, Ordering};
+use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use xlfn_kernel::operation_gate::{OperationGate, OwnedOperationGuard};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,171 +37,192 @@ impl BindingState {
     }
 }
 
-/// One canonical formula-binding record shared by the mutable registry and
-/// the immutable read-side publication snapshot.
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
-    pub(crate) object: SharedObject,
+    object: Mutex<Option<ObjectBinding>>,
     pub(crate) state: AtomicU8,
+    readers: OperationGate,
 }
 
 impl BindingRecord {
-    fn new(id: HandleId, object: SharedObject) -> Self {
+    fn new(id: HandleId, object: ObjectBinding) -> Self {
         Self {
             id,
-            object,
+            object: Mutex::new(Some(object)),
             state: AtomicU8::new(BindingState::Live as u8),
+            readers: OperationGate::new(),
         }
     }
 
     pub(crate) fn state(&self) -> BindingState {
         BindingState::from_raw(self.state.load(Ordering::Acquire))
     }
-}
 
-const BINDING_CHUNK_SIZE: usize = 64;
+    pub(crate) fn object(&self) -> &ObjectCell {
+        let pointer = {
+            let object = self.object.lock();
+            NonNull::from(
+                object
+                    .as_ref()
+                    .expect("a live/read-admitted binding owns its object capability")
+                    .object(),
+            )
+        };
+        // SAFETY: callers hold this record's reader permit. Retirement waits
+        // for all such permits before taking and dropping ObjectBinding.
+        unsafe { pointer.as_ref() }
+    }
 
-#[derive(Clone)]
-struct BindingChunk {
-    entries: [Option<triomphe::Arc<BindingRecord>>; BINDING_CHUNK_SIZE],
-}
+    fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
+        self.object
+            .lock()
+            .as_ref()
+            .ok_or(XllError::StaleHandle)?
+            .duplicate()
+    }
 
-impl BindingChunk {
-    fn empty() -> Self {
-        Self {
-            entries: [const { None }; BINDING_CHUNK_SIZE],
-        }
+    fn retire(&self) -> ObjectBinding {
+        self.object
+            .lock()
+            .take()
+            .expect("binding retirement consumes one object capability")
     }
 }
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct BindingPtr(NonNull<BindingRecord>);
+
+impl BindingPtr {
+    fn from_ref(record: &BindingRecord) -> Self {
+        Self(NonNull::from(record))
+    }
+
+    fn get(self) -> &'static BindingRecord {
+        // SAFETY: binding records are table-owned tombstones and are not
+        // reclaimed until every publication/read has been withdrawn.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+unsafe impl Send for BindingPtr {}
+unsafe impl Sync for BindingPtr {}
 
 pub(crate) struct BindingSnapshot {
-    guard: arc_swap::Guard<triomphe::Arc<BindingChunk>>,
+    record: Option<BindingPtr>,
 }
 
-impl BindingSnapshot {
-    pub(crate) fn get(&self, slot: u32) -> Option<&triomphe::Arc<BindingRecord>> {
-        self.guard.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)].as_ref()
-    }
-}
-
-/// A call-scoped read capability. The snapshot transitively owns the binding
-/// record and its `ObjectCell`; no object `Arc` is cloned on warm lookup.
+/// A call-scoped capability that prevents one binding's object reference from
+/// being retired while it is projected into a typed handle.
 pub(crate) struct BindingReadLease {
-    snapshot: BindingSnapshot,
-    id: HandleId,
+    record: BindingPtr,
+    _permit: OwnedOperationGuard,
 }
 
 impl BindingReadLease {
     pub(crate) fn new(snapshot: BindingSnapshot, id: HandleId) -> XllResult<Self> {
-        let valid = snapshot.get(id.slot).is_some_and(|record| record.id == id);
-        if !valid {
+        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
+        let record_ref = record.get();
+        // SAFETY: the record is a table-owned tombstone. Its gate is drained
+        // before the object capability is retired.
+        let permit = unsafe { record_ref.readers.enter_owned() }
+            .map_err(|_| XllError::StaleHandle)?;
+        if record_ref.id != id || record_ref.state() != BindingState::Live {
+            drop(permit);
             return Err(XllError::StaleHandle);
         }
-        Ok(Self { snapshot, id })
+        Ok(Self {
+            record,
+            _permit: permit,
+        })
     }
 
     pub(crate) fn record(&self) -> &BindingRecord {
-        self.snapshot
-            .get(self.id.slot)
-            .filter(|record| record.id == self.id)
-            .map(triomphe::Arc::as_ref)
-            .expect("validated binding read lease")
+        self.record.get()
     }
 
-    pub(crate) fn object(&self) -> &SharedObject {
-        &self.record().object
+    pub(crate) fn object(&self) -> &ObjectCell {
+        self.record().object()
+    }
+
+    pub(crate) fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
+        self.record().duplicate_object_binding()
+    }
+
+    pub(crate) fn acquire_object_lease(
+        &self,
+    ) -> XllResult<super::object::ObjectLeaseGuard> {
+        self.record()
+            .object
+            .lock()
+            .as_ref()
+            .ok_or(XllError::StaleHandle)?
+            .acquire_lease()
     }
 }
 
-/// Immutable slot-indexed publication snapshots for warm handle lookup.
 pub(crate) struct PublishedBindings {
-    chunks: Box<[ArcSwapAny<triomphe::Arc<BindingChunk>>]>,
-    empty: ArcSwapAny<triomphe::Arc<BindingChunk>>,
+    entries: Box<[AtomicPtr<BindingRecord>]>,
 }
 
 impl PublishedBindings {
     pub(crate) fn new(maximum_bindings: u32) -> Self {
-        let chunk_count = (maximum_bindings as usize)
-            .div_ceil(BINDING_CHUNK_SIZE)
-            .max(1);
-        let empty_chunk = triomphe::Arc::new(BindingChunk::empty());
         Self {
-            chunks: (0..chunk_count)
-                .map(|_| ArcSwapAny::new(triomphe::Arc::clone(&empty_chunk)))
+            entries: (0..maximum_bindings.max(1))
+                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
                 .collect(),
-            empty: ArcSwapAny::new(empty_chunk),
         }
     }
 
-    fn chunk_index(slot: u32) -> usize {
-        slot as usize / BINDING_CHUNK_SIZE
-    }
-
-    /// Load the chunk containing one publication.
     pub(crate) fn load(&self, slot: u32) -> BindingSnapshot {
-        let chunk = self
-            .chunks
-            .get(Self::chunk_index(slot))
-            .unwrap_or(&self.empty);
-        BindingSnapshot {
-            guard: chunk.load(),
-        }
+        let record = self
+            .entries
+            .get(slot as usize)
+            .and_then(|entry| NonNull::new(entry.load(Ordering::Acquire)))
+            .map(BindingPtr);
+        BindingSnapshot { record }
     }
 
-    /// Update the snapshot while the canonical registry write lock is held.
-    fn insert(&self, id: HandleId, record: triomphe::Arc<BindingRecord>) {
-        let slot = id.slot;
-        let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
-            debug_assert!(false, "handle slot exceeds the publication table");
+    fn insert(&self, id: HandleId, record: BindingPtr) {
+        let Some(entry) = self.entries.get(id.slot as usize) else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        if !entry.load(Ordering::Acquire).is_null() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        entry.store(record.0.as_ptr(), Ordering::Release);
+    }
+
+    fn remove(&self, id: HandleId, expected: BindingPtr) {
+        let Some(entry) = self.entries.get(id.slot as usize) else {
             return;
         };
-        let current = chunk.load_full();
-        let mut next = current.as_ref().clone();
-        next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = Some(record);
-        chunk.store(triomphe::Arc::new(next));
+        let _ = entry.compare_exchange(
+            expected.0.as_ptr(),
+            std::ptr::null_mut(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
-    /// Remove only the publication that belongs to the canonical entry being
-    /// removed.
-    fn remove(&self, id: HandleId, expected: &triomphe::Arc<BindingRecord>) {
-        let slot = id.slot;
-        let Some(chunk) = self.chunks.get(Self::chunk_index(slot)) else {
-            return;
-        };
-        let current = chunk.load_full();
-        if !current.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)]
-            .as_ref()
-            .is_some_and(|record| triomphe::Arc::ptr_eq(record, expected))
-        {
-            return;
-        }
-        let mut next = current.as_ref().clone();
-        next.entries[slot as usize & (BINDING_CHUNK_SIZE - 1)] = None;
-        chunk.store(triomphe::Arc::new(next));
-    }
-
-    /// Clear all publication snapshots while the canonical registry is being
-    /// closed.
     fn clear(&self) {
-        let empty_chunk = triomphe::Arc::new(BindingChunk::empty());
-        for chunk in &self.chunks {
-            chunk.store(triomphe::Arc::clone(&empty_chunk));
+        for entry in &self.entries {
+            entry.store(std::ptr::null_mut(), Ordering::Release);
         }
     }
 }
 
 pub(crate) struct BindingSlot {
     pub(crate) next_generation: BindingGeneration,
-    pub(crate) record: Option<triomphe::Arc<BindingRecord>>,
+    pub(crate) record: Option<BindingPtr>,
 }
 
 pub(crate) struct RegistryState {
     pub(crate) slots: Vec<BindingSlot>,
     pub(crate) free: Vec<usize>,
     pub(crate) live_bindings: u32,
+    records: Vec<Box<BindingRecord>>,
 }
 
-/// Canonical binding ownership and its immutable read-side publication.
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
@@ -208,6 +236,7 @@ impl BindingTable {
                 slots: Vec::new(),
                 free: Vec::new(),
                 live_bindings: 0,
+                records: Vec::new(),
             }),
             published: PublishedBindings::new(maximum_bindings),
             maximum_bindings,
@@ -221,18 +250,11 @@ impl BindingTable {
                 code: DomainErrorCode::Overflow,
             });
         }
-
         let (index, slot, reused, appended) = match state.free.pop() {
             Some(index) => {
-                let slot = match u32::try_from(index) {
-                    Ok(slot) => slot,
-                    Err(_) => {
-                        state.free.push(index);
-                        return Err(XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
-                        });
-                    }
-                };
+                let slot = u32::try_from(index).map_err(|_| XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
+                })?;
                 (index, slot, true, false)
             }
             None => {
@@ -247,7 +269,6 @@ impl BindingTable {
                 (index, slot, false, true)
             }
         };
-
         let id = HandleId {
             slot,
             generation: state.slots[index].next_generation,
@@ -287,9 +308,8 @@ impl BindingTable {
         let record = state
             .slots
             .get(id.slot as usize)
-            .and_then(|slot| slot.record.as_ref())
-            .filter(|record| record.id == id)
-            .cloned()
+            .and_then(|slot| slot.record)
+            .filter(|record| record.get().id == id)
             .ok_or(XllError::StaleHandle)?;
         Ok(BindingRemoval {
             table: self,
@@ -300,20 +320,23 @@ impl BindingTable {
         })
     }
 
-    pub(crate) fn retire_all(&self) -> (u32, Vec<triomphe::Arc<BindingRecord>>) {
+    pub(crate) fn retire_all(&self) -> (u32, Vec<ObjectBinding>) {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
         let mut retired = Vec::with_capacity(live_bindings as usize);
         state.free.clear();
         self.published.clear();
+        let mut records = Vec::with_capacity(live_bindings as usize);
         for index in 0..state.slots.len() {
             let reusable = {
                 let slot = &mut state.slots[index];
                 if let Some(record) = slot.record.take() {
                     record
+                        .get()
                         .state
                         .store(BindingState::Retired as u8, Ordering::Release);
-                    retired.push(record);
+                    record.get().readers.begin_close();
+                    records.push(record);
                 }
                 if let Some(next) = slot.next_generation.next() {
                     slot.next_generation = next;
@@ -328,6 +351,10 @@ impl BindingTable {
         }
         state.live_bindings = 0;
         drop(state);
+        for record in records {
+            record.get().readers.close_and_wait_begin().wait();
+            retired.push(record.get().retire());
+        }
         (live_bindings, retired)
     }
 }
@@ -343,18 +370,20 @@ pub(crate) struct BindingReservation<'table> {
 }
 
 impl BindingReservation<'_> {
-    pub(crate) fn publish(mut self, object: SharedObject) -> (HandleId, bool) {
+    pub(crate) fn publish(mut self, object: ObjectBinding) -> (HandleId, bool) {
         let mut state = self
             .state
             .take()
-            .expect("binding reservation must own the table write lock");
-        let record = triomphe::Arc::new(BindingRecord::new(self.id, object));
-        state.slots[self.index].record = Some(triomphe::Arc::clone(&record));
-        self.table.published.insert(self.id, record);
+            .expect("binding reservation owns the table write lock");
+        let record = Box::new(BindingRecord::new(self.id, object));
+        let pointer = BindingPtr::from_ref(record.as_ref());
+        state.records.push(record);
+        state.slots[self.index].record = Some(pointer);
+        self.table.published.insert(self.id, pointer);
         state.live_bindings = state
             .live_bindings
             .checked_add(1)
-            .expect("binding reservation capacity was checked before commit");
+            .expect("binding capacity was checked before commit");
         self.active = false;
         drop(state);
         (self.id, self.reused)
@@ -369,12 +398,9 @@ impl Drop for BindingReservation<'_> {
         let mut state = self
             .state
             .take()
-            .expect("binding reservation must own the table write lock");
+            .expect("binding reservation owns the table write lock");
         if self.appended {
-            let slot = state
-                .slots
-                .pop()
-                .expect("new binding reservation owns the final slot");
+            let slot = state.slots.pop().expect("reservation owns the final slot");
             debug_assert!(slot.record.is_none());
         } else if self.reused {
             state.free.push(self.index);
@@ -386,33 +412,35 @@ pub(crate) struct BindingRemoval<'table> {
     pub(super) table: &'table BindingTable,
     pub(super) state: Option<RwLockWriteGuard<'table, RegistryState>>,
     pub(super) id: HandleId,
-    pub(super) record: triomphe::Arc<BindingRecord>,
+    pub(super) record: BindingPtr,
     pub(super) active: bool,
 }
 
 impl BindingRemoval<'_> {
     #[cfg(test)]
-    pub(crate) fn object(&self) -> &SharedObject {
-        &self.record.object
+    pub(crate) fn object(&self) -> &ObjectCell {
+        self.record.get().object()
     }
 
     pub(crate) fn commit(mut self) -> bool {
         let mut state = self
             .state
             .take()
-            .expect("binding removal must own the table write lock");
-        self.record
+            .expect("binding removal owns the table write lock");
+        let record = self.record.get();
+        record
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
-        self.table.published.remove(self.id, &self.record);
+        self.table.published.remove(self.id, self.record);
+        record.readers.begin_close();
         let slot = state
             .slots
             .get_mut(self.id.slot as usize)
-            .expect("binding slot was checked above");
-        let slot_record = slot
-            .record
-            .take()
-            .expect("binding record was checked above");
+            .expect("binding slot was validated");
+        let slot_record = slot.record.take().expect("binding record was validated");
+        if slot_record != self.record {
+            xlfn_kernel::invariant::fail_stop();
+        }
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
             true
@@ -422,15 +450,14 @@ impl BindingRemoval<'_> {
         state.live_bindings = state
             .live_bindings
             .checked_sub(1)
-            .expect("binding removal cannot underflow live count");
+            .expect("binding removal cannot underflow");
         if reusable {
             state.free.push(self.id.slot as usize);
         }
         self.active = false;
         drop(state);
-        // The binding lock must never be held while the final `ObjectCell`
-        // reference runs arbitrary user `Drop` code.
-        drop(slot_record);
+        record.readers.close_and_wait_begin().wait();
+        drop(record.retire());
         reusable
     }
 }

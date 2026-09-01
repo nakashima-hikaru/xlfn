@@ -13,7 +13,6 @@ use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition}
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::QuarantineReason;
 use crate::{XllError, XllResult};
-use std::sync::Arc;
 
 /// The result of beginning an open attempt. The composition root turns this
 /// into an `OpeningTxn` by attaching the operation-scoped open capability.
@@ -118,16 +117,6 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         reason: QuarantineReason,
     ) {
         self.quarantine.retain_generation(generation, root, reason);
-    }
-
-    pub(crate) fn quarantine_shared_generation(
-        &self,
-        generation: Option<RuntimeGeneration>,
-        root: Arc<ExecutionGeneration<A>>,
-        reason: QuarantineReason,
-    ) {
-        self.quarantine
-            .retain_shared_generation(generation, root, reason);
     }
 
     #[cfg(test)]

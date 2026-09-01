@@ -14,7 +14,7 @@ use crate::generation::{ExecutionGeneration, RemovalEpoch, RuntimeGeneration};
 use crate::ingress::AdmittedExport;
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::registration::RegistrationId;
-#[cfg(any(test, feature = "async", feature = "bench-internals"))]
+#[cfg(test)]
 use std::sync::Arc;
 #[cfg(not(feature = "async"))]
 use std::sync::atomic::Ordering;
@@ -35,7 +35,7 @@ mod transactions;
 
 #[cfg(any(
     feature = "bench-internals",
-    all(test, any(feature = "handles", feature = "rtd")),
+    test,
 ))]
 use crate::runtime_components::GenerationServices;
 #[cfg(feature = "async")]
@@ -348,7 +348,11 @@ impl<A: crate::Addin> Runtime<A> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        let transaction = opening.attach_host().initialized(lifecycle_state);
+        let generation = opening.attempt_id().into_runtime_generation();
+        let transaction = opening.attach_host().initialized(
+            lifecycle_state,
+            crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
+        );
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
@@ -427,20 +431,8 @@ impl<A: crate::Addin> Runtime<A> {
         self.lifecycle.has_current_generation()
     }
 
-    #[cfg(feature = "bench-internals")]
-    pub(crate) fn arm_test_generation(&self) {
-        let services = GenerationServices::arm_generation(
-            crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-            crate::addin::RuntimeConfig::new(),
-            Some(crate::excel_rtd::RtdSubscriptionHost::detached()),
-        )
-        .expect("test runtime generation can be armed once")
-        .commit();
-        self.lifecycle.install_test_generation_services(services);
-    }
-
     #[cfg(test)]
-    pub(crate) fn take_current_generation(&self) -> Option<Arc<ExecutionGeneration<A>>> {
+    pub(crate) fn take_current_generation(&self) -> Option<Box<ExecutionGeneration<A>>> {
         self.lifecycle.take_current_generation()
     }
 
@@ -475,6 +467,15 @@ impl<A: crate::Addin> Runtime<A> {
             _ingress: ingress,
             _observation: observation,
         })
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn execution_lease(
+        &'static self,
+        call: &CallGuard<'_, A>,
+    ) -> ExecutionLease<A> {
+        self.lifecycle
+            .acquire_execution_lease(call.admission.generation_pointer())
     }
 
     #[inline]
@@ -566,19 +567,25 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
-    pub(crate) fn formula_handle_service(
+    pub(crate) fn with_formula_handle_service<R>(
         &self,
-    ) -> XllResult<Arc<crate::handle::FormulaHandleService>> {
-        self.generation_services()?.formula_handle_service()
+        operation: impl FnOnce(&crate::handle::FormulaHandleService) -> R,
+    ) -> XllResult<R> {
+        self.lifecycle
+            .with_generation_services(|services| {
+                services.formula_handle_service().map(|service| operation(&service))
+            })
+            .ok_or(XllError::Closing)?
     }
 
-    #[cfg(any(
-        feature = "bench-internals",
-        all(test, any(feature = "handles", feature = "rtd")),
-    ))]
-    pub(crate) fn generation_services(&self) -> XllResult<Arc<GenerationServices>> {
-        let services = self.open_deps().generation_services_snapshot();
-        services.ok_or(XllError::Closing)
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn with_generation_services<R>(
+        &self,
+        operation: impl FnOnce(&GenerationServices) -> R,
+    ) -> XllResult<R> {
+        self.lifecycle
+            .with_generation_services(operation)
+            .ok_or(XllError::Closing)
     }
 
     #[cfg(test)]
@@ -587,21 +594,31 @@ impl<A: crate::Addin> Runtime<A> {
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> XllResult<SealedGenerationServices> {
         let generation = self.protocol_generation();
-        let Some(services) = self.open_deps().generation_services_snapshot() else {
-            return Ok(SealedGenerationServices::empty(
-                generation,
-                subscriptions_stopped,
-            ));
-        };
-        services.seal(generation, subscriptions_stopped)
+        let mut subscriptions_stopped = Some(subscriptions_stopped);
+        self.lifecycle
+            .with_generation_services(|services| {
+                services.seal(
+                    generation,
+                    subscriptions_stopped
+                        .take()
+                        .expect("generation services consume one subscription certificate"),
+                )
+            })
+            .unwrap_or_else(|| {
+                Ok(SealedGenerationServices::empty(
+                    generation,
+                    subscriptions_stopped
+                        .take()
+                        .expect("missing services preserve the subscription certificate"),
+                ))
+            })
     }
 
     #[cfg(test)]
     pub(crate) fn shutdown_handle_topics(&self) -> XllResult<()> {
-        let Some(services) = self.open_deps().generation_services_snapshot() else {
-            return Ok(());
-        };
-        services.shutdown_handle_topics()
+        self.lifecycle
+            .with_generation_services(GenerationServices::shutdown_handle_topics)
+            .unwrap_or(Ok(()))
     }
 
     #[cfg(test)]
@@ -617,9 +634,16 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[inline]
     #[cfg(all(test, feature = "rtd"))]
-    pub(crate) fn subscriptions(&self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead> {
-        let services = self.generation_services()?;
-        services.rtd_call_access().read()
+    pub(crate) fn with_subscriptions<R>(
+        &self,
+        operation: impl FnOnce(&crate::subscription::SubscriptionRuntime) -> R,
+    ) -> XllResult<R> {
+        self.with_generation_services(|services| {
+            services
+                .rtd_call_access()
+                .read()
+                .map(|subscriptions| operation(&subscriptions))
+        })?
     }
 
     #[cfg(test)]
@@ -632,7 +656,9 @@ impl<A: crate::Addin> Runtime<A> {
         }
         #[cfg(feature = "rtd")]
         {
-            let Some(services) = self.open_deps().generation_services_snapshot() else {
+            let Some(result) = self.lifecycle.with_generation_services(|services| {
+                services.close_subscriptions(self.protocol_generation())
+            }) else {
                 #[cfg(test)]
                 {
                     return Ok(crate::excel_rtd::stopped_subscriptions(
@@ -644,7 +670,7 @@ impl<A: crate::Addin> Runtime<A> {
                     return Err(XllError::Closing);
                 }
             };
-            services.close_subscriptions(self.protocol_generation())
+            result
         }
     }
 
@@ -744,7 +770,7 @@ pub(crate) mod test_support {
 
 pub struct CallGuard<'runtime, A: crate::Addin> {
     _ingress: &'runtime AdmittedExport<'runtime>,
-    admission: GenerationAdmission<A>,
+    admission: GenerationAdmission<'runtime, A>,
     _observation: observer::CallObservation<'runtime>,
 }
 
@@ -777,13 +803,6 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         generation
     }
 
-    #[cfg(feature = "async")]
-    #[must_use]
-    pub(crate) fn lease(&self) -> ExecutionLease<A> {
-        ExecutionLease {
-            generation: Arc::clone(self.admission.generation_arc()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -895,9 +914,11 @@ pub(crate) mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &1);
-        let old_handles = runtime.formula_handle_service().unwrap();
-        let old_token = old_handles
-            .prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
+        let old_token = runtime
+            .with_formula_handle_service(|handles| {
+                handles.prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
+            })
+            .unwrap()
             .unwrap()
             .into_token();
         drop(ingress);
@@ -920,28 +941,31 @@ pub(crate) mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &2);
-        let new_handles = runtime.formula_handle_service().unwrap();
-        let new_token = new_handles
-            .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
-            .unwrap()
-            .into_token();
-        assert_eq!(
-            crate::value::with_excel_call_scope(|scope| {
-                new_handles
-                    .lookup::<TestHandle>(scope, &new_token)
-                    .map(|value| value.0)
+        runtime
+            .with_formula_handle_service(|new_handles| {
+                let new_token = new_handles
+                    .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
+                    .unwrap()
+                    .into_token();
+                assert_eq!(
+                    crate::value::with_excel_call_scope(|scope| {
+                        new_handles
+                            .lookup::<TestHandle>(scope, &new_token)
+                            .map(|value| value.0)
+                    })
+                    .unwrap(),
+                    2
+                );
+                assert!(matches!(
+                    crate::value::with_excel_call_scope(|scope| {
+                        new_handles
+                            .lookup::<TestHandle>(scope, &old_token)
+                            .map(|_| ())
+                    }),
+                    Err(XllError::StaleHandle | XllError::InvalidHandle)
+                ));
             })
-            .unwrap(),
-            2
-        );
-        assert!(matches!(
-            crate::value::with_excel_call_scope(|scope| {
-                new_handles
-                    .lookup::<TestHandle>(scope, &old_token)
-                    .map(|_| ())
-            }),
-            Err(XllError::StaleHandle | XllError::InvalidHandle)
-        ));
+            .unwrap();
         drop(ingress);
 
         let removal_attempt = runtime.begin_final_removal().unwrap();

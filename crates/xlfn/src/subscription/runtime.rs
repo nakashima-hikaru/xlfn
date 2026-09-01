@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "subscription runtime resolves stable Box-owned server arena entries through non-owning pointers"
+)]
+
 use super::RuntimeServices;
 use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::PublishCore;
@@ -9,7 +14,7 @@ use super::server::{
     TerminationAdmission, TerminationCoordinator, cleanup_catalog_binding_and_pending,
     disconnect_one_no_unwind,
 };
-use super::source::{ErasedRtdSource, RtdSource, RtdSourceHandle};
+use super::source::{RtdSource, RtdSourceHandle, SourceArena};
 use super::topic::{
     RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentity, SubscriptionKey, TopicId,
 };
@@ -20,7 +25,9 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::ptr::NonNull;
+#[cfg(test)]
+use std::sync::Arc;
 use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
 use xlfn_kernel::quota::Quota;
 
@@ -32,14 +39,17 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
     pub(crate) host: H,
-    pub(crate) runtime_gate: Arc<OperationGate>,
+    // Pointer-bearing server roots are declared before every field they
+    // reference so Rust's declaration-order drop reclaims servers first.
+    pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Box<SubscriptionServer<H>>>>,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
-    pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Arc<SubscriptionServer<H>>>>,
-    pub(crate) active_quota: triomphe::Arc<Quota>,
-    pub(crate) queued_update_quota: triomphe::Arc<Quota>,
+    pub(crate) sources: SourceArena,
+    pub(crate) runtime_gate: OperationGate,
+    pub(crate) active_quota: Quota,
+    pub(crate) queued_update_quota: Quota,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
-    pub(crate) services: Arc<RuntimeServices>,
+    pub(crate) services: RuntimeServices,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
@@ -54,7 +64,19 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             RuntimeGeneration::new(1).expect("test generation is non-zero"),
             RtdLimits::standard(),
             H::default(),
+            SourceArena::empty(
+                RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            ),
         )
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn with_sources_for_internal(sources: SourceArena) -> Self
+    where
+        H: Default,
+    {
+        let generation = RuntimeGeneration::new(1).expect("test generation is non-zero");
+        Self::with_host(generation, RtdLimits::standard(), H::default(), sources)
     }
 
     #[cfg(test)]
@@ -66,29 +88,38 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             RuntimeGeneration::new(1).expect("test generation is non-zero"),
             limits,
             H::default(),
+            SourceArena::empty(
+                RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            ),
         )
     }
 
-    pub(crate) fn with_host(generation: RuntimeGeneration, limits: RtdLimits, host: H) -> Self {
+    pub(crate) fn with_host(
+        generation: RuntimeGeneration,
+        limits: RtdLimits,
+        host: H,
+        sources: SourceArena,
+    ) -> Self {
         let runtime_id = allocate_runtime_id().expect("runtime ID allocation overflow");
         Self {
             generation,
             runtime_id,
             limits,
             host,
-            runtime_gate: Arc::new(OperationGate::new()),
+            servers: Mutex::new(FxHashMap::default()),
             catalog: Mutex::new(SubscriptionCatalog {
                 entries: FxHashMap::default(),
                 pending_topic_bytes: 0,
                 identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
-            servers: Mutex::new(FxHashMap::default()),
-            active_quota: triomphe::Arc::new(Quota::new(limits.max_active.get())),
-            queued_update_quota: triomphe::Arc::new(Quota::new(limits.max_queued_updates.get())),
+            sources,
+            runtime_gate: OperationGate::new(),
+            active_quota: Quota::new(limits.max_active.get()),
+            queued_update_quota: Quota::new(limits.max_queued_updates.get()),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
-            services: Arc::new(RuntimeServices::new()),
+            services: RuntimeServices::new(),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -120,7 +151,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     pub(crate) fn register_server(
-        self: &Arc<Self>,
+        &self,
         generation: ServerGeneration,
     ) -> XllResult<SubscriptionServerHandle<H>> {
         let _operation = self.runtime_gate.enter().map_err(|_| XllError::Closing)?;
@@ -128,17 +159,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
-        let publish = triomphe::Arc::new(PublishCore::new(
+        let publish = Box::new(PublishCore::new(
             self.host.clone(),
-            Arc::clone(&self.runtime_gate),
-            triomphe::Arc::clone(&self.queued_update_quota),
-            Arc::clone(&self.services),
+            &self.runtime_gate,
+            &self.queued_update_quota,
+            &self.services,
         ));
-        let server = Arc::new(SubscriptionServer {
+        let server = Box::new(SubscriptionServer {
             generation,
             publish,
             subscriptions: Mutex::new(FxHashMap::default()),
-            parent: Arc::downgrade(self),
             termination_coordinator: TerminationCoordinator::default(),
         });
 
@@ -148,15 +178,28 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SERVER_DUE,
             });
         }
-        servers.insert(generation, Arc::clone(&server));
-        Ok(SubscriptionServerHandle { inner: server })
+        servers.insert(generation, server);
+        Ok(SubscriptionServerHandle::new(self, generation))
+    }
+
+    pub(crate) fn resolve_server(
+        &self,
+        generation: ServerGeneration,
+    ) -> Option<&SubscriptionServer<H>> {
+        let pointer = {
+            let servers = self.servers.lock();
+            NonNull::from(servers.get(&generation)?.as_ref())
+        };
+        // SAFETY: server entries are retained as tombstones until the runtime
+        // itself is reclaimed; the returned borrow is tied to `&self`.
+        Some(unsafe { pointer.as_ref() })
     }
 
     pub(crate) fn prepare<S>(
-        self: &Arc<Self>,
+        &self,
         source: &RtdSourceHandle<S>,
         topic: RtdTopic,
-    ) -> XllResult<PreparedSubscription<H>>
+    ) -> XllResult<PreparedSubscription<'_, H>>
     where
         S: RtdSource,
     {
@@ -206,7 +249,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     id: existing_id,
                     key: existing_key,
                     reservation: Some(PreparationReservation {
-                        runtime: Arc::downgrade(self),
+                        runtime: self,
                     }),
                 });
             }
@@ -216,11 +259,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        let erased_source: Arc<dyn ErasedRtdSource> = Arc::clone(&source.source) as _;
         let (id, key) = catalog.insert_pending(
             self.runtime_id,
             source.id,
-            erased_source,
             topic,
             self.limits,
         )?;
@@ -229,13 +270,13 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             id,
             key,
             reservation: Some(PreparationReservation {
-                runtime: Arc::downgrade(self),
+                runtime: self,
             }),
         })
     }
 
     pub(crate) fn finish_preparation(&self, id: SubscriptionId, committed: bool) {
-        let removed_source = {
+        {
             let mut catalog = self.catalog.lock();
             let Some(finish) = catalog.with_entry(id, |entry| entry.finish_preparation(committed))
             else {
@@ -243,20 +284,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             };
 
             match finish {
-                PreparationFinish::Remove => catalog
-                    .remove_entry(id)
-                    .and_then(SubscriptionEntry::into_source),
-                PreparationFinish::DropSource(source) => Some(source),
-                PreparationFinish::Keep => None,
-            }
-        };
-
-        if let Some(source) = removed_source {
-            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
-            if res.is_err() {
-                self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-                }));
+                PreparationFinish::Remove => {
+                    catalog.remove_entry(id);
+                }
+                PreparationFinish::Keep => {}
             }
         }
     }
@@ -282,7 +313,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         &self,
         id: SubscriptionId,
         generation: ConnectionGeneration,
-    ) -> Option<Arc<dyn ErasedRtdSource>> {
+    ) {
         let mut catalog = self.catalog.lock();
 
         let should_remove = catalog
@@ -293,21 +324,18 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             .unwrap_or(false);
 
         if should_remove {
-            return catalog
-                .remove_entry(id)
-                .and_then(SubscriptionEntry::into_source);
+            catalog.remove_entry(id);
         }
-
-        None
     }
 
     pub(crate) fn connect_transaction(
-        self: &Arc<Self>,
+        &self,
         server_handle: &SubscriptionServerHandle<H>,
         topic_id: TopicId,
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H>> {
-        let operation = server_handle.inner.enter_owned_operation()?;
+        let server = server_handle.server()?;
+        let operation = server.enter_owned_operation()?;
         let conn_gen = ConnectionGeneration::new(
             self.next_connection_generation
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -321,35 +349,30 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
 
-        let (source, topic) = {
+        let (source_id, topic) = {
             let mut catalog = self.catalog.lock();
             let Some(result) = catalog.with_entry(id, |entry| -> XllResult<_> {
-                let source = entry.begin_connection(server_handle.inner.generation, conn_gen)?;
-                Ok((source, entry.topic.clone()))
+                entry.begin_connection(server.generation, conn_gen)?;
+                Ok((entry.source_id.0, entry.topic.clone()))
             }) else {
                 return Err(XllError::Closing);
             };
             result?
         };
+        let source = self.sources.resolve(source_id).ok_or(XllError::StaleHandle)?;
 
-        if let Err(error) = server_handle.inner.publish.reserve_connection(
+        if let Err(error) = server.publish.reserve_connection(
             topic_id,
             id,
             conn_gen,
             &self.active_quota,
         ) {
-            if let Some(source) = self.rollback_catalog_connection_reservation(id, conn_gen)
-                && catch_unwind(AssertUnwindSafe(|| drop(source))).is_err()
-            {
-                self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-                }));
-            }
+            self.rollback_catalog_connection_reservation(id, conn_gen);
             return Err(error);
         }
 
         let erased_sink = ErasedSink::for_publish(
-            triomphe::Arc::clone(&server_handle.inner.publish),
+            server.publish.as_ref(),
             topic_id,
             conn_gen,
         );
@@ -359,11 +382,11 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let subscription = match sub_res {
             Ok(Ok(sub)) => sub,
             Ok(Err(err)) => {
-                let _ = self.rollback_connection(&server_handle.inner, topic_id, conn_gen, id);
+                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
                 return Err(err);
             }
             Err(panic_payload) => {
-                let _ = self.rollback_connection(&server_handle.inner, topic_id, conn_gen, id);
+                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
                 self.record_cleanup_result(Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
@@ -371,14 +394,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         };
 
-        let install_result = match server_handle
-            .inner
-            .publish
-            .install_connection(topic_id, conn_gen)
-        {
+        let install_result = match server.publish.install_connection(topic_id, conn_gen) {
             Ok(installed) => {
-                server_handle
-                    .inner
+                server
                     .subscriptions
                     .lock()
                     .insert(topic_id, subscription);
@@ -392,7 +410,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             Err(sub) => {
                 let cleanup_res = disconnect_one_no_unwind(sub);
                 let rollback_res =
-                    self.rollback_connection(&server_handle.inner, topic_id, conn_gen, id);
+                    self.rollback_connection(server, topic_id, conn_gen, id);
                 let first_error = cleanup_res.err().or_else(|| rollback_res.err());
                 if let Some(error) = first_error {
                     self.record_cleanup_result(Err(error.clone()));
@@ -403,7 +421,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         };
 
         Ok(SubscriptionConnection {
-            runtime: Arc::clone(self),
+            runtime: NonNull::from(self),
             operation: Some(operation),
             topic_id,
             generation: conn_gen,
@@ -417,7 +435,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
     pub(crate) fn commit_connection(
         &self,
-        server: &Arc<SubscriptionServer<H>>,
+        server: &SubscriptionServer<H>,
         topic_id: TopicId,
         generation: ConnectionGeneration,
         id: SubscriptionId,
@@ -427,19 +445,13 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             .publish
             .commit_connection(topic_id, generation, observed_sequence)?;
 
-        let removed_source = {
+        {
             let mut catalog = self.catalog.lock();
-            catalog
+            if !catalog
                 .with_entry(id, |entry| entry.finish_connection(generation))
-                .flatten()
-        };
-
-        if let Some(source) = removed_source {
-            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
-            if res.is_err() {
-                self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-                }));
+                .unwrap_or(false)
+            {
+                return Err(XllError::Closing);
             }
         }
 
@@ -462,7 +474,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let subscription = server.subscriptions.lock().remove(&topic_id);
         server.publish.rollback_connection(topic_id, generation, id);
 
-        let removed_source = {
+        {
             let mut catalog = self.catalog.lock();
             let transitioned = catalog
                 .with_entry(id, |entry| entry.rollback_connection(generation))
@@ -474,13 +486,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     .get(&id)
                     .is_some_and(SubscriptionEntry::can_remove)
             {
-                catalog
-                    .remove_entry(id)
-                    .and_then(SubscriptionEntry::into_source)
-            } else {
-                None
+                catalog.remove_entry(id);
             }
-        };
+        }
 
         let mut first_error = None;
 
@@ -492,16 +500,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         }
 
-        if let Some(source) = removed_source {
-            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
-            if res.is_err() {
-                let err = XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-                };
-                self.record_cleanup_result(Err(err.clone()));
-            }
-        }
-
         first_error.map_or(Ok(()), Err)
     }
 
@@ -510,11 +508,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         server_handle: &SubscriptionServerHandle<H>,
         topic_id: TopicId,
     ) -> XllResult<()> {
-        let subscription = server_handle.inner.subscriptions.lock().remove(&topic_id);
-        let Some(retired) = server_handle
-            .inner
-            .publish
-            .disconnect_connection(topic_id)?
+        let server = server_handle.server()?;
+        let _operation = server.enter_operation()?;
+        let subscription = server.subscriptions.lock().remove(&topic_id);
+        let Some(retired) = server.publish.disconnect_connection(topic_id)?
         else {
             return Ok(());
         };
@@ -523,27 +520,18 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
 
-        let removed_source = {
+        {
             let mut catalog = self.catalog.lock();
             cleanup_catalog_binding_and_pending(
                 &mut catalog,
                 id_to_clean,
-                server_handle.inner.generation,
+                server.generation,
                 conn_gen,
-            )
-        };
+            );
+        }
 
         let disconnect_result = subscription.map(disconnect_one_no_unwind);
-        let mut first_error = disconnect_result.and_then(|res| res.err());
-
-        if let Some(source) = removed_source
-            && catch_unwind(AssertUnwindSafe(|| drop(source))).is_err()
-            && first_error.is_none()
-        {
-            first_error = Some(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-            });
-        }
+        let first_error = disconnect_result.and_then(|res| res.err());
 
         if let Some(ref err) = first_error {
             self.record_cleanup_result(Err(err.clone()));
@@ -574,14 +562,21 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let runtime_wait = self.runtime_gate.close_and_wait_begin();
         runtime_wait.wait();
 
-        let server_handles = {
+        let server_pointers = {
             let servers = self.servers.lock();
-            servers.values().cloned().collect::<Vec<_>>()
+            servers
+                .values()
+                .map(|server| NonNull::from(server.as_ref()))
+                .collect::<Vec<_>>()
         };
 
-        let admissions = server_handles
+        let admissions = server_pointers
             .iter()
-            .map(SubscriptionServer::begin_termination)
+            .map(|pointer| {
+                // SAFETY: servers are retained in the runtime arena until
+                // this close operation completes and the runtime is dropped.
+                unsafe { pointer.as_ref() }.begin_termination(self)
+            })
             .collect::<Vec<_>>();
 
         let cancel_results = admissions
@@ -594,8 +589,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let mut first_error = None;
         for ((server, admission), cancel_res) in
-            server_handles.iter().zip(admissions).zip(cancel_results)
+            server_pointers.iter().zip(admissions).zip(cancel_results)
         {
+            // SAFETY: same arena-retention proof as admission creation.
+            let server = unsafe { server.as_ref() };
             let res = match admission {
                 TerminationAdmission::Owner(owner) => owner.finish(cancel_res),
                 TerminationAdmission::Waiter(waiter) => waiter.wait(),
@@ -612,7 +609,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             self.record_cleanup_result(Err(err));
         }
 
-        let pending_sources = {
+        {
             let mut catalog = self.catalog.lock();
             for _ in 0..catalog
                 .entries
@@ -626,20 +623,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
-            catalog
-                .entries
-                .drain()
-                .filter_map(|(_, entry)| entry.into_source())
-                .collect::<Vec<_>>()
-        };
-
-        for source in pending_sources {
-            let res = catch_unwind(AssertUnwindSafe(|| drop(source)));
-            if res.is_err() {
-                self.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SOURCE,
-                }));
-            }
+            catalog.entries.clear();
         }
 
         {
@@ -650,21 +634,31 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         self.cleanup_result()
     }
+
+    pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {
+        let server = self.resolve_server(generation).ok_or(XllError::Closing)?;
+        match server.begin_termination(self) {
+            TerminationAdmission::Owner(owner) => {
+                let cancel_result = owner.request_cancel();
+                owner.finish(cancel_result)
+            }
+            TerminationAdmission::Waiter(waiter) => waiter.wait(),
+            TerminationAdmission::Complete => server.termination_result(),
+        }
+    }
 }
 
-#[derive(Debug)]
-struct PreparationReservation<H: SubscriptionHost> {
-    runtime: Weak<SubscriptionRuntime<H>>,
+struct PreparationReservation<'runtime, H: SubscriptionHost> {
+    runtime: &'runtime SubscriptionRuntime<H>,
 }
 
-#[derive(Debug)]
-pub(crate) struct PreparedSubscription<H: SubscriptionHost> {
+pub(crate) struct PreparedSubscription<'runtime, H: SubscriptionHost> {
     id: SubscriptionId,
     key: SubscriptionKey,
-    reservation: Option<PreparationReservation<H>>,
+    reservation: Option<PreparationReservation<'runtime, H>>,
 }
 
-impl<H: SubscriptionHost> PreparedSubscription<H> {
+impl<H: SubscriptionHost> PreparedSubscription<'_, H> {
     #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
     #[inline]
     pub(crate) fn id(&self) -> SubscriptionId {
@@ -688,9 +682,7 @@ impl<H: SubscriptionHost> PreparedSubscription<H> {
         let Some(reservation) = self.reservation.take() else {
             return;
         };
-        if let Some(runtime) = reservation.runtime.upgrade() {
-            runtime.finish_preparation(self.id, committed);
-        }
+        reservation.runtime.finish_preparation(self.id, committed);
     }
 
     #[cfg(test)]
@@ -699,14 +691,14 @@ impl<H: SubscriptionHost> PreparedSubscription<H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for PreparedSubscription<H> {
+impl<H: SubscriptionHost> Drop for PreparedSubscription<'_, H> {
     fn drop(&mut self) {
         self.finish(false);
     }
 }
 
 pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
-    pub(crate) runtime: Arc<SubscriptionRuntime<H>>,
+    pub(crate) runtime: NonNull<SubscriptionRuntime<H>>,
     pub(crate) operation: Option<OwnedServerOperation<H>>,
     pub(crate) topic_id: TopicId,
     pub(crate) generation: ConnectionGeneration,
@@ -719,12 +711,18 @@ pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
 
 impl<H: SubscriptionHost> SubscriptionConnection<H> {
     #[inline]
-    pub(crate) fn server(&self) -> &Arc<SubscriptionServer<H>> {
-        &self
-            .operation
+    fn runtime(&self) -> &SubscriptionRuntime<H> {
+        // SAFETY: the owned operation contains a runtime-gate permit, so the
+        // runtime cannot be reclaimed before the connection completes.
+        unsafe { self.runtime.as_ref() }
+    }
+
+    #[inline]
+    pub(crate) fn server(&self) -> &SubscriptionServer<H> {
+        self.operation
             .as_ref()
             .expect("active connection operation")
-            .server
+            .server()
     }
 
     pub(crate) fn value(&self) -> &StoredRtdValue {
@@ -736,7 +734,7 @@ impl<H: SubscriptionHost> SubscriptionConnection<H> {
             return Ok(());
         }
         let result = if self.created {
-            self.runtime.commit_connection(
+            self.runtime().commit_connection(
                 self.server(),
                 self.topic_id,
                 self.generation,
@@ -762,8 +760,8 @@ impl<H: SubscriptionHost> SubscriptionConnection<H> {
         if self.created
             && let Some(operation) = &self.operation
         {
-            let _ = self.runtime.rollback_connection(
-                operation.server.as_ref(),
+            let _ = self.runtime().rollback_connection(
+                operation.server(),
                 self.topic_id,
                 self.generation,
                 self.id,

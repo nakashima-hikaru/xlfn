@@ -5,10 +5,11 @@
 //! cannot be committed without its binding and single-flight reservation.
 
 use super::runtime::{FormulaHandleService, PreparedHandleObject};
-use super::{ExcelHandleObject, HandleTopicKey, Initialization, PublishedTopic};
+use super::{
+    ExcelHandleObject, HandleTopicKey, InitializationPtr, PublishedTopic, PublishedTopicPtr,
+};
 use crate::XllResult;
 use crate::generation::TopicGeneration;
-use std::sync::Arc;
 
 /// Owns the single-flight marker for one cold topic preparation.
 ///
@@ -18,7 +19,7 @@ use std::sync::Arc;
 pub(super) struct TopicReservation<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
-    initialization: Arc<Initialization>,
+    initialization: InitializationPtr,
     active: bool,
 }
 
@@ -26,7 +27,7 @@ impl<'runtime> TopicReservation<'runtime> {
     pub(super) fn new(
         runtime: &'runtime FormulaHandleService,
         key: HandleTopicKey,
-        initialization: Arc<Initialization>,
+        initialization: InitializationPtr,
     ) -> Self {
         Self {
             runtime,
@@ -49,7 +50,7 @@ impl Drop for TopicReservation<'_> {
         if self
             .runtime
             .topics
-            .finish_initialization(self.key, &self.initialization)
+            .finish_initialization(self.key, self.initialization)
         {
             self.runtime
                 .refinement
@@ -137,8 +138,6 @@ pub(crate) enum ObjectAllocation {
 pub(crate) struct InsertedPublication<'runtime> {
     pub(super) transaction: ProvisionalPublicationTxn<'runtime>,
     pub(super) token: String,
-    pub(super) binding_id: super::HandleId,
-    pub(super) object_id: super::ObjectId,
     pub(super) allocation: ObjectAllocation,
 }
 
@@ -157,6 +156,7 @@ pub(super) struct ObservedPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     generation: TopicGeneration,
+    publication: PublishedTopicPtr,
     provisional: ProvisionalPublication<'runtime>,
     reservation: TopicReservation<'runtime>,
 }
@@ -166,7 +166,7 @@ impl<'runtime> PublicationReservation<'runtime> {
         runtime: &'runtime FormulaHandleService,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        initialization: Arc<Initialization>,
+        initialization: InitializationPtr,
     ) -> Self {
         Self {
             runtime,
@@ -180,15 +180,15 @@ impl<'runtime> PublicationReservation<'runtime> {
         self,
         prepared: PreparedHandleObject,
     ) -> XllResult<InsertedPublication<'runtime>> {
-        let (token, binding_id, object_id, reused) = match prepared {
+        let (token, _binding_id, _object_id, reused) = match prepared {
             PreparedHandleObject::New(value) => self
                 .runtime
                 .store
-                .insert_pending::<T>(value.into_shared())?,
+                .insert_pending::<T>(value.into_binding())?,
             PreparedHandleObject::Existing(object) => self
                 .runtime
                 .store
-                .insert_existing::<T>(object.into_shared())?,
+                .insert_existing::<T>(object.into_binding())?,
         };
         let provisional = ProvisionalPublication::new(
             self.runtime,
@@ -211,8 +211,6 @@ impl<'runtime> PublicationReservation<'runtime> {
                 reservation,
             },
             token,
-            binding_id,
-            object_id,
             allocation: if reused {
                 ObjectAllocation::Reused
             } else {
@@ -225,22 +223,21 @@ impl<'runtime> PublicationReservation<'runtime> {
 impl<'runtime> ProvisionalPublicationTxn<'runtime> {
     pub(super) fn publish_and_observe(
         self,
-        publication: triomphe::Arc<PublishedTopic>,
-        lifetime_key: Arc<str>,
+        publication: PublishedTopic,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-        on_linearized: impl FnOnce(),
+        on_linearized: impl FnOnce(PublishedTopicPtr),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
         let token = &self.provisional.token;
-        self.runtime.topics.insert_provisional(
+        let publication = self.runtime.topics.insert_provisional(
             self.key,
             self.generation,
-            triomphe::Arc::clone(&publication),
+            publication,
             on_linearized,
         )?;
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
-        observe(&lifetime_key, token)?;
+        observe(&publication.lifetime_key, token)?;
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
@@ -255,6 +252,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
             runtime,
             key,
             generation,
+            publication,
             provisional,
             reservation,
         })
@@ -262,15 +260,23 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
 }
 
 impl ObservedPublicationTxn<'_> {
-    pub(super) fn commit(self, publication: &triomphe::Arc<PublishedTopic>) -> XllResult<()> {
-        self.runtime.commit_publication(
-            self.key,
-            self.generation,
-            &self.reservation.initialization,
+    pub(super) fn commit(self) -> XllResult<()> {
+        let Self {
+            runtime,
+            key,
+            generation,
+            publication,
+            provisional,
+            reservation,
+        } = self;
+        runtime.commit_publication(
+            key,
+            generation,
+            reservation.initialization,
             publication,
         )?;
-        self.provisional.commit();
-        self.reservation.commit();
+        provisional.commit();
+        reservation.commit();
         Ok(())
     }
 }

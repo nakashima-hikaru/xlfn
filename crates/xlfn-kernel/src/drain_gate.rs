@@ -35,6 +35,17 @@ impl DrainGate {
         Ok(DrainPermit { gate: self })
     }
 
+    /// Acquires an owned permit from a process-lifetime gate.
+    ///
+    /// This is the temporal-lifetime counterpart of an owning reference: the
+    /// gate owner must seal and drain every permit before reclaiming the
+    /// pointed-to object.
+    #[inline]
+    pub fn try_enter_owned(&'static self) -> Result<OwnedDrainPermit, Sealed> {
+        self.counter.try_acquire()?;
+        Ok(OwnedDrainPermit { gate: self })
+    }
+
     /// Acquires one count without retaining an RAII permit.
     ///
     /// Callers using this form must pair it with [`DrainGate::release`].
@@ -103,6 +114,18 @@ pub struct DrainPermit<'a> {
 }
 
 impl Drop for DrainPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+/// An active admission whose gate has process lifetime.
+#[derive(Debug)]
+pub struct OwnedDrainPermit {
+    gate: &'static DrainGate,
+}
+
+impl Drop for OwnedDrainPermit {
     fn drop(&mut self) {
         self.gate.release();
     }

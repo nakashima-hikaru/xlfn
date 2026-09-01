@@ -8,10 +8,11 @@ use crate::diagnostics::id::DiagnosticId;
 use crate::error::DomainErrorCode;
 use crate::shutdown::CleanupIssueKind;
 use crate::{XllError, XllResult};
-use arc_swap::ArcSwapAny;
 use crossbeam_utils::sync::Parker;
 use futures_util::future::{AbortHandle, Abortable};
 use parking_lot::{Condvar, Mutex};
+use std::ptr::NonNull;
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -19,20 +20,43 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub(crate) struct Executor {
-    pub(crate) shared: Arc<ExecutorShared>,
+    pub(crate) shared: Box<ExecutorShared>,
     pub(crate) workers: Vec<JoinHandle<()>>,
 }
+
+/// Non-owning executor capability used by workers and detached async tasks.
+///
+/// The unique `Box<ExecutorShared>` remains in `Executor`. Shutdown drains all
+/// tasks and joins every worker before reclaiming that Box.
+#[derive(Clone, Copy)]
+pub(crate) struct ExecutorPtr(NonNull<ExecutorShared>);
+
+impl ExecutorPtr {
+    pub(crate) fn from_ref(shared: &ExecutorShared) -> Self {
+        Self(NonNull::from(shared))
+    }
+
+    pub(crate) fn get(self) -> &'static ExecutorShared {
+        // SAFETY: construction and use are confined to the executor temporal
+        // protocol documented on this capability and `Executor::finish_close`.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+// SAFETY: ExecutorShared is thread-safe. Its unique owner drains tasks and
+// joins workers before reclamation, so transferred capabilities remain valid.
+unsafe impl Send for ExecutorPtr {}
+unsafe impl Sync for ExecutorPtr {}
 
 /// Shared executor state.
 ///
 /// Ownership invariants:
 ///
-/// - Each `Executor` creates and owns one canonical `Arc<ExecutorShared>`.
-/// - `AsyncManager::published_executor` publishes clones of that same Arc.
-/// - Spawn snapshots may retain the Arc after publication is withdrawn.
-/// - Such stale snapshots cannot admit work after `closing` is published.
-/// - Workers and active tasks retain the shared state independently of
-///   the unique `Executor` owner.
+/// - Each `Executor` uniquely owns one stable `Box<ExecutorShared>`.
+/// - `AsyncManager` publishes only a non-owning pointer protected by spawn
+///   admission; publication never participates in ownership.
+/// - Workers and active tasks carry non-owning capabilities. Global active
+///   accounting and worker joins must complete before the Box is reclaimed.
 /// - `Executor` exclusively owns the worker JoinHandles.
 /// - The runnable queue is terminated explicitly with `queue.seal_and_wake_all()`.
 /// - After sealing the queue, workers drain normally; if no workers remain,
@@ -54,7 +78,7 @@ pub(crate) struct Executor {
 /// - Q4: Sleeping workers in `idle_workers` are woken whenever work is enqueued or batch-stolen.
 /// - Q5: Worker panic recovers all remaining tasks from its local queue back to the global injector.
 pub(crate) struct ExecutorShared {
-    pub(crate) queue: Arc<RunnableQueue>,
+    pub(crate) queue: RunnableQueue,
     pub(crate) next_id: AtomicU64,
     pub(crate) active: AtomicUsize,
     pub(crate) live_workers: AtomicUsize,
@@ -64,7 +88,7 @@ pub(crate) struct ExecutorShared {
     /// Lifecycle transitions are authoritative under `control`;
     /// spawn reads only this atomic.
     pub(crate) closing: AtomicBool,
-    pub(crate) current: ArcSwapAny<triomphe::Arc<GenerationState>>,
+    pub(crate) current: std::sync::atomic::AtomicPtr<GenerationState>,
     /// Cold lifecycle state. Never acquired by spawn/completion.
     pub(crate) control: Mutex<ExecutorControl>,
     pub(crate) wait_lock: Mutex<()>,
@@ -114,19 +138,20 @@ impl Executor {
             workers_local.push((worker, parker));
         }
 
-        let queue = Arc::new(RunnableQueue::new(
+        let queue = RunnableQueue::new(
             stealers.into_boxed_slice(),
             unparkers.into_boxed_slice(),
-        ));
-        let initial_generation = triomphe::Arc::new(GenerationState::new(generation));
-        let shared = Arc::new(ExecutorShared {
+        );
+        let initial_generation = Box::new(GenerationState::new(generation));
+        let initial_pointer = NonNull::from(initial_generation.as_ref());
+        let shared = Box::new(ExecutorShared {
             queue,
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             live_workers: AtomicUsize::new(0),
             fatal_worker_failure: AtomicBool::new(false),
             closing: AtomicBool::new(false),
-            current: ArcSwapAny::new(triomphe::Arc::clone(&initial_generation)),
+            current: std::sync::atomic::AtomicPtr::new(initial_pointer.as_ptr()),
             control: Mutex::new(ExecutorControl {
                 phase: ControlPhase::Running,
                 generations: [(generation, initial_generation)].into_iter().collect(),
@@ -141,11 +166,11 @@ impl Executor {
             #[cfg(test)]
             after_generation_admission_hook: Mutex::new(None),
         });
-        let rollback_shared = Arc::clone(&shared);
+        let shared_pointer = ExecutorPtr::from_ref(shared.as_ref());
         let mut workers = scopeguard::guard(
             Vec::<JoinHandle<()>>::with_capacity(worker_count),
             move |mut workers| {
-                rollback_shared.queue.seal_and_wake_all();
+                shared_pointer.get().queue.seal_and_wake_all();
                 while let Some(worker) = workers.pop() {
                     drop(worker.join());
                 }
@@ -157,8 +182,8 @@ impl Executor {
                     diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                 });
             }
-            let worker_shared = Arc::clone(&shared);
             shared.live_workers.fetch_add(1, Ordering::Release);
+            let worker_shared = ExecutorPtr::from_ref(shared.as_ref());
             let worker = thread::Builder::new()
                 .name(format!("xlfn-async-{index}"))
                 .spawn(move || {
@@ -250,7 +275,7 @@ impl Executor {
 
 impl ExecutorShared {
     pub(crate) fn spawn<F>(
-        self: &Arc<Self>,
+        &self,
         generation: u64,
         future: F,
         cancellation: CancellationSource,
@@ -267,7 +292,14 @@ impl ExecutorShared {
             });
         }
 
-        let current = self.current.load();
+        let current_pointer = self.current.load(Ordering::Acquire);
+        if current_pointer.is_null() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        // SAFETY: the pointer names a generation Box owned by `control`.
+        // Generation admission is closed and drained before a non-current,
+        // task-free generation can be reclaimed.
+        let current = unsafe { &*current_pointer };
 
         #[cfg(test)]
         {
@@ -336,7 +368,7 @@ impl ExecutorShared {
             current.task_count.fetch_add(1, Ordering::AcqRel);
         }
 
-        let completion = reservation.commit(self, triomphe::Arc::clone(&*current), id);
+        let completion = reservation.commit(self, current, id);
 
         drop(admission);
         self.observer
@@ -354,11 +386,9 @@ impl ExecutorShared {
                 hook();
             }
         }
-        let queue = Arc::downgrade(&self.queue);
+        let shared = ExecutorPtr::from_ref(self);
         let schedule = move |runnable| {
-            if let Some(queue) = queue.upgrade() {
-                queue.schedule(runnable);
-            }
+            shared.get().queue.schedule(runnable);
         };
         let (runnable, task) = async_task::spawn(wrapped, schedule);
         task.detach();
@@ -367,17 +397,13 @@ impl ExecutorShared {
     }
 
     pub(crate) fn cancel_generation(&self, generation: u64) -> Vec<TaskControl> {
-        let generation_arc = {
-            let control = self.control.lock();
-            let Some(state) = control.generations.get(&generation) else {
-                return Vec::new();
-            };
-            debug_assert_eq!(state.id, generation);
-            state.admission.begin_close();
-            triomphe::Arc::clone(state)
+        let control = self.control.lock();
+        let Some(state) = control.generations.get(&generation) else {
+            return Vec::new();
         };
-        generation_arc.admission.close_and_wait_begin().wait();
-        generation_arc.drain_tasks()
+        debug_assert_eq!(state.id, generation);
+        state.admission.close_and_wait_begin().wait();
+        state.drain_tasks()
     }
 
     pub(crate) fn advance_generation(&self, next: u64) -> bool {
@@ -392,7 +418,13 @@ impl ExecutorShared {
                 }
             }
 
-            let old = self.current.load_full();
+            let old_pointer = self.current.load(Ordering::Acquire);
+            if old_pointer.is_null() {
+                xlfn_kernel::invariant::fail_stop();
+            }
+            // SAFETY: generation-transition serialization prevents removal of
+            // the current generation while its admission is being drained.
+            let old = unsafe { &*old_pointer };
             old.admission.begin_close();
             control.phase = ControlPhase::Advancing {
                 from: old.id,
@@ -413,13 +445,15 @@ impl ExecutorShared {
             }
         }
 
-        let next_generation = control
-            .generations
-            .entry(next)
-            .or_insert_with(|| triomphe::Arc::new(GenerationState::new(next)))
-            .clone();
+        let next_pointer = {
+            let next_generation = control
+                .generations
+                .entry(next)
+                .or_insert_with(|| Box::new(GenerationState::new(next)));
+            NonNull::from(next_generation.as_ref())
+        };
 
-        self.current.store(triomphe::Arc::clone(&next_generation));
+        self.current.store(next_pointer.as_ptr(), Ordering::Release);
 
         control.generations.retain(|generation, state| {
             *generation == next || state.task_count.load(Ordering::Acquire) != 0
@@ -430,29 +464,24 @@ impl ExecutorShared {
     }
 
     pub(crate) fn request_close(&self) -> Vec<TaskControl> {
-        let generations = {
-            let mut control = self.control.lock();
+        let mut control = self.control.lock();
 
-            if matches!(control.phase, ControlPhase::Closing) {
-                return Vec::new();
-            }
+        if matches!(control.phase, ControlPhase::Closing) {
+            return Vec::new();
+        }
 
-            self.closing.store(true, Ordering::Release);
-            control.phase = ControlPhase::Closing;
+        self.closing.store(true, Ordering::Release);
+        control.phase = ControlPhase::Closing;
 
-            let generations = control.generations.values().cloned().collect::<Vec<_>>();
-            for generation in &generations {
-                generation.admission.begin_close();
-            }
-            generations
-        };
-
-        for generation in &generations {
+        for generation in control.generations.values() {
+            generation.admission.begin_close();
+        }
+        for generation in control.generations.values() {
             generation.admission.close_and_wait_begin().wait();
         }
 
         let mut tasks = Vec::new();
-        for generation in generations {
+        for generation in control.generations.values() {
             tasks.extend(generation.drain_tasks());
         }
         tasks

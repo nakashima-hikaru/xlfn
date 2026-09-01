@@ -1,31 +1,34 @@
-//! Shared ownership for formula-handle payloads.
+//! Runtime-owned arena for formula-handle payloads.
 //!
-//! A published binding owns one strong reference to an [`ObjectCell`].  A
-//! call-scoped binding snapshot keeps that reference alive without another
-//! atomic increment on the lookup path.  Only an explicit [`Handle::pin`]
-//! creates an additional long-lived lease.
+//! The arena is the unique owner of every [`ObjectCell`]. Bindings and pins
+//! carry counted, non-owning capabilities; neither participates in memory
+//! ownership. An object is reclaimed only after both capability counts reach
+//! zero, and its application destructor always runs outside the arena lock.
+
+#![allow(
+    unsafe_code,
+    reason = "handle capabilities are audited non-owning pointers into a runtime-owned arena"
+)]
 
 use super::token::ObjectId;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-/// The sole shared owner of one erased handle payload.
-pub(crate) type SharedObject = triomphe::Arc<ObjectCell>;
 
 /// A type-checked, non-owning projection into an [`ObjectCell`].
-///
-/// The projection is created only by `ObjectCell::typed_projection`. Callers
-/// must retain the corresponding `SharedObject` or binding snapshot while
-/// using it; `Handle` and `HandleLease` encode that ownership around this
-/// value. Keeping the pointer construction and dereference proof here avoids
-/// duplicating raw-pointer casts in each public handle type.
 pub(crate) struct TypedObjectProjection<T: 'static> {
     pointer: NonNull<T>,
+}
+
+impl<T: 'static> Copy for TypedObjectProjection<T> {}
+
+impl<T: 'static> Clone for TypedObjectProjection<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<T: 'static> TypedObjectProjection<T> {
@@ -36,20 +39,18 @@ impl<T: 'static> TypedObjectProjection<T> {
 
     #[inline]
     pub(crate) fn as_ref(&self) -> &T {
-        // SAFETY: this projection is constructed only after ObjectCell checks
-        // its TypeId, and its enclosing handle retains the ObjectCell owner.
+        // SAFETY: projections are constructed only after a TypeId check. The
+        // enclosing binding-read or pin capability delays object reclamation.
         unsafe { self.pointer.as_ref() }
     }
 }
 
-/// Errors raised while a handle payload is being destroyed are retained until
-/// the handle subsystem presents its quiescence certificate.
 pub(crate) struct HandleCleanupState {
     failure: Mutex<Option<XllError>>,
 }
 
 impl HandleCleanupState {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             failure: Mutex::new(None),
         }
@@ -70,101 +71,208 @@ impl HandleCleanupState {
     }
 }
 
-/// Lifetime accounting owned by one handle registry.
-pub(crate) struct ObjectLifetimeTracker {
-    cleanup: Arc<HandleCleanupState>,
-    live_objects: AtomicUsize,
-    active_leases: AtomicUsize,
-    sealed: AtomicBool,
-    admission_gate: Mutex<()>,
+struct ObjectEntry {
+    cell: Box<ObjectCell>,
+    bindings: usize,
+    pins: usize,
+}
+
+struct ObjectArenaState {
+    objects: FxHashMap<ObjectId, ObjectEntry>,
+    active_pins: usize,
+    sealed: bool,
+}
+
+/// Unique owner and reclamation authority for handle payloads.
+pub(crate) struct ObjectArena {
+    state: Mutex<ObjectArenaState>,
+    cleanup: HandleCleanupState,
     #[cfg(any(test, feature = "refinement"))]
     trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
 }
 
-impl ObjectLifetimeTracker {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            cleanup: Arc::new(HandleCleanupState::new()),
-            live_objects: AtomicUsize::new(0),
-            active_leases: AtomicUsize::new(0),
-            sealed: AtomicBool::new(false),
-            admission_gate: Mutex::new(()),
+impl ObjectArena {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(ObjectArenaState {
+                objects: FxHashMap::default(),
+                active_pins: 0,
+                sealed: false,
+            }),
+            cleanup: HandleCleanupState::new(),
             #[cfg(any(test, feature = "refinement"))]
             trace: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn insert<T: Send + Sync + 'static>(
+        &self,
+        id: ObjectId,
+        value: T,
+    ) -> XllResult<ObjectBinding> {
+        let owner: Box<dyn Any + Send + Sync> = Box::new(value);
+        let pointer = NonNull::from_ref(owner.as_ref()).cast::<()>();
+        let cell = Box::new(ObjectCell {
+            id,
+            owner: Some(owner),
+            pointer,
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+        });
+        let cell_pointer = NonNull::from(cell.as_ref());
+        let mut state = self.state.lock();
+        if state.sealed {
+            return Err(XllError::Closing);
+        }
+        if state
+            .objects
+            .insert(
+                id,
+                ObjectEntry {
+                    cell,
+                    bindings: 1,
+                    pins: 0,
+                },
+            )
+            .is_some()
+        {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        drop(state);
+        self.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
+        Ok(ObjectBinding {
+            arena: NonNull::from(self),
+            cell: cell_pointer,
+            id,
+            armed: true,
         })
     }
 
-    pub(crate) fn cleanup(&self) -> &Arc<HandleCleanupState> {
-        &self.cleanup
-    }
-
-    fn register_object(&self) -> XllResult<()> {
-        let _gate = self.admission_gate.lock();
-        if self.sealed.load(Ordering::Acquire) {
+    fn duplicate_binding(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<()> {
+        let mut state = self.state.lock();
+        if state.sealed {
             return Err(XllError::Closing);
         }
-        self.live_objects
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .map(|_| ())
-            .map_err(|_| XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            })
-            .inspect(|()| {
-                #[cfg(any(test, feature = "refinement"))]
-                self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
-            })
+        let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
+        if NonNull::from(entry.cell.as_ref()) != cell {
+            return Err(XllError::StaleHandle);
+        }
+        entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
+            code: crate::error::DomainErrorCode::Overflow,
+        })?;
+        Ok(())
     }
 
-    fn release_object(&self) {
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.live_objects);
-        #[cfg(any(test, feature = "refinement"))]
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
-    }
-
-    fn acquire_lease(self: &Arc<Self>) -> XllResult<ObjectLeaseGuard> {
-        let _gate = self.admission_gate.lock();
-        if self.sealed.load(Ordering::Acquire) {
+    fn acquire_pin(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<ObjectLeaseGuard> {
+        let mut state = self.state.lock();
+        if state.sealed {
             return Err(XllError::Closing);
         }
-        self.active_leases
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .map_err(|_| XllError::Domain {
+        let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
+        if NonNull::from(entry.cell.as_ref()) != cell {
+            return Err(XllError::StaleHandle);
+        }
+        entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
+            code: crate::error::DomainErrorCode::Overflow,
+        })?;
+        state.active_pins = state
+            .active_pins
+            .checked_add(1)
+            .ok_or(XllError::Domain {
                 code: crate::error::DomainErrorCode::Overflow,
             })?;
-        #[cfg(any(test, feature = "refinement"))]
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
+        drop(state);
+        self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(ObjectLeaseGuard {
-            tracker: Arc::clone(self),
+            arena: NonNull::from(self),
+            id,
+            armed: true,
         })
     }
 
-    fn release_lease(&self) {
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.active_leases);
-        #[cfg(any(test, feature = "refinement"))]
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandlePin);
+    fn release_binding(&self, id: ObjectId) {
+        let retired = {
+            let mut state = self.state.lock();
+            let entry = state
+                .objects
+                .get_mut(&id)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            entry.bindings = entry
+                .bindings
+                .checked_sub(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            if entry.bindings == 0 && entry.pins == 0 {
+                Some(state.objects.remove(&id).expect("object entry was present").cell)
+            } else {
+                None
+            }
+        };
+        if let Some(cell) = retired {
+            self.destroy(cell);
+        }
+    }
+
+    fn release_pin(&self, id: ObjectId) {
+        let retired = {
+            let mut state = self.state.lock();
+            let reclaim = {
+                let entry = state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+                entry.pins = entry
+                    .pins
+                    .checked_sub(1)
+                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+                entry.bindings == 0 && entry.pins == 0
+            };
+            state.active_pins = state
+                .active_pins
+                .checked_sub(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            reclaim.then(|| state.objects.remove(&id).expect("object entry was present").cell)
+        };
+        self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandlePin);
+        if let Some(cell) = retired {
+            self.destroy(cell);
+        }
+    }
+
+    fn destroy(&self, mut cell: Box<ObjectCell>) {
+        let owner = cell
+            .owner
+            .take()
+            .expect("object cell owner is consumed exactly once");
+        if catch_unwind(AssertUnwindSafe(|| drop(owner))).is_err() {
+            let error = XllError::Panic;
+            crate::diagnostics::report_no_unwind("handle object final drop", &error);
+            self.cleanup.record(error);
+        }
+        drop(cell);
+        self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
     }
 
     pub(crate) fn seal(&self) {
-        let _gate = self.admission_gate.lock();
-        self.sealed.store(true, Ordering::Release);
+        self.state.lock().sealed = true;
+    }
+
+    pub(crate) fn cleanup_result(&self) -> XllResult<()> {
+        self.cleanup.result()
     }
 
     pub(crate) fn finish_quiescence(&self) -> XllResult<()> {
-        let _gate = self.admission_gate.lock();
-        if self.active_leases.load(Ordering::Acquire) != 0 {
+        let state = self.state.lock();
+        if state.active_pins != 0 {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
             });
         }
-        if self.live_objects.load(Ordering::Acquire) != 0 {
+        if !state.objects.is_empty() {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
             });
         }
+        drop(state);
         self.cleanup.result()
     }
 
@@ -173,43 +281,25 @@ impl ObjectLifetimeTracker {
         let _ = self.trace.set(trace);
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn record_shutdown_event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+    fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = self.trace.get() {
             trace.record(event);
         }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = event;
     }
 }
 
-/// Stable storage for one typed handle payload.
 pub(crate) struct ObjectCell {
     id: ObjectId,
     owner: Option<Box<dyn Any + Send + Sync>>,
-    ptr: NonNull<()>,
+    pointer: NonNull<()>,
     type_id: TypeId,
     type_name: &'static str,
-    lifetime: Arc<ObjectLifetimeTracker>,
 }
 
 impl ObjectCell {
-    pub(crate) fn new<T: Send + Sync + 'static>(
-        id: ObjectId,
-        value: T,
-        lifetime: Arc<ObjectLifetimeTracker>,
-    ) -> XllResult<SharedObject> {
-        lifetime.register_object()?;
-        let owner: Box<dyn Any + Send + Sync> = Box::new(value);
-        let ptr = NonNull::from_ref(owner.as_ref()).cast::<()>();
-        Ok(triomphe::Arc::new(Self {
-            id,
-            owner: Some(owner),
-            ptr,
-            type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
-            lifetime,
-        }))
-    }
-
     pub(crate) fn id(&self) -> ObjectId {
         self.id
     }
@@ -222,48 +312,79 @@ impl ObjectCell {
         self.type_name
     }
 
-    #[inline]
     pub(crate) fn typed_projection<T: 'static>(&self) -> Option<TypedObjectProjection<T>> {
         (self.type_id == TypeId::of::<T>()).then(|| TypedObjectProjection {
-            pointer: self.ptr.cast(),
+            pointer: self.pointer.cast(),
+        })
+    }
+}
+
+unsafe impl Send for ObjectCell {}
+unsafe impl Sync for ObjectCell {}
+
+/// One formula binding's non-owning, counted capability to an object.
+pub(crate) struct ObjectBinding {
+    arena: NonNull<ObjectArena>,
+    cell: NonNull<ObjectCell>,
+    id: ObjectId,
+    armed: bool,
+}
+
+impl ObjectBinding {
+    pub(crate) fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    pub(crate) fn object(&self) -> &ObjectCell {
+        // SAFETY: an armed binding contributes one arena count and therefore
+        // prevents object reclamation.
+        unsafe { self.cell.as_ref() }
+    }
+
+    pub(crate) fn duplicate(&self) -> XllResult<Self> {
+        // SAFETY: the boxed arena outlives every binding capability.
+        unsafe { self.arena.as_ref() }.duplicate_binding(self.id, self.cell)?;
+        Ok(Self {
+            arena: self.arena,
+            cell: self.cell,
+            id: self.id,
+            armed: true,
         })
     }
 
     pub(crate) fn acquire_lease(&self) -> XllResult<ObjectLeaseGuard> {
-        self.lifetime.acquire_lease()
+        // SAFETY: same lifetime invariant as `duplicate`.
+        unsafe { self.arena.as_ref() }.acquire_pin(self.id, self.cell)
     }
 }
 
-// SAFETY: `owner` is the sole allocation owner and is explicitly Send + Sync.
-// `ptr` is only a stable, non-owning pointer into that allocation and is
-// dereferenced only while an owning `SharedObject` is held.
-unsafe impl Send for ObjectCell {}
-// SAFETY: same invariant as `Send`.
-unsafe impl Sync for ObjectCell {}
-
-impl Drop for ObjectCell {
+impl Drop for ObjectBinding {
     fn drop(&mut self) {
-        let owner = self
-            .owner
-            .take()
-            .expect("object cell owner must be present exactly once");
-        let result = catch_unwind(AssertUnwindSafe(|| drop(owner)));
-        if result.is_err() {
-            let error = XllError::Panic;
-            crate::diagnostics::report_no_unwind("handle object final drop", &error);
-            self.lifetime.cleanup.record(error);
+        if self.armed {
+            // SAFETY: registry sealing waits for binding retirement before
+            // reclaiming the boxed arena.
+            unsafe { self.arena.as_ref() }.release_binding(self.id);
         }
-        self.lifetime.release_object();
     }
 }
 
-/// The explicit long-lived ownership witness created by `Handle::pin()`.
+unsafe impl Send for ObjectBinding {}
+unsafe impl Sync for ObjectBinding {}
+
 pub(crate) struct ObjectLeaseGuard {
-    tracker: Arc<ObjectLifetimeTracker>,
+    arena: NonNull<ObjectArena>,
+    id: ObjectId,
+    armed: bool,
 }
 
 impl Drop for ObjectLeaseGuard {
     fn drop(&mut self) {
-        self.tracker.release_lease();
+        if self.armed {
+            // SAFETY: an active pin prevents arena/service reclamation.
+            unsafe { self.arena.as_ref() }.release_pin(self.id);
+        }
     }
 }
+
+unsafe impl Send for ObjectLeaseGuard {}
+unsafe impl Sync for ObjectLeaseGuard {}

@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
-pub(crate) use connection::{FormulaBinding, FormulaObserverId, Topic};
+pub(crate) use connection::{FormulaObserverId, Topic};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
@@ -85,7 +85,7 @@ pub(crate) use lifetime::FormulaLifetimeBackend;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
 pub(crate) use lifetime::FormulaLifetimeConnection;
 pub(crate) use lifetime::FormulaLifetimeGeneration;
-pub(crate) use object::SharedObject;
+pub(crate) use object::ObjectBinding;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
@@ -97,12 +97,15 @@ pub(crate) use registry::{HandleRegistry, PendingHandleValue};
 pub(crate) use runtime::FormulaHandleService;
 #[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceResolver;
+#[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
+pub(crate) use runtime::FormulaHandleServiceRead;
 #[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceSlot;
 pub(crate) use store::HandleStore;
 pub(crate) use token::{HandleId, HandleToken, ObjectId};
 pub(crate) use topic::{
-    Initialization, PrepareDecision, PublishedTopic, PublishedTopicState, TopicRemoval, TopicTable,
+    Initialization, InitializationPtr, PrepareDecision, PublishedTopic, PublishedTopicPtr,
+    PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(not(feature = "handles"))]
 pub(crate) use typed::{ExcelHandleObject, Handle, HandleAlias};

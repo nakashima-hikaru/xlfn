@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "ErasedSink is an audited non-owning capability over a runtime-owned PublishCore"
+)]
+
 use super::data_plane::PublishCore;
 use super::host::SubscriptionHost;
 use super::topic::{SubscriptionId, TopicId};
@@ -7,47 +12,39 @@ use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
+use std::ptr::NonNull;
 use xlfn_kernel::quota::QuotaPermit;
 
-pub(crate) trait SinkPublisher: Send + Sync {
-    fn publish(
-        &self,
-        topic_id: TopicId,
-        connection_generation: ConnectionGeneration,
-        value: StoredRtdValue,
-    ) -> XllResult<()>;
-}
-
-struct PublishCoreSink<H: SubscriptionHost> {
-    publish: triomphe::Arc<PublishCore<H>>,
-}
-
-impl<H: SubscriptionHost> SinkPublisher for PublishCoreSink<H> {
-    fn publish(
-        &self,
-        topic_id: TopicId,
-        connection_generation: ConnectionGeneration,
-        value: StoredRtdValue,
-    ) -> XllResult<()> {
-        self.publish.publish(topic_id, connection_generation, value)
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct ErasedSink {
-    publisher: std::sync::Arc<dyn SinkPublisher>,
+    publish_core: NonNull<()>,
+    publish: unsafe fn(NonNull<()>, TopicId, ConnectionGeneration, StoredRtdValue) -> XllResult<()>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
 
 impl ErasedSink {
     pub(crate) fn for_publish<H: SubscriptionHost>(
-        publish: triomphe::Arc<PublishCore<H>>,
+        publish: &PublishCore<H>,
         topic_id: TopicId,
         connection_generation: ConnectionGeneration,
     ) -> Self {
+        unsafe fn publish_through<H: SubscriptionHost>(
+            core: NonNull<()>,
+            topic_id: TopicId,
+            connection_generation: ConnectionGeneration,
+            value: StoredRtdValue,
+        ) -> XllResult<()> {
+            // SAFETY: `for_publish` records a pointer to `PublishCore<H>`, and
+            // the RtdSubscription safety contract requires every sink clone
+            // to stop publishing before that server is reclaimed.
+            let core = unsafe { core.cast::<PublishCore<H>>().as_ref() };
+            core.publish(topic_id, connection_generation, value)
+        }
+
         Self {
-            publisher: std::sync::Arc::new(PublishCoreSink { publish }),
+            publish_core: NonNull::from(publish).cast(),
+            publish: publish_through::<H>,
             topic_id,
             connection_generation,
         }
@@ -55,10 +52,23 @@ impl ErasedSink {
 
     #[inline]
     pub(crate) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
-        self.publisher
-            .publish(self.topic_id, self.connection_generation, value)
+        // SAFETY: construction fixes the erased type and the subscription
+        // teardown contract keeps the pointed-to core alive for every call.
+        unsafe {
+            (self.publish)(
+                self.publish_core,
+                self.topic_id,
+                self.connection_generation,
+                value,
+            )
+        }
     }
 }
+
+// SAFETY: PublishCore is Sync and the capability is read-only. Temporal
+// validity is guaranteed by the unsafe RtdSubscription contract.
+unsafe impl Send for ErasedSink {}
+unsafe impl Sync for ErasedSink {}
 
 pub(crate) struct ActiveSubscription {
     pub(crate) id: SubscriptionId,

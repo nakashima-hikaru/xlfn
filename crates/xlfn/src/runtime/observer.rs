@@ -230,13 +230,13 @@ impl RuntimeObserver {
             crate::excel_rtd::set_trace_sink(Arc::clone(&trace));
             deps.returns().returns.set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
-            let services = deps
-                .generation_services_snapshot()
-                .expect("committed open generation publishes its services");
-            #[cfg(feature = "handles")]
-            services.set_handle_trace_sink(Arc::clone(&trace));
-            #[cfg(feature = "rtd")]
-            services.set_subscription_trace_sink(Arc::clone(&trace));
+            deps.with_generation_services(|services| {
+                #[cfg(feature = "handles")]
+                services.set_handle_trace_sink(Arc::clone(&trace));
+                #[cfg(feature = "rtd")]
+                services.set_subscription_trace_sink(Arc::clone(&trace));
+            })
+            .expect("committed open generation publishes its services");
             #[cfg(feature = "async")]
             deps.executors()
                 .async_manager

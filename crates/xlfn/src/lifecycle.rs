@@ -208,7 +208,7 @@ mod tests {
             .attach_host();
         let lifecycle = lifecycle_access(&runtime);
         let (transaction, _) =
-            match initialize_addin::<LayersPanic>(&test_open_context(), transaction) {
+            match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
                 Ok(result) => result,
                 Err(failure) => {
                     let error = failure.rollback(&runtime, &lifecycle);
@@ -649,10 +649,8 @@ mod tests {
 
         struct TraceSubscription;
 
-        impl crate::subscription::RtdSubscription for TraceSubscription {
-            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
-                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
-            }
+        unsafe impl crate::subscription::RtdSubscription for TraceSubscription {
+            fn request_cancel(&self) {}
 
             fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
                 Ok(())
@@ -1456,10 +1454,8 @@ mod tests {
             events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
 
-        impl crate::subscription::RtdSubscription for OrderedSubscription {
-            fn cancellation(&self) -> std::sync::Arc<dyn crate::subscription::RtdCancellation> {
-                std::sync::Arc::new(crate::subscription::RtdCancellationHandle::noop())
-            }
+        unsafe impl crate::subscription::RtdSubscription for OrderedSubscription {
+            fn request_cancel(&self) {}
 
             fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
                 self.events.lock().unwrap().push("subscription");

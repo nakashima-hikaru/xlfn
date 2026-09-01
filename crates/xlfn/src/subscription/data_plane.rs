@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "publish permits borrow runtime-owned quotas proven live by RTD shutdown"
+)]
+
 use super::delivery::{
     DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
     RefreshPlan, RefreshState, RtdUpdate, SERVER_LIFECYCLE_OPEN, ShardRefreshBatch, SignalState,
@@ -12,16 +17,18 @@ use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use xlfn_kernel::operation_gate::{OperationGate, OperationGuard, TerminationWaitGuard};
+use xlfn_kernel::operation_gate::{
+    OperationGate, OperationGuard, OwnedOperationGuard, TerminationWaitGuard,
+};
 use xlfn_kernel::quota::Quota;
 
 pub(crate) struct PublishCore<H: SubscriptionHost> {
     host: H,
-    runtime_gate: Arc<OperationGate>,
+    runtime_gate: NonNull<OperationGate>,
     server_gate: OperationGate,
-    queued_update_quota: triomphe::Arc<Quota>,
+    queued_update_quota: NonNull<Quota>,
     lifecycle: AtomicU8,
     publish_epoch: AtomicU64,
     next_update_sequence: AtomicU64,
@@ -32,15 +39,15 @@ pub(crate) struct PublishCore<H: SubscriptionHost> {
     ready_shards: AtomicU32,
     shards: Box<[Mutex<TopicShard>]>,
     refresh: Mutex<RefreshState<H::Notifier>>,
-    services: Arc<RuntimeServices>,
+    services: NonNull<RuntimeServices>,
 }
 
 impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn new(
         host: H,
-        runtime_gate: Arc<OperationGate>,
-        queued_update_quota: triomphe::Arc<Quota>,
-        services: Arc<RuntimeServices>,
+        runtime_gate: &OperationGate,
+        queued_update_quota: &Quota,
+        services: &RuntimeServices,
     ) -> Self {
         let mut shards = Vec::with_capacity(super::delivery::TOPIC_SHARDS);
         for _ in 0..super::delivery::TOPIC_SHARDS {
@@ -49,9 +56,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         Self {
             host,
-            runtime_gate,
+            runtime_gate: NonNull::from(runtime_gate),
             server_gate: OperationGate::new(),
-            queued_update_quota,
+            queued_update_quota: NonNull::from(queued_update_quota),
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
             next_update_sequence: AtomicU64::new(0),
@@ -61,10 +68,35 @@ impl<H: SubscriptionHost> PublishCore<H> {
             ready_shards: AtomicU32::new(0),
             shards: shards.into_boxed_slice(),
             refresh: Mutex::new(RefreshState::default()),
-            services,
+            services: NonNull::from(services),
         }
     }
+
+    #[inline]
+    fn runtime_gate(&self) -> &OperationGate {
+        // SAFETY: SubscriptionRuntime uniquely owns the gate and reclaims it
+        // only after every owned server and publish operation is drained.
+        unsafe { self.runtime_gate.as_ref() }
+    }
+
+    #[inline]
+    fn queued_update_quota(&self) -> &Quota {
+        // SAFETY: the runtime-owned quota outlives all publish cores and their
+        // queued-update permits.
+        unsafe { self.queued_update_quota.as_ref() }
+    }
+
+    #[inline]
+    fn services(&self) -> &RuntimeServices {
+        // SAFETY: runtime services are reclaimed after all servers.
+        unsafe { self.services.as_ref() }
+    }
 }
+
+// SAFETY: every non-owning pointer targets an immutable-address field of the
+// owning SubscriptionRuntime, which drains and drops all servers first.
+unsafe impl<H: SubscriptionHost> Send for PublishCore<H> {}
+unsafe impl<H: SubscriptionHost> Sync for PublishCore<H> {}
 
 impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,21 +125,17 @@ impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
 }
 
 pub(crate) struct ScopedPublishOperation<'a, H: SubscriptionHost> {
-    pub(crate) _gate_guard: OperationGuard<'a>,
+    pub(crate) _runtime_guard: OperationGuard<'a>,
+    pub(crate) _server_guard: OperationGuard<'a>,
     pub(crate) _host_guard: H::AdmissionGuard,
     pub(crate) _observation: ServerOperationObservation,
 }
 
 pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
-    core: triomphe::Arc<PublishCore<H>>,
+    _runtime_guard: OwnedOperationGuard,
+    _server_guard: OwnedOperationGuard,
     _host_guard: H::AdmissionGuard,
     _observation: ServerOperationObservation,
-}
-
-impl<H: SubscriptionHost> Drop for OwnedPublishOperation<H> {
-    fn drop(&mut self) {
-        self.core.server_gate.release();
-    }
 }
 
 pub(crate) struct PublishTerminationStart<'a, H: SubscriptionHost> {
@@ -147,41 +175,44 @@ pub(crate) struct InstalledConnection {
 }
 
 pub(crate) struct ServerOperationObservation {
-    services: Arc<RuntimeServices>,
+    services: NonNull<RuntimeServices>,
 }
 
 impl ServerOperationObservation {
-    fn begin(services: &Arc<RuntimeServices>) -> Self {
+    fn begin(services: &RuntimeServices) -> Self {
         services.record(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
         Self {
-            services: Arc::clone(services),
+            services: NonNull::from(services),
         }
     }
 }
 
 impl Drop for ServerOperationObservation {
     fn drop(&mut self) {
-        self.services
+        // SAFETY: every observation is nested inside an admitted publish
+        // operation, so runtime services cannot be reclaimed yet.
+        unsafe { self.services.as_ref() }
             .record(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
     }
 }
 
 struct ServerCallbackObservation {
-    services: Arc<RuntimeServices>,
+    services: NonNull<RuntimeServices>,
 }
 
 impl ServerCallbackObservation {
-    fn begin(services: &Arc<RuntimeServices>) -> Self {
+    fn begin(services: &RuntimeServices) -> Self {
         services.record(crate::shutdown_trace::ShutdownEvent::BeginCallback);
         Self {
-            services: Arc::clone(services),
+            services: NonNull::from(services),
         }
     }
 }
 
 impl Drop for ServerCallbackObservation {
     fn drop(&mut self) {
-        self.services
+        // SAFETY: callback observation is scoped by host/server admission.
+        unsafe { self.services.as_ref() }
             .record(crate::shutdown_trace::ShutdownEvent::EndCallback);
     }
 }
@@ -386,38 +417,48 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {
-        if self.runtime_gate.is_closing() {
-            return Err(XllError::Closing);
-        }
-
-        let mut gate_guard = None;
+        let mut runtime_guard = None;
+        let mut server_guard = None;
         let host_guard = self.host.enter_with(|| {
-            gate_guard = Some(self.server_gate.enter().map_err(|_| XllError::Closing)?);
+            runtime_guard = Some(
+                self.runtime_gate()
+                    .enter()
+                    .map_err(|_| XllError::Closing)?,
+            );
+            server_guard = Some(self.server_gate.enter().map_err(|_| XllError::Closing)?);
             Ok(())
         })?;
 
         Ok(ScopedPublishOperation {
-            _gate_guard: gate_guard.expect("host admission acquires the server gate"),
+            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
+            _server_guard: server_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
-            _observation: ServerOperationObservation::begin(&self.services),
+            _observation: ServerOperationObservation::begin(self.services()),
         })
     }
 
-    pub(crate) fn enter_owned_operation(
-        core: triomphe::Arc<Self>,
-    ) -> XllResult<OwnedPublishOperation<H>> {
-        if core.runtime_gate.is_closing() {
-            return Err(XllError::Closing);
-        }
-
-        let host_guard = core.host.enter_with(|| {
-            core.server_gate.acquire().map_err(|_| XllError::Closing)?;
+    pub(crate) fn enter_owned_operation(&self) -> XllResult<OwnedPublishOperation<H>> {
+        let mut runtime_guard = None;
+        let mut server_guard = None;
+        let host_guard = self.host.enter_with(|| {
+            // SAFETY: the runtime close waits this gate before reclaiming the
+            // runtime and all server-owned publish cores.
+            runtime_guard = Some(
+                unsafe { self.runtime_gate().enter_owned() }
+                    .map_err(|_| XllError::Closing)?,
+            );
+            // SAFETY: server termination drains this gate before reclaiming
+            // the publish core.
+            server_guard = Some(
+                unsafe { self.server_gate.enter_owned() }.map_err(|_| XllError::Closing)?,
+            );
             Ok(())
         })?;
-        let observation = ServerOperationObservation::begin(&core.services);
+        let observation = ServerOperationObservation::begin(self.services());
 
         Ok(OwnedPublishOperation {
-            core,
+            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
+            _server_guard: server_guard.expect("host admission acquires the server gate"),
             _host_guard: host_guard,
             _observation: observation,
         })
@@ -428,7 +469,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         id: SubscriptionId,
         generation: ConnectionGeneration,
-        active_quota: &triomphe::Arc<Quota>,
+        active_quota: &Quota,
     ) -> XllResult<()> {
         let shard_index = shard_index(topic_id);
         let mut shard = self.shards[shard_index].lock();
@@ -441,7 +482,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
         if let std::collections::hash_map::Entry::Vacant(topic_entry) = shard.topic_by_id.entry(id)
         {
-            let permit = Quota::try_acquire(active_quota).map_err(|_| XllError::Overloaded)?;
+            // SAFETY: the runtime-owned active quota outlives every server and
+            // is reclaimed only after all connection permits are drained.
+            let permit = unsafe { Quota::try_acquire(active_quota) }
+                .map_err(|_| XllError::Overloaded)?;
             topic_entry.insert(topic_id);
             shard.active_by_topic.insert(
                 topic_id,
@@ -664,7 +708,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
                         false
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        let permit = Quota::try_acquire(&self.queued_update_quota)
+                        // SAFETY: the runtime-owned queue quota outlives this
+                        // publish core and every queued-update permit.
+                        let permit = unsafe { Quota::try_acquire(self.queued_update_quota()) }
                             .map_err(|_| XllError::Overloaded)?;
                         let sequence = self.allocate_update_sequence()?;
                         entry.insert(QueuedUpdate {
@@ -693,7 +739,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     pub(crate) fn drive_notification(&self, mut attempt: NotificationAttempt<H::Notifier>) {
         loop {
-            let _callback = ServerCallbackObservation::begin(&self.services);
+            let _callback = ServerCallbackObservation::begin(self.services());
             let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));
             let completion = match res {
                 Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
@@ -702,7 +748,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     let err = XllError::Internal {
                         diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_NOTIFY,
                     };
-                    self.services.record_cleanup_result(Err(err.clone()));
+                    self.services().record_cleanup_result(Err(err.clone()));
                     std::panic::resume_unwind(panic_payload);
                 }
             };
@@ -711,7 +757,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 NotificationCompletion::Finished => break,
                 NotificationCompletion::Retry(next) => attempt = next,
                 NotificationCompletion::Failed(err) => {
-                    self.services.record_cleanup_result(Err(err));
+                    self.services().record_cleanup_result(Err(err));
                     break;
                 }
             }

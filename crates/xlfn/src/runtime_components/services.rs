@@ -2,6 +2,41 @@
 
 use crate::generation::RuntimeGeneration;
 
+/// Resources registered during `Addin::open` and moved into generation
+/// services at commit. The value is affine: no subsystem can retain a second
+/// owner when the opening transaction rolls back or publishes the generation.
+pub(crate) struct GenerationServiceInputs {
+    #[cfg(feature = "rtd")]
+    rtd_sources: crate::subscription::SourceArena,
+}
+
+impl GenerationServiceInputs {
+    #[cfg(not(feature = "rtd"))]
+    pub(crate) const fn empty() -> Self {
+        Self {}
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(crate) const fn with_rtd_sources(sources: crate::subscription::SourceArena) -> Self {
+        Self {
+            rtd_sources: sources,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn empty_for_generation(generation: RuntimeGeneration) -> Self {
+        #[cfg(feature = "rtd")]
+        {
+            Self::with_rtd_sources(crate::subscription::SourceArena::empty(generation))
+        }
+        #[cfg(not(feature = "rtd"))]
+        {
+            let _ = generation;
+            Self::empty()
+        }
+    }
+}
+
 /// Service slots whose liveness is coupled to one open generation.
 /// Generation-specific policy is consumed from [`crate::generation::OpeningGeneration`]
 /// while these slots carry the service state owned by the open bundle.
@@ -48,9 +83,9 @@ pub(crate) struct ArmedServices {
 }
 
 impl ArmedServices {
-    pub(crate) fn commit(mut self) -> std::sync::Arc<GenerationServices> {
+    pub(crate) fn commit(mut self) -> Box<GenerationServices> {
         self.committed = true;
-        std::sync::Arc::new(
+        Box::new(
             self.services
                 .take()
                 .expect("an armed service reservation owns its service bundle"),
@@ -73,9 +108,10 @@ impl GenerationServices {
         generation: RuntimeGeneration,
         _config: crate::addin::RuntimeConfig,
         subscription_host: Option<crate::excel_rtd::RtdSubscriptionHost>,
+        inputs: GenerationServiceInputs,
     ) -> crate::XllResult<ArmedServices> {
         #[cfg(not(feature = "rtd"))]
-        let _ = (generation, subscription_host);
+        let _ = (generation, subscription_host, inputs);
         let services = Self {
             #[cfg(feature = "handles")]
             formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
@@ -92,7 +128,7 @@ impl GenerationServices {
         if let Err(error) = services
             .rtd
             .subscriptions
-            .arm(generation, _config.rtd_limits())
+            .arm(generation, _config.rtd_limits(), inputs.rtd_sources)
         {
             services.disarm_or_abort();
             return Err(error);
@@ -121,8 +157,8 @@ impl GenerationServices {
     #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
     pub(crate) fn formula_handle_service(
         &self,
-    ) -> crate::XllResult<std::sync::Arc<crate::handle::FormulaHandleService>> {
-        self.formula_handles.get_owned()
+    ) -> crate::XllResult<crate::handle::FormulaHandleServiceRead<'_>> {
+        self.formula_handles.read()
     }
 
     /// Stop the RTD producer associated with this generation without making
@@ -133,7 +169,7 @@ impl GenerationServices {
             let Some(handles) = self.formula_handles.read_if_ready() else {
                 return Ok(());
             };
-            crate::excel_rtd::shutdown_handle_topics(std::sync::Arc::clone(handles.as_arc()))
+            crate::excel_rtd::shutdown_handle_topics(&*handles)
         }
         #[cfg(not(feature = "handles"))]
         Ok(())
