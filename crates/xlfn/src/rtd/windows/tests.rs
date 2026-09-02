@@ -1199,6 +1199,7 @@ struct DispatchTestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
+// SAFETY: DispatchTestSubscription is a mock subscription for testing.
 unsafe impl RtdSubscription for DispatchTestSubscription {
     fn request_cancel(&self) {}
 
@@ -2333,7 +2334,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
-    let handle = ensured.subscription_server.as_ref().unwrap().clone();
+    let handle = ensured.subscription_server.unwrap();
 
     let prepared = subscriptions
         .prepare(

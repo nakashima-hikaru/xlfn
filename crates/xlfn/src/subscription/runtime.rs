@@ -77,19 +77,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         Self::with_host(generation, RtdLimits::standard(), H::default(), sources)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_limits(limits: RtdLimits) -> Self
-    where
-        H: Default,
-    {
-        Self::with_host(
-            RuntimeGeneration::new(1).expect("test generation is non-zero"),
-            limits,
-            H::default(),
-            SourceArena::empty(RuntimeGeneration::new(1).expect("test generation is non-zero")),
-        )
-    }
-
     pub(crate) fn with_host(
         generation: RuntimeGeneration,
         limits: RtdLimits,
