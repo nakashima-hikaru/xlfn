@@ -1208,12 +1208,20 @@ unsafe impl RtdSubscription for DispatchTestSubscription {
     }
 }
 
+#[derive(Clone)]
 struct DispatchTestSource {
-    sink: Mutex<Option<RtdSink<f64>>>,
+    sink: Arc<Mutex<Option<RtdSink<f64>>>>,
     disconnected: Arc<AtomicBool>,
 }
 
 impl DispatchTestSource {
+    fn new(disconnected: Arc<AtomicBool>) -> Self {
+        Self {
+            sink: Arc::new(Mutex::new(None)),
+            disconnected,
+        }
+    }
+
     fn publish(&self, value: f64) -> XllResult<()> {
         self.sink
             .lock()
@@ -2316,13 +2324,10 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let _guard = TEST_LOCK.lock().unwrap();
     let disconnected = Arc::new(AtomicBool::new(false));
-    let source = DispatchTestSource {
-        sink: Mutex::new(None),
-        disconnected: Arc::clone(&disconnected),
-    };
+    let source = DispatchTestSource::new(Arc::clone(&disconnected));
     let (arena, source_handle) = crate::subscription::SourceArena::with_source(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        source,
+        source.clone(),
     )
     .unwrap();
     let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
