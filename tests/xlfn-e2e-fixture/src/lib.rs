@@ -4,10 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use xlfn::prelude::*;
-use xlfn::rtd::{
-    RtdCancellation, RtdCancellationHandle, RtdSink, RtdSource, RtdSubscription, RtdTopic,
-    RtdValue,
-};
+use xlfn::rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
 
 pub struct State {
     rtd: RtdSourceHandle<RtdFixture>,
@@ -137,9 +134,11 @@ struct RtdFixtureSubscription {
     key: String,
 }
 
-impl RtdSubscription for RtdFixtureSubscription {
-    fn cancellation(&self) -> Arc<dyn RtdCancellation> {
-        Arc::new(RtdCancellationHandle::noop())
+// SAFETY: `disconnect_and_wait` removes the sink from the shared map, ensuring
+// no further sink usage after return.
+unsafe impl RtdSubscription for RtdFixtureSubscription {
+    fn request_cancel(&self) {
+        // No background work to cancel in this fixture.
     }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
