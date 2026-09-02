@@ -21,14 +21,14 @@ use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 #[cfg(feature = "handles")]
 pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
-    handles: Arc<H>,
+    handles: &H,
     ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    let _rtd_operation = crate::excel_rtd::begin_operation(handles.as_ref(), ingress)?;
-    let ensured = ensure_server(Some(&handles), None)?;
+    let _rtd_operation = crate::excel_rtd::begin_operation(handles, ingress)?;
+    let ensured = ensure_server(Some(handles), None)?;
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 

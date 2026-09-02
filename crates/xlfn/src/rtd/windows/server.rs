@@ -174,9 +174,45 @@ impl Drop for OwnedServerReference {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct BackendHandles(NonNull<dyn FormulaLifetimeBackend>);
+
+// SAFETY: FormulaLifetimeBackend is Send + Sync and remains valid while attached to the server.
+unsafe impl Send for BackendHandles {}
+// SAFETY: FormulaLifetimeBackend immutable operations are thread-safe.
+unsafe impl Sync for BackendHandles {}
+
+impl std::ops::Deref for BackendHandles {
+    type Target = dyn FormulaLifetimeBackend;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the backend.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct BackendSubscriptions(NonNull<SubscriptionRuntime>);
+
+// SAFETY: SubscriptionRuntime is Send + Sync and remains valid while attached to the server.
+unsafe impl Send for BackendSubscriptions {}
+// SAFETY: SubscriptionRuntime methods are thread-safe.
+unsafe impl Sync for BackendSubscriptions {}
+
+impl std::ops::Deref for BackendSubscriptions {
+    type Target = SubscriptionRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the runtime.
+        unsafe { self.0.as_ref() }
+    }
+}
+
 pub(super) struct ServerBackends {
-    pub(super) handles: Option<Arc<dyn FormulaLifetimeBackend>>,
-    pub(super) subscriptions: Option<Arc<SubscriptionRuntime>>,
+    pub(super) handles: Option<BackendHandles>,
+    pub(super) subscriptions: Option<BackendSubscriptions>,
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
 
@@ -322,7 +358,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
 }
 
 #[cfg(any(feature = "handles", test))]
-pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: Arc<H>) -> XllResult<()> {
+pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -421,7 +457,7 @@ pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: Arc<H>) -> 
     }
 }
 
-pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) -> XllResult<()> {
+pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -438,7 +474,7 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
                         .lock()
                         .subscriptions
                         .as_ref()
-                        .is_some_and(|active| Arc::ptr_eq(active, &subscriptions))
+                        .is_some_and(|active| std::ptr::eq(&**active, subscriptions))
                 }
             })
             .cloned()
@@ -522,23 +558,22 @@ pub(crate) fn shutdown_subscriptions(subscriptions: Arc<SubscriptionRuntime>) ->
 
 #[cfg(any(feature = "handles", test))]
 pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
-    handles: Option<&Arc<H>>,
-    subscriptions: Option<&Arc<SubscriptionRuntime>>,
+    handles: Option<&H>,
+    subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
-    let backend =
-        handles.map(|handles| -> Arc<dyn FormulaLifetimeBackend> { Arc::<H>::clone(handles) });
-    ensure_server_impl(backend.as_ref(), subscriptions)
+    let backend = handles.map(|h| -> &dyn FormulaLifetimeBackend { h });
+    ensure_server_impl(backend, subscriptions)
 }
 
 pub(super) fn ensure_server_without_handles(
-    subscriptions: Option<&Arc<SubscriptionRuntime>>,
+    subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
     ensure_server_impl(None, subscriptions)
 }
 
 fn ensure_server_impl(
-    handles: Option<&Arc<dyn FormulaLifetimeBackend>>,
-    subscriptions: Option<&Arc<SubscriptionRuntime>>,
+    handles: Option<&dyn FormulaLifetimeBackend>,
+    subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();
 
@@ -597,7 +632,7 @@ fn ensure_server_impl(
                     });
                 }
                 None => {
-                    backends.handles = Some(Arc::clone(handles));
+                    backends.handles = Some(BackendHandles(NonNull::from(handles)));
                 }
             }
         }
@@ -605,7 +640,7 @@ fn ensure_server_impl(
         let (newly_attached_subscriptions, subscription_handle) =
             if let Some(subscriptions) = subscriptions {
                 match backends.subscriptions.as_ref() {
-                    Some(active) if Arc::ptr_eq(active, subscriptions) => {
+                    Some(active) if std::ptr::eq(&**active, subscriptions) => {
                         (None, backends.subscription_server.clone())
                     }
                     Some(_) => {
@@ -615,7 +650,8 @@ fn ensure_server_impl(
                     }
                     None => {
                         let handle = subscriptions.register_server(existing.generation)?;
-                        backends.subscriptions = Some(Arc::clone(subscriptions));
+                        backends.subscriptions =
+                            Some(BackendSubscriptions(NonNull::from(subscriptions)));
                         backends.subscription_server = Some(handle.clone());
                         (Some(handle.clone()), Some(handle))
                     }
@@ -681,8 +717,8 @@ fn ensure_server_impl(
         operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
-            handles: handles.cloned(),
-            subscriptions: subscriptions.cloned(),
+            handles: handles.map(|h| BackendHandles(NonNull::from(h))),
+            subscriptions: subscriptions.map(|s| BackendSubscriptions(NonNull::from(s))),
             subscription_server: subscription_handle.clone(),
         }),
         callbacks: Mutex::new(ServerCallbacks::default()),

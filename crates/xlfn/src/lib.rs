@@ -136,13 +136,11 @@ pub(crate) mod test_callback {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard};
-    use xlfn_sys::{
-        XL_ASYNC_RETURN, XL_FREE, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS,
-    };
+    use xlfn_sys::{XL_ASYNC_RETURN, XL_FREE, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS};
     #[cfg(feature = "handles")]
     use xlfn_sys::{
-        XLF_CALLER, XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12,
-        XLTYPE_REF, XLTYPE_SREF, XLTYPE_STR, XL_SHEET_ID, XL_SHEET_NM,
+        XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value,
+        XLREF12, XLTYPE_REF, XLTYPE_SREF, XLTYPE_STR,
     };
 
     static TOTAL_CALLS: AtomicUsize = AtomicUsize::new(0);

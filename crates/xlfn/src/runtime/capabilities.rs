@@ -73,7 +73,10 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.host
     }
 
-    #[cfg(all(any(test, feature = "refinement"), any(feature = "handles", feature = "rtd")))]
+    #[cfg(all(
+        any(test, feature = "refinement"),
+        any(feature = "handles", feature = "rtd")
+    ))]
     pub(in crate::runtime) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(&GenerationServices) -> R,

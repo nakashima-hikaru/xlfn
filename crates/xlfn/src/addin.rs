@@ -1,4 +1,3 @@
-
 use crate::call::CallScope;
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};

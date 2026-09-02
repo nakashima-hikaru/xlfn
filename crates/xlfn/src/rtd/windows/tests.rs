@@ -770,7 +770,7 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
 #[test]
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the allocation throughout
@@ -803,14 +803,14 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
         ServerPhase::Terminated
     );
 
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
     drop(ensured);
 }
 
 #[test]
 fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -865,14 +865,14 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
             .is_some_and(|active| active.pointer == server_address)
     );
 
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
     drop(ensured);
 }
 
 #[test]
 fn deferred_termination_spawn_failure_rolls_back_atomically() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -892,7 +892,7 @@ fn deferred_termination_spawn_failure_rolls_back_atomically() {
     drop(accepted);
     drop(operation);
 
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
     drop(ensured);
 }
 
@@ -926,7 +926,7 @@ fn termination_worker_can_finish_before_handle_registration() {
 #[test]
 fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
@@ -949,7 +949,7 @@ fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
 
     // The coordinator has exited, so ordinary shutdown can safely perform
     // the idempotent cleanup that the injected panic skipped.
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
     drop(ensured);
 }
 
@@ -999,7 +999,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     use std::sync::atomic::AtomicI32;
 
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let server_address = server as usize;
@@ -1075,7 +1075,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     use std::sync::Barrier;
 
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
     let _generation = ensured.active.generation;
@@ -1087,16 +1087,14 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     // SAFETY: the retained server remains live for the scoped race.
     let operation = unsafe { (*server).operations.enter() }.unwrap();
 
-    let subscriptions = Arc::new(SubscriptionRuntime::new());
-    let rendezvous = Arc::new(Barrier::new(2));
+    let subscriptions = SubscriptionRuntime::new();
+    let rendezvous = Barrier::new(2);
     std::thread::scope(|scope| {
-        let attached_subscriptions = Arc::clone(&subscriptions);
-        let attached_rendezvous = Arc::clone(&rendezvous);
-        scope.spawn(move || {
-            let attached = ensure_server_without_handles(Some(&attached_subscriptions))
-                .expect("attach subscriptions");
-            attached_rendezvous.wait();
-            attached_rendezvous.wait();
+        scope.spawn(|| {
+            let attached =
+                ensure_server_without_handles(Some(&subscriptions)).expect("attach subscriptions");
+            rendezvous.wait();
+            rendezvous.wait();
             drop(attached);
         });
 
@@ -1120,7 +1118,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     });
 
     drop(operation);
-    shutdown_subscriptions(subscriptions).unwrap();
+    shutdown_subscriptions(&subscriptions).unwrap();
     drop(ensured);
     handles.seal().map(|_| ()).unwrap();
 }
@@ -1628,7 +1626,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
 #[test]
 fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     assert!(ensured.newly_created);
 
@@ -1677,13 +1675,13 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     drop(server_unknown);
     drop(factory);
 
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn create_instance_nulls_output_on_every_rejected_request() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
@@ -1758,13 +1756,13 @@ fn create_instance_nulls_output_on_every_rejected_request() {
     );
 
     drop(factory);
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn com_query_failures_clear_stale_output_pointers() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
     let class_factory_iid = iid_iclass_factory_from_fields();
     let unknown_iid = iid_iunknown_from_fields();
@@ -1900,13 +1898,13 @@ fn com_query_failures_clear_stale_output_pointers() {
 
     drop(server_unknown);
     drop(factory);
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn idispatch_resolves_names_and_invokes_heartbeat() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
@@ -2074,13 +2072,13 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
 
     drop(dispatch);
     drop(factory);
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
@@ -2311,13 +2309,13 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     // references.
     drop(dispatch);
     drop(factory);
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = Arc::new(SubscriptionRuntime::new());
+    let subscriptions = SubscriptionRuntime::new();
     let disconnected = Arc::new(AtomicBool::new(false));
     let source = Arc::new(DispatchTestSource {
         sink: Mutex::new(None),
@@ -2509,7 +2507,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
 #[test]
 fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
+    let handles = FormulaHandleService::new(4);
     let _active = ensure_server(Some(&handles), None).unwrap();
     let wrong = GUID::from_u128(1);
     let class_factory_iid = iid_iclass_factory_from_fields();
@@ -2528,14 +2526,14 @@ fn wrong_clsid_is_not_served() {
     assert_eq!(status, CLASS_E_CLASSNOTAVAILABLE);
     assert!(output.is_null());
 
-    shutdown(handles).unwrap();
+    shutdown(&handles).unwrap();
 }
 
 #[test]
 fn existing_server_attaches_each_backend_without_replacement() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let handles = Arc::new(FormulaHandleService::new(4));
-    let subscriptions = Arc::new(SubscriptionRuntime::new());
+    let handles = FormulaHandleService::new(4);
+    let subscriptions = SubscriptionRuntime::new();
 
     let first = ensure_server(Some(&handles), None).unwrap();
     assert!(first.newly_created);
@@ -2560,14 +2558,14 @@ fn existing_server_attaches_each_backend_without_replacement() {
         backends
             .subscriptions
             .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &subscriptions))
+            .is_some_and(|active| std::ptr::eq(&**active, &subscriptions))
     );
 }
 
 #[test]
 fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = Arc::new(SubscriptionRuntime::new());
+    let subscriptions = SubscriptionRuntime::new();
 
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
@@ -2611,7 +2609,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
 
     assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
     drop(ensured);
-    shutdown_subscriptions(subscriptions).unwrap();
+    shutdown_subscriptions(&subscriptions).unwrap();
 }
 
 #[test]
