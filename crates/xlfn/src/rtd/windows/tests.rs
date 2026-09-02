@@ -2507,7 +2507,8 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
 
     drop(dispatch);
     drop(factory);
-    subscriptions.close().unwrap();
+    drop(ensured);
+    shutdown_subscriptions(&subscriptions).unwrap();
 }
 
 #[test]

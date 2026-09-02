@@ -9,6 +9,7 @@ use futures_util::Future;
 use parking_lot::{Condvar, Mutex};
 use std::ops::Deref;
 use std::ptr::NonNull;
+#[cfg(any(test, feature = "refinement"))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(test)]
