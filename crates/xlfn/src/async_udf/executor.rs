@@ -46,6 +46,7 @@ impl ExecutorPtr {
 // SAFETY: ExecutorShared is thread-safe. Its unique owner drains tasks and
 // joins workers before reclamation, so transferred capabilities remain valid.
 unsafe impl Send for ExecutorPtr {}
+// SAFETY: ExecutorShared is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for ExecutorPtr {}
 
 /// Shared executor state.

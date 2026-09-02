@@ -649,6 +649,7 @@ mod tests {
 
         struct TraceSubscription;
 
+        // SAFETY: trace subscription does not interact with external state.
         unsafe impl crate::subscription::RtdSubscription for TraceSubscription {
             fn request_cancel(&self) {}
 
@@ -714,7 +715,15 @@ mod tests {
             let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
             let runtime = static_fixture.runtime();
             let opening = runtime.begin_open().unwrap();
-            let mut opening = runtime.publish(opening, (), ());
+            let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let (arena, source) = crate::subscription::SourceArena::with_source(
+                opening.attempt_id().into_runtime_generation(),
+                TraceSource {
+                    sink: std::sync::Arc::clone(&trace_sink),
+                },
+            )
+            .unwrap();
+            let mut opening = runtime.publish_with_sources(opening, (), (), arena);
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
             crate::diagnostics::reset_diagnostic_router().unwrap();
@@ -727,58 +736,54 @@ mod tests {
             let free = unsafe { crate::return_abi::free_return_boundary(pointer) };
             drop(free);
 
-            let handles = runtime.formula_handle_service().unwrap();
-            handles
-                .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
-                    Ok(TraceHandle)
+            runtime
+                .with_formula_handle_service(|handles| {
+                    handles
+                        .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
+                            Ok(TraceHandle)
+                        })
+                        .unwrap();
                 })
                 .unwrap();
 
             let notifier_state =
                 std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
-            let subscriptions = runtime.subscriptions().unwrap();
-            let subscriptions = subscriptions.as_arc();
-            let server = subscriptions
-                .register_server(
-                    crate::subscription::ServerGeneration::new(1)
-                        .expect("non-zero test server generation"),
-                )
+            runtime
+                .with_subscriptions(|subscriptions| {
+                    let server = subscriptions
+                        .register_server(
+                            crate::subscription::ServerGeneration::new(1)
+                                .expect("non-zero test server generation"),
+                        )
+                        .unwrap();
+                    server
+                        .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
+                            std::sync::Arc::clone(&notifier_state),
+                        ))
+                        .unwrap();
+                    let prepared = subscriptions
+                        .prepare(
+                            &source,
+                            crate::subscription::RtdTopic::single("lean-checker-subscription")
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let id = prepared.id();
+                    prepared.commit();
+                    let conn = subscriptions
+                        .connect_transaction(&server, crate::subscription::TopicId(1), id)
+                        .unwrap();
+                    conn.commit().unwrap();
+                    trace_sink
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .expect("trace source must retain its RTD sink")
+                        .publish(1.0)
+                        .unwrap();
+                    assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
+                })
                 .unwrap();
-            server
-                .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
-                    std::sync::Arc::clone(&notifier_state),
-                ))
-                .unwrap();
-            let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let source = crate::subscription::RtdSourceHandle::for_internal(
-                runtime
-                    .last_committed_generation()
-                    .expect("test runtime has a generation"),
-                TraceSource {
-                    sink: std::sync::Arc::clone(&trace_sink),
-                },
-            )
-            .unwrap();
-            let prepared = subscriptions
-                .prepare(
-                    &source,
-                    crate::subscription::RtdTopic::single("lean-checker-subscription").unwrap(),
-                )
-                .unwrap();
-            let id = prepared.id();
-            prepared.commit();
-            let conn = subscriptions
-                .connect_transaction(&server, crate::subscription::TopicId(1), id)
-                .unwrap();
-            conn.commit().unwrap();
-            trace_sink
-                .lock()
-                .unwrap()
-                .as_ref()
-                .expect("trace source must retain its RTD sink")
-                .publish(1.0)
-                .unwrap();
-            assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
 
             #[cfg(feature = "async")]
             {
@@ -1454,6 +1459,7 @@ mod tests {
             events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
 
+        // SAFETY: test subscription records ordering in arc-mutex.
         unsafe impl crate::subscription::RtdSubscription for OrderedSubscription {
             fn request_cancel(&self) {}
 
@@ -1518,54 +1524,57 @@ mod tests {
             let runtime = Runtime::<OrderedClose>::new();
             let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let open_attempt = runtime.begin_open().unwrap();
-            let mut open_attempt = runtime.publish_with_lifecycle(
+            let (arena, source) = crate::subscription::SourceArena::with_source(
+                open_attempt.attempt_id().into_runtime_generation(),
+                OrderedSource {
+                    events: std::sync::Arc::clone(&events),
+                },
+            )
+            .unwrap();
+            let mut open_attempt = runtime.publish_with_lifecycle_and_sources(
                 open_attempt,
                 (),
                 OrderedState {
                     events: std::sync::Arc::clone(&events),
                 },
                 (),
+                arena,
             );
             runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
             runtime
-                .formula_handle_service()
-                .unwrap()
-                .prepare(crate::handle::test_topic_key("ordered"), || {
-                    Ok(OrderedHandle {
-                        events: std::sync::Arc::clone(&events),
-                    })
+                .with_formula_handle_service(|handles| {
+                    handles
+                        .prepare(crate::handle::test_topic_key("ordered"), || {
+                            Ok(OrderedHandle {
+                                events: std::sync::Arc::clone(&events),
+                            })
+                        })
+                        .unwrap();
                 })
                 .unwrap();
-            let subscriptions = runtime.subscriptions().unwrap();
-            let subscriptions = subscriptions.as_arc();
-            let server = subscriptions
-                .register_server(
-                    crate::subscription::ServerGeneration::new(1)
-                        .expect("non-zero test server generation"),
-                )
+            runtime
+                .with_subscriptions(|subscriptions| {
+                    let server = subscriptions
+                        .register_server(
+                            crate::subscription::ServerGeneration::new(1)
+                                .expect("non-zero test server generation"),
+                        )
+                        .unwrap();
+                    let prepared = subscriptions
+                        .prepare(
+                            &source,
+                            crate::subscription::RtdTopic::single("ordered").unwrap(),
+                        )
+                        .unwrap();
+                    let id = prepared.id();
+                    prepared.commit();
+                    let conn = subscriptions
+                        .connect_transaction(&server, crate::subscription::TopicId(1), id)
+                        .unwrap();
+                    conn.commit().unwrap();
+                    let _ = server;
+                })
                 .unwrap();
-            let source = crate::subscription::RtdSourceHandle::for_internal(
-                runtime
-                    .last_committed_generation()
-                    .expect("test runtime has a generation"),
-                OrderedSource {
-                    events: std::sync::Arc::clone(&events),
-                },
-            )
-            .unwrap();
-            let prepared = subscriptions
-                .prepare(
-                    &source,
-                    crate::subscription::RtdTopic::single("ordered").unwrap(),
-                )
-                .unwrap();
-            let id = prepared.id();
-            prepared.commit();
-            let conn = subscriptions
-                .connect_transaction(&server, crate::subscription::TopicId(1), id)
-                .unwrap();
-            conn.commit().unwrap();
-            drop(server);
 
             assert_eq!(host_auto_remove::<OrderedClose>(&runtime), 1);
             assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);

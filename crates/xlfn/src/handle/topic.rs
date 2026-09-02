@@ -93,7 +93,9 @@ impl Deref for PublishedTopicPtr {
     }
 }
 
+// SAFETY: PublishedTopicPtr is an audited pointer to an immutable PublishedTopic.
 unsafe impl Send for PublishedTopicPtr {}
+// SAFETY: PublishedTopic is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for PublishedTopicPtr {}
 
 pub(crate) struct PublishedTopics {
@@ -171,7 +173,9 @@ impl Deref for InitializationPtr {
     }
 }
 
+// SAFETY: InitializationPtr is an audited pointer to an immutable Initialization.
 unsafe impl Send for InitializationPtr {}
+// SAFETY: Initialization is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for InitializationPtr {}
 
 pub(crate) struct TopicTableState {
@@ -179,7 +183,15 @@ pub(crate) struct TopicTableState {
     pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
     pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
     pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
+    #[allow(
+        clippy::vec_box,
+        reason = "PublishedTopic requires stable heap addresses for non-owning PublishedTopicPtr"
+    )]
     publications: Vec<Box<PublishedTopic>>,
+    #[allow(
+        clippy::vec_box,
+        reason = "Initialization requires stable heap addresses for non-owning InitializationPtr"
+    )]
     initializations: Vec<Box<Initialization>>,
     pub(crate) generation: TopicGeneration,
     pub(crate) closed: bool,

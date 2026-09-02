@@ -285,15 +285,14 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         }
         #[cfg(feature = "rtd")]
         {
+            let generation = self.protocol_generation();
             let result = self.lifecycle.with_generation_services(|services| {
-                services.close_subscriptions(self.protocol_generation())
+                services.close_subscriptions(generation)
             });
             let Some(result) = result else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::excel_rtd::stopped_subscriptions(
-                        self.protocol_generation(),
-                    ));
+                    return Ok(crate::excel_rtd::stopped_subscriptions(generation));
                 }
                 #[cfg(not(test))]
                 {

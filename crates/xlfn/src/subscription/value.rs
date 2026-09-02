@@ -1,6 +1,5 @@
 use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
-use triomphe::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
@@ -17,7 +16,7 @@ pub(crate) enum StoredRtdValue {
     Number(f64),
     Boolean(bool),
     Integer(i32),
-    String(Arc<String>),
+    String(Box<str>),
     Error(ExcelErrorValue),
     Empty,
 }
@@ -46,7 +45,7 @@ impl RtdValue {
             Self::Number(value) => StoredRtdValue::Number(value),
             Self::Boolean(value) => StoredRtdValue::Boolean(value),
             Self::Integer(value) => StoredRtdValue::Integer(value),
-            Self::String(value) => StoredRtdValue::String(Arc::new(value)),
+            Self::String(value) => StoredRtdValue::String(value.into_boxed_str()),
             Self::Error(value) => StoredRtdValue::Error(value),
             Self::Empty => StoredRtdValue::Empty,
         })

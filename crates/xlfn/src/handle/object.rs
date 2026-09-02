@@ -5,10 +5,6 @@
 //! ownership. An object is reclaimed only after both capability counts reach
 //! zero, and its application destructor always runs outside the arena lock.
 
-#![allow(
-    unsafe_code,
-    reason = "handle capabilities are audited non-owning pointers into a runtime-owned arena"
-)]
 
 use super::token::ObjectId;
 use crate::{XllError, XllResult};
@@ -328,7 +324,9 @@ impl ObjectCell {
     }
 }
 
+// SAFETY: ObjectCell is immutable once published and safe to transfer across threads.
 unsafe impl Send for ObjectCell {}
+// SAFETY: ObjectCell contents are immutable and safe to share across threads.
 unsafe impl Sync for ObjectCell {}
 
 /// One formula binding's non-owning, counted capability to an object.
@@ -377,7 +375,9 @@ impl Drop for ObjectBinding {
     }
 }
 
+// SAFETY: ObjectBinding is a non-owning thread-safe handle to an arena-managed object.
 unsafe impl Send for ObjectBinding {}
+// SAFETY: ObjectBinding immutable borrows can be shared across threads.
 unsafe impl Sync for ObjectBinding {}
 
 pub(crate) struct ObjectLeaseGuard {
@@ -395,5 +395,7 @@ impl Drop for ObjectLeaseGuard {
     }
 }
 
+// SAFETY: ObjectLeaseGuard holds a pin count in a thread-safe arena and can be transferred.
 unsafe impl Send for ObjectLeaseGuard {}
+// SAFETY: ObjectLeaseGuard immutable borrows can be shared across threads.
 unsafe impl Sync for ObjectLeaseGuard {}

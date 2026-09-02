@@ -36,7 +36,7 @@ impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
 }
 
 pub struct RtdPublishNumberBenchmark {
-    _runtime: Arc<crate::subscription::SubscriptionRuntime>,
+    _runtime: Box<crate::subscription::SubscriptionRuntime>,
     server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<f64>,
 }
@@ -58,7 +58,7 @@ impl RtdPublishNumberBenchmark {
                 sink: Arc::clone(&sink_slot),
             })
             .expect("benchmark source handle allocation must succeed");
-        let runtime = Arc::new(
+        let runtime = Box::new(
             crate::subscription::SubscriptionRuntime::with_sources_for_internal(
                 registration.finish(),
             ),
@@ -122,7 +122,7 @@ impl RtdPublishNumberBenchmark {
 }
 
 pub struct RtdPublishStringBenchmark {
-    _runtime: Arc<crate::subscription::SubscriptionRuntime>,
+    _runtime: Box<crate::subscription::SubscriptionRuntime>,
     server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<String>,
 }
@@ -144,7 +144,7 @@ impl RtdPublishStringBenchmark {
                 sink: Arc::clone(&sink_slot),
             })
             .expect("benchmark source handle allocation must succeed");
-        let runtime = Arc::new(
+        let runtime = Box::new(
             crate::subscription::SubscriptionRuntime::with_sources_for_internal(
                 registration.finish(),
             ),
@@ -292,7 +292,7 @@ enum RtdRefreshSinks {
 }
 
 pub struct RtdRefreshScalingBenchmark {
-    _runtime: Arc<crate::subscription::SubscriptionRuntime>,
+    _runtime: Box<crate::subscription::SubscriptionRuntime>,
     server: crate::subscription::SubscriptionServerHandle,
     sinks: RtdRefreshSinks,
     updated_indices: Vec<usize>,
@@ -453,7 +453,7 @@ impl RtdRefreshScalingBenchmark {
 fn build_refresh_topics<T>(
     topic_ids: &[crate::subscription::TopicId],
 ) -> (
-    Arc<crate::subscription::SubscriptionRuntime>,
+    Box<crate::subscription::SubscriptionRuntime>,
     crate::subscription::SubscriptionServerHandle,
     Vec<crate::subscription::RtdSink<T>>,
 )
@@ -475,7 +475,7 @@ where
             (source, sink_slot)
         })
         .collect::<Vec<_>>();
-    let runtime = Arc::new(
+    let runtime = Box::new(
         crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
     );
     let server = runtime

@@ -65,4 +65,5 @@ impl Drop for QuotaPermit {
 // SAFETY: Quota is thread-safe and the lifetime contract is independent of
 // the thread on which a permit is dropped.
 unsafe impl Send for QuotaPermit {}
+// SAFETY: Quota is thread-safe and immutable borrows can be shared across threads.
 unsafe impl Sync for QuotaPermit {}

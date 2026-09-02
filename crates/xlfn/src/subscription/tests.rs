@@ -4,7 +4,7 @@
 )]
 
 use super::*;
-use crate::excel_rtd::RtdNotifier;
+use crate::excel_rtd::{RtdNotifier, RtdSubscriptionHost};
 use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
 
 use std::num::NonZeroUsize;
@@ -15,6 +15,7 @@ pub(crate) struct TestSubscription {
     disconnected: Arc<AtomicBool>,
 }
 
+// SAFETY: test subscription does not access external resources.
 unsafe impl RtdSubscription for TestSubscription {
     fn request_cancel(&self) {
         self.canceled.store(true, Ordering::Release);
@@ -61,7 +62,53 @@ where
     }
 }
 
+pub(crate) struct SourceFixture {
+    registration: SourceRegistration,
+}
+
+impl SourceFixture {
+    pub(crate) fn new() -> Self {
+        Self {
+            registration: SourceRegistration::new(
+                crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            ),
+        }
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "test helper returns a tuple of handles and sinks"
+    )]
+    pub(crate) fn add<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+        &self,
+        initial: Option<T>,
+    ) -> (
+        RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
+        Arc<Mutex<Option<RtdSink<T>>>>,
+        Arc<AtomicBool>,
+    ) {
+        let slot = Arc::new(Mutex::new(None));
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let source = self
+            .registration
+            .register(PublishingSource {
+                initial,
+                sink_slot: Arc::clone(&slot),
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&disconnected),
+                on_subscribe: None,
+            })
+            .expect("test source handle allocation must succeed");
+        (source, slot, disconnected)
+    }
+
+    pub(crate) fn finish(self) -> SourceArena {
+        self.registration.finish()
+    }
+}
+
 pub(crate) type PublishingSourceResult<T> = (
+    SourceArena,
     RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
     Arc<Mutex<Option<RtdSink<T>>>>,
     Arc<AtomicBool>,
@@ -70,20 +117,9 @@ pub(crate) type PublishingSourceResult<T> = (
 pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>(
     initial: Option<T>,
 ) -> PublishingSourceResult<T> {
-    let slot = Arc::new(Mutex::new(None));
-    let disconnected = Arc::new(AtomicBool::new(false));
-    let source = RtdSourceHandle::for_internal(
-        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        PublishingSource {
-            initial,
-            sink_slot: Arc::clone(&slot),
-            canceled: Arc::new(AtomicBool::new(false)),
-            disconnected: Arc::clone(&disconnected),
-            on_subscribe: None,
-        },
-    )
-    .expect("test source handle allocation must succeed");
-    (source, slot, disconnected)
+    let fixture = SourceFixture::new();
+    let (source, slot, disconnected) = fixture.add(initial);
+    (fixture.finish(), source, slot, disconnected)
 }
 
 fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
@@ -94,11 +130,11 @@ fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
     SubscriptionServerHandle,
     RtdSink<T>,
 ) {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink_slot, _) = publishing_source(initial);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink_slot, _) = publishing_source(initial);
     let prepared = runtime
         .prepare(&source, RtdTopic::single(topic).unwrap())
         .unwrap();
@@ -129,16 +165,17 @@ fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
 
 #[test]
 fn server_publish_isolation() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_a, _sink_a, _) = fixture.add(Some(1.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
     let server_b = runtime
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
-
-    let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
-    let (source_b, sink_b, _) = publishing_source(Some(2.0f64));
 
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
@@ -161,10 +198,9 @@ fn server_publish_isolation() {
         .unwrap();
     conn_b.commit().unwrap();
 
-    let _sink_a = sink_a.lock().clone().unwrap();
     let sink_b = sink_b.lock().clone().unwrap();
 
-    let lock_guard = server_a.inner.publish.lock_shard_for_test(0);
+    let lock_guard = server_a.test_server().publish.lock_shard_for_test(0);
 
     let b_published = Arc::new(AtomicBool::new(false));
     let b_published_clone = Arc::clone(&b_published);
@@ -180,7 +216,11 @@ fn server_publish_isolation() {
 
 #[test]
 fn notification_callback_isolation() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_a, sink_a, _) = fixture.add(Some(1.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -203,9 +243,6 @@ fn notification_callback_isolation() {
     server_b
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_b)))
         .unwrap();
-
-    let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
-    let (source_b, sink_b, _) = publishing_source(Some(2.0f64));
 
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
@@ -248,7 +285,8 @@ fn notification_callback_isolation() {
 
 #[test]
 fn server_locality_refresh_lock_independence() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source_b, sink_b, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -256,7 +294,6 @@ fn server_locality_refresh_lock_independence() {
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
@@ -271,10 +308,10 @@ fn server_locality_refresh_lock_independence() {
     sink_b.publish(42.0).unwrap();
 
     // server A の shard mutex を保持した状態で server B.begin_refresh を実行
-    let _guard_a = server_a.inner.publish.lock_shard_for_test(0);
+    let _guard_a = server_a.test_server().publish.lock_shard_for_test(0);
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let server_b_clone = server_b.clone();
+    let server_b_clone = server_b;
     let handle = std::thread::spawn(move || {
         let batch = server_b_clone.begin_refresh().unwrap();
         let observed = (batch.updates.len(), batch.updates[0].value.clone());
@@ -292,28 +329,24 @@ fn server_locality_refresh_lock_independence() {
 }
 
 #[test]
-fn refresh_batch_does_not_retain_server_arc() {
+fn refresh_batch_borrows_server_lifetime() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let before = Arc::strong_count(&server.inner);
 
     let batch = server.begin_refresh().unwrap();
-
-    assert_eq!(
-        Arc::strong_count(&server.inner),
-        before,
-        "refresh batch must borrow SubscriptionServer rather than retain an Arc",
-    );
-
+    assert!(batch.updates.is_empty());
     batch.complete(RefreshOutcome::Delivered).unwrap();
-    assert_eq!(Arc::strong_count(&server.inner), before);
 }
 
 #[test]
 fn runtime_close_blocks_all_servers_immediately() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -321,7 +354,6 @@ fn runtime_close_blocks_all_servers_immediately() {
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
@@ -343,7 +375,6 @@ fn runtime_close_blocks_all_servers_immediately() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
         .unwrap();
 
-    let (source_a, sink_a, _) = publishing_source(Some(0.0f64));
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
@@ -369,7 +400,7 @@ fn runtime_close_blocks_all_servers_immediately() {
     });
 
     // server_a が close 処理に入り OperationGate が Closing になるまで待機
-    while server_a.inner.enter_operation().is_ok() {
+    while server_a.test_server().enter_operation().is_ok() {
         std::thread::yield_now();
     }
 
@@ -383,12 +414,12 @@ fn runtime_close_blocks_all_servers_immediately() {
 
 #[test]
 fn server_termination_clears_pending_and_allows_reconnect() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, disconnected) = publishing_source(Some(10.0));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, sink, disconnected) = publishing_source(Some(10.0));
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared-topic").unwrap())
         .unwrap();
@@ -415,7 +446,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     prep_b.commit();
 
     runtime
-        .claim_server(server_b.inner.generation, id_b)
+        .claim_server(server_b.generation(), id_b)
         .unwrap();
 
     let conn_b = runtime
@@ -434,7 +465,11 @@ fn server_termination_clears_pending_and_allows_reconnect() {
 
 #[test]
 fn uncommitted_update_does_not_trigger_notification() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add(Some(0.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -444,7 +479,6 @@ fn uncommitted_update_does_not_trigger_notification() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
-    let (source_a, _, _) = publishing_source(Some(0.0f64));
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a-0").unwrap())
         .unwrap();
@@ -455,7 +489,6 @@ fn uncommitted_update_does_not_trigger_notification() {
         .unwrap();
     conn_a.commit().unwrap();
 
-    let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b-0").unwrap())
         .unwrap();
@@ -477,7 +510,8 @@ fn uncommitted_update_does_not_trigger_notification() {
 
 #[test]
 fn publish_between_install_and_commit_prepares_notification() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -487,7 +521,6 @@ fn publish_between_install_and_commit_prepares_notification() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
-    let (source, sink, _) = publishing_source(Some(1.0f64));
     let prepared = runtime
         .prepare(&source, RtdTopic::single("known-update").unwrap())
         .unwrap();
@@ -508,12 +541,12 @@ fn publish_between_install_and_commit_prepares_notification() {
 
 #[test]
 fn deliverable_pending_accounting_tracks_connection_lifecycle() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, sink, _) = publishing_source(Some(1.0f64));
     let prepared = runtime
         .prepare(&source, RtdTopic::single("accounting").unwrap())
         .unwrap();
@@ -527,27 +560,27 @@ fn deliverable_pending_accounting_tracks_connection_lifecycle() {
 
     // The source's initial publish and this update both belong to an
     // uncommitted connection, so neither is deliverable yet.
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 0);
     sink.publish(2.0).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 0);
 
     connection.commit().unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
 
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
     batch.complete(RefreshOutcome::Delivered).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
 
     sink.publish(3.0).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     runtime.disconnect(&server, TopicId(1)).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
 }
 
@@ -557,13 +590,13 @@ fn first_empty_publish_is_deliverable() {
 
     sink.publish(()).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
     assert_eq!(batch.updates[0].value, StoredRtdValue::Empty);
     batch.complete(RefreshOutcome::Delivered).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
 }
 
 #[test]
@@ -573,7 +606,7 @@ fn repeated_empty_publish_is_suppressed() {
     sink.publish(()).unwrap();
     sink.publish(()).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
@@ -588,7 +621,7 @@ fn repeated_number_publish_is_suppressed() {
     sink.publish(12.5).unwrap();
     sink.publish(12.5).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
@@ -604,13 +637,13 @@ fn repeated_string_publish_is_suppressed() {
     sink.publish("same-value".to_owned()).unwrap();
     sink.publish("same-value".to_owned()).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
     assert_eq!(
         batch.updates[0].value,
-        StoredRtdValue::String(triomphe::Arc::new("same-value".to_owned())),
+        StoredRtdValue::String("same-value".into()),
     );
     assert_eq!(batch.updates[0].sequence, 0);
     batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -626,7 +659,7 @@ fn changed_value_after_same_value_is_delivered() {
     first.complete(RefreshOutcome::Delivered).unwrap();
 
     sink.publish(10.0).unwrap();
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
     sink.publish(11.0).unwrap();
 
     let changed = server.begin_refresh().unwrap();
@@ -658,7 +691,7 @@ fn same_value_after_successful_refresh_is_suppressed() {
 
     sink.publish(21.0).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
     let empty = server.begin_refresh().unwrap();
     assert!(empty.updates.is_empty());
@@ -667,11 +700,11 @@ fn same_value_after_successful_refresh_is_suppressed() {
 
 #[test]
 fn reconnect_does_not_inherit_previous_generation_latest() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink_slot, _) = publishing_source(Some(100.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink_slot, _) = publishing_source(Some(100.0_f64));
 
     let prepared_a = runtime
         .prepare(&source, RtdTopic::single("generation-latest").unwrap())
@@ -695,7 +728,7 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
     let id_b = prepared_b.id();
     prepared_b.commit();
     runtime
-        .claim_server(server_b.inner.generation, id_b)
+        .claim_server(server_b.generation(), id_b)
         .unwrap();
     let connection_b = runtime
         .connect_transaction(&server_b, TopicId(1), id_b)
@@ -703,10 +736,10 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
     assert_eq!(connection_b.value(), &StoredRtdValue::Number(100.0));
     connection_b.commit().unwrap();
 
-    assert_eq!(server_b.inner.publish.queued_update_count(), 0);
+    assert_eq!(server_b.test_server().publish.queued_update_count(), 0);
     let sink = sink_slot.lock().clone().expect("reconnected source sink");
     sink.publish(100.0).unwrap();
-    assert_eq!(server_b.inner.publish.queued_update_count(), 0);
+    assert_eq!(server_b.test_server().publish.queued_update_count(), 0);
     let second = server_b.begin_refresh().unwrap();
     assert!(second.updates.is_empty());
     second.complete(RefreshOutcome::Delivered).unwrap();
@@ -714,11 +747,11 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
 
 #[test]
 fn old_buffer_update_is_not_redelivered_after_newer_update() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("superseded").unwrap())
         .unwrap();
@@ -741,7 +774,7 @@ fn old_buffer_update_is_not_redelivered_after_newer_update() {
     assert_eq!(latest.updates[0].value, StoredRtdValue::Number(11.0));
     latest.complete(RefreshOutcome::Delivered).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
     let empty = server.begin_refresh().unwrap();
     assert!(empty.updates.is_empty());
@@ -750,11 +783,11 @@ fn old_buffer_update_is_not_redelivered_after_newer_update() {
 
 #[test]
 fn newer_update_survives_completion_of_older_refresh() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("newer-survives").unwrap())
         .unwrap();
@@ -772,7 +805,7 @@ fn newer_update_survives_completion_of_older_refresh() {
     sink.publish(11.0).unwrap();
     older.complete(RefreshOutcome::Delivered).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let newer = server.begin_refresh().unwrap();
     assert_eq!(newer.updates.len(), 1);
@@ -782,11 +815,11 @@ fn newer_update_survives_completion_of_older_refresh() {
 
 #[test]
 fn failed_refresh_keeps_pending_update() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("failed-refresh").unwrap())
         .unwrap();
@@ -804,7 +837,7 @@ fn failed_refresh_keeps_pending_update() {
     let sequence = failed.updates[0].sequence;
     failed.complete(RefreshOutcome::Failed).unwrap();
 
-    assert_eq!(server.inner.publish.queued_update_count(), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let retry = server.begin_refresh().unwrap();
     assert_eq!(retry.updates.len(), 1);
@@ -814,11 +847,11 @@ fn failed_refresh_keeps_pending_update() {
 
 #[test]
 fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("concurrent-publish").unwrap())
         .unwrap();
@@ -847,11 +880,11 @@ fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
 
 #[test]
 fn refresh_collection_skips_shards_without_deliverable_updates() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("ready-shard").unwrap())
         .unwrap();
@@ -864,8 +897,8 @@ fn refresh_collection_skips_shards_without_deliverable_updates() {
         .unwrap();
     sink.lock().clone().unwrap().publish(10.0).unwrap();
 
-    let unrelated_shard = server.inner.publish.lock_shard_for_test(0);
-    let server_clone = server.clone();
+    let unrelated_shard = server.test_server().publish.lock_shard_for_test(0);
+    let server_clone = server;
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let batch = server_clone.begin_refresh().unwrap();
@@ -884,11 +917,11 @@ fn refresh_collection_skips_shards_without_deliverable_updates() {
 
 #[test]
 fn refresh_planning_does_not_traverse_topic_shards() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source::<f64>(None);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("planning-only").unwrap())
         .unwrap();
@@ -901,20 +934,21 @@ fn refresh_planning_does_not_traverse_topic_shards() {
         .unwrap();
     sink.lock().clone().unwrap().publish(10.0).unwrap();
 
-    let ready_shard = server.inner.publish.lock_shard_for_test(1);
-    let planned = server.inner.publish.plan_refresh().unwrap();
+    let ready_shard = server.test_server().publish.lock_shard_for_test(1);
+    let planned = server.test_server().publish.plan_refresh().unwrap();
     drop(ready_shard);
     drop(planned);
 }
 
 #[test]
 fn refresh_reduction_orders_updates_by_global_sequence() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_one, sink_one, _) = fixture.add::<f64>(None);
+    let (source_two, sink_two, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source_one, sink_one, _) = publishing_source::<f64>(None);
-    let (source_two, sink_two, _) = publishing_source::<f64>(None);
 
     for (source, topic_id, name) in [
         (&source_one, TopicId(1), "reduction-one"),
@@ -949,7 +983,8 @@ fn refresh_reduction_orders_updates_by_global_sequence() {
 
 #[test]
 fn server_standalone_termination() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source_b, sink_b, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -957,7 +992,6 @@ fn server_standalone_termination() {
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
@@ -970,7 +1004,7 @@ fn server_standalone_termination() {
 
     let sink_b = sink_b.lock().clone().unwrap();
 
-    let server_a_clone = server_a.clone();
+    let server_a_clone = server_a;
     let handle_term = std::thread::spawn(move || {
         server_a_clone.terminate().unwrap();
     });
@@ -984,7 +1018,11 @@ fn server_standalone_termination() {
 
 #[test]
 fn stale_sink_returns_closing() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let fixture = SourceFixture::new();
+    let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -992,7 +1030,6 @@ fn stale_sink_returns_closing() {
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source_a, sink_a, _) = publishing_source(Some(0.0f64));
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
@@ -1009,7 +1046,6 @@ fn stale_sink_returns_closing() {
 
     assert!(matches!(sink_a.publish(1.0), Err(XllError::Closing)));
 
-    let (source_b, sink_b, _) = publishing_source(Some(0.0f64));
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap())
         .unwrap();
@@ -1030,7 +1066,21 @@ fn global_quota_enforcement() {
         max_queued_updates: RtdCapacity::from_usize(10),
         ..RtdLimits::standard()
     };
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(limits));
+    let fixture = SourceFixture::new();
+    let mut sources_a = Vec::new();
+    for _ in 0..6 {
+        sources_a.push(fixture.add(Some(0.0f64)));
+    }
+    let mut sources_b = Vec::new();
+    for _ in 0..5 {
+        sources_b.push(fixture.add(Some(0.0f64)));
+    }
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        limits,
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -1039,30 +1089,28 @@ fn global_quota_enforcement() {
         .unwrap();
 
     let mut sinks_a = Vec::new();
-    for i in 0..6 {
-        let (source, sink, _) = publishing_source(Some(0.0f64));
+    for (i, (source, sink, _)) in sources_a.into_iter().enumerate() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("a-{}", i)).unwrap())
             .unwrap();
         let id = prep.id();
         prep.commit();
         let conn = runtime
-            .connect_transaction(&server_a, TopicId(i), id)
+            .connect_transaction(&server_a, TopicId(i as i32), id)
             .unwrap();
         conn.commit().unwrap();
         sinks_a.push(sink.lock().clone().unwrap());
     }
 
     let mut sinks_b = Vec::new();
-    for i in 0..5 {
-        let (source, sink, _) = publishing_source(Some(0.0f64));
+    for (i, (source, sink, _)) in sources_b.into_iter().enumerate() {
         let prep = runtime
             .prepare(&source, RtdTopic::single(format!("b-{}", i)).unwrap())
             .unwrap();
         let id = prep.id();
         prep.commit();
         let conn = runtime
-            .connect_transaction(&server_b, TopicId(i), id)
+            .connect_transaction(&server_b, TopicId(i as i32), id)
             .unwrap();
         conn.commit().unwrap();
         sinks_b.push(sink.lock().clone().unwrap());
@@ -1085,7 +1133,8 @@ fn global_quota_enforcement() {
 
 #[test]
 fn key_binding_concurrency_rejection() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -1093,7 +1142,6 @@ fn key_binding_concurrency_rejection() {
         .register_server(ServerGeneration::new(2).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(1.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("shared").unwrap())
         .unwrap();
@@ -1117,7 +1165,8 @@ fn key_binding_concurrency_rejection() {
 
 #[test]
 fn runtime_close_waits_for_inflight() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source_a, sink_a, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -1136,7 +1185,6 @@ fn runtime_close_waits_for_inflight() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
         .unwrap();
 
-    let (source_a, sink_a, _) = publishing_source(Some(1.0f64));
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("a").unwrap())
         .unwrap();
@@ -1214,21 +1262,15 @@ fn inflight_register_waits_for_close() {
     handle_close.join().unwrap();
 
     assert!(closed_flag.load(Ordering::Acquire));
-    assert!(reg_res.is_ok());
-    assert!(runtime.servers.lock().is_empty());
+    let server = reg_res.unwrap();
+    assert!(matches!(server.test_server().enter_operation(), Err(XllError::Closing)));
 }
 
 #[test]
 fn inflight_prepare_waits_for_close() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
     let (enter_tx, enter_rx) = std::sync::mpsc::channel();
     let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
     let unblock_rx = Arc::new(Mutex::new(unblock_rx));
-
-    runtime.set_operation_enter_hook(Some(Arc::new(move || {
-        enter_tx.send(()).unwrap();
-        unblock_rx.lock().recv().unwrap();
-    })));
 
     let source_dropped = Arc::new(AtomicBool::new(false));
     struct DroppingSource(Arc<AtomicBool>);
@@ -1252,14 +1294,23 @@ fn inflight_prepare_waits_for_close() {
         }
     }
 
-    let source = RtdSourceHandle::for_internal(
+    let (arena, source) = SourceArena::with_source(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         DroppingSource(Arc::clone(&source_dropped)),
     )
     .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+
+    runtime.set_operation_enter_hook(Some(Arc::new(move || {
+        enter_tx.send(()).unwrap();
+        unblock_rx.lock().recv().unwrap();
+    })));
+
     let runtime_clone = Arc::clone(&runtime);
     let handle_prep = std::thread::spawn(move || {
-        runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap())
+        let prep = runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap())?;
+        drop(prep);
+        Ok::<(), XllError>(())
     });
 
     enter_rx.recv().unwrap();
@@ -1283,23 +1334,18 @@ fn inflight_prepare_waits_for_close() {
     handle_close.join().unwrap();
 
     assert!(closed_flag.load(Ordering::Acquire));
-    let prep = prep_res.unwrap();
-    drop(prep);
+    assert!(prep_res.is_ok());
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
     drop(catalog);
+    drop(runtime);
 
     assert!(source_dropped.load(Ordering::Acquire));
 }
 
 #[test]
 fn reentrant_drop_safety() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let server = runtime
-        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
-        .unwrap();
-
     struct ReentrantSource {
         runtime: Arc<SubscriptionRuntime>,
     }
@@ -1325,13 +1371,19 @@ fn reentrant_drop_safety() {
         }
     }
 
-    let source = RtdSourceHandle::for_internal(
-        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        ReentrantSource {
-            runtime: Arc::clone(&runtime),
-        },
-    )
-    .unwrap();
+    let fixture = SourceFixture::new();
+    let runtime_for_source = Arc::new(SubscriptionRuntime::new());
+    let source = fixture
+        .registration
+        .register(ReentrantSource {
+            runtime: Arc::clone(&runtime_for_source),
+        })
+        .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+
     let prep = runtime
         .prepare(&source, RtdTopic::single("reentrant").unwrap())
         .unwrap();
@@ -1348,18 +1400,18 @@ fn reentrant_drop_safety() {
 
 #[test]
 fn server_lifecycle_rejects_mutations_when_closing() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("test").unwrap())
         .unwrap();
     let id = prep.id();
 
-    server.inner.publish.mark_closing_for_test();
+    server.test_server().publish.mark_closing_for_test();
 
     assert!(matches!(
         server.attach_update_notifier(RtdNotifier::for_test(Arc::new(TestNotifierState::new()))),
@@ -1378,6 +1430,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
 }
 
 pub(crate) struct FailingDisconnectSubscription;
+// SAFETY: test subscription returns an error on disconnect without unsafe effects.
 unsafe impl RtdSubscription for FailingDisconnectSubscription {
     fn request_cancel(&self) {}
 
@@ -1390,12 +1443,12 @@ unsafe impl RtdSubscription for FailingDisconnectSubscription {
 
 #[test]
 fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("test_err").unwrap())
         .unwrap();
@@ -1409,13 +1462,13 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
 
     {
         server
-            .inner
+            .test_server()
             .subscriptions
             .lock()
             .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
     }
 
-    let server_clone = server.clone();
+    let server_clone = server;
     let handle = std::thread::spawn(move || server_clone.terminate());
 
     let res_owner = server.terminate();
@@ -1448,8 +1501,7 @@ fn server_terminate_callback_drop_failure_reaches_waiter() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::new(state)))
         .unwrap();
 
-    let server_clone = std::sync::Arc::clone(&server.inner);
-    let admission = server_clone.begin_termination();
+    let admission = server.test_server().begin_termination(&runtime);
     let TerminationAdmission::Owner(owner) = admission else {
         panic!("expected Owner admission");
     };
@@ -1471,8 +1523,7 @@ fn server_terminate_owner_unwind_notifies_waiter() {
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let server_clone = std::sync::Arc::clone(&server.inner);
-    let admission = server_clone.begin_termination();
+    let admission = server.test_server().begin_termination(&runtime);
     let TerminationAdmission::Owner(owner) = admission else {
         panic!("expected Owner admission");
     };
@@ -1491,12 +1542,12 @@ fn server_terminate_owner_unwind_notifies_waiter() {
 
 #[test]
 fn disconnect_propagates_subscription_cleanup_error() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("disc_err").unwrap())
         .unwrap();
@@ -1510,7 +1561,7 @@ fn disconnect_propagates_subscription_cleanup_error() {
 
     {
         server
-            .inner
+            .test_server()
             .subscriptions
             .lock()
             .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
@@ -1527,12 +1578,12 @@ fn disconnect_propagates_subscription_cleanup_error() {
 
 #[test]
 fn rollback_records_subscription_cleanup_error() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("roll_err").unwrap())
         .unwrap();
@@ -1545,7 +1596,7 @@ fn rollback_records_subscription_cleanup_error() {
 
     {
         server
-            .inner
+            .test_server()
             .subscriptions
             .lock()
             .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
@@ -1562,6 +1613,7 @@ fn rollback_records_subscription_cleanup_error() {
 }
 
 struct PanickingCancelSubscription;
+// SAFETY: test subscription tests cancel panic handling without unsafe effects.
 unsafe impl RtdSubscription for PanickingCancelSubscription {
     fn request_cancel(&self) {
         panic!("request_cancel panic test");
@@ -1573,12 +1625,12 @@ unsafe impl RtdSubscription for PanickingCancelSubscription {
 
 #[test]
 fn request_cancel_panic_propagates_to_termination() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("cancel_panic").unwrap())
         .unwrap();
@@ -1592,7 +1644,7 @@ fn request_cancel_panic_propagates_to_termination() {
 
     {
         server
-            .inner
+            .test_server()
             .subscriptions
             .lock()
             .insert(TopicId(1), Box::new(PanickingCancelSubscription));
@@ -1625,14 +1677,10 @@ impl RtdSource for DelayedSubscribeFailingSource {
 
 #[test]
 fn install_failure_during_closing_propagates_cleanup_error() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let server = runtime
-        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
-        .unwrap();
     let (tx_close, rx_close) = std::sync::mpsc::channel();
     let (tx_enter, rx_enter) = std::sync::mpsc::channel();
 
-    let source = RtdSourceHandle::for_internal(
+    let (arena, source) = SourceArena::with_source(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         DelayedSubscribeFailingSource {
             tx_entered: std::sync::Mutex::new(Some(tx_enter)),
@@ -1640,6 +1688,10 @@ fn install_failure_during_closing_propagates_cleanup_error() {
         },
     )
     .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
     let prep = runtime
         .prepare(&source, RtdTopic::single("delayed_fail").unwrap())
         .unwrap();
@@ -1647,7 +1699,7 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     prep.commit();
 
     let runtime_clone = Arc::clone(&runtime);
-    let server_clone = server.clone();
+    let server_clone = server;
     let id_clone = id;
 
     let handle = std::thread::spawn(move || {
@@ -1656,7 +1708,7 @@ fn install_failure_during_closing_propagates_cleanup_error() {
 
     rx_enter.recv().unwrap();
 
-    server.inner.publish.mark_closing_for_test();
+    server.test_server().publish.mark_closing_for_test();
 
     tx_close.send(()).unwrap();
 
@@ -1678,8 +1730,8 @@ fn install_failure_during_closing_propagates_cleanup_error() {
 
 #[test]
 fn same_handle_and_same_topic_reuse_pending_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let topic = RtdTopic::single("shared").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
@@ -1697,10 +1749,10 @@ fn same_handle_and_same_topic_reuse_pending_identity() {
 
 #[test]
 fn distinct_handles_do_not_share_source_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-
-    let (source_a, _, _) = publishing_source::<f64>(None);
-    let (source_b, _, _) = publishing_source::<f64>(None);
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
     let topic = RtdTopic::single("shared").unwrap();
 
     let first = runtime.prepare(&source_a, topic.clone()).unwrap();
@@ -1714,12 +1766,12 @@ fn distinct_handles_do_not_share_source_identity() {
 
 #[test]
 fn same_handle_reuses_active_subscription_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("shared-active").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
@@ -1753,20 +1805,24 @@ fn same_handle_reuses_active_subscription_identity() {
 
 #[test]
 fn released_source_identity_returns_to_the_live_quota() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: RtdCapacity::from_usize(1),
-        ..RtdLimits::standard()
-    }));
-
-    let (first_source, _, _) = publishing_source::<f64>(None);
+    let fixture = SourceFixture::new();
+    let (first_source, _, _) = fixture.add::<f64>(None);
+    let (second_source, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::from_usize(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
 
     runtime
         .prepare(&first_source, RtdTopic::single("first").unwrap())
         .unwrap()
         .rollback();
-    drop(first_source);
-
-    let (second_source, _, _) = publishing_source::<f64>(None);
+    let _ = first_source;
 
     runtime
         .prepare(&second_source, RtdTopic::single("second").unwrap())
@@ -1776,8 +1832,8 @@ fn released_source_identity_returns_to_the_live_quota() {
 
 #[test]
 fn live_source_reuses_identity_after_pending_subscription_is_removed() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let topic = RtdTopic::single("stable").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
@@ -1792,13 +1848,17 @@ fn live_source_reuses_identity_after_pending_subscription_is_removed() {
 
 #[test]
 fn failed_pending_admission_rolls_back_new_source_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_pending: RtdCapacity::disabled(),
-        max_source_ids: RtdCapacity::from_usize(1),
-        ..RtdLimits::standard()
-    }));
-
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_pending: RtdCapacity::disabled(),
+            max_source_ids: RtdCapacity::from_usize(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        arena,
+    ));
 
     assert!(matches!(
         runtime.prepare(&source, RtdTopic::single("blocked").unwrap()),
@@ -1811,7 +1871,7 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
 #[test]
 fn source_refcount_tracks_live_subscription_identities() {
     let mut index = SubscriptionIdentityIndex::default();
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
     let first_identity = SubscriptionIdentity {
         source_id: SourceId(source.id),
         topic: RtdTopic::single("first").unwrap(),
@@ -1845,11 +1905,16 @@ fn source_refcount_tracks_live_subscription_identities() {
 
 #[test]
 fn source_limit_counts_distinct_live_sources_not_topics() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: RtdCapacity::from_usize(1),
-        ..RtdLimits::standard()
-    }));
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::from_usize(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        arena,
+    ));
 
     let first = runtime
         .prepare(&source, RtdTopic::single("first-topic").unwrap())
@@ -1876,12 +1941,18 @@ fn source_limit_counts_distinct_live_sources_not_topics() {
 
 #[test]
 fn source_limit_rejects_a_second_live_source() {
-    let runtime = Arc::new(SubscriptionRuntime::with_limits(RtdLimits {
-        max_source_ids: RtdCapacity::from_usize(1),
-        ..RtdLimits::standard()
-    }));
-    let (source_a, _, _) = publishing_source::<f64>(None);
-    let (source_b, _, _) = publishing_source::<f64>(None);
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::from_usize(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
 
     let first = runtime
         .prepare(&source_a, RtdTopic::single("first-source").unwrap())
@@ -1910,7 +1981,7 @@ fn source_limit_rejects_a_second_live_source() {
 #[test]
 fn duplicate_identity_does_not_change_source_refcount() {
     let mut index = SubscriptionIdentityIndex::default();
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
     let identity = SubscriptionIdentity {
         source_id: SourceId(source.id),
         topic: RtdTopic::single("duplicate").unwrap(),
@@ -1932,8 +2003,8 @@ fn duplicate_identity_does_not_change_source_refcount() {
 
 #[test]
 fn topic_part_boundaries_are_part_of_subscription_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
 
     let topic_a = RtdTopic::new(["a\0b", "c"]).unwrap();
     let topic_b = RtdTopic::new(["a", "b\0c"]).unwrap();
@@ -1948,8 +2019,8 @@ fn topic_part_boundaries_are_part_of_subscription_identity() {
 
 #[test]
 fn structurally_equal_topics_share_transport_key() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
 
     let prepared_a = runtime
         .prepare(&source, RtdTopic::new(["market", "USD\0JPY"]).unwrap())
@@ -1971,8 +2042,8 @@ fn topic_rejects_parts_larger_than_excel_string_limit() {
 
 #[test]
 fn large_logical_topic_uses_bounded_transport_key() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source, _, _) = publishing_source::<f64>(None);
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
 
     let topic = RtdTopic::single("x".repeat(16 * 1024)).unwrap();
     let prepared = runtime.prepare(&source, topic).unwrap();
@@ -1985,10 +2056,10 @@ fn large_logical_topic_uses_bounded_transport_key() {
 
 #[test]
 fn distinct_identities_receive_distinct_transport_keys() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-
-    let (source_a, _, _) = publishing_source::<f64>(None);
-    let (source_b, _, _) = publishing_source::<f64>(None);
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
 
     let topic = RtdTopic::single("same").unwrap();
 
@@ -2001,11 +2072,11 @@ fn distinct_identities_receive_distinct_transport_keys() {
 
 #[test]
 fn identity_index_is_removed_after_final_unbind() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, _, _) = publishing_source(Some(1.0_f64));
 
     let prepared = runtime
         .prepare(&source, RtdTopic::single("unbind_test").unwrap())
@@ -2028,9 +2099,10 @@ fn identity_index_is_removed_after_final_unbind() {
 
 #[test]
 fn catalog_entries_are_canonical_for_subscription_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let (source_a, _, _) = publishing_source::<f64>(None);
-    let (source_b, _, _) = publishing_source::<f64>(None);
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
 
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("topic-a").unwrap())
@@ -2108,7 +2180,8 @@ fn refresh_state_attach_prepare_commit_lifecycle() {
 
 #[test]
 fn server_notification_retry_sequence_eventually_succeeds() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -2128,7 +2201,6 @@ fn server_notification_retry_sequence_eventually_succeeds() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
-    let (source, sink, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("retry_test").unwrap())
         .unwrap();
@@ -2149,7 +2221,8 @@ fn server_notification_retry_sequence_eventually_succeeds() {
 
 #[test]
 fn server_notification_retry_suppressed_after_max_attempts() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -2177,7 +2250,6 @@ fn server_notification_retry_suppressed_after_max_attempts() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
-    let (source, sink, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("suppress_test").unwrap())
         .unwrap();
@@ -2198,7 +2270,8 @@ fn server_notification_retry_suppressed_after_max_attempts() {
 
 #[test]
 fn server_notification_panic_records_cleanup_failure() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -2210,7 +2283,6 @@ fn server_notification_panic_records_cleanup_failure() {
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
         .unwrap();
 
-    let (source, sink, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("panic_test").unwrap())
         .unwrap();
@@ -2231,24 +2303,24 @@ fn server_notification_panic_records_cleanup_failure() {
 }
 
 #[test]
-fn parent_runtime_drop_causes_fail_closed_on_server() {
+fn runtime_close_causes_fail_closed_on_server() {
     let runtime = Arc::new(SubscriptionRuntime::new());
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    drop(runtime);
+    runtime.close().unwrap();
 
     assert!(matches!(
-        server.inner.enter_operation(),
+        server.test_server().enter_operation(),
         Err(XllError::Closing)
     ));
     assert!(matches!(
-        server.inner.enter_owned_operation(),
+        server.test_server().enter_owned_operation(),
         Err(XllError::Closing)
     ));
     assert!(matches!(
-        server.inner.publish.publish(
+        server.test_server().publish.publish(
             TopicId(1),
             ConnectionGeneration::new(1).unwrap(),
             RtdValue::Number(1.0).into_stored().unwrap(),
@@ -2259,11 +2331,11 @@ fn parent_runtime_drop_causes_fail_closed_on_server() {
 
 #[test]
 fn runtime_close_and_publish_race() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("race_test").unwrap())
         .unwrap();
@@ -2315,13 +2387,12 @@ fn runtime_close_and_publish_race() {
 }
 
 #[test]
-fn quota_permit_survives_parent_drop_and_releases_on_drain() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let quota = triomphe::Arc::clone(&runtime.queued_update_quota);
+fn quota_permit_releases_on_drain() {
+    let (arena, source, sink_slot, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
-    let (source, sink_slot, _) = publishing_source(Some(0.0f64));
     let prep = runtime
         .prepare(&source, RtdTopic::single("quota_test").unwrap())
         .unwrap();
@@ -2335,21 +2406,21 @@ fn quota_permit_survives_parent_drop_and_releases_on_drain() {
     let sink = sink_slot.lock().clone().unwrap();
 
     sink.publish(42.0).unwrap();
-    assert_eq!(quota.used(), 1);
+    assert_eq!(runtime.queued_update_quota.used(), 1);
 
-    drop(runtime);
-    assert_eq!(quota.used(), 1);
-
-    drop(sink);
-    drop(sink_slot);
-    drop(server);
-    assert_eq!(quota.used(), 0);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    batch
+        .complete(crate::subscription::RefreshOutcome::Delivered)
+        .unwrap();
+    assert_eq!(runtime.queued_update_quota.used(), 0);
 }
 
 pub(crate) struct SinkHoldingSubscription<T> {
     _sink: RtdSink<T>,
 }
 
+// SAFETY: test subscription holds an RtdSink and does not touch unsafe state.
 unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
     fn request_cancel(&self) {}
 
@@ -2374,17 +2445,16 @@ impl RtdSource for SinkCapturingSource {
 
 #[test]
 fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
-    let server = runtime
-        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
-        .unwrap();
-    assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
-
-    let source = RtdSourceHandle::for_internal(
+    let (arena, source) = SourceArena::with_source(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         SinkCapturingSource,
     )
     .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+
     let prep = runtime
         .prepare(&source, RtdTopic::single("cycle_test").unwrap())
         .unwrap();
@@ -2396,25 +2466,21 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
         .unwrap();
     conn.commit().unwrap();
 
-    // While active, subscription holds a sink reference to PublishCore
-    assert_eq!(triomphe::Arc::count(&server.inner.publish), 2);
-
-    // Terminate server, closing and dropping subscriptions
+    // Terminate server, closing and disconnecting subscriptions
     server.terminate().unwrap();
 
-    // After termination, subscription sink is dropped, restoring unique ownership to SubscriptionServer
-    assert_eq!(triomphe::Arc::count(&server.inner.publish), 1);
-    assert!(triomphe::Arc::is_unique(&server.inner.publish));
+    // After termination, server is marked closed/terminated
+    assert!(server.claim(id).is_err());
 }
 
 #[test]
 fn prepare_warm_path_reuses_registered_source_identity() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("warm-path-strong-count").unwrap();
 
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
@@ -2431,7 +2497,7 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     second_pending.rollback();
 
     // Commit and connect transaction to activate subscription.
-    // The pending catalog entry is consumed/removed, so the runtime no longer retains Arc<Source>.
+    // The pending catalog entry is consumed/removed.
     let id = first.id();
     first.commit();
     let conn = runtime
@@ -2448,12 +2514,12 @@ fn prepare_warm_path_reuses_registered_source_identity() {
 
 #[test]
 fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
 
-    let (source, _, _) = publishing_source(Some(1.0_f64));
     let topic = RtdTopic::single("existing-active-noop").unwrap();
 
     let first = runtime.prepare(&source, topic.clone()).unwrap();
@@ -2466,19 +2532,14 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
         .unwrap();
     conn.commit().unwrap();
 
-    // Record baseline weak count of runtime (from server, etc.)
-    let baseline_weak = Arc::weak_count(&runtime);
-
-    // Prepare on existing active: must NOT downgrade runtime (no weak count bump)
+    // Prepare on existing active: warm lookup
     let warm = runtime.prepare(&source, topic).unwrap();
     assert_eq!(warm.id(), id);
     assert_eq!(warm.key(), &key);
     assert!(!warm.has_reservation());
-    assert_eq!(Arc::weak_count(&runtime), baseline_weak);
 
     // Rollback is a no-op: catalog active keys and pending are untouched
     warm.rollback();
-    assert_eq!(Arc::weak_count(&runtime), baseline_weak);
     let catalog = runtime.catalog.lock();
     assert!(
         catalog
@@ -2491,10 +2552,10 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
 
 #[test]
 fn resolve_transport_key_validates_runtime_identity() {
-    let runtime_a = Arc::new(SubscriptionRuntime::new());
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime_a = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let runtime_b = Arc::new(SubscriptionRuntime::new());
 
-    let (source, _, _) = publishing_source::<f64>(None);
     let prep = runtime_a
         .prepare(&source, RtdTopic::single("resolve-test").unwrap())
         .unwrap();

@@ -90,6 +90,11 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
             .pending_update_count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_server(&self) -> &SubscriptionServer<H> {
+        self.server().expect("test server remains registered")
+    }
+
     pub(crate) fn claim(&self, id: SubscriptionId) -> XllResult<()> {
         let runtime = self.runtime();
         let _runtime_operation = runtime.enter_external_operation()?;
@@ -119,6 +124,7 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
 // SAFETY: the runtime and server are thread-safe; the temporal validity proof
 // is the same server/module quiescence contract used by every handle method.
 unsafe impl<H: SubscriptionHost> Send for SubscriptionServerHandle<H> {}
+// SAFETY: SubscriptionServerHandle is a Copy non-owning handle with no interior mutability.
 unsafe impl<H: SubscriptionHost> Sync for SubscriptionServerHandle<H> {}
 
 pub(crate) struct SubscriptionServer<H: SubscriptionHost> {
@@ -142,6 +148,10 @@ pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
     server: NonNull<SubscriptionServer<H>>,
     pub(crate) _publish_operation: OwnedPublishOperation<H>,
 }
+
+// SAFETY: the nested publish operation guards ensure liveness of the server
+// across thread boundaries for the duration of the owned operation.
+unsafe impl<H: SubscriptionHost> Send for OwnedServerOperation<H> {}
 
 impl<H: SubscriptionHost> OwnedServerOperation<H> {
     #[inline]

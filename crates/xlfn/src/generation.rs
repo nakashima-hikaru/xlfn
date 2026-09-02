@@ -95,6 +95,7 @@ impl<A: crate::Addin> ExecutionLease<A> {
 // SAFETY: the generation payload is Send + Sync by the Addin contract and the
 // owned permit prevents reclamation while the pointer crosses threads.
 unsafe impl<A: crate::Addin> Send for ExecutionLease<A> {}
+// SAFETY: same invariant as Send; shared borrows access immutable shared_state.
 unsafe impl<A: crate::Addin> Sync for ExecutionLease<A> {}
 
 /// Identity of an in-flight open transaction. It is distinct from the

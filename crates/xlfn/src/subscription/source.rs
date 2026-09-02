@@ -188,7 +188,7 @@ pub struct RtdSink<T> {
 impl<T> Clone for RtdSink<T> {
     fn clone(&self) -> Self {
         Self {
-            sink: self.sink.clone(),
+            sink: self.sink,
             _value: PhantomData,
         }
     }

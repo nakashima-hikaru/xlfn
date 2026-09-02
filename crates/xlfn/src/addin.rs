@@ -854,29 +854,42 @@ mod tests {
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        #[cfg(feature = "rtd")]
-        let services = runtime.generation_services().unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
             #[cfg(feature = "rtd")]
-            let main_thread = MainThreadContext::<TestU32Addin>::new(
-                state,
-                crate::rtd::RtdCallContext::new(
-                    services.rtd_call_access(),
-                    crate::host_api::ExcelHost::new(scope.callbacks()),
-                ),
-            );
+            runtime
+                .with_generation_services(|services| {
+                    let main_thread = MainThreadContext::<TestU32Addin>::new(
+                        state,
+                        crate::rtd::RtdCallContext::new(
+                            services.rtd_call_access(),
+                            crate::host_api::ExcelHost::new(scope.callbacks()),
+                        ),
+                    );
+                    let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
+
+                    assert_eq!(thread_safe.state(), &17);
+                    assert_eq!(main_thread.state(), &17);
+                    assert_eq!(macro_sheet.state(), &17);
+
+                    let copied = main_thread.clone();
+                    assert_eq!(copied.state(), &17);
+                    assert_eq!(main_thread.state(), &17);
+                })
+                .unwrap();
             #[cfg(not(feature = "rtd"))]
-            let main_thread = MainThreadContext::<TestU32Addin>::new(state);
-            let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
+            {
+                let main_thread = MainThreadContext::<TestU32Addin>::new(state);
+                let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
 
-            assert_eq!(thread_safe.state(), &17);
-            assert_eq!(main_thread.state(), &17);
-            assert_eq!(macro_sheet.state(), &17);
+                assert_eq!(thread_safe.state(), &17);
+                assert_eq!(main_thread.state(), &17);
+                assert_eq!(macro_sheet.state(), &17);
 
-            let copied = main_thread.clone();
-            assert_eq!(copied.state(), &17);
-            assert_eq!(main_thread.state(), &17);
+                let copied = main_thread.clone();
+                assert_eq!(copied.state(), &17);
+                assert_eq!(main_thread.state(), &17);
+            }
         });
     }
 
@@ -936,6 +949,7 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
+        // SAFETY: test subscription does not access host or async runtimes.
         unsafe impl crate::subscription::RtdSubscription for TestSubscription {
             fn request_cancel(&self) {}
             fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
@@ -964,66 +978,73 @@ mod tests {
             }
         }
 
-        let runtime = crate::runtime::Runtime::<()>::new();
-        let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        let subscriptions = runtime.subscriptions().unwrap();
-        let subscriptions = subscriptions.as_arc();
         let disconnected = Arc::new(AtomicBool::new(false));
-        let source = crate::subscription::RtdSourceHandle::for_internal(
-            runtime
-                .last_committed_generation()
-                .expect("test runtime has a generation"),
+        let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+        let (arena, source) = crate::subscription::SourceArena::with_source(
+            generation,
             TestSource {
                 disconnected: Arc::clone(&disconnected),
             },
         )
         .unwrap();
-        let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
-        let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
-        let server = subscriptions
-            .register_server(
-                crate::subscription::ServerGeneration::new(51)
-                    .expect("non-zero test server generation"),
-            )
-            .unwrap();
-        let id = prepared.id();
-        let key_obj = *prepared.key();
-        let conn = subscriptions
-            .connect_transaction(&server, crate::subscription::TopicId(7), id)
-            .unwrap();
-        assert_eq!(
-            conn.value(),
-            &crate::subscription::StoredRtdValue::Number(17.5)
-        );
-        conn.commit().unwrap();
 
-        let services = runtime.generation_services().unwrap();
-        let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
-        assert_eq!(repeated.id(), id);
-        assert_eq!(repeated.key(), &key_obj);
-        assert!(!repeated.has_reservation());
-        repeated.rollback();
+        let runtime = crate::runtime::Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_sources(opening, (), (), arena);
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
+        let server = runtime
+            .with_subscriptions(|subscriptions| {
+                let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
+                let server = subscriptions
+                    .register_server(
+                        crate::subscription::ServerGeneration::new(51)
+                            .expect("non-zero test server generation"),
+                    )
+                    .unwrap();
+                let id = prepared.id();
+                let key_obj = *prepared.key();
+                let conn = subscriptions
+                    .connect_transaction(&server, crate::subscription::TopicId(7), id)
+                    .unwrap();
+                assert_eq!(
+                    conn.value(),
+                    &crate::subscription::StoredRtdValue::Number(17.5)
+                );
+                conn.commit().unwrap();
+
+                let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
+                assert_eq!(repeated.id(), id);
+                assert_eq!(repeated.key(), &key_obj);
+                assert!(!repeated.has_reservation());
+                repeated.rollback();
+                server
+            })
+            .unwrap();
 
         let _state = ();
         crate::value::with_excel_call_scope(|scope| {
-            let context = MainThreadContext::<()>::new(
-                &_state,
-                crate::rtd::RtdCallContext::new(
-                    services.rtd_call_access(),
-                    crate::host_api::ExcelHost::new(scope.callbacks()),
-                ),
-            );
-            assert!(matches!(
-                context.rtd().subscribe(&source, topic),
-                Err(crate::XllError::ExcelApi {
-                    function: crate::ExcelApiFunction::Rtd,
-                    failure: crate::ExcelApiFailure::Status(crate::ExcelCallbackStatus::Failed(
-                        xlfn_sys::XLRET_FAILED,
-                    )),
+            runtime
+                .with_generation_services(|services| {
+                    let context = MainThreadContext::<()>::new(
+                        &_state,
+                        crate::rtd::RtdCallContext::new(
+                            services.rtd_call_access(),
+                            crate::host_api::ExcelHost::new(scope.callbacks()),
+                        ),
+                    );
+                    assert!(matches!(
+                        context.rtd().subscribe(&source, topic),
+                        Err(crate::XllError::ExcelApi {
+                            function: crate::ExcelApiFunction::Rtd,
+                            failure: crate::ExcelApiFailure::Status(crate::ExcelCallbackStatus::Failed(
+                                xlfn_sys::XLRET_FAILED,
+                            )),
+                        })
+                    ));
                 })
-            ));
+                .unwrap();
         });
 
         let batch = server.begin_refresh().unwrap();

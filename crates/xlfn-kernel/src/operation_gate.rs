@@ -97,6 +97,7 @@ impl Drop for OwnedOperationGuard {
 // SAFETY: OperationGate is thread-safe and may release an operation from any
 // thread; temporal validity is guaranteed by the constructor contract.
 unsafe impl Send for OwnedOperationGuard {}
+// SAFETY: OperationGate is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for OwnedOperationGuard {}
 
 pub struct TerminationWaitGuard<'a> {

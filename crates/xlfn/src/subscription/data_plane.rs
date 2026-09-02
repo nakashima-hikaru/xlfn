@@ -96,6 +96,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 // SAFETY: every non-owning pointer targets an immutable-address field of the
 // owning SubscriptionRuntime, which drains and drops all servers first.
 unsafe impl<H: SubscriptionHost> Send for PublishCore<H> {}
+// SAFETY: PublishCore fields use atomic or mutex synchronization.
 unsafe impl<H: SubscriptionHost> Sync for PublishCore<H> {}
 
 impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
@@ -138,6 +139,10 @@ pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
     _observation: ServerOperationObservation,
 }
 
+// SAFETY: the nested runtime and server operation guards admit execution
+// across thread boundaries for the duration of the owned operation.
+unsafe impl<H: SubscriptionHost> Send for OwnedPublishOperation<H> {}
+
 pub(crate) struct PublishTerminationStart<'a, H: SubscriptionHost> {
     wait: TerminationWaitGuard<'a>,
     notifier: Option<H::Notifier>,
@@ -177,6 +182,10 @@ pub(crate) struct InstalledConnection {
 pub(crate) struct ServerOperationObservation {
     services: NonNull<RuntimeServices>,
 }
+
+// SAFETY: RuntimeServices is thread-safe, and ServerOperationObservation is
+// only held within an admitted operation guard that guarantees runtime liveness.
+unsafe impl Send for ServerOperationObservation {}
 
 impl ServerOperationObservation {
     fn begin(services: &RuntimeServices) -> Self {

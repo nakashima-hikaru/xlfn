@@ -68,6 +68,7 @@ impl ErasedSink {
 // SAFETY: PublishCore is Sync and the capability is read-only. Temporal
 // validity is guaranteed by the unsafe RtdSubscription contract.
 unsafe impl Send for ErasedSink {}
+// SAFETY: ErasedSink accesses PublishCore via synchronized atomic/mutex methods.
 unsafe impl Sync for ErasedSink {}
 
 pub(crate) struct ActiveSubscription {

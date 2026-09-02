@@ -66,6 +66,7 @@ impl<A: crate::Addin> PublishedGeneration<A> {
 // Send + Sync by their contracts. Access is possible only while the
 // publication drain gate holds an admission.
 unsafe impl<A: crate::Addin> Send for PublishedGeneration<A> {}
+// SAFETY: same invariant as Send; concurrent reads are synchronized by admission.
 unsafe impl<A: crate::Addin> Sync for PublishedGeneration<A> {}
 
 /// Read-side admission capability for one coherent open generation.

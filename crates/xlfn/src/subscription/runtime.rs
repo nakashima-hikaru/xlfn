@@ -689,6 +689,10 @@ pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
     pub(crate) finished: bool,
 }
 
+// SAFETY: the connection carries an OwnedServerOperation with runtime/server
+// operation permits, ensuring liveness across threads until finished or dropped.
+unsafe impl<H: SubscriptionHost> Send for SubscriptionConnection<H> {}
+
 impl<H: SubscriptionHost> SubscriptionConnection<H> {
     #[inline]
     fn runtime(&self) -> &SubscriptionRuntime<H> {

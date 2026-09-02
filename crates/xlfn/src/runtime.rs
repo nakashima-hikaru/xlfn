@@ -370,6 +370,81 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
+    #[cfg(all(test, feature = "rtd"))]
+    pub(crate) fn publish_with_sources<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun>,
+        state: A::SharedState,
+        layers: A::Layers,
+        sources: crate::subscription::SourceArena,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled>
+    where
+        A::LifecycleState: Default,
+    {
+        let access = self
+            .bind_addin_lifecycle()
+            .expect("test runtime binds its lifecycle thread");
+        let transaction = opening.attach_host().initialized(
+            Default::default(),
+            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+        );
+        let transaction = match transaction.stage_opening_generation(OpeningGeneration {
+            shared_state: state,
+            layers,
+            init_config: crate::addin::RuntimeConfig::new(),
+        }) {
+            Ok(transaction) => transaction,
+            Err((_error, transaction, _opening)) => {
+                drop(transaction);
+                panic!("test runtime must stage its opening generation");
+            }
+        };
+        match transaction.install_lifecycle(&access) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                drop(transaction);
+                panic!("test runtime must install its lifecycle state: {reason:?}");
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "rtd"))]
+    pub(crate) fn publish_with_lifecycle_and_sources<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun>,
+        state: A::SharedState,
+        lifecycle_state: A::LifecycleState,
+        layers: A::Layers,
+        sources: crate::subscription::SourceArena,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled> {
+        let access = self
+            .bind_addin_lifecycle()
+            .expect("test runtime binds its lifecycle thread");
+        let transaction = opening.attach_host().initialized(
+            lifecycle_state,
+            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+        );
+        let transaction = match transaction.stage_opening_generation(OpeningGeneration {
+            shared_state: state,
+            layers,
+            init_config: crate::addin::RuntimeConfig::new(),
+        }) {
+            Ok(transaction) => transaction,
+            Err((_error, transaction, _opening)) => {
+                drop(transaction);
+                panic!("test runtime must stage its opening generation");
+            }
+        };
+        match transaction.install_lifecycle(&access) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                drop(transaction);
+                panic!("test runtime must install its lifecycle state: {reason:?}");
+            }
+        }
+    }
+
+
     pub(crate) fn bind_addin_lifecycle(
         &self,
     ) -> Result<AddinLifecycleAccess<'_, A>, ThreadAffineError> {
@@ -574,7 +649,11 @@ impl<A: crate::Addin> Runtime<A> {
             .ok_or(XllError::Closing)?
     }
 
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[allow(
+        dead_code,
+        reason = "helper is used only under specific feature combinations"
+    )]
     pub(crate) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(&GenerationServices) -> R,
@@ -652,14 +731,13 @@ impl<A: crate::Addin> Runtime<A> {
         }
         #[cfg(feature = "rtd")]
         {
+            let generation = self.protocol_generation();
             let Some(result) = self.lifecycle.with_generation_services(|services| {
-                services.close_subscriptions(self.protocol_generation())
+                services.close_subscriptions(generation)
             }) else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::excel_rtd::stopped_subscriptions(
-                        self.protocol_generation(),
-                    ));
+                    return Ok(crate::excel_rtd::stopped_subscriptions(generation));
                 }
                 #[cfg(not(test))]
                 {

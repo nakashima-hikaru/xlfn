@@ -104,7 +104,10 @@ impl BindingPtr {
     }
 }
 
+// SAFETY: BindingPtr is an audited pointer to an immutable BindingRecord whose
+// lifetime is guaranteed by the table-quiescence protocol.
 unsafe impl Send for BindingPtr {}
+// SAFETY: BindingRecord is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for BindingPtr {}
 
 pub(crate) struct BindingSnapshot {
@@ -218,6 +221,10 @@ pub(crate) struct RegistryState {
     pub(crate) slots: Vec<BindingSlot>,
     pub(crate) free: Vec<usize>,
     pub(crate) live_bindings: u32,
+    #[allow(
+        clippy::vec_box,
+        reason = "BindingRecord requires stable heap addresses for non-owning BindingPtr"
+    )]
     records: Vec<Box<BindingRecord>>,
 }
 

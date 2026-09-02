@@ -1983,10 +1983,7 @@ fn executor_can_restart_after_publication_is_drained() {
     let manager = Arc::new(AsyncManager::new());
     manager.start(1).unwrap();
     let old_snapshot = manager.snapshot_spawn_executor().unwrap();
-    assert_eq!(
-        old_snapshot.current.load(Ordering::Acquire).is_null(),
-        false
-    );
+    assert!(!old_snapshot.current.load(Ordering::Acquire).is_null());
     drop(old_snapshot);
 
     assert!(manager.close().issues.is_empty());

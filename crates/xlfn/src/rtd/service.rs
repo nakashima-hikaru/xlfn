@@ -131,7 +131,12 @@ mod tests {
     #[test]
     fn subscription_service_slot_reuses_published_runtime() {
         let slot = SubscriptionServiceSlot::new();
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
 
         let first = slot.read(RtdSubscriptionHost::detached()).unwrap();
         let second = slot.read(RtdSubscriptionHost::detached()).unwrap();
@@ -142,7 +147,12 @@ mod tests {
     #[test]
     fn subscription_service_slot_initializes_once_under_contention() {
         let slot = Arc::new(SubscriptionServiceSlot::new());
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let mut handles = Vec::new();
 
@@ -166,7 +176,12 @@ mod tests {
     #[test]
     fn subscription_service_slot_seal_unpublishes_runtime() {
         let slot = SubscriptionServiceSlot::new();
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
         let read = slot.read(RtdSubscriptionHost::detached()).unwrap();
         drop(read);
 
@@ -182,7 +197,12 @@ mod tests {
     #[test]
     fn subscription_service_slot_can_reopen_after_close() {
         let slot = SubscriptionServiceSlot::new();
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
 
         let first = slot.read(RtdSubscriptionHost::detached()).unwrap();
         let first_runtime_id = first.runtime_id;
@@ -190,7 +210,12 @@ mod tests {
 
         slot.seal(Some(generation())).unwrap();
 
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
         let second = slot.read(RtdSubscriptionHost::detached()).unwrap();
 
         assert_ne!(first_runtime_id, second.runtime_id);
@@ -204,7 +229,12 @@ mod tests {
             Err(crate::XllError::Closing)
         ));
 
-        slot.arm(generation(), RtdLimits::standard()).unwrap();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
         assert!(slot.read(RtdSubscriptionHost::detached()).is_ok());
 
         slot.seal(Some(generation())).unwrap();
