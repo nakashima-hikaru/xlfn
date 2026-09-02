@@ -1,14 +1,15 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use xlfn::prelude::*;
 use xlfn::rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
 
 pub struct State {
-    rtd: RtdSourceHandle<RtdFixture>,
-    publisher: Arc<RtdFixture>,
+    rtd: RtdSourceHandle<RtdFixtureSource>,
+    core: Box<FixtureCore>,
 }
 
 #[excel_addin(
@@ -27,13 +28,15 @@ impl Addin for FixtureAddin {
     fn open(
         context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        let publisher = Arc::new(RtdFixture::default());
-        Ok(Opened::new(State {
-            rtd: context
-                .rtd()
-                .register_shared_source(Arc::clone(&publisher))?,
-            publisher,
-        }, (), ()))
+        let core = Box::new(FixtureCore {
+            sinks: Mutex::new(HashMap::new()),
+            sequence: AtomicI32::new(0),
+        });
+        let core_ptr = NonNull::from(&*core);
+        let rtd = context
+            .rtd()
+            .register_source(RtdFixtureSource { core: core_ptr })?;
+        Ok(Opened::new(State { rtd, core }, (), ()))
     }
 }
 
@@ -64,13 +67,12 @@ pub async fn async_add(x: f64, y: f64) -> XllResult<f64> {
     }
 }
 
-#[derive(Default)]
-struct RtdFixture {
-    sinks: Arc<Mutex<HashMap<String, RtdSink<i32>>>>,
+struct FixtureCore {
+    sinks: Mutex<HashMap<String, RtdSink<i32>>>,
     sequence: AtomicI32,
 }
 
-impl RtdFixture {
+impl FixtureCore {
     fn publish_batch(&self, topic_count: i32) -> XllResult<i32> {
         if !(1..=3).contains(&topic_count) {
             return Err(XllError::input(
@@ -104,7 +106,27 @@ impl RtdFixture {
     }
 }
 
-impl RtdSource for RtdFixture {
+#[derive(Clone, Copy)]
+struct RtdFixtureSource {
+    core: NonNull<FixtureCore>,
+}
+
+// SAFETY: `FixtureCore` synchronizes internal mutation via `Mutex` and `AtomicI32`,
+// so non-owning pointers may be safely sent across threads.
+unsafe impl Send for RtdFixtureSource {}
+// SAFETY: `FixtureCore` synchronizes all internal state.
+unsafe impl Sync for RtdFixtureSource {}
+
+impl RtdFixtureSource {
+    fn core(&self) -> &FixtureCore {
+        // SAFETY: `FixtureCore` is uniquely owned by `State` in `Addin::SharedState`.
+        // The add-in lifecycle guarantees `State` outlives the RTD runtime, sources,
+        // and all active subscriptions.
+        unsafe { self.core.as_ref() }
+    }
+}
+
+impl RtdSource for RtdFixtureSource {
     type Value = i32;
     type Subscription = RtdFixtureSubscription;
 
@@ -118,31 +140,46 @@ impl RtdSource for RtdFixture {
             .first()
             .cloned()
             .ok_or(XllError::InvalidHandle)?;
-        self.sinks
+        self.core()
+            .sinks
             .lock()
             .map_err(|_| XllError::Panic)?
             .insert(key.clone(), sink);
         Ok(RtdFixtureSubscription {
-            sinks: Arc::clone(&self.sinks),
+            core: self.core,
             key,
         })
     }
 }
 
 struct RtdFixtureSubscription {
-    sinks: Arc<Mutex<HashMap<String, RtdSink<i32>>>>,
+    core: NonNull<FixtureCore>,
     key: String,
 }
 
-// SAFETY: `disconnect_and_wait` removes the sink from the shared map, ensuring
-// no further sink usage after return.
+// SAFETY: `FixtureCore` synchronizes internal mutation via `Mutex` and `AtomicI32`.
+unsafe impl Send for RtdFixtureSubscription {}
+// SAFETY: `FixtureCore` synchronizes all internal state.
+unsafe impl Sync for RtdFixtureSubscription {}
+
+impl RtdFixtureSubscription {
+    fn core(&self) -> &FixtureCore {
+        // SAFETY: `FixtureCore` is uniquely owned by `State` in `Addin::SharedState`,
+        // which outlives the RTD runtime and this subscription.
+        unsafe { self.core.as_ref() }
+    }
+}
+
+// SAFETY: `disconnect_and_wait` removes the sink from the shared core before
+// returning, ensuring no further sink usage after return.
 unsafe impl RtdSubscription for RtdFixtureSubscription {
     fn request_cancel(&self) {
         // No background work to cancel in this fixture.
     }
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-        self.sinks
+        self.core()
+            .sinks
             .lock()
             .map_err(|_| XllError::Panic)?
             .remove(&self.key);
@@ -172,14 +209,14 @@ pub fn rtd_publish(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
     topic_count: i32,
 ) -> XllResult<i32> {
-    context.state().publisher.publish_batch(topic_count)
+    context.state().core.publish_batch(topic_count)
 }
 
 #[excel_function(name = "FRAMEWORK.RTD.ACTIVE", volatile)]
 pub fn rtd_active(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
 ) -> XllResult<i32> {
-    context.state().publisher.active_topics()
+    context.state().core.active_topics()
 }
 
 #[excel_function(name = "FRAMEWORK.VERSION", thread_safe)]
