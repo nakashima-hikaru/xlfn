@@ -42,6 +42,7 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         }
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) const fn generation(&self) -> ServerGeneration {
         self.generation

@@ -105,7 +105,7 @@ impl SourceArena {
         self.sources.get(index).map(Box::as_ref)
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     pub(crate) fn with_source<S: RtdSource>(
         generation: RuntimeGeneration,
         source: S,

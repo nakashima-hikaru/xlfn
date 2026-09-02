@@ -55,7 +55,7 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
 }
 
 impl<H: SubscriptionHost> SubscriptionRuntime<H> {
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     pub(crate) fn new() -> Self
     where
         H: Default,
