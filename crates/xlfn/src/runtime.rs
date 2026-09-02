@@ -444,7 +444,6 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-
     pub(crate) fn bind_addin_lifecycle(
         &self,
     ) -> Result<AddinLifecycleAccess<'_, A>, ThreadAffineError> {
@@ -732,9 +731,10 @@ impl<A: crate::Addin> Runtime<A> {
         #[cfg(feature = "rtd")]
         {
             let generation = self.protocol_generation();
-            let Some(result) = self.lifecycle.with_generation_services(|services| {
-                services.close_subscriptions(generation)
-            }) else {
+            let Some(result) = self
+                .lifecycle
+                .with_generation_services(|services| services.close_subscriptions(generation))
+            else {
                 #[cfg(test)]
                 {
                     return Ok(crate::excel_rtd::stopped_subscriptions(generation));

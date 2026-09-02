@@ -168,7 +168,9 @@ fn server_publish_isolation() {
     let fixture = SourceFixture::new();
     let (source_a, _sink_a, _) = fixture.add(Some(1.0f64));
     let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
@@ -219,7 +221,9 @@ fn notification_callback_isolation() {
     let fixture = SourceFixture::new();
     let (source_a, sink_a, _) = fixture.add(Some(1.0f64));
     let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
@@ -345,7 +349,9 @@ fn runtime_close_blocks_all_servers_immediately() {
     let fixture = SourceFixture::new();
     let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
     let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
@@ -445,9 +451,7 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let id_b = prep_b.id();
     prep_b.commit();
 
-    runtime
-        .claim_server(server_b.generation(), id_b)
-        .unwrap();
+    runtime.claim_server(server_b.generation(), id_b).unwrap();
 
     let conn_b = runtime
         .connect_transaction(&server_b, TopicId(1), id_b)
@@ -468,7 +472,9 @@ fn uncommitted_update_does_not_trigger_notification() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add(Some(0.0f64));
     let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
@@ -727,9 +733,7 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
         .unwrap();
     let id_b = prepared_b.id();
     prepared_b.commit();
-    runtime
-        .claim_server(server_b.generation(), id_b)
-        .unwrap();
+    runtime.claim_server(server_b.generation(), id_b).unwrap();
     let connection_b = runtime
         .connect_transaction(&server_b, TopicId(1), id_b)
         .unwrap();
@@ -945,7 +949,9 @@ fn refresh_reduction_orders_updates_by_global_sequence() {
     let fixture = SourceFixture::new();
     let (source_one, sink_one, _) = fixture.add::<f64>(None);
     let (source_two, sink_two, _) = fixture.add::<f64>(None);
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -1021,7 +1027,9 @@ fn stale_sink_returns_closing() {
     let fixture = SourceFixture::new();
     let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
     let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let server_a = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
@@ -1263,7 +1271,10 @@ fn inflight_register_waits_for_close() {
 
     assert!(closed_flag.load(Ordering::Acquire));
     let server = reg_res.unwrap();
-    assert!(matches!(server.test_server().enter_operation(), Err(XllError::Closing)));
+    assert!(matches!(
+        server.test_server().enter_operation(),
+        Err(XllError::Closing)
+    ));
 }
 
 #[test]
@@ -1379,7 +1390,9 @@ fn reentrant_drop_safety() {
             runtime: Arc::clone(&runtime_for_source),
         })
         .unwrap();
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
     let server = runtime
         .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
         .unwrap();
@@ -1752,7 +1765,9 @@ fn distinct_handles_do_not_share_source_identity() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add::<f64>(None);
     let (source_b, _, _) = fixture.add::<f64>(None);
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
     let topic = RtdTopic::single("shared").unwrap();
 
     let first = runtime.prepare(&source_a, topic.clone()).unwrap();
@@ -2059,7 +2074,9 @@ fn distinct_identities_receive_distinct_transport_keys() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add::<f64>(None);
     let (source_b, _, _) = fixture.add::<f64>(None);
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let topic = RtdTopic::single("same").unwrap();
 
@@ -2102,7 +2119,9 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add::<f64>(None);
     let (source_b, _, _) = fixture.add::<f64>(None);
-    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(fixture.finish()));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
 
     let prep_a = runtime
         .prepare(&source_a, RtdTopic::single("topic-a").unwrap())

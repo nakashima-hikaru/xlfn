@@ -1038,9 +1038,9 @@ mod tests {
                         context.rtd().subscribe(&source, topic),
                         Err(crate::XllError::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
-                            failure: crate::ExcelApiFailure::Status(crate::ExcelCallbackStatus::Failed(
-                                xlfn_sys::XLRET_FAILED,
-                            )),
+                            failure: crate::ExcelApiFailure::Status(
+                                crate::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED,)
+                            ),
                         })
                     ));
                 })

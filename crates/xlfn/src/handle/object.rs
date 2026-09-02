@@ -5,7 +5,6 @@
 //! ownership. An object is reclaimed only after both capability counts reach
 //! zero, and its application destructor always runs outside the arena lock.
 
-
 use super::token::ObjectId;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;

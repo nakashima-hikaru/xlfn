@@ -613,7 +613,10 @@ fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
         (seal_handle, finished_rx)
     });
 
-    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
     seal_handle.join().unwrap();
 }
 
@@ -1684,7 +1687,10 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
         (seal_handle, finished_rx)
     });
 
-    let sealed = finished_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    let sealed = finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
     seal_handle.join().unwrap();
     runtime.store.registry.finish_quiescence(&sealed).unwrap();
 }
