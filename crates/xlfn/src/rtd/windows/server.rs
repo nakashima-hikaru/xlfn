@@ -182,6 +182,14 @@ unsafe impl Send for BackendHandles {}
 // SAFETY: FormulaLifetimeBackend immutable operations are thread-safe.
 unsafe impl Sync for BackendHandles {}
 
+impl BackendHandles {
+    pub(super) fn new(handles: &(dyn FormulaLifetimeBackend + 'static)) -> Self {
+        let raw = std::ptr::from_ref(handles).cast_mut();
+        // SAFETY: `raw` originates from a valid reference and is non-null.
+        unsafe { Self(NonNull::new_unchecked(raw)) }
+    }
+}
+
 impl std::ops::Deref for BackendHandles {
     type Target = dyn FormulaLifetimeBackend;
 
@@ -199,6 +207,14 @@ pub(super) struct BackendSubscriptions(NonNull<SubscriptionRuntime>);
 unsafe impl Send for BackendSubscriptions {}
 // SAFETY: SubscriptionRuntime methods are thread-safe.
 unsafe impl Sync for BackendSubscriptions {}
+
+impl BackendSubscriptions {
+    pub(super) fn new(subscriptions: &SubscriptionRuntime) -> Self {
+        let raw = std::ptr::from_ref(subscriptions).cast_mut();
+        // SAFETY: `raw` originates from a valid reference and is non-null.
+        unsafe { Self(NonNull::new_unchecked(raw)) }
+    }
+}
 
 impl std::ops::Deref for BackendSubscriptions {
     type Target = SubscriptionRuntime;
@@ -561,7 +577,7 @@ pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
     handles: Option<&H>,
     subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
-    let backend = handles.map(|h| -> &dyn FormulaLifetimeBackend { h });
+    let backend = handles.map(|h| -> &(dyn FormulaLifetimeBackend + 'static) { h });
     ensure_server_impl(backend, subscriptions)
 }
 
@@ -572,7 +588,7 @@ pub(super) fn ensure_server_without_handles(
 }
 
 fn ensure_server_impl(
-    handles: Option<&dyn FormulaLifetimeBackend>,
+    handles: Option<&(dyn FormulaLifetimeBackend + 'static)>,
     subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
     let mut active = ACTIVE_SERVER.lock();
@@ -632,7 +648,7 @@ fn ensure_server_impl(
                     });
                 }
                 None => {
-                    backends.handles = Some(BackendHandles(NonNull::from(handles)));
+                    backends.handles = Some(BackendHandles::new(handles));
                 }
             }
         }
@@ -650,8 +666,7 @@ fn ensure_server_impl(
                     }
                     None => {
                         let handle = subscriptions.register_server(existing.generation)?;
-                        backends.subscriptions =
-                            Some(BackendSubscriptions(NonNull::from(subscriptions)));
+                        backends.subscriptions = Some(BackendSubscriptions::new(subscriptions));
                         backends.subscription_server = Some(handle.clone());
                         (Some(handle.clone()), Some(handle))
                     }
@@ -717,8 +732,8 @@ fn ensure_server_impl(
         operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
-            handles: handles.map(|h| BackendHandles(NonNull::from(h))),
-            subscriptions: subscriptions.map(|s| BackendSubscriptions(NonNull::from(s))),
+            handles: handles.map(BackendHandles::new),
+            subscriptions: subscriptions.map(BackendSubscriptions::new),
             subscription_server: subscription_handle.clone(),
         }),
         callbacks: Mutex::new(ServerCallbacks::default()),

@@ -15,7 +15,6 @@ use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
 
